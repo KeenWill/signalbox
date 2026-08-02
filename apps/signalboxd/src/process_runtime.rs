@@ -35,8 +35,10 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedConversation,
-    ImportedConversationFormat, ImportedConversationId,
+    DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
+    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
@@ -77,6 +79,8 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
+    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
+    goal_turn::GoalTurnCandidates,
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
         DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
@@ -85,11 +89,11 @@ use signalbox_persistence::{
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
-        ProcessProviderModelCallFailureCause, ProcessReadError, ProcessReadRepository,
-        ProcessReconciliationOperation, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
-        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
-        ProcessTurnState,
+        ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
+        ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -100,18 +104,22 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, ConversationCursor as WireConversationCursor,
-    ConversationImportFormat, ConversationOrigin as WireConversationOrigin,
+    BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
+    ConversationCursor as WireConversationCursor, ConversationImportFormat,
+    ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, ImportedContentKind,
-    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
+    GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
+    GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelSelection as WireModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -119,8 +127,8 @@ use signalbox_process_protocol::{
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    TranscriptTextEntry, TurnState, UsageProvenance, content_fragments, decode_client_line,
+    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -416,6 +424,7 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         }
         DispatchedOutboxEventKind::SessionCreated
         | DispatchedOutboxEventKind::InputAccepted { .. }
+        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
     }
@@ -973,6 +982,115 @@ where
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
         }
+        ClientRequest::AttachGoal {
+            command_id,
+            session_id,
+            statement,
+        } => {
+            let Ok(statement) = GoalStatement::try_new(statement) else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Attach(statement),
+                services,
+            )
+            .await
+        }
+        ClientRequest::ReadGoal { session_id } => {
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_read_goal(
+                writer,
+                version,
+                request_id,
+                session_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
+        }
+        ClientRequest::ResumeGoal {
+            command_id,
+            session_id,
+            guidance,
+        } => {
+            let Ok(guidance) = guidance.map(GoalGuidance::try_new).transpose() else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Resume(guidance),
+                services,
+            )
+            .await
+        }
+        ClientRequest::StopGoal {
+            command_id,
+            session_id,
+        } => {
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Stop,
+                services,
+            )
+            .await
+        }
+        ClientRequest::SupersedeGoal {
+            command_id,
+            session_id,
+            statement,
+        } => {
+            let Ok(statement) = GoalStatement::try_new(statement) else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Supersede(statement),
+                services,
+            )
+            .await
+        }
         ClientRequest::ListTemplates {} => {
             handle_list_templates(
                 writer,
@@ -1043,6 +1161,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
+                &services.model_configuration,
                 snapshot_permit,
             )
             .await
@@ -1062,6 +1181,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
+                &services.model_configuration,
                 &services.fanouts,
                 shutdown,
                 snapshot_permit,
@@ -7673,6 +7793,7 @@ async fn handle_read_transcript<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -7684,6 +7805,7 @@ where
         selected_session,
         version,
         request_id,
+        model_configuration,
     )
     .await;
     drop(snapshot_permit);
@@ -7719,6 +7841,7 @@ async fn handle_follow_session<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     fanouts: &ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
     snapshot_permit: OwnedSemaphorePermit,
@@ -7735,6 +7858,7 @@ where
             selected_session,
             version,
             request_id,
+            model_configuration,
         ),
     )
     .await;
@@ -7879,6 +8003,7 @@ async fn spool_transcript(
     session: SessionId,
     version: ProtocolVersion,
     request_id: RequestId,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
     let reader = repository.open_transcript(session).await;
     let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
@@ -7913,10 +8038,17 @@ async fn spool_transcript(
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::ModelCallUsage(usage) => {
-                write_model_call_usage(&mut file, version, request_id, model_call_count, &usage)
-                    .await
-                    .map_err(SnapshotSpoolError::from_connection)
-                    .map_err(TranscriptSpoolError::Spool)?;
+                write_model_call_usage(
+                    &mut file,
+                    version,
+                    request_id,
+                    model_call_count,
+                    &usage,
+                    model_configuration,
+                )
+                .await
+                .map_err(SnapshotSpoolError::from_connection)
+                .map_err(TranscriptSpoolError::Spool)?;
                 model_call_count = model_call_count
                     .checked_add(1)
                     .ok_or(SnapshotSpoolError::EncodeInvariant)
@@ -8036,11 +8168,39 @@ async fn write_model_call_usage<Writer>(
     request_id: RequestId,
     model_call_index: u64,
     evidence: &ProcessTranscriptModelCallUsage,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let usage = evidence.usage();
+    let cost = model_configuration
+        .derive_model_call_cost(
+            evidence.target(),
+            evidence.credential_profile(),
+            crate::configuration::ModelCallInputUsage::from_persisted(
+                usage.input_tokens(),
+                evidence.input_token_semantics(),
+            ),
+            usage.output_tokens(),
+            usage.cache_creation_input_tokens(),
+            usage.cache_read_input_tokens(),
+        )
+        .map(|cost| -> Result<_, ProcessConnectionError> {
+            Ok(ModelCallDollarCost {
+                amount_usd: CanonicalDollarAmount::try_new(
+                    cost.amount_usd().normalize().to_string(),
+                )
+                .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                rate_version: BillingRateVersion::try_new(cost.rate_version().to_owned())
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                label: match cost.billing_kind() {
+                    crate::BillingKind::ApiMetered => ModelCallCostLabel::Real,
+                    crate::BillingKind::Subscription => ModelCallCostLabel::MeteredEquivalent,
+                },
+            })
+        })
+        .transpose()?;
     write_message(
         writer,
         version,
@@ -8049,6 +8209,10 @@ where
             model_call_index: CanonicalU64::new(model_call_index),
             turn_id: wire_uuid(evidence.turn().into_uuid()),
             model_call_id: wire_uuid(evidence.call().into_uuid()),
+            usage_provenance: match evidence.provenance() {
+                ProcessModelCallUsageProvenance::Reported => UsageProvenance::Reported,
+                ProcessModelCallUsageProvenance::Estimated => UsageProvenance::Estimated,
+            },
             usage: ModelCallTokenUsage {
                 input_tokens: usage.input_tokens().map(CanonicalU64::new),
                 output_tokens: usage.output_tokens().map(CanonicalU64::new),
@@ -8057,6 +8221,7 @@ where
                     .map(CanonicalU64::new),
                 cache_read_input_tokens: usage.cache_read_input_tokens().map(CanonicalU64::new),
             },
+            cost,
         },
     )
     .await
@@ -8883,6 +9048,7 @@ enum InternalDiagnostic {
     ToolLoopCorruption,
     ToolLoopInvalidTransition,
     ProcessReadCorruption,
+    GoalRepositoryCorruption,
 }
 
 impl InternalDiagnostic {
@@ -8942,7 +9108,8 @@ impl InternalDiagnostic {
             | Self::SubmitInputCorruption
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
-            | Self::ProcessReadCorruption => OperatorFailureClass::FailClosedCorruption,
+            | Self::ProcessReadCorruption
+            | Self::GoalRepositoryCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
 
@@ -9013,6 +9180,7 @@ impl InternalDiagnostic {
             Self::ToolLoopCorruption => "tool_loop_corruption",
             Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
             Self::ProcessReadCorruption => "process_read_corruption",
+            Self::GoalRepositoryCorruption => "goal_repository_corruption",
         }
     }
 }
@@ -9308,6 +9476,339 @@ fn wire_provider_failure_cause(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn handle_goal_user_command<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_uuid: uuid::Uuid,
+    session_id: CanonicalUuid,
+    action: GoalUserAction,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let schedules_turn = match &action {
+        GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_) => {
+            true
+        }
+        GoalUserAction::Stop => false,
+    };
+    let command = GoalUserCommand::new(DurableCommandId::from_uuid(command_uuid), session, action);
+    let candidates = schedules_turn.then(|| {
+        GoalTurnCandidates::new(
+            AcceptedInputId::from_uuid(uuid::Uuid::now_v7()),
+            TurnId::from_uuid(uuid::Uuid::now_v7()),
+        )
+    });
+    let outcome = GoalRepository::new(services.pool.clone())
+        .handle_user_command(command, candidates, |alias| {
+            services.model_configuration.resolve_alias(alias)
+        })
+        .await;
+    match outcome {
+        Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(event))) => {
+            if schedules_turn {
+                let _ = services.eligibility_nudge.nudge(session);
+            }
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::GoalTransitionApplied {
+                    session_id,
+                    event_ordinal: CanonicalU64::new(event.ordinal().get()),
+                    generation: CanonicalU64::new(event.generation().get()),
+                },
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(reason))) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::GoalCommandRejected {
+                    session_id,
+                    reason: wire_goal_command_rejection(reason),
+                }),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(error) => {
+            write_goal_repository_error(
+                writer,
+                version,
+                request_id,
+                Some(session_id.into_uuid()),
+                error,
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_read_goal<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let loaded = GoalRepository::new(pool.clone())
+        .load_goal(SessionId::from_uuid(session_id.into_uuid()))
+        .await;
+    let goal = match loaded {
+        Ok(Some(goal)) => goal,
+        Ok(None) => {
+            drop(snapshot_permit);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await;
+        }
+        Err(error) => {
+            drop(snapshot_permit);
+            return write_goal_repository_error(
+                writer,
+                version,
+                request_id,
+                Some(session_id.into_uuid()),
+                error,
+            )
+            .await;
+        }
+    };
+    let spool_result = spool_goal_snapshot(&goal, version, request_id, session_id).await;
+    drop(goal);
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(error) => return write_snapshot_spool_error(writer, version, request_id, error).await,
+    };
+    write_spooled_file(writer, &mut spool).await
+}
+
+async fn spool_goal_snapshot(
+    goal: &Goal,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+) -> Result<tokio::fs::File, SnapshotSpoolError> {
+    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryStart {
+            session_id,
+            current_generation: CanonicalU64::new(goal.current().generation().get()),
+            current_statement: goal.current().statement().as_str().to_owned(),
+        },
+    )
+    .await?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryState {
+            current_state: wire_goal_state(goal.current().state()),
+        },
+    )
+    .await?;
+    for event in goal.events() {
+        let wire_event = wire_goal_event(event).map_err(SnapshotSpoolError::from_connection)?;
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(event.ordinal().get()),
+                generation: CanonicalU64::new(event.generation().get()),
+                event: wire_event,
+            },
+        )
+        .await?;
+    }
+    let event_count =
+        u64::try_from(goal.events().len()).map_err(|_| SnapshotSpoolError::EncodeInvariant)?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryEnd {
+            event_count: CanonicalU64::new(event_count),
+        },
+    )
+    .await?;
+    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)?;
+    Ok(file)
+}
+
+fn wire_goal_state(state: &GoalState) -> GoalLifecycleState {
+    match state {
+        GoalState::Pursuing => GoalLifecycleState::Pursuing {},
+        GoalState::Blocked { reason, need } => GoalLifecycleState::Blocked {
+            reason: wire_goal_blocked_reason(*reason),
+            need: need.as_str().to_owned(),
+        },
+        GoalState::Achieved { report } => GoalLifecycleState::Achieved {
+            turn_id: wire_uuid(report.turn().into_uuid()),
+            tool_request_id: wire_uuid(report.tool_request().into_uuid()),
+        },
+        GoalState::UserStopped => GoalLifecycleState::UserStopped {},
+        GoalState::Superseded { by_generation } => GoalLifecycleState::Superseded {
+            by_generation: CanonicalU64::new(by_generation.get()),
+        },
+    }
+}
+
+fn wire_goal_event(event: &GoalEvent) -> Result<GoalHistoryEvent, ProcessConnectionError> {
+    match event.kind() {
+        GoalEventKind::Commissioned {
+            statement,
+            provenance,
+        } => Ok(GoalHistoryEvent::Commissioned {
+            statement: statement.as_str().to_owned(),
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::Blocked { block, need } => Ok(GoalHistoryEvent::Blocked {
+            reason: wire_goal_blocked_reason(block.reason_kind()),
+            need: need.as_str().to_owned(),
+            provenance: wire_goal_blocked_provenance(*block),
+        }),
+        GoalEventKind::Resumed {
+            guidance,
+            provenance,
+        } => Ok(GoalHistoryEvent::Resumed {
+            guidance: guidance.as_ref().map(|value| value.as_str().to_owned()),
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::Achieved { report, provenance } => Ok(GoalHistoryEvent::Achieved {
+            report: report.as_str().to_owned(),
+            turn_id: wire_uuid(provenance.turn().into_uuid()),
+            tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
+        }),
+        GoalEventKind::UserStopped { provenance } => Ok(GoalHistoryEvent::UserStopped {
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::Superseded {
+            replacement_statement,
+            provenance,
+        } => Ok(GoalHistoryEvent::Superseded {
+            replacement_statement: replacement_statement.as_str().to_owned(),
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+    }
+}
+
+fn wire_goal_blocked_provenance(value: GoalBlockProvenance) -> WireGoalBlockedProvenance {
+    match value {
+        GoalBlockProvenance::Model { provenance, .. } => WireGoalBlockedProvenance::Model {
+            turn_id: wire_uuid(provenance.turn().into_uuid()),
+            tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
+        },
+        GoalBlockProvenance::ExecutionFailure { provenance } => {
+            WireGoalBlockedProvenance::ExecutionFailure {
+                turn_id: wire_uuid(provenance.turn().into_uuid()),
+            }
+        }
+    }
+}
+
+const fn wire_goal_blocked_reason(value: GoalBlockedReasonKind) -> WireGoalBlockedReason {
+    match value {
+        GoalBlockedReasonKind::UserInputRequired => WireGoalBlockedReason::UserInputRequired,
+        GoalBlockedReasonKind::ExternalChangeRequired => {
+            WireGoalBlockedReason::ExternalChangeRequired
+        }
+        GoalBlockedReasonKind::AuthorizationRequired => {
+            WireGoalBlockedReason::AuthorizationRequired
+        }
+        GoalBlockedReasonKind::ExecutionFailure => WireGoalBlockedReason::ExecutionFailure,
+    }
+}
+
+const fn wire_goal_command_rejection(
+    value: DomainGoalCommandRejection,
+) -> WireGoalCommandRejection {
+    match value {
+        DomainGoalCommandRejection::SessionNotFound => WireGoalCommandRejection::SessionNotFound,
+        DomainGoalCommandRejection::GoalAlreadyAttached => {
+            WireGoalCommandRejection::GoalAlreadyAttached
+        }
+        DomainGoalCommandRejection::GoalNotAttached => WireGoalCommandRejection::GoalNotAttached,
+        DomainGoalCommandRejection::UnknownModelAlias => {
+            WireGoalCommandRejection::UnknownModelAlias
+        }
+        DomainGoalCommandRejection::AcceptancePositionExhausted => {
+            WireGoalCommandRejection::AcceptancePositionExhausted
+        }
+        DomainGoalCommandRejection::RequiresBlocked => WireGoalCommandRejection::RequiresBlocked,
+        DomainGoalCommandRejection::RequiresPursuingOrBlocked => {
+            WireGoalCommandRejection::RequiresPursuingOrBlocked
+        }
+        DomainGoalCommandRejection::GenerationExhausted => {
+            WireGoalCommandRejection::GenerationExhausted
+        }
+        DomainGoalCommandRejection::EventOrdinalExhausted => {
+            WireGoalCommandRejection::EventOrdinalExhausted
+        }
+    }
+}
+
+fn wire_goal_command_id(
+    value: DurableCommandId,
+) -> Result<signalbox_process_protocol::CommandId, ProcessConnectionError> {
+    signalbox_process_protocol::CommandId::try_from_uuid(value.into_uuid())
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)
+}
+
+async fn write_goal_repository_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: Option<uuid::Uuid>,
+    error: GoalRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        GoalRepositoryError::Database(_) => ProtocolError::mutation_definitely_unavailable(),
+        GoalRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_commit_ambiguous(),
+        GoalRepositoryError::DifferentCommandKind { .. } => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
+        }
+        GoalRepositoryError::Corruption(_) => {
+            internal_protocol_error(session_id, InternalDiagnostic::GoalRepositoryCorruption)
+        }
+    };
+    write_error(writer, version, request_id, protocol_error).await
+}
+
 fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
     CanonicalUuid::from_uuid(value)
 }
@@ -9366,11 +9867,19 @@ impl ProtocolError {
         }
     }
 
+    const fn mutation_definitely_unavailable() -> Self {
+        Self::without_detail(ErrorCode::Unavailable)
+    }
+
+    const fn mutation_commit_ambiguous() -> Self {
+        Self::without_detail(ErrorCode::CommitAmbiguous)
+    }
+
     const fn mutation_unavailable(commit_ambiguous: bool) -> Self {
         if commit_ambiguous {
-            Self::without_detail(ErrorCode::CommitAmbiguous)
+            Self::mutation_commit_ambiguous()
         } else {
-            Self::without_detail(ErrorCode::Unavailable)
+            Self::mutation_definitely_unavailable()
         }
     }
 
@@ -9411,6 +9920,9 @@ enum ProcessUpdateEvent {
         turn: signalbox_domain::TurnId,
         acceptance_position: u64,
         content: String,
+    },
+    GoalTurnRetired {
+        turn: signalbox_domain::TurnId,
     },
     TurnActivated {
         turn: signalbox_domain::TurnId,
@@ -9476,6 +9988,9 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
+            DispatchedOutboxEventKind::GoalTurnRetired { turn } => {
+                Self::GoalTurnRetired { turn: *turn }
+            }
             DispatchedOutboxEventKind::TurnActivated {
                 turn,
                 current_attempt,
@@ -9577,6 +10092,9 @@ impl ProcessUpdateEvent {
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
                 content: InputContent::new(content.clone()),
+            },
+            Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
+                turn_id: wire_uuid(turn.into_uuid()),
             },
             Self::TurnActivated {
                 turn,
@@ -9865,21 +10383,23 @@ mod tests {
 
     use signalbox_application::{ImportConversationError, ImportedConversationConverter};
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest, ReviewPass,
-        ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-        ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
-        ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
-        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
+        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId, Goal,
+        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
+        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
+        ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
+        ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
+        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId,
+        SessionInputPosition, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
+        TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, FrameEncodeError,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion, RejectionDetail, ReviewFindingInput,
-        ReviewSeverity, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+        InputContent, MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion, RejectionDetail,
+        ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage, SessionEvent,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+        decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -9907,7 +10427,8 @@ mod tests {
         internal_protocol_error, map_rejection, observe_outbox_metrics_once,
         operational_import_error, read_frame_line, replacement_model_is_admitted,
         retry_context_compaction_range_database_reads, run_until_shutdown,
-        snapshot_reader_capacity, submit_input_model_execution_diagnostic, wire_model_call_state,
+        snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
+        submit_input_model_execution_diagnostic, wire_goal_event, wire_model_call_state,
         wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
@@ -10475,11 +10996,11 @@ mod tests {
     #[test]
     fn commit_ambiguity_selects_the_stable_process_error_code() {
         assert_eq!(
-            ProtocolError::mutation_unavailable(false).code,
+            ProtocolError::mutation_definitely_unavailable().code,
             ErrorCode::Unavailable
         );
         assert_eq!(
-            ProtocolError::mutation_unavailable(true).code,
+            ProtocolError::mutation_commit_ambiguous().code,
             ErrorCode::CommitAmbiguous
         );
         assert!(
@@ -10530,6 +11051,10 @@ mod tests {
         let current_catalog = crate::HubModelConfiguration::parse(
             r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -11226,6 +11751,61 @@ context_window_tokens = 200000
     }
 
     #[tokio::test]
+    async fn goal_history_is_completed_in_spool_before_socket_write() -> Result<(), Box<dyn Error>>
+    {
+        let session = SessionId::from_uuid(Uuid::from_u128(40));
+        let session_id = wire_uuid(session.into_uuid());
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(41));
+        let statement = GoalStatement::try_new(String::from("finish the fixture task"))?;
+        let goal = Goal::commission(session, statement.clone(), GoalUserProvenance::new(command));
+        let request_id = RequestId::try_new(42)?;
+        let mut spool = spool_goal_snapshot(&goal, ProtocolVersion::One, request_id, session_id)
+            .await
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "goal spool fixture failed: {}",
+                    spool_error_display(&error)
+                ))
+            })?;
+        let mut encoded = Vec::new();
+        spool.read_to_end(&mut encoded).await?;
+
+        let mut expected = encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryStart {
+                session_id,
+                current_generation: CanonicalU64::new(goal.current().generation().get()),
+                current_statement: statement.as_str().to_owned(),
+            },
+        )?)?;
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::Pursuing {},
+            },
+        )?)?);
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(goal.events()[0].ordinal().get()),
+                generation: CanonicalU64::new(goal.events()[0].generation().get()),
+                event: wire_goal_event(&goal.events()[0])?,
+            },
+        )?)?);
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(
+                    u64::try_from(goal.events().len()).expect("fixture event count fits u64"),
+                ),
+            },
+        )?)?);
+
+        assert_eq!(encoded, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn blocked_follow_write_is_cancelled_by_shutdown() -> Result<(), Box<dyn Error>> {
         let (mut writer, _reader) = duplex(1);
         writer.write_all(b"x").await?;
@@ -11458,6 +12038,19 @@ context_window_tokens = 200000
             )),
             ModelCallState::Terminal {
                 disposition: ModelCallDisposition::Ambiguous
+            }
+        );
+    }
+
+    #[test]
+    fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(7));
+        let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
+
+        assert_eq!(
+            update.wire(),
+            SessionEvent::GoalTurnRetired {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
             }
         );
     }

@@ -97,6 +97,12 @@ pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 /// Maximum entries in one deployment model-alias catalog.
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
+/// Maximum canonical decimal USD amount text.
+pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
+
+/// Maximum UTF-8 bytes in one deployment-owned billing rate version.
+pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
+
 /// Maximum concerns in one frozen review-orchestration attempt.
 pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
 
@@ -840,26 +846,161 @@ impl ContentFragment {
     }
 }
 
-/// Provider-reported token fields for one terminal model call.
+/// Independently nullable token fields for one terminal model call.
 ///
 /// Every field is required on the wire but independently nullable. A null is
-/// unreported evidence; a reported zero is encoded as the canonical string
+/// absent evidence; a present zero is encoded as the canonical string
 /// `"0"`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCallTokenUsage {
-    /// Provider-reported input-token count.
+    /// Input-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub input_tokens: Option<CanonicalU64>,
-    /// Provider-reported output-token count.
+    /// Output-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub output_tokens: Option<CanonicalU64>,
-    /// Provider-reported cache-creation input-token count.
+    /// Cache-creation input-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cache_creation_input_tokens: Option<CanonicalU64>,
-    /// Provider-reported cache-read input-token count.
+    /// Cache-read input-token count from the call's named provenance.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cache_read_input_tokens: Option<CanonicalU64>,
+}
+
+/// Closed provenance of one terminal model call's token fields.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageProvenance {
+    /// Counts reported by the provider or adapter stream.
+    Reported,
+    /// Counts produced by an explicit estimator.
+    Estimated,
+}
+
+/// How a derived token-rate dollar figure must be labeled.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCallCostLabel {
+    /// The serving credential profile is directly API-metered.
+    Real,
+    /// The serving credential profile is subscription-backed.
+    MeteredEquivalent,
+}
+
+/// Canonical nonnegative decimal USD text with no exponent or redundant zeroes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CanonicalDollarAmount(String);
+
+impl CanonicalDollarAmount {
+    /// Validates one shortest nonnegative base-ten decimal spelling.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        const MAX_DECIMAL_COEFFICIENT: u128 = 79_228_162_514_264_337_593_543_950_335;
+
+        let (integer, fraction) = value
+            .split_once('.')
+            .map_or((value.as_str(), None), |parts| (parts.0, Some(parts.1)));
+        let integer_is_canonical = integer == "0"
+            || (!integer.starts_with('0')
+                && integer.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && integer.bytes().all(|byte| byte.is_ascii_digit()));
+        let fraction_is_canonical = fraction.is_none_or(|fraction| {
+            !fraction.is_empty()
+                && fraction.bytes().all(|byte| byte.is_ascii_digit())
+                && !fraction.ends_with('0')
+        });
+        let coefficient =
+            value
+                .bytes()
+                .filter(|byte| *byte != b'.')
+                .try_fold(0_u128, |coefficient, digit| {
+                    coefficient
+                        .checked_mul(10)?
+                        .checked_add(u128::from(digit.checked_sub(b'0')?))
+                });
+        if value.is_empty()
+            || value.len() > MAX_DOLLAR_AMOUNT_BYTES
+            || !integer_is_canonical
+            || !fraction_is_canonical
+            || fraction.is_some_and(|fraction| fraction.len() > 28)
+            || coefficient.is_none_or(|coefficient| coefficient > MAX_DECIMAL_COEFFICIENT)
+        {
+            Err(CanonicalValueError::DollarAmount)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the canonical decimal spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CanonicalDollarAmount {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<CanonicalDollarAmount> for String {
+    fn from(value: CanonicalDollarAmount) -> Self {
+        value.0
+    }
+}
+
+/// One bounded deployment-owned rate version carried as cost provenance.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct BillingRateVersion(String);
+
+impl BillingRateVersion {
+    /// Validates a nonempty, unpadded, NUL-free version spelling.
+    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        if value.is_empty()
+            || value.len() > MAX_RATE_VERSION_UTF8_BYTES
+            || value.trim() != value
+            || value.contains('\0')
+        {
+            Err(CanonicalValueError::RateVersion)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the exact rate version.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for BillingRateVersion {
+    type Error = CanonicalValueError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<BillingRateVersion> for String {
+    fn from(value: BillingRateVersion) -> Self {
+        value.0
+    }
+}
+
+/// One read-time dollar figure derived from usage and named configured rates.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCallDollarCost {
+    /// Dollar amount attributable to the token axes that were present.
+    pub amount_usd: CanonicalDollarAmount,
+    /// Exact configured rate version used for derivation.
+    pub rate_version: BillingRateVersion,
+    /// Real or metered-equivalent label from the pinned credential profile.
+    pub label: ModelCallCostLabel,
 }
 
 impl TryFrom<String> for ContentFragment {
@@ -1029,6 +1170,10 @@ pub enum CanonicalValueError {
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
+    /// Dollar amount was not canonical bounded nonnegative decimal text.
+    DollarAmount,
+    /// Billing rate version was empty, padded, NUL-bearing, or oversized.
+    RateVersion,
 }
 
 impl fmt::Display for CanonicalValueError {
@@ -1042,6 +1187,8 @@ impl fmt::Display for CanonicalValueError {
             Self::Metadata => "session metadata value is invalid",
             Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
+            Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
+            Self::RateVersion => "billing rate version is invalid",
         })
     }
 }
@@ -1839,6 +1986,201 @@ fn validate_review_orchestration_snapshot(
     Ok(())
 }
 
+/// Closed durable goal-command rejection vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalCommandRejection {
+    /// The target session does not exist.
+    SessionNotFound,
+    /// A goal is already pursuing or blocked.
+    GoalAlreadyAttached,
+    /// The session has no goal lineage.
+    GoalNotAttached,
+    /// The session's selected model alias is absent from daemon configuration.
+    UnknownModelAlias,
+    /// The session accepted-input position cannot advance beyond `u64::MAX`.
+    AcceptancePositionExhausted,
+    /// Resume requires a blocked current generation.
+    RequiresBlocked,
+    /// Stop or supersede requires a pursuing or blocked generation.
+    RequiresPursuingOrBlocked,
+    /// No successor generation can be represented.
+    GenerationExhausted,
+    /// No successor event position can be represented.
+    EventOrdinalExhausted,
+}
+
+/// Closed blocked-reason vocabulary at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalBlockedReason {
+    /// Progress requires information or a decision from the user.
+    UserInputRequired,
+    /// Progress requires an external state change.
+    ExternalChangeRequired,
+    /// Progress requires authority the session does not hold.
+    AuthorizationRequired,
+    /// The preceding goal turn failed and was not retried.
+    ExecutionFailure,
+}
+
+/// Provenance for one blocked event at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalBlockedProvenance {
+    /// The model declared the blocked transition through its correlated tool.
+    Model {
+        /// Exact invoking turn.
+        turn_id: CanonicalUuid,
+        /// Exact invoking tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The scheduler observed one unsuccessfully terminalized goal turn.
+    ExecutionFailure {
+        /// Exact failed turn.
+        turn_id: CanonicalUuid,
+    },
+}
+
+/// One generation's derived lifecycle state at the process boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalLifecycleState {
+    /// Autonomous scheduling continues.
+    Pursuing {},
+    /// Autonomous scheduling pauses pending an explicit user transition.
+    Blocked {
+        /// Closed blocked reason.
+        reason: GoalBlockedReason,
+        /// Exact statement of what is needed.
+        need: String,
+    },
+    /// The model declared completion.
+    Achieved {
+        /// Turn containing the final-report declaration.
+        turn_id: CanonicalUuid,
+        /// Tool request immediately preceded by the final-report transcript part.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The user explicitly ended this generation.
+    UserStopped {},
+    /// Another immutable statement replaced this generation.
+    Superseded {
+        /// Successor generation commissioned by the same event.
+        by_generation: CanonicalU64,
+    },
+}
+
+/// One append-only goal event payload at the process boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalHistoryEvent {
+    /// The user commissioned an immutable statement.
+    Commissioned {
+        /// Exact immutable statement.
+        statement: String,
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+    /// Pursuit paused with a typed reason and exact need.
+    Blocked {
+        /// Closed reason.
+        reason: GoalBlockedReason,
+        /// Exact statement of what is needed.
+        need: String,
+        /// Typed transition provenance.
+        provenance: GoalBlockedProvenance,
+    },
+    /// The user resumed blocked pursuit.
+    Resumed {
+        /// Optional exact next-turn guidance.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        guidance: Option<String>,
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+    /// The model declared achievement with its final report.
+    Achieved {
+        /// Exact final report.
+        report: String,
+        /// Invoking turn.
+        turn_id: CanonicalUuid,
+        /// Invoking tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The user explicitly ended the generation.
+    UserStopped {
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+    /// The user atomically replaced the active statement.
+    Superseded {
+        /// Newly commissioned immutable statement.
+        replacement_statement: String,
+        /// Durable user command provenance.
+        command_id: CommandId,
+    },
+}
+
+fn validate_goal_text(value: &str) -> Result<(), FrameValidationError> {
+    if value.is_empty() || value.len() > MAX_CONTENT_FRAGMENT_BYTES || value.contains('\0') {
+        return Err(FrameValidationError::GoalShape);
+    }
+    Ok(())
+}
+
+fn validate_goal_state(state: &GoalLifecycleState) -> Result<(), FrameValidationError> {
+    match state {
+        GoalLifecycleState::Blocked { need, .. } => validate_goal_text(need),
+        GoalLifecycleState::Superseded { by_generation } if by_generation.value() == 0 => {
+            Err(FrameValidationError::GoalShape)
+        }
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => Ok(()),
+    }
+}
+
+fn validate_goal_event(event: &GoalHistoryEvent) -> Result<(), FrameValidationError> {
+    match event {
+        GoalHistoryEvent::Commissioned { statement, .. } => validate_goal_text(statement),
+        GoalHistoryEvent::Blocked {
+            reason,
+            need,
+            provenance,
+        } => {
+            validate_goal_text(need)?;
+            let scheduler_reason = match reason {
+                GoalBlockedReason::UserInputRequired
+                | GoalBlockedReason::ExternalChangeRequired
+                | GoalBlockedReason::AuthorizationRequired => false,
+                GoalBlockedReason::ExecutionFailure => true,
+            };
+            let scheduler_provenance = match provenance {
+                GoalBlockedProvenance::Model { .. } => false,
+                GoalBlockedProvenance::ExecutionFailure { .. } => true,
+            };
+            if scheduler_reason != scheduler_provenance {
+                return Err(FrameValidationError::GoalShape);
+            }
+            Ok(())
+        }
+        GoalHistoryEvent::Resumed {
+            guidance: Some(guidance),
+            ..
+        } => validate_goal_text(guidance),
+        GoalHistoryEvent::Achieved { report, .. } => validate_goal_text(report),
+        GoalHistoryEvent::Superseded {
+            replacement_statement,
+            ..
+        } => validate_goal_text(replacement_statement),
+        GoalHistoryEvent::Resumed { guidance: None, .. } | GoalHistoryEvent::UserStopped { .. } => {
+            Ok(())
+        }
+    }
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1865,6 +2207,46 @@ pub enum ClientRequest {
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
+    /// Attach one immutable commissioned goal statement.
+    AttachGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Exact immutable statement.
+        statement: String,
+    },
+    /// Read the current goal projection and complete ordered event history.
+    ReadGoal {
+        /// Target session.
+        session_id: CanonicalUuid,
+    },
+    /// Resume a blocked goal with optional next-turn guidance.
+    ResumeGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Optional exact next-turn guidance.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        guidance: Option<String>,
+    },
+    /// Explicitly stop a pursuing or blocked goal.
+    StopGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+    },
+    /// Atomically replace the active immutable statement.
+    SupersedeGoal {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Newly commissioned immutable statement.
+        statement: String,
+    },
     /// Submit user input with an admitted delivery treatment.
     SubmitInput {
         /// Durable mutation identity.
@@ -2229,6 +2611,59 @@ pub enum ToolDecision {
 
 impl ClientRequest {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        match self {
+            Self::AttachGoal { statement, .. } | Self::SupersedeGoal { statement, .. } => {
+                validate_goal_text(statement)?;
+            }
+            Self::ResumeGoal {
+                guidance: Some(guidance),
+                ..
+            } => validate_goal_text(guidance)?,
+            Self::CreateSession { .. }
+            | Self::CreateSessionFromTemplate { .. }
+            | Self::ListTemplates {}
+            | Self::ListSessions {}
+            | Self::ReadGoal { .. }
+            | Self::ResumeGoal { guidance: None, .. }
+            | Self::StopGoal { .. }
+            | Self::SubmitInput { .. }
+            | Self::CompactSession { .. }
+            | Self::ReadTranscript { .. }
+            | Self::FollowSession { .. }
+            | Self::ListSessionMetadata { .. }
+            | Self::ListConversations { .. }
+            | Self::ListModelAliases {}
+            | Self::ReadSessionMetadata { .. }
+            | Self::ReplaceSessionMetadata { .. }
+            | Self::ReplaceSessionDefaults { .. }
+            | Self::ReadSessionDefaults { .. }
+            | Self::ImportConversation { .. }
+            | Self::ReadImportedConversation { .. }
+            | Self::CreateSessionFromImportedFrontier { .. }
+            | Self::ReconcileTurn { .. }
+            | Self::CreateReviewTarget { .. }
+            | Self::StartReviewRun { .. }
+            | Self::ActivateReviewPass { .. }
+            | Self::CompleteReviewPass { .. }
+            | Self::RecordReviewFindings { .. }
+            | Self::RecordReviewFindingEvent { .. }
+            | Self::ReserveReviewExternalLink { .. }
+            | Self::AttachReviewExternalLink { .. }
+            | Self::ReadReviewTarget { .. }
+            | Self::ReadReviewRun { .. }
+            | Self::ReadReviewFinding { .. }
+            | Self::ListReviewFindings { .. }
+            | Self::StartReviewOrchestration { .. }
+            | Self::RecordReviewImportOutcome { .. }
+            | Self::RecordReviewConcernOutcome { .. }
+            | Self::RecordReviewJudgmentPlan { .. }
+            | Self::RecordReviewJudgmentEffect { .. }
+            | Self::RecordReviewRepairOutcomes { .. }
+            | Self::RecordReviewPublicationOutcomes { .. }
+            | Self::ReadReviewOrchestration { .. }
+            | Self::StopTurn { .. }
+            | Self::DecideToolRequest { .. } => {}
+        }
         if let Self::SubmitInput {
             expected_defaults_version,
             delivery,
@@ -2611,6 +3046,13 @@ pub enum RejectionDetail {
     SessionNotFound {
         /// Absent target.
         session_id: CanonicalUuid,
+    },
+    /// A durable goal command was rejected by current goal state.
+    GoalCommandRejected {
+        /// Target session.
+        session_id: CanonicalUuid,
+        /// Closed goal-specific reason.
+        reason: GoalCommandRejection,
     },
     /// A turn already held the session slot.
     ActiveTurnPresent {
@@ -3575,6 +4017,11 @@ pub enum SessionEvent {
         /// Exact accepted user text.
         content: InputContent,
     },
+    /// A queued goal turn became intentionally ineligible.
+    GoalTurnRetired {
+        /// Exact immutable queued turn retired by a goal transition.
+        turn_id: CanonicalUuid,
+    },
     /// A queued turn became active.
     TurnActivated {
         /// Activated turn.
@@ -3701,6 +4148,43 @@ pub enum ServerMessage {
         acceptance_position: CanonicalU64,
         /// Exact active turn the steering is bound to.
         source_turn_id: CanonicalUuid,
+    },
+    /// A durable user goal command appended one event.
+    GoalTransitionApplied {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Appended event position.
+        event_ordinal: CanonicalU64,
+        /// Generation acted on by the event.
+        generation: CanonicalU64,
+    },
+    /// Begins one complete goal-history snapshot.
+    GoalHistoryStart {
+        /// Owning session.
+        session_id: CanonicalUuid,
+        /// Current immutable statement generation.
+        current_generation: CanonicalU64,
+        /// Current immutable statement.
+        current_statement: String,
+    },
+    /// Carries the current lifecycle state in a frame bounded independently from text.
+    GoalHistoryState {
+        /// Current derived lifecycle state.
+        current_state: GoalLifecycleState,
+    },
+    /// One ordered event in a goal-history snapshot.
+    GoalHistoryItem {
+        /// Positive contiguous event position.
+        event_ordinal: CanonicalU64,
+        /// Statement generation acted on by the event.
+        generation: CanonicalU64,
+        /// Exact event payload and provenance.
+        event: GoalHistoryEvent,
+    },
+    /// Completes one goal-history snapshot.
+    GoalHistoryEnd {
+        /// Number of preceding history items.
+        event_count: CanonicalU64,
     },
     /// Begins a session-summary sequence.
     SessionsStart {},
@@ -3922,7 +4406,7 @@ pub enum ServerMessage {
         /// Exact lifecycle state.
         state: TurnState,
     },
-    /// Exact provider-reported token fields for one terminal model call.
+    /// Exact independently nullable token fields for one terminal model call.
     TranscriptModelCallUsage {
         /// Zero-based model-call evidence index in this snapshot.
         model_call_index: CanonicalU64,
@@ -3930,8 +4414,13 @@ pub enum ServerMessage {
         turn_id: CanonicalUuid,
         /// Immutable model-call identity.
         model_call_id: CanonicalUuid,
-        /// Exact independently nullable provider fields.
+        /// Closed source vocabulary for the independently nullable counts.
+        usage_provenance: UsageProvenance,
+        /// Exact independently nullable fields from the named provenance.
         usage: ModelCallTokenUsage,
+        /// Read-time configured-rate derivation, required null when unavailable.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        cost: Option<ModelCallDollarCost>,
     },
     /// Completes the model-call evidence section of one transcript snapshot.
     TranscriptModelCallsEnd {
@@ -4116,6 +4605,33 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::GoalTransitionApplied {
+                event_ordinal,
+                generation,
+                ..
+            }
+            | Self::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                ..
+            } if event_ordinal.value() == 0 || generation.value() == 0 => {
+                return Err(FrameValidationError::GoalShape);
+            }
+            Self::GoalHistoryStart {
+                current_generation,
+                current_statement,
+                ..
+            } => {
+                if current_generation.value() == 0 {
+                    return Err(FrameValidationError::GoalShape);
+                }
+                validate_goal_text(current_statement)?;
+            }
+            Self::GoalHistoryState { current_state } => validate_goal_state(current_state)?,
+            Self::GoalHistoryItem { event, .. } => validate_goal_event(event)?,
+            Self::GoalHistoryEnd { event_count } if event_count.value() == 0 => {
+                return Err(FrameValidationError::GoalShape);
+            }
             Self::SessionMetadataSummary {
                 title,
                 tags,
@@ -4204,6 +4720,15 @@ impl ServerMessage {
                     }
                     preview.validate()?;
                 }
+            }
+            Self::TranscriptModelCallUsage { usage, cost, .. }
+                if cost.is_some()
+                    && usage.input_tokens.is_none()
+                    && usage.output_tokens.is_none()
+                    && usage.cache_creation_input_tokens.is_none()
+                    && usage.cache_read_input_tokens.is_none() =>
+            {
+                return Err(FrameValidationError::ModelCallUsageShape);
             }
             _ => {}
         }
@@ -4378,6 +4903,10 @@ pub enum FrameValidationError {
     TemplateShape,
     /// A review lifecycle or orchestration frame carried an invalid shape.
     ReviewShape,
+    /// A model-call usage row carried cost without any reported usage axis.
+    ModelCallUsageShape,
+    /// A goal request, state, or event carried an invalid shape.
+    GoalShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -4404,6 +4933,8 @@ impl fmt::Display for FrameValidationError {
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
+            Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
+            Self::GoalShape => "commissioned-goal frame shape is inconsistent",
         })
     }
 }
@@ -4809,20 +5340,22 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
-        ContentFragment, ConversationCursor, ConversationImportFormat, ConversationImportSource,
-        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, ImportedContentKind,
-        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
-        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
+        BillingRateVersion, CanonicalDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
+        ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
+        ConversationImportFormat, ConversationImportSource, ConversationOrigin,
+        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
+        ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
+        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
+        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
         ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
         ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
         ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
@@ -4833,7 +5366,8 @@ mod tests {
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
         ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
+        encode_server_line,
     };
     use uuid::Uuid;
 
@@ -5004,6 +5538,166 @@ mod tests {
         assert_eq!(String::from_utf8(encoded.clone())?, expected);
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    #[test]
+    fn inv033_goal_requests_and_history_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::AttachGoal {
+                command_id: command(2)?,
+                session_id: uuid(3),
+                statement: String::from("ship goal mode"),
+            },
+            r#"{"type":"attach_goal","command_id":"00000000-0000-0000-0000-000000000002","session_id":"00000000-0000-0000-0000-000000000003","statement":"ship goal mode"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(4)?,
+            ClientRequest::ResumeGoal {
+                command_id: command(5)?,
+                session_id: uuid(3),
+                guidance: Some(String::from("use the user decision")),
+            },
+            r#"{"type":"resume_goal","command_id":"00000000-0000-0000-0000-000000000005","session_id":"00000000-0000-0000-0000-000000000003","guidance":"use the user decision"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(6)?,
+            ClientRequest::SupersedeGoal {
+                command_id: command(7)?,
+                session_id: uuid(3),
+                statement: String::from("ship clarified goal mode"),
+            },
+            r#"{"type":"supersede_goal","command_id":"00000000-0000-0000-0000-000000000007","session_id":"00000000-0000-0000-0000-000000000003","statement":"ship clarified goal mode"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(8)?,
+            ServerMessage::GoalHistoryStart {
+                session_id: uuid(3),
+                current_generation: CanonicalU64::new(2),
+                current_statement: String::from("ship clarified goal mode"),
+            },
+            r#"{"type":"goal_history_start","session_id":"00000000-0000-0000-0000-000000000003","current_generation":"2","current_statement":"ship clarified goal mode"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(8)?,
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::Pursuing {},
+            },
+            r#"{"type":"goal_history_state","current_state":{"type":"pursuing"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(3),
+                generation: CanonicalU64::new(2),
+                event: GoalHistoryEvent::Blocked {
+                    reason: GoalBlockedReason::ExecutionFailure,
+                    need: String::from("repair execution"),
+                    provenance: GoalBlockedProvenance::ExecutionFailure { turn_id: uuid(10) },
+                },
+            },
+            r#"{"type":"goal_history_item","event_ordinal":"3","generation":"2","event":{"type":"blocked","reason":"execution_failure","need":"repair execution","provenance":{"type":"execution_failure","turn_id":"00000000-0000-0000-0000-00000000000a"}}}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(11)?,
+            ClientRequest::ReadGoal {
+                session_id: uuid(3),
+            },
+            r#"{"type":"read_goal","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(12)?,
+            ClientRequest::StopGoal {
+                command_id: command(13)?,
+                session_id: uuid(3),
+            },
+            r#"{"type":"stop_goal","command_id":"00000000-0000-0000-0000-00000000000d","session_id":"00000000-0000-0000-0000-000000000003"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(14)?,
+            ServerMessage::GoalTransitionApplied {
+                session_id: uuid(3),
+                event_ordinal: CanonicalU64::new(4),
+                generation: CanonicalU64::new(2),
+            },
+            r#"{"type":"goal_transition_applied","session_id":"00000000-0000-0000-0000-000000000003","event_ordinal":"4","generation":"2"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(15)?,
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(4),
+            },
+            r#"{"type":"goal_history_end","event_count":"4"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(16)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("goal command rejected"),
+                detail: ErrorDetail::rejected(RejectionDetail::GoalCommandRejected {
+                    session_id: uuid(3),
+                    reason: GoalCommandRejection::AcceptancePositionExhausted,
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"goal command rejected","detail":{"type":"goal_command_rejected","session_id":"00000000-0000-0000-0000-000000000003","reason":"acceptance_position_exhausted"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_split_goal_projection_fits_maximally_escaped_text_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let text = "\u{1}".repeat(MAX_CONTENT_FRAGMENT_BYTES);
+        let start = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::GoalHistoryStart {
+                session_id: uuid(2),
+                current_generation: CanonicalU64::new(1),
+                current_statement: text.clone(),
+            },
+        )?;
+        let state = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::Blocked {
+                    reason: GoalBlockedReason::ExternalChangeRequired,
+                    need: text,
+                },
+            },
+        )?;
+        let start_encoded = encode_server_line(&start)?;
+        let state_encoded = encode_server_line(&state)?;
+
+        assert!(start_encoded.len() < super::MAX_FRAME_BYTES);
+        assert!(state_encoded.len() < super::MAX_FRAME_BYTES);
+        assert_eq!(decode_server_line(&start_encoded)?, start);
+        assert_eq!(decode_server_line(&state_encoded)?, state);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_goal_history_rejects_model_provenance_for_execution_failure() {
+        let mismatched = ServerMessage::GoalHistoryItem {
+            event_ordinal: CanonicalU64::new(2),
+            generation: CanonicalU64::new(1),
+            event: GoalHistoryEvent::Blocked {
+                reason: GoalBlockedReason::ExecutionFailure,
+                need: String::from("repair execution"),
+                provenance: GoalBlockedProvenance::Model {
+                    turn_id: uuid(3),
+                    tool_request_id: uuid(4),
+                },
+            },
+        };
+
+        assert_eq!(
+            ServerFrame::try_new(
+                RequestId::try_new(1).expect("fixture request identity is admitted"),
+                mismatched,
+            )
+            .expect_err("scheduler-only reason rejects model provenance"),
+            FrameValidationError::GoalShape
+        );
     }
 
     #[test]
@@ -5377,6 +6071,19 @@ mod tests {
         );
         assert_client_malformed(
             r#"{"version":1,"request_id":"+1","request":{"type":"list_sessions"}}"#,
+        );
+    }
+
+    #[test]
+    fn canonical_dollar_amount_matches_the_wire_decimal_representation() {
+        assert!(
+            CanonicalDollarAmount::try_new(String::from("79228162514264337593543950335")).is_ok()
+        );
+        assert!(
+            CanonicalDollarAmount::try_new(String::from("0.0000000000000000000000000001")).is_ok()
+        );
+        assert!(
+            CanonicalDollarAmount::try_new(String::from("79228162514264337593543950336")).is_err()
         );
     }
 
@@ -6037,12 +6744,18 @@ mod tests {
             model_call_index: CanonicalU64::new(0),
             turn_id: uuid(2),
             model_call_id: uuid(3),
+            usage_provenance: UsageProvenance::Reported,
             usage: ModelCallTokenUsage {
                 input_tokens: Some(CanonicalU64::new(10)),
                 output_tokens: Some(CanonicalU64::new(0)),
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(CanonicalU64::new(4)),
             },
+            cost: Some(ModelCallDollarCost {
+                amount_usd: CanonicalDollarAmount::try_new(String::from("0.125"))?,
+                rate_version: BillingRateVersion::try_new(String::from("rates-v7"))?,
+                label: ModelCallCostLabel::MeteredEquivalent,
+            }),
         };
 
         let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request_id, message)?;
@@ -6050,7 +6763,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(encoded.clone())?,
             format!(
-                "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}}}}}}\n"
+                "{{\"version\":{PROTOCOL_VERSION},\"request_id\":\"1\",\"message\":{{\"type\":\"transcript_model_call_usage\",\"model_call_index\":\"0\",\"turn_id\":\"00000000-0000-0000-0000-000000000002\",\"model_call_id\":\"00000000-0000-0000-0000-000000000003\",\"usage_provenance\":\"reported\",\"usage\":{{\"input_tokens\":\"10\",\"output_tokens\":\"0\",\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":\"4\"}},\"cost\":{{\"amount_usd\":\"0.125\",\"rate_version\":\"rates-v7\",\"label\":\"metered_equivalent\"}}}}}}\n"
             )
         );
         assert_eq!(decode_server_line(&encoded)?, frame);
@@ -6060,9 +6773,36 @@ mod tests {
     #[test]
     fn usage_rejects_an_omitted_evidence_field() {
         let error = decode_server_line(&line(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null},"cost":null}}"#,
         ))
         .expect_err("required-nullable evidence fields cannot be omitted");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[test]
+    fn usage_rejects_an_omitted_cost_member() {
+        let error = decode_server_line(&line(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null}}}"#,
+        ))
+        .expect_err("the derived cost member is required nullable");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[test]
+    fn usage_rejects_cost_without_a_present_axis() {
+        let error = decode_server_line(&line(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"reported","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null},"cost":{"amount_usd":"0","rate_version":"rates-v1","label":"real"}}}"#,
+        ))
+        .expect_err("a cost without derivation evidence must be rejected");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[test]
+    fn usage_provenance_rejects_unknown_values() {
+        let error = decode_server_line(&line(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_model_call_usage","model_call_index":"0","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","usage_provenance":"inferred","usage":{"input_tokens":null,"output_tokens":null,"cache_creation_input_tokens":null,"cache_read_input_tokens":null},"cost":null}}"#,
+        ))
+        .expect_err("the usage provenance vocabulary is closed");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
     }
 
@@ -8209,6 +8949,31 @@ mod tests {
             request(2)?,
             tool_reconciliation,
         )?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    /// INV-033 / INV-048: queued goal retirement has one exact closed wire
+    /// shape and round-trips its immutable turn identity.
+    #[test]
+    fn inv033_inv048_goal_turn_retired_event_round_trips() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let message = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(1),
+            session_id: uuid(1),
+            event: SessionEvent::GoalTurnRetired { turn_id: uuid(2) },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(3)?, message)?;
+
+        assert_eq!(
+            String::from_utf8(encode_server_line(&frame)?)?,
+            concat!(
+                "{\"version\":1,\"request_id\":\"3\",\"message\":{\"type\":\"session_event\",\"cursor\":\"1\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000001\",",
+                "\"event\":{\"type\":\"goal_turn_retired\",",
+                "\"turn_id\":\"00000000-0000-0000-0000-000000000002\"}}}\n"
+            )
+        );
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
         Ok(())
     }

@@ -27,6 +27,7 @@ public struct SignalboxTimelineMessage: Equatable, Sendable {
     public let eventID: SignalboxEventID
     public let role: SignalboxMessageRole
     public let text: String
+    public let unrecognizedKind: String?
     public let thinkingText: String?
     public let isStreaming: Bool
     public let createdAt: Date?
@@ -255,6 +256,7 @@ public enum SignalboxEventNormalizer {
                     eventID: record.eventID,
                     role: event.role,
                     text: event.text,
+                    unrecognizedKind: event.unrecognizedKind,
                     thinkingText: nil,
                     isStreaming: false,
                     createdAt: nil,
@@ -293,20 +295,7 @@ public enum SignalboxEventNormalizer {
                     eventID: record.eventID,
                     title: "Model usage",
                     systemImage: "number.circle",
-                    details: [
-                        .init(label: "Turn", value: event.turnID.rawValue),
-                        .init(label: "Model call", value: event.modelCallID.rawValue),
-                        .init(label: "Input tokens", value: tokenLabel(event.inputTokens)),
-                        .init(label: "Output tokens", value: tokenLabel(event.outputTokens)),
-                        .init(
-                            label: "Cache creation input tokens",
-                            value: tokenLabel(event.cacheCreationInputTokens)
-                        ),
-                        .init(
-                            label: "Cache read input tokens",
-                            value: tokenLabel(event.cacheReadInputTokens)
-                        ),
-                    ]
+                    details: modelCallUsageDetails(event)
                 )
             )
         case .processImportedContent(let event):
@@ -661,6 +650,7 @@ public enum SignalboxEventNormalizer {
                 eventID: record.eventID,
                 role: event.message.role,
                 text: text,
+                unrecognizedKind: nil,
                 thinkingText: thinkingText.isEmpty ? nil : thinkingText,
                 isStreaming: event.isStreaming,
                 createdAt: event.createdAt,
@@ -672,6 +662,34 @@ public enum SignalboxEventNormalizer {
 
     private static func tokenLabel(_ value: SignalboxCanonicalUInt64?) -> String {
         value?.rawValue.description ?? "Not reported"
+    }
+
+    private static func modelCallUsageDetails(
+        _ event: SignalboxProcessModelCallUsageEvent
+    ) -> [SignalboxProcessNoticeDetail] {
+        var details = [
+            SignalboxProcessNoticeDetail(label: "Turn", value: event.turnID.rawValue),
+            .init(label: "Model call", value: event.modelCallID.rawValue),
+            .init(label: "Usage provenance", value: event.usageProvenance),
+            .init(label: "Input tokens", value: tokenLabel(event.inputTokens)),
+            .init(label: "Output tokens", value: tokenLabel(event.outputTokens)),
+            .init(
+                label: "Cache creation input tokens",
+                value: tokenLabel(event.cacheCreationInputTokens)
+            ),
+            .init(
+                label: "Cache read input tokens",
+                value: tokenLabel(event.cacheReadInputTokens)
+            ),
+        ]
+        if let amount = event.costAmountUSD,
+           let rateVersion = event.costRateVersion,
+           let label = event.costLabel {
+            details.append(.init(label: "Cost (USD)", value: amount))
+            details.append(.init(label: "Cost rate version", value: rateVersion))
+            details.append(.init(label: "Cost label", value: label))
+        }
+        return details
     }
 
     private static func toolCard(

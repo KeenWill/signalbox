@@ -1,5 +1,38 @@
 import Foundation
 
+public enum SignalboxProcessPresentation {
+  public static let maximumLabelUTF8Bytes = 4 * 1_024
+
+  /// Bounds protocol-derived labels so unbounded retained tokens cannot exhaust memory or
+  /// stall SwiftUI layout.
+  public static func retainedLabel(_ label: String) -> String {
+    retainedLabel(label, maximumUTF8Bytes: maximumLabelUTF8Bytes)
+  }
+
+  /// Bounds protocol-derived labels while preserving a diagnostic suffix so retained
+  /// tokens cannot exhaust memory or stall SwiftUI layout.
+  public static func retainedLabel(_ label: String, preserving suffix: String) -> String {
+    let retainedSuffix = retainedLabel(suffix)
+    let maximumPrefixUTF8Bytes = maximumLabelUTF8Bytes - retainedSuffix.utf8.count
+    return retainedLabel(label, maximumUTF8Bytes: maximumPrefixUTF8Bytes) + retainedSuffix
+  }
+
+  private static func retainedLabel(_ label: String, maximumUTF8Bytes: Int) -> String {
+    let scalars = label.unicodeScalars
+    var retainedEnd = scalars.startIndex
+    var retainedBytes = 0
+    while retainedEnd != scalars.endIndex {
+      let scalarBytes = scalars[retainedEnd].utf8.count
+      guard retainedBytes + scalarBytes <= maximumUTF8Bytes else {
+        break
+      }
+      retainedBytes += scalarBytes
+      retainedEnd = scalars.index(after: retainedEnd)
+    }
+    return String(scalars[..<retainedEnd])
+  }
+}
+
 public struct SignalboxProcessSession: Identifiable, Equatable, Sendable {
   public let id: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
@@ -167,9 +200,13 @@ extension SignalboxImportedConversationEntry: Identifiable {
     case .attested(speaker: .assistant):
       return "Assistant"
     case .attested(speaker: .unknown(let value)):
-      return "Unrecognized speaker (\(value))"
+      return SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized speaker (\(value))"
+      )
     case .unknown(let kind, _):
-      return "Unknown speaker (\(kind))"
+      return SignalboxProcessPresentation.retainedLabel(
+        "Unknown speaker (\(kind))"
+      )
     }
   }
 
@@ -194,7 +231,9 @@ extension SignalboxImportedConversationEntry: Identifiable {
     case .messageContentAbsent:
       return "Message content absent"
     case .unknown(let value):
-      return "Unrecognized content (\(value))"
+      return SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized content (\(value))"
+      )
     }
   }
 }
@@ -298,14 +337,50 @@ public struct SignalboxProcessActivity: Equatable, Sendable {
 }
 
 public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case role
+    case text
+    case unrecognizedKind = "unrecognized_kind"
+  }
+
   public let kind: String
   public let role: SignalboxMessageRole
   public let text: String
+  public let unrecognizedKind: String?
 
-  public init(role: SignalboxMessageRole, text: String) {
+  public init(
+    role: SignalboxMessageRole,
+    text: String,
+    unrecognizedKind: String? = nil
+  ) {
     self.kind = "process_message"
     self.role = role
     self.text = text
+    self.unrecognizedKind = unrecognizedKind.map {
+      SignalboxProcessPresentation.retainedLabel($0)
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.kind = try container.decode(String.self, forKey: .kind)
+    self.role = try container.decode(SignalboxMessageRole.self, forKey: .role)
+    self.text = try container.decode(String.self, forKey: .text)
+    self.unrecognizedKind = try container.decodeIfPresent(
+      String.self,
+      forKey: .unrecognizedKind
+    ).map {
+      SignalboxProcessPresentation.retainedLabel($0)
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(kind, forKey: .kind)
+    try container.encode(role, forKey: .role)
+    try container.encode(text, forKey: .text)
+    try container.encodeIfPresent(unrecognizedKind, forKey: .unrecognizedKind)
   }
 }
 
@@ -344,29 +419,41 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
   public let kind: String
   public let turnID: SignalboxCanonicalUUID
   public let modelCallID: SignalboxCanonicalUUID
+  public let usageProvenance: String
   public let inputTokens: SignalboxCanonicalUInt64?
   public let outputTokens: SignalboxCanonicalUInt64?
   public let cacheCreationInputTokens: SignalboxCanonicalUInt64?
   public let cacheReadInputTokens: SignalboxCanonicalUInt64?
+  public let costAmountUSD: String?
+  public let costRateVersion: String?
+  public let costLabel: String?
 
   public init(evidence: SignalboxTranscriptModelCallUsage) {
     self.kind = "process_model_call_usage"
     self.turnID = evidence.turnID
     self.modelCallID = evidence.modelCallID
+    self.usageProvenance = evidence.usageProvenance.rawValue
     self.inputTokens = evidence.usage.inputTokens
     self.outputTokens = evidence.usage.outputTokens
     self.cacheCreationInputTokens = evidence.usage.cacheCreationInputTokens
     self.cacheReadInputTokens = evidence.usage.cacheReadInputTokens
+    self.costAmountUSD = evidence.cost?.amountUSD.rawValue
+    self.costRateVersion = evidence.cost?.rateVersion.rawValue
+    self.costLabel = evidence.cost?.label.rawValue
   }
 
   private enum CodingKeys: String, CodingKey {
     case kind
     case turnID = "turn_id"
     case modelCallID = "model_call_id"
+    case usageProvenance = "usage_provenance"
     case inputTokens = "input_tokens"
     case outputTokens = "output_tokens"
     case cacheCreationInputTokens = "cache_creation_input_tokens"
     case cacheReadInputTokens = "cache_read_input_tokens"
+    case costAmountUSD = "cost_amount_usd"
+    case costRateVersion = "cost_rate_version"
+    case costLabel = "cost_label"
   }
 }
 

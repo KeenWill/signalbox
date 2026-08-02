@@ -155,6 +155,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
     var latestActivity = SignalboxProcessActivity.unavailable
     var activeActivity: SignalboxProcessActivity?
+    var unknownTurnActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
 
@@ -162,6 +163,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       switch record {
       case .turn(let turn):
         latestActivity = activity(for: turn.state)
+        if case .unknown = turn.state {
+          unknownTurnActivity = latestActivity
+        } else if case .queued = turn.state {
+          // A queued successor does not prove that an unknown earlier turn is terminal.
+        } else {
+          unknownTurnActivity = nil
+        }
         if turnStateIsActive(turn.state) {
           activeActivity = latestActivity
         }
@@ -233,7 +241,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
-      activity: activeActivity ?? latestActivity,
+      activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
       materializedAcceptedInputIDs: materializedAcceptedInputIDs
     )
   }
@@ -255,14 +263,20 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .contextSummary:
       event = .processContextSummary(SignalboxProcessContextSummaryEvent(text: content))
     case .imported(_, _, let speaker):
+      let presentation = importedPresentation(speaker)
       event = .processMessage(
-        SignalboxProcessMessageEvent(role: importedRole(speaker), text: content)
+        SignalboxProcessMessageEvent(
+          role: presentation.role,
+          text: content,
+          unrecognizedKind: presentation.unrecognizedKind
+        )
       )
-    case .unknown(let kind, _, let diagnostic):
-      event = .processConservative(
-        SignalboxProcessConservativeEvent(
-          kind: kind,
-          diagnostic: diagnostic?.message ?? "Unrecognized text entry: \(content)"
+    case .unknown(let kind, _, _):
+      event = .processMessage(
+        SignalboxProcessMessageEvent(
+          role: .unknown,
+          text: content,
+          unrecognizedKind: SignalboxProcessPresentation.retainedLabel(kind)
         )
       )
     }
@@ -390,7 +404,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message,
         event: .processConservative(
           SignalboxProcessConservativeEvent(
-            kind: kind,
+            kind: SignalboxProcessPresentation.retainedLabel(kind),
             diagnostic: diagnostic?.message ?? "The entry kind is not rendered by this client."
           )
         )
@@ -652,13 +666,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
-    case .turnActivated(let turnID, _):
-      guard
-        case .modelIdentityChanged(let entryTurnID, _, _) = message.entry
-      else {
-        return false
-      }
-      return entryTurnID == turnID
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -691,7 +698,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
-    case .sessionCreated, .inputAccepted, .modelCallTransition,
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
@@ -726,13 +733,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
-    case .turnActivated(let turnID, _):
-      return snapshot.records.contains { record in
-        guard case .turn(let turn) = record else {
-          return false
-        }
-        return turn.turnID == turnID
-      }
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -836,25 +836,32 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryAttemptID == toolAttemptID && context.turnID == turnID
       }
-    case .sessionCreated, .inputAccepted, .modelCallTransition, .turnRefused,
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return true
     }
   }
 
-  private func importedRole(
+  private func importedPresentation(
     _ speaker: SignalboxImportedSourceSpeaker
-  ) -> SignalboxMessageRole {
-    guard case .attested(let importedSpeaker) = speaker else {
-      return .unknown
-    }
-    switch importedSpeaker {
-    case .user:
-      return .user
-    case .assistant:
-      return .assistant
-    case .unknown:
-      return .unknown
+  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?) {
+    switch speaker {
+    case .attested(.user):
+      return (.user, nil)
+    case .attested(.assistant):
+      return (.assistant, nil)
+    case .attested(.unknown(let value)):
+      return (
+        .unknown,
+        SignalboxProcessPresentation.retainedLabel("Unrecognized speaker (\(value))")
+      )
+    case .unknown(let kind, _):
+      return (
+        .unknown,
+        SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
+      )
+    case .notAttested, .attestedAbsent:
+      return (.unknown, nil)
     }
   }
 
@@ -921,10 +928,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
     case .failed(_, _, let terminalModelCall):
+      if let terminalModelCall, case .unknown(let value) = terminalModelCall.disposition {
+        let label = SignalboxProcessPresentation.retainedLabel(
+          "Failed: unrecognized disposition (\(value))"
+        )
+        return .init(state: .failed, label: label)
+      }
       guard let cause = terminalModelCall?.cause else {
         return .init(state: .failed, label: "Failed")
       }
-      return .init(state: .failed, label: "Failed: \(providerFailureLabel(cause))")
+      let label = SignalboxProcessPresentation.retainedLabel(
+        "Failed: \(providerFailureLabel(cause))"
+      )
+      return .init(state: .failed, label: label)
     case .completed:
       return .init(state: .completed, label: "Completed")
     case .refused:
@@ -932,7 +948,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .cancelled:
       return .init(state: .cancelled, label: "Cancelled")
     case .unknown:
-      return .unavailable
+      return .init(state: .recoveryRequired, label: "Recovery required")
     }
   }
 

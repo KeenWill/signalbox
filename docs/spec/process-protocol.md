@@ -3,6 +3,12 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The typed usage provenance, derived-cost row shape, and labeled client
+aggregation are verified against PR #389 (`agent/cost-accounting`).
+
+The goal-mode process and terminal surface was re-verified through PR #384
+(`agent/goal-mode-runtime`).
+
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
@@ -191,6 +197,11 @@ that variant.
 | `create_session_from_template`          | `command_id` (canonical UUID string), `template_name` (template-name string), `runner_placement` (proposed; placement object or null)                                                                                                                                    | Resolve one daemon-held template and copy its complete bundle into a user-initiated session's defaults version one.                                                                                                                                                                                                                                                             |
 | `list_sessions`                         | none                                                                                                                                                                                                                                                                     | Read all current sessions as basic summaries, ordered by session identity.                                                                                                                                                                                                                                                                                                      |
 | `list_templates`                        | none                                                                                                                                                                                                                                                                     | Read every available template's name and version in name order.                                                                                                                                                                                                                                                                                                                 |
+| `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
+| `read_goal`                             | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read the current goal projection and complete ordered lineage.                                                                                                                                                                                                                                                                                                                  |
+| `resume_goal`                           | `command_id` and `session_id` (canonical UUID strings), `guidance` (string or null)                                                                                                                                                                                      | Resume the blocked current generation, optionally using exact guidance as its next turn input.                                                                                                                                                                                                                                                                                  |
+| `stop_goal`                             | `command_id` and `session_id` (canonical UUID strings)                                                                                                                                                                                                                   | Terminalize the pursuing or blocked current generation by explicit user action.                                                                                                                                                                                                                                                                                                 |
+| `supersede_goal`                        | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                             | Atomically supersede the current generation and begin pursuing a new immutable statement in the same lineage.                                                                                                                                                                                                                                                                   |
 | `submit_input`                          | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string, or null only for steering), and optional `delivery`                                                                                   | Submit exact user text with the selected closed delivery intent; omitting `delivery` retains `StartWhenNoActiveTurn`.                                                                                                                                                                                                                                                           |
 | `read_transcript`                       | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                                                                                                                                                                                                                                  |
 | `follow_session`                        | `session_id` (canonical UUID string)                                                                                                                                                                                                                                     | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session; also receive ephemeral provider-text deltas.                                                                                                                                                                 |
@@ -678,6 +689,24 @@ that variant. Every accepted non-review mutation request — `create_session`,
   promotion changes no session placement; or
 - `error` with a stable `code` and a non-sensitive `message`.
 
+**Implemented behavior.** An accepted goal mutation returns
+`goal_transition_applied { session_id, event_ordinal, generation }`. A
+successful `read_goal` returns `goal_history_start` with the current generation
+and immutable statement; `goal_history_state` with the current state; one or
+more contiguous `goal_history_item` messages with event ordinal, generation,
+event, and provenance; then `goal_history_end { event_count }`. Each of the two
+projection frames carries at most one bounded goal text, so even maximally
+JSON-escaped text remains below the frame cap. Because every attached lineage
+has its commissioning event, `event_count` is the exact number of preceding
+items. Before presenting any line, the client validates the complete sequence
+and count, replays every event through the admitted lifecycle transitions, and
+checks that the replay derives the declared current projection. Goal text uses
+the ordinary bounded text grammar; the closed lifecycle, event, reason, and
+provenance correlations are owned by [goal mode](goal-mode.md). The daemon
+completes an effective-user-private temporary-file spool, then releases both the
+decoded goal aggregate and snapshot-reader permit before writing the first
+history frame to the connection.
+
 Review mutations return exactly one stable acknowledgement:
 
 - `review_target_created { target_id }`;
@@ -1144,12 +1173,23 @@ by model-call UUID. The native client models both usage rows and the mandatory
 model-calls-end boundary, validates their contiguous indices, identities, and
 count, and retains usage rows in its bounded snapshot record set without
 presenting the former false unknown-frame diagnostic. Each row carries
-contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`, and a
-required `usage` object with required-nullable `input_tokens`, `output_tokens`,
+contiguous zero-based `model_call_index`, `turn_id`, `model_call_id`, closed
+`usage_provenance` (`reported` or `estimated`), and a required `usage` object
+with required-nullable `input_tokens`, `output_tokens`,
 `cache_creation_input_tokens`, and `cache_read_input_tokens`. A null field means
-the provider did not report it; a reported zero is the canonical decimal string
-`"0"`. `transcript_model_calls_end { model_call_count }` acknowledges the exact
-row count before any entry message. Every terminal call has one row, including
+that axis was not supplied; a present zero is the canonical decimal string
+`"0"`. The required-nullable `cost` member is null when no derivation is
+available. Otherwise it carries canonical nonnegative decimal `amount_usd`, the
+exact bounded `rate_version`, and label `real` or `metered_equivalent`. Because
+no read-time derivation exists without evidence, a nonnull `cost` is rejected
+when all four usage axes are null. `amount_usd` admits exactly the decimal
+representation used for derivation: at most 28 fractional digits and a
+coefficient no greater than 79,228,162,514,264,337,593,543,950,335. The daemon
+derives that value at read time under the
+[configuration-and-credentials](configuration-and-credentials.md) contract; no
+bare dollar amount is durable model-call evidence.
+`transcript_model_calls_end { model_call_count }` acknowledges the exact row
+count before any entry message. Every terminal call has one row, including
 historical, cancellation, and recovery calls whose four fields are all null.
 
 The daemon builds that complete sequence in a secure unnamed temporary file
@@ -1390,6 +1430,7 @@ closed `event` object. The protocol admits these event shapes:
 | ------------------------------ | ----------------------------------------------------------------------------- |
 | `session_created`              | none                                                                          |
 | `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
+| `goal_turn_retired`            | `turn_id`                                                                     |
 | `turn_activated`               | `turn_id` and `current_attempt_id`                                            |
 | `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                       |
 | `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
@@ -1397,6 +1438,12 @@ closed `event` object. The protocol admits these event shapes:
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 | `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+
+A `goal_turn_retired` event clears only the exact queued turn it names; an
+unmatched or already-active identity leaves local turn controls unchanged. A
+superseding transaction publishes this event before its replacement
+`input_accepted`, so a live follower cannot retain the obsolete queued identity
+and ignore the replacement activation.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.
@@ -1546,6 +1593,11 @@ below. The client accepts a global `--socket <path>` override or reads
 - `search [--title <substring>] [--tag <tag>]... [--include-archived] [--limit <decimal>] [--after <session-uuid>]`;
 - `conversations [--title <substring>] [--origin <native|imported|all>] [--include-archived] [--limit <decimal>] [--after <native|imported>:<uuid>]`;
 - `compact <session-uuid> [--through-position <positive-decimal>] [--command-id <uuid>]`;
+- `goal attach <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
+- `goal show <session-uuid>`;
+- `goal resume <session-uuid> [--guidance <text> | --guidance-file <path>] [--command-id <uuid>]`;
+- `goal stop <session-uuid> [--command-id <uuid>]`;
+- `goal supersede <session-uuid> (--statement <text> | --statement-file <path>) [--command-id <uuid>]`;
 - `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `send <session-uuid> --queue [--command-id <uuid> --defaults-version <decimal> --turn <uuid>]`;
 - `steer <session-uuid> [--command-id <uuid> --turn <uuid>]`;
@@ -1800,6 +1852,14 @@ process argument: the client reads one bounded file snapshot before socket I/O
 and rejects an empty, oversized, non-UTF-8, or U+0000-bearing prompt locally,
 then sends the exact text.
 
+**Implemented behavior.** The `goal` verbs expose only commission, inspection,
+resume, stop, and supersession. Mutations print a generated command identity
+before socket I/O and validate the applied event ordinal and generation receipt.
+`goal show` validates and spools the complete history before printing the
+current projection and every event with terminal-safe statement, need, guidance,
+and report text. Guidance that does not replace scope remains a resume or the
+existing `steer` verb; no edit-in-place command exists.
+
 `reconcile` reads its successor content the same way and names the parked turn
 the operator observed in the session transcript. It prints the same command and
 defaults recovery values as an ordinary `send`, then follows the accepted
@@ -1918,16 +1978,22 @@ evidence. A transition committed at or below that cursor therefore remains
 visible even when it has not added a semantic transcript entry.
 
 `transcript` replays the validated usage rows after ordinary turn and frontier
-output. It prints one compact subtotal per turn that has terminal calls and one
-session-total line, including `terminal_calls=0` with `0/0` field coverage when
-there are no terminal calls. Each of the four token fields carries both its
-subtotal and `reported_calls/terminal_calls` coverage. Zero is printed as zero;
-a field with no reported calls is printed as `unreported`, and partial coverage
-is never silently treated as complete. Snapshot validation rejects noncontiguous
-indices, unknown turn identities, repeated model-call identities, or usage rows
-outside strict turn-acceptance and per-turn model-call-UUID order. These client
-totals are presentation arithmetic over the exact per-call evidence. The client
-does not compute currency cost or store a derived total.
+output. It prints separate `reported` and `estimated` token subtotals per turn
+that has terminal calls and at session scope, including `terminal_calls=0` with
+`0/0` field coverage. The two provenances are never silently summed. Each of the
+four token fields carries both its subtotal and `present_calls/terminal_calls`
+coverage. Zero is printed as zero; a field with no supplied calls is printed as
+`unreported`, and partial coverage is never silently treated as complete.
+Snapshot validation rejects noncontiguous indices, unknown turn identities,
+repeated model-call identities, or usage rows outside strict turn-acceptance and
+per-turn model-call-UUID order. Currency presentation aggregates only per-call
+derived figures sharing the same usage provenance, billing label, and rate
+version; each line states that labeled triple and its costed-call count. These
+client totals are presentation arithmetic over exact per-call read evidence and
+use an anonymous temporary-file index so distinct rate versions do not grow
+client heap. The client scans that index once for output; totals are never
+persisted, and an addition that cannot retain both operands exactly rejects the
+snapshot instead of reporting a rounded total.
 
 The unbounded aggregate session-summary sequence is bounded the same way. `list`
 validates ordering and the terminal count while spooling summary frames to an

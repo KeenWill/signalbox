@@ -36,9 +36,12 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
       .deadlineExceeded(let message):
       return message
     case .remote(let code, let message, _):
-      return "\(code.rawValue): \(message)"
+      return SignalboxProcessPresentation.retainedLabel("\(code.rawValue): \(message)")
     case .mutationRetryExhausted(let code, let message):
-      return "\(code.rawValue): \(message) The exact command can be retried."
+      return SignalboxProcessPresentation.retainedLabel(
+        "\(code.rawValue): \(message)",
+        preserving: " The exact command can be retried."
+      )
     }
   }
 }
@@ -1551,11 +1554,16 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           "The mutation returned an unrelated message."
         )
       }
-      guard error.code == .commitAmbiguous else {
+      switch error.code {
+      case .commitAmbiguous:
+        break
+      case .malformedFrame, .unsupportedVersion, .invalidRequest, .notFound,
+        .conflictingReuse, .rejected, .resyncRequired, .unavailable, .internal, .unknown:
         throw remote(error)
       }
       let delay = try ambiguousMutationRetryDelay(
         at: retryIndex,
+        code: error.code,
         message: error.message
       )
       retryIndex += 1
@@ -1565,11 +1573,12 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
 
   private func ambiguousMutationRetryDelay(
     at retryIndex: Int,
+    code: SignalboxProcessErrorCode = .commitAmbiguous,
     message: String
   ) throws -> Duration {
     guard policy.ambiguousMutationRetryDelays.indices.contains(retryIndex) else {
       throw SignalboxProcessServiceError.mutationRetryExhausted(
-        code: .commitAmbiguous,
+        code: code,
         message: message
       )
     }

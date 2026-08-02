@@ -65,6 +65,9 @@ struct MessageBubble: View {
         if let label = message.label {
             return label
         }
+        if let unrecognizedKind = message.unrecognizedKind {
+            return "Unrecognized: \(unrecognizedKind)"
+        }
         switch message.role {
         case .user:
             return "You"
@@ -544,6 +547,7 @@ private enum MarkdownBlockParser {
 
 struct ToolInvocationCard: View {
     let tool: SignalboxToolCard
+    let decisionAvailable: Bool
     let onApprove: () -> Void
     let onDeny: () -> Void
     @State private var isExpanded = true
@@ -572,7 +576,7 @@ struct ToolInvocationCard: View {
                 .accessibilityLabel(isExpanded ? "Collapse tool" : "Expand tool")
             }
 
-            if tool.status == .waitingForApproval && tool.decisionAvailable {
+            if tool.status == .waitingForApproval && decisionAvailable {
                 HStack(spacing: 10) {
                     Button(role: .destructive) {
                         onDeny()

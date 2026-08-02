@@ -229,6 +229,10 @@ mod tests {
             r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -305,6 +309,14 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":8,"cached_input_
         let configuration = HubModelConfiguration::parse(&format!(
             r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+billing_kind = "subscription"
 
 [[adapter_mappings]]
 model_family = "anthropic"

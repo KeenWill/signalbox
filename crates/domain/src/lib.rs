@@ -14,6 +14,8 @@ mod context_compaction;
 mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
+mod goal;
+mod goal_command;
 mod imported_conversation;
 mod imported_session;
 mod model_call;
@@ -46,10 +48,10 @@ pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptError,
-    SessionSystemPromptFailure, TurnConfigurationProvenance, UnknownModelAlias,
-    VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+    OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
+    SessionSystemPromptError, SessionSystemPromptFailure, TurnConfigurationProvenance,
+    UnknownModelAlias, VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use context_compaction::{
     ContextCompaction, ContextCompactionId, ContextCompactionModelCall,
@@ -63,6 +65,18 @@ pub use context_frontier::{
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
+pub use goal::{
+    Goal, GoalBlockProvenance, GoalBlockedReasonKind, GoalEvent, GoalEventKind, GoalEventOrdinal,
+    GoalGeneration, GoalGenerationSnapshot, GoalGuidance, GoalModelBlockedReasonKind,
+    GoalModelProvenance, GoalNeed, GoalReconstitutionError, GoalReconstitutionFailure,
+    GoalReconstitutionInput, GoalReport, GoalReportRef, GoalSchedulerProvenance, GoalState,
+    GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure, GoalTurnSource,
+    GoalUserProvenance,
+};
+pub use goal_command::{
+    GoalCommandRejection, GoalCommandResult, GoalUserAction, GoalUserCommand,
+    ReconstitutedGoalCommand,
+};
 pub use imported_conversation::{
     ImportedConversation, ImportedConversationDisplayTitle, ImportedConversationDisplayTitleError,
     ImportedConversationFormat, ImportedConversationReconstitutionError,
@@ -210,7 +224,7 @@ pub use session_template::{
     SessionTemplateNameFailure, SessionTemplateProvenance, SessionTemplateVersion,
 };
 pub use submit_input::{
-    PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
+    GoalTurnOriginConstructionInput, PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,
@@ -235,10 +249,12 @@ pub use tool::{
     AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecision,
-    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
-    ToolArgumentsKind, ToolCallProposal, ToolDecisionSource, ToolDenialReason,
+    DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
+    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
+    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
+    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
+    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
+    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
     ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
     ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
@@ -257,9 +273,10 @@ pub use tool_attempt::{
     ToolExecutionErrorKind,
 };
 pub use tool_execution::{
-    AwaitingToolApproval, AwaitingToolRecovery, PreparedToolAttempt, PreparedToolBatchDecision,
-    PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError, ToolBatchDecisionFailure,
-    ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
+    AwaitingToolApproval, AwaitingToolRecovery, DelegateToolApprovalTransitionError,
+    DelegateToolApprovalTransitionFailure, PreparedDelegateToolApproval, PreparedToolAttempt,
+    PreparedToolBatchDecision, PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError,
+    ToolBatchDecisionFailure, ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionError,
     ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolResultProjectionError,
     ToolResultProjectionFailure,

@@ -330,7 +330,7 @@ struct ProcessSessionCreationRetryState {
     if error is CancellationError {
       unresolvedCreation = prepared
     } else if let serviceError = error as? SignalboxProcessServiceError,
-      case .mutationRetryExhausted = serviceError
+      serviceError.retainsPreparedMutationIdentity
     {
       unresolvedCreation = prepared
     } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -853,13 +853,17 @@ final class ProcessImportedContinuationRetryStore {
 }
 
 private extension SignalboxProcessServiceError {
-  var retainsPreparedImportedSessionCreation: Bool {
+  var retainsPreparedMutationIdentity: Bool {
     switch self {
-    case .mutationRetryExhausted:
+    case .mutationRetryExhausted, .remote(code: .unknown, message: _, detail: _):
       return true
     case .unexpectedMessage, .invalidPage, .deadlineExceeded, .remote:
       return false
     }
+  }
+
+  var retainsPreparedImportedSessionCreation: Bool {
+    retainsPreparedMutationIdentity
   }
 }
 
@@ -1151,7 +1155,9 @@ private struct ProcessImportedConversationScreen: View {
     case .codexRolloutJSONLV1:
       "Codex rollout JSONL v1"
     case .unknown(let value):
-      "Unrecognized format (\(value))"
+      SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized format (\(value))"
+      )
     case nil:
       "Unknown"
     }
@@ -1328,9 +1334,32 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case unknownNestedState
   }
 
+  private enum TimelinePresentationKey: Hashable {
+    case normalized(String)
+    case unrecognized(UInt64)
+    case unrecognizedHistoryBoundary
+  }
+
+  private struct RetainedUnrecognizedTimelineItem {
+    let item: SignalboxTimelineItem
+    let utf8Bytes: UInt
+  }
+
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
+  private var sideSnapshotCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
+  private var normalizedTimelineItemIDs: Set<String> = []
+  private var timelinePresentationOrder: [TimelinePresentationKey] = []
+  private var unrecognizedLiveTimelineItemsByCursor:
+    [UInt64: RetainedUnrecognizedTimelineItem] = [:]
+  private var unrecognizedLiveTimelineUTF8Bytes: UInt = 0
+  private var hasUnrecognizedLiveTimelineHistoryBoundary = false
+  private var nextUnrecognizedLiveEventID = -1
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
+
+  var canDecideToolRequest: Bool {
+    connectedService != nil && !isDecidingTool && mutationBlocksByTurnID.isEmpty
+  }
 
   init(
     session: SignalboxProcessSession,
@@ -1464,7 +1493,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if error is CancellationError {
         unresolvedSubmission = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
-        case .mutationRetryExhausted = serviceError
+        serviceError.retainsPreparedMutationIdentity
       {
         unresolvedSubmission = preparedForAttempt
       } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -1534,7 +1563,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if error is CancellationError {
         unresolvedToolDecision = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
-        case .mutationRetryExhausted = serviceError
+        serviceError.retainsPreparedMutationIdentity
       {
         unresolvedToolDecision = preparedForAttempt
       } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -1629,7 +1658,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if error is CancellationError {
         unresolvedTurnStop = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
-        case .mutationRetryExhausted = serviceError
+        serviceError.retainsPreparedMutationIdentity
       {
         unresolvedTurnStop = preparedForAttempt
       } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -1662,6 +1691,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     canSubmit
       && activeTurnID != nil
       && activity.state != .waitingForToolDecision
+      && activity.state != .recoveryRequired
   }
 
   func apply(_ update: SignalboxSessionSynchronizationDriverUpdate) {
@@ -1682,7 +1712,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .authoritativeSnapshot(let snapshot):
         let projection = try projector.projectAuthoritativeSnapshot(snapshot)
         try normalizer.replaceAll(with: projection.records)
-        timeline = normalizer.timelineItems
+        refreshTimeline()
         pendingInputs = projection.pendingInputs
         acceptedInputsAwaitingTranscript.removeAll {
           projection.materializedAcceptedInputIDs.contains($0.id)
@@ -1694,16 +1724,51 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
+        sideSnapshotCursorsByTurnID = [:]
         activity = projection.activity
         streamedText = nil
         errorMessage = nil
       case .sideSnapshot(let snapshot, let trigger):
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
-        timeline = normalizer.timelineItems
+        refreshTimeline()
+        let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
+        let snapshotActiveTurnID = activeTurnID(in: snapshot)
+        let snapshotTerminalizedActiveTurn = activeTurnID.map {
+          snapshotTerminalTurnIDs.contains($0)
+        } ?? false
+        terminalTurnIDs.formUnion(snapshotTerminalTurnIDs)
+        if let activeTurnID, snapshotTerminalTurnIDs.contains(activeTurnID) {
+          self.activeTurnID = nil
+        }
+        let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
+        sideSnapshotCursorsByTurnID = Dictionary(
+          snapshot.records.compactMap { record in
+            guard case .turn(let turn) = record else {
+              return nil
+            }
+            return (turn.turnID, snapshot.cursor.rawValue)
+          }, uniquingKeysWith: { _, latest in latest })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if !mutationBlocksByTurnID.isEmpty {
+        if let snapshotActiveTurnID {
+          activeTurnID = snapshotActiveTurnID
+          if projection.activity.state != .waitingForToolDecision
+            || sideSnapshotApprovalMatchesTrigger(snapshot, trigger: trigger)
+          {
+            activity = projection.activity
+          }
+        } else if snapshotTerminalizedActiveTurn || isTerminalActivity(projection.activity) {
+          activity = projection.activity
+        } else if case .turnActivated(let turnID, _) = trigger.event,
+          snapshotTerminalTurnIDs.contains(turnID)
+        {
+          activeTurnID = snapshotActiveTurnID
+          activity = projection.activity
+        } else if !mutationBlocksByTurnID.isEmpty
+          || projection.activity.state == .recoveryRequired
+          || (wasMutationBlocked && projection.activity.state == .running)
+        {
           activity = projection.activity
         } else if projection.activity.state == .waitingForToolDecision,
           sideSnapshotApprovalMatchesTrigger(snapshot, trigger: trigger)
@@ -1721,11 +1786,17 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
         streamedText = nil
       case .event(let followed):
-        if let record = try projector.projectUnrecognizedFollowedEvent(followed) {
-          normalizer.upsert(record)
-          timeline = normalizer.timelineItems
+        switch followed.event {
+        case .modelCallTransition(_, _, .unknown),
+          .toolBatchTransition(_, _, .unknown):
+          if let record = try projector.projectUnrecognizedFollowedEvent(followed) {
+            normalizer.upsert(record)
+            refreshTimeline()
+          }
+        default:
+          break
         }
-        applyLiveEvent(followed.event)
+        applyLiveEvent(followed)
       case .providerTextDelta(let delta):
         if var current = streamedText,
           current.turnID == delta.turnID,
@@ -1836,22 +1907,29 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     in snapshot: SignalboxSynchronizationSnapshot
   ) -> [SignalboxCanonicalUUID: MutationBlockReason] {
     var blocks: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
+    var unresolvedUnknownTurnID: SignalboxCanonicalUUID?
     for record in snapshot.records {
       guard case .turn(let turn) = record else {
         continue
       }
       switch turn.state {
       case .unknown:
-        blocks[turn.turnID] = .unknownTurnState
+        unresolvedUnknownTurnID = turn.turnID
       case .activeRunning(_, let currentModelCall):
+        unresolvedUnknownTurnID = nil
         if let currentModelCall, case .unknown = currentModelCall.state {
           blocks[turn.turnID] = .unknownNestedState
         }
-      case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      case .queued:
+        break
+      case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
         .reconciliationRequired, .toolReconciliationRequired:
-        break
+        unresolvedUnknownTurnID = nil
       }
+    }
+    if let unresolvedUnknownTurnID {
+      blocks[unresolvedUnknownTurnID] = .unknownTurnState
     }
     return blocks
   }
@@ -1865,6 +1943,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     activity = .unavailable
     activeTurnID = nil
     mutationBlocksByTurnID = [:]
+    sideSnapshotCursorsByTurnID = [:]
+    normalizedTimelineItemIDs = []
+    timelinePresentationOrder = []
+    unrecognizedLiveTimelineItemsByCursor = [:]
+    unrecognizedLiveTimelineUTF8Bytes = 0
+    hasUnrecognizedLiveTimelineHistoryBoundary = false
+    nextUnrecognizedLiveEventID = -1
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -1879,8 +1964,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     normalizer = SignalboxIncrementalEventNormalizer()
   }
 
-  private func applyLiveEvent(_ event: SignalboxProcessSessionEvent) {
-    switch event {
+  private func applyLiveEvent(_ followed: SignalboxFollowedSessionEvent) {
+    switch followed.event {
     case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
       if !materializedAcceptedInputIDs.contains(acceptedInputID) {
         let acceptedInput = SignalboxProcessPendingInput(
@@ -1900,15 +1985,27 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           pendingInputs.append(acceptedInput)
         }
         pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
-        if !activityRepresentsActiveTurn {
+        if mutationBlocksByTurnID.isEmpty, !activityRepresentsActiveTurn {
           activity = .init(state: .queued, label: "Queued")
         }
       }
     case .turnActivated(let turnID, _):
-      activeTurnID = turnID
+      let admitsActivation = admitsStateTransition(for: turnID, at: followed.cursor)
+      if admitsActivation || !terminalTurnIDs.contains(turnID) {
+        activeTurnID = turnID
+      }
+      guard admitsActivation else {
+        return
+      }
       mutationBlocksByTurnID.removeValue(forKey: turnID)
+      guard mutationBlocksByTurnID.isEmpty else {
+        return
+      }
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       if modelCallStateBlocksMutation(state) {
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
@@ -1918,68 +2015,233 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
       }
-      applyModelCallState(state)
+      applyModelCallState(state, for: turnID)
     case .toolBatchTransition(let turnID, _, let state):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       switch state {
       case .proposed:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
-        activity = .init(state: .running, label: "Running")
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .resultsProjected:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
-        activity = .init(state: .running, label: "Running")
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .recoveryRequired:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
           mutationBlocksByTurnID.removeValue(forKey: turnID)
         }
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
       case .unknown(let kind, _):
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
         }
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
-        latestDiagnostic = "Preserved an unrecognized tool-batch state: \(kind)."
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
+        presentDiagnostic("Preserved an unrecognized tool-batch state: \(kind).")
       }
     case .turnCompleted(let turnID, _, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .completed, label: "Completed")
       )
     case .turnFailed(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .failed, label: "Failed")
       )
     case .turnRefused(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .refused, label: "Refused")
       )
     case .turnCancelled(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .cancelled, label: "Cancelled")
       )
     case .turnReconciliationRequired(let turnID, _, _),
       .turnToolReconciliationRequired(let turnID, _, _):
       applyTerminalTurn(
         turnID: turnID,
+        at: followed.cursor,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
       )
-    case .sessionCreated, .contextCompacted, .unknown:
+    case .unknown(let kind, _, let decodingDiagnostic):
+      retainUnrecognizedLiveEvent(
+        kind: kind,
+        decodingDiagnostic: decodingDiagnostic,
+        cursor: followed.cursor
+      )
+    case .sessionCreated, .contextCompacted:
       break
     }
   }
 
+  private func retainUnrecognizedLiveEvent(
+    kind: String,
+    decodingDiagnostic: SignalboxDecodingDiagnostic?,
+    cursor: SignalboxCanonicalUInt64
+  ) {
+    guard unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] == nil else {
+      return
+    }
+    let retainedKind = SignalboxProcessPresentation.retainedLabel(kind)
+    let retainedDiagnostic = SignalboxProcessPresentation.retainedLabel(
+      decodingDiagnostic?.message
+        ?? "The session event kind is not rendered by this client."
+    )
+    let retainedBytes = UInt(retainedKind.utf8.count + retainedDiagnostic.utf8.count)
+    guard makeRoomForUnrecognizedLiveTimelineItem(utf8Bytes: retainedBytes) else {
+      return
+    }
+    let retained = RetainedUnrecognizedTimelineItem(
+      item: .unknown(
+        SignalboxUnknownEventCard(
+          eventID: SignalboxEventID(rawValue: nextUnrecognizedLiveEventID),
+          kind: retainedKind,
+          diagnostic: retainedDiagnostic
+        )
+      ),
+      utf8Bytes: retainedBytes
+    )
+    nextUnrecognizedLiveEventID -= 1
+    unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] = retained
+    unrecognizedLiveTimelineUTF8Bytes += retainedBytes
+    timelinePresentationOrder.append(.unrecognized(cursor.rawValue))
+    refreshTimeline()
+  }
+
+  /// Evicts the oldest unknown-event cards so a future-event stream cannot exhaust
+  /// presentation memory, while retaining a visible truncation boundary.
+  private func makeRoomForUnrecognizedLiveTimelineItem(utf8Bytes: UInt) -> Bool {
+    let capacity = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
+      .eventBufferCapacity
+    guard
+      capacity.maximumEvents > 1,
+      utf8Bytes <= capacity.maximumUTF8Bytes
+    else {
+      return false
+    }
+    while retainedUnrecognizedLiveTimelineCount >= capacity.maximumEvents
+      || unrecognizedLiveTimelineUTF8Bytes > capacity.maximumUTF8Bytes - utf8Bytes
+    {
+      guard evictOldestUnrecognizedLiveTimelineItem() else {
+        return false
+      }
+    }
+    return true
+  }
+
+  private var retainedUnrecognizedLiveTimelineCount: UInt {
+    UInt(unrecognizedLiveTimelineItemsByCursor.count)
+      + (hasUnrecognizedLiveTimelineHistoryBoundary ? 1 : 0)
+  }
+
+  /// Discards the oldest unknown-event card so a future-event stream cannot exhaust
+  /// retained presentation memory, installing a visible boundary on first eviction.
+  private func evictOldestUnrecognizedLiveTimelineItem() -> Bool {
+    guard
+      let index = timelinePresentationOrder.firstIndex(where: { key in
+        if case .unrecognized = key {
+          return true
+        }
+        return false
+      }),
+      case .unrecognized(let cursor) = timelinePresentationOrder[index],
+      let evicted = unrecognizedLiveTimelineItemsByCursor.removeValue(forKey: cursor)
+    else {
+      return false
+    }
+    unrecognizedLiveTimelineUTF8Bytes -= evicted.utf8Bytes
+    if hasUnrecognizedLiveTimelineHistoryBoundary {
+      timelinePresentationOrder.remove(at: index)
+    } else {
+      timelinePresentationOrder[index] = .unrecognizedHistoryBoundary
+      hasUnrecognizedLiveTimelineHistoryBoundary = true
+      unrecognizedLiveTimelineUTF8Bytes += Self.unrecognizedLiveTimelineHistoryBoundaryBytes
+    }
+    return true
+  }
+
+  private static let unrecognizedLiveTimelineHistoryBoundaryKind =
+    "unrecognized_session_event_history_truncated"
+  private static let unrecognizedLiveTimelineHistoryBoundaryDiagnostic =
+    "Earlier unrecognized session events were removed to keep retained history bounded."
+  private static let unrecognizedLiveTimelineHistoryBoundary: SignalboxTimelineItem =
+    .unknown(
+      SignalboxUnknownEventCard(
+        eventID: SignalboxEventID(rawValue: .min),
+        kind: unrecognizedLiveTimelineHistoryBoundaryKind,
+        diagnostic: unrecognizedLiveTimelineHistoryBoundaryDiagnostic
+      )
+    )
+
+  private static let unrecognizedLiveTimelineHistoryBoundaryBytes = UInt(
+    unrecognizedLiveTimelineHistoryBoundaryKind.utf8.count
+      + unrecognizedLiveTimelineHistoryBoundaryDiagnostic.utf8.count
+  )
+
+  private func refreshTimeline() {
+    let normalizedItems = normalizer.timelineItems
+    let normalizedItemsByID = Dictionary(
+      normalizedItems.map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    for item in normalizedItems {
+      if normalizedTimelineItemIDs.insert(item.id).inserted {
+        timelinePresentationOrder.append(.normalized(item.id))
+      }
+    }
+    timeline = timelinePresentationOrder.compactMap { key in
+      switch key {
+      case .normalized(let id):
+        return normalizedItemsByID[id]
+      case .unrecognized(let cursor):
+        return unrecognizedLiveTimelineItemsByCursor[cursor]?.item
+      case .unrecognizedHistoryBoundary:
+        return Self.unrecognizedLiveTimelineHistoryBoundary
+      }
+    }
+  }
+
+  private func admitsStateTransition(
+    for turnID: SignalboxCanonicalUUID,
+    at cursor: SignalboxCanonicalUInt64
+  ) -> Bool {
+    guard let snapshotCursor = sideSnapshotCursorsByTurnID[turnID] else {
+      return true
+    }
+    guard cursor.rawValue > snapshotCursor else {
+      return false
+    }
+    sideSnapshotCursorsByTurnID.removeValue(forKey: turnID)
+    return true
+  }
+
   private func applyTerminalTurn(
     turnID: SignalboxCanonicalUUID,
+    at cursor: SignalboxCanonicalUInt64,
     terminalActivity: SignalboxProcessActivity
   ) {
+    let admitsTerminalState = admitsStateTransition(for: turnID, at: cursor)
     terminalTurnIDs.insert(turnID)
-    mutationBlocksByTurnID.removeValue(forKey: turnID)
+    if admitsTerminalState {
+      mutationBlocksByTurnID.removeValue(forKey: turnID)
+    }
     if activeTurnID == turnID {
       activeTurnID = nil
     }
@@ -1990,6 +2252,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     pendingInputs.removeAll { $0.turnID == turnID }
     for acceptedInput in acceptedInputs {
       retainAcceptedInputAwaitingTranscript(acceptedInput)
+    }
+    guard admitsTerminalState, mutationBlocksByTurnID.isEmpty else {
+      return
     }
     activity =
       if pendingInputs.isEmpty {
@@ -2024,11 +2289,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           return nil
         }
         switch turn.state {
-        case .failed, .completed, .refused, .cancelled:
+        case .failed, .completed, .refused, .cancelled, .reconciliationRequired,
+          .toolReconciliationRequired:
           return turn.turnID
         case .queued, .activeRunning, .activeAwaitingToolApproval,
-          .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
-          .reconciliationRequired, .toolReconciliationRequired, .unknown:
+          .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .unknown:
           return nil
         }
       })
@@ -2061,6 +2326,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  private func isTerminalActivity(_ activity: SignalboxProcessActivity) -> Bool {
+    switch activity.state {
+    case .failed, .completed, .refused, .cancelled:
+      return true
+    case .unavailable, .queued, .running, .waitingForToolDecision, .recoveryRequired:
+      return false
+    }
+  }
+
   private func modelCallStateBlocksMutation(_ state: SignalboxModelCallState) -> Bool {
     switch state {
     case .terminal(.unknown), .unknown:
@@ -2070,24 +2344,53 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
-  private func applyModelCallState(_ state: SignalboxModelCallState) {
+  private func applyModelCallState(
+    _ state: SignalboxModelCallState,
+    for turnID: SignalboxCanonicalUUID
+  ) {
     switch state {
     case .prepared, .inFlight, .cancellationRequested:
-      activity = .init(state: .running, label: "Running")
+      applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
     case .terminal(let disposition):
       switch disposition {
       case .ambiguous:
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
       case .completed, .knownFailed, .refused, .cancelled:
-        activity = .init(state: .running, label: "Running")
+        applyNestedActivity(.init(state: .running, label: "Running"), for: turnID)
       case .unknown(let value):
-        activity = .init(state: .recoveryRequired, label: "Recovery required")
-        latestDiagnostic = "Preserved an unrecognized model-call disposition: \(value)."
+        applyNestedActivity(
+          .init(state: .recoveryRequired, label: "Recovery required"),
+          for: turnID
+        )
+        presentDiagnostic("Preserved an unrecognized model-call disposition: \(value).")
       }
     case .unknown(let kind, _):
-      activity = .init(state: .recoveryRequired, label: "Recovery required")
-      latestDiagnostic = "Preserved an unrecognized model-call state: \(kind)."
+      applyNestedActivity(
+        .init(state: .recoveryRequired, label: "Recovery required"),
+        for: turnID
+      )
+      presentDiagnostic("Preserved an unrecognized model-call state: \(kind).")
     }
+  }
+
+  private func applyNestedActivity(
+    _ nestedActivity: SignalboxProcessActivity,
+    for turnID: SignalboxCanonicalUUID
+  ) {
+    let preservesBlockedActivity = mutationBlocksByTurnID.contains { blockedTurnID, reason in
+      blockedTurnID != turnID || reason == .unknownTurnState
+    }
+    guard !preservesBlockedActivity else {
+      return
+    }
+    activity = nestedActivity
+  }
+
+  private func presentDiagnostic(_ message: String) {
+    latestDiagnostic = SignalboxSessionSynchronizationMachine.retainedDiagnosticMessage(message)
   }
 }
 
@@ -2329,6 +2632,7 @@ struct ProcessSessionDetailScreen: View {
     case .tool(let tool):
       ToolInvocationCard(
         tool: tool,
+        decisionAvailable: tool.decisionAvailable && viewModel.canDecideToolRequest,
         onApprove: {
           Task {
             await viewModel.decideToolRequest(tool.invocationID, decision: .approve)

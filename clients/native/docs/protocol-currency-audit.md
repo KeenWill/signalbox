@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `849e8316` on 2026-08-01.
+Verified against repository head `e56f4ab1` on 2026-08-01.
 
 ## Scope and method
 
@@ -21,12 +21,18 @@ The audit compared:
   [synchronizer](../Sources/SignalboxClient/SessionSynchronization.swift), and
   [timeline projector](../Sources/SignalboxClient/ProcessTranscriptProjector.swift).
 
-The current Rust protocol has 41 client request verbs and 58 server message
-kinds. Before this work, native modeled 16 request verbs and 35 server message
-kinds, plus a generic unknown-message envelope. All 12 current durable
+Live read-only observation covered existing native and imported conversations,
+including a 1,023-row catalog and a 7,713-entry imported detail transcript. No
+model-bearing send was required.
+
+The current Rust protocol has 46 client request verbs and 62 server message
+kinds. Before this work, native modeled 16 request verbs and 34 server message
+kinds, plus a generic unknown-message envelope. Twelve of the 13 current durable
 `SessionEvent` variants and all four current text-entry variants were named, but
 some nested future variants were rejected during synchronization. Native named
-eight of the nine current non-text transcript-entry variants.
+eight of the nine current non-text transcript-entry variants. The remaining
+durable event, `goal_turn_retired`, arrived after the initial inventory and is
+preserved through the generic visibly-unrecognized event representation.
 
 Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
@@ -45,12 +51,12 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 | C06 | Medium | Future failed-call dispositions and causes, terminal model-call dispositions, process error codes, and conversation cursor origins failed scalar enum decoding. | **close-now** — retain unknown scalar values and use conservative labels or explicit protocol errors. |
 | C07 | Medium | A future durable `SessionEvent` was preserved and diagnosed by synchronization but produced no timeline row. | **close-now** — add a stable, visibly unrecognized timeline entry without interpreting its payload. |
 | C08 | Medium | The `model_identity_changed` transcript entry was the only current non-text entry kind native could not name. | **close-now** — decode it and show its selected model and defaults version in the existing timeline idiom. |
-| C09 | Medium | `transcript_model_call_usage` decoded and participated in snapshot counts but the projector silently discarded all four nullable token fields. | **close-now** — render a minimal typed usage entry for the owning model call. |
+| C09 | Medium | `transcript_model_call_usage` decoded and participated in snapshot counts but the projector silently discarded provenance, all four nullable token fields, and optional dollar cost. | **close-now** — render a minimal typed usage entry for the owning model call. |
 | C10 | Medium | `context_summary` was rendered as an ordinary assistant message, hiding that the text is compacted context. | **close-now** — retain the text while giving it a distinct typed timeline label. |
 | C11 | Medium | `plan_read` tool results were shown only as an undifferentiated raw JSON tool result. | **close-now** — recognize the current tool name and render a minimal faithful plan read in the existing tool card. |
 | C12 | Medium | `plan_write` arguments and results were shown only as undifferentiated raw JSON. | **close-now** — recognize the current tool name and render a minimal faithful plan update in the existing tool card. |
 | C13 | Medium | Imported non-text transcript markers, including source events, thinking, tool calls, and tool results, were deliberately routed to generic `imported_*` unknown cards despite retaining their order and kind. | **close-now** — render every current imported marker as a faithful typed notice using only the kind and source-speaker attestation the wire supplies. |
-| C14 | Medium | An imported summary whose title is underivable has no source-authored title for the unified list or detail navigation. | **close-now** — provide a stable, visibly untitled imported-conversation label rather than presenting an empty title. |
+| C14 | Medium | Six observed imported summaries had an underivable title and therefore no source-authored label for the unified list or detail navigation. | **close-now** — provide a stable, visibly untitled imported-conversation label rather than presenting an empty title. |
 
 ## Staged gaps
 
@@ -63,8 +69,11 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 | S05 | High | Native has no `reconcile_turn` request despite decoding reconciliation-required turn and event states. | **staged** — see [turn lifecycle](../../../docs/open-questions.md#turn-lifecycle). |
 | S06 | Medium | Native lacks the review mutation verbs `create_review_target`, `start_review_run`, `activate_review_pass`, `complete_review_pass`, `record_review_findings`, `record_review_finding_event`, `reserve_review_external_link`, `attach_review_external_link`, `start_review_orchestration`, `record_review_import_outcome`, `record_review_concern_outcome`, `record_review_judgment_plan`, `record_review_judgment_effect`, `record_review_repair_outcomes`, and `record_review_publication_outcomes`. It also lacks their creation, activation, completion, recording, linking, and orchestration receipts. | **staged** — see [client scope](../../../docs/open-questions.md#client-scope). |
 | S07 | Medium | Native lacks `read_review_target`, `read_review_run`, `read_review_finding`, `list_review_findings`, and `read_review_orchestration`, plus `review_target`, `review_run`, `review_finding`, the three finding-page messages, and `review_orchestration`. | **staged** — see [client scope](../../../docs/open-questions.md#client-scope). |
-| S11 | High | `listConversations` eagerly reads every 100-row page on each refresh and throws when its 100-page application cap is reached instead of publishing a bounded prefix. | **staged** — see [session organization, visibility, and retention](../../../docs/open-questions.md#session-organization-visibility-and-retention). |
-| S12 | Medium | Imported detail reads retain and project the entire transcript before publishing it; the application cap permits 50,000 entries, so latency and memory grow linearly with conversation size. | **staged** — see [conversation import](../../../docs/open-questions.md#conversation-import). |
+| S08 | Medium | The daemon template catalog exposes only template name and bundle version, which is insufficient for a useful native template browser without another source of display metadata. | **staged** — see [template storage and authoring](../../../docs/open-questions.md#template-storage-and-authoring). |
+| S09 | Medium | Native lacks the goal-mode requests `attach_goal`, `read_goal`, `resume_goal`, `stop_goal`, and `supersede_goal`; the five goal-history or transition responses; and typed goal lifecycle, history-event, provenance, blocked-reason, and rejection vocabularies. | **staged** — see [destination features](../../../docs/open-questions.md#destination-features-target-model). |
+| S10 | Medium | Plans are available only as model tool calls and results; there is no independent client plan-read verb or server projection. | **staged** — see [client scope](../../../docs/open-questions.md#client-scope). |
+| S11 | High | `listConversations` eagerly reads every 100-row page on each refresh and throws when its 100-page application cap is reached instead of publishing a bounded prefix; 1,023 observed rows required 11 pages and 0.87 seconds. | **staged** — see [session organization, visibility, and retention](../../../docs/open-questions.md#session-organization-visibility-and-retention). |
+| S12 | Medium | Imported detail reads retain and project the entire transcript before publishing it; 7,713 observed entries required 0.96 seconds, and latency and memory grow linearly toward the 50,000-entry application cap. | **staged** — see [conversation import](../../../docs/open-questions.md#conversation-import). |
 | S13 | High | Added members on known version-one frames, messages, nested states, errors, or details invalidate the closed wire shape and therefore erase the known projection. | **staged** — changing that rule requires a revision to the [process protocol](../../../docs/spec/process-protocol.md). |
 
 ## Report-only gap
@@ -76,23 +85,24 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 ## Daemon-side findings
 
 These findings are outside `clients/native/**`; this effort records them and
-does not alter daemon behavior.
+does not alter daemon behavior. Staged daemon finding S08 appears in the staged
+inventory above so disposition totals remain unambiguous.
 
 | ID | Severity | Finding | Disposition |
 | --- | --- | --- | --- |
-| S08 | Medium | The template catalog exposes only template name and bundle version, which is insufficient for a useful native browser without another source of display metadata. | **staged** — see [template storage and authoring](../../../docs/open-questions.md#template-storage-and-authoring). |
-| S09 | Medium | The current process protocol exposes no independent goal-mode read model for a native goal-mode display. | **staged** — see [destination features](../../../docs/open-questions.md#destination-features-target-model). |
-| S10 | Medium | Plans are available only as model tool calls/results; there is no independent client plan-read verb or server projection. | **staged** — see [client scope](../../../docs/open-questions.md#client-scope). |
 | R02 | High | Import rejection maps 17 failure classes to one opaque `invalid_request` response and emits no diagnostic log, erasing actionable failure detail. | **report-only** — add typed or logged daemon diagnostics in a daemon-owned change. |
-| R03 | High | The daemon's 6 MiB import-frame ceiling rejects oversized imports before schema processing. | **report-only** — revisit transport/import framing and size admission in a daemon-owned change. |
+| R03 | High | The daemon's 6 MiB import-frame ceiling rejects oversized imports before schema processing; it rejected 70.8% of an observed rollout corpus by volume. | **report-only** — revisit transport/import framing and size admission in a daemon-owned change. |
 
 ## Current shape catalog
 
-The 25 request verbs absent from native are the five non-review verbs in S01
-through S05 and the 20 review verbs in S06 and S07. The 23 named server kinds
+The 30 request verbs absent from native are the five non-review verbs in S01
+through S05, the 20 review verbs in S06 and S07, and the five goal verbs in S09.
+The 28 named server kinds
 absent before this work are `steering_submitted`; the three template sequence
-kinds; `session_defaults_replaced`; `session_compacted`; and these 17 review
-kinds: `review_target_created`, `review_run_started`, `review_pass_activated`,
+kinds; `session_defaults_replaced`; `session_compacted`; the five goal kinds
+`goal_transition_applied`, `goal_history_start`, `goal_history_state`,
+`goal_history_item`, and `goal_history_end`; and these 17 review kinds:
+`review_target_created`, `review_run_started`, `review_pass_activated`,
 `review_pass_completed`, `review_findings_recorded`,
 `review_finding_event_recorded`, `review_external_link_reserved`,
 `review_external_link_attached`, `review_target`, `review_run`,
@@ -104,10 +114,11 @@ The durable event family itself is current: `session_created`, `input_accepted`,
 `turn_activated`, `model_call_transition`, `tool_batch_transition`,
 `context_compacted`, `turn_completed`, `turn_failed`, `turn_refused`,
 `turn_cancelled`, `turn_reconciliation_required`, and
-`turn_tool_reconciliation_required` are all decoded. Native also carries a
-generic unknown-event representation for forward compatibility. The gap was
-acceptance or presentation of newer nested/event content, covered by C03 and
-C07.
+`turn_tool_reconciliation_required` are all decoded. The current
+`goal_turn_retired` variant and future variants use native's generic
+unknown-event representation for forward compatibility. The gap was acceptance
+or presentation of newer nested/event content, covered by C03 and C07; a full
+goal-mode surface remains S09.
 
 The non-text transcript family is `model_identity_changed`,
 `assistant_tool_use`, `tool_execution_result`, `tool_denied`, `tool_closed`,

@@ -47,6 +47,8 @@ public enum SignalboxProcessProtocolVersion: Codable, Equatable, CaseIterable, S
 public enum SignalboxCanonicalValueError: LocalizedError, Equatable {
   case uuid
   case decimal
+  case dollarAmount
+  case rateVersion
   case requestID
   case commandID
 
@@ -56,6 +58,10 @@ public enum SignalboxCanonicalValueError: LocalizedError, Equatable {
       return "UUID is not canonical lowercase hyphenated text."
     case .decimal:
       return "Unsigned integer is not canonical decimal text."
+    case .dollarAmount:
+      return "Dollar amount is not canonical nonnegative decimal text."
+    case .rateVersion:
+      return "Billing rate version is not a bounded unpadded string."
     case .requestID:
       return "Client request identity must be nonzero."
     case .commandID:
@@ -772,9 +778,13 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .transcriptTurn(try SignalboxTranscriptTurn(from: decoder))
       case "transcript_model_call_usage":
         try tagged.rejectUnadmittedFields(
-          ["type", "model_call_index", "turn_id", "model_call_id", "usage"],
+          [
+            "type", "model_call_index", "turn_id", "model_call_id", "usage_provenance",
+            "usage", "cost",
+          ],
           decoder: decoder
         )
+        try tagged.requireFields(["cost"], decoder: decoder)
         self = .transcriptModelCallUsage(
           try SignalboxTranscriptModelCallUsage(from: decoder)
         )
@@ -1393,13 +1403,124 @@ public struct SignalboxTranscriptModelCallUsage: Decodable, Equatable, Sendable 
   public let modelCallIndex: SignalboxCanonicalUInt64
   public let turnID: SignalboxCanonicalUUID
   public let modelCallID: SignalboxCanonicalUUID
+  public let usageProvenance: SignalboxUsageProvenance
   public let usage: SignalboxModelCallTokenUsage
+  public let cost: SignalboxModelCallDollarCost?
 
   public init(from decoder: Decoder) throws {
     modelCallIndex = try decoder.decode("model_call_index")
     turnID = try decoder.decode("turn_id")
     modelCallID = try decoder.decode("model_call_id")
+    usageProvenance = try decoder.decode("usage_provenance")
     usage = try decoder.decode("usage")
+    cost = try decoder.decodeIfPresent("cost")
+    guard cost == nil
+      || usage.inputTokens != nil
+      || usage.outputTokens != nil
+      || usage.cacheCreationInputTokens != nil
+      || usage.cacheReadInputTokens != nil
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Model-call cost requires at least one present usage axis."
+        )
+      )
+    }
+  }
+}
+
+public enum SignalboxUsageProvenance: String, Decodable, Equatable, Sendable {
+  case reported
+  case estimated
+}
+
+public enum SignalboxModelCallCostLabel: String, Decodable, Equatable, Sendable {
+  case real
+  case meteredEquivalent = "metered_equivalent"
+}
+
+public struct SignalboxCanonicalDollarAmount: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(from decoder: Decoder) throws {
+    let spelling = try decoder.singleValueContainer().decode(String.self)
+    let components = spelling.split(separator: ".", omittingEmptySubsequences: false)
+    let integer = components.first.map(String.init) ?? ""
+    let fraction = components.count == 2 ? String(components[1]) : nil
+    let integerIsCanonical = integer == "0"
+      || (!integer.hasPrefix("0") && integer.allSatisfy(\.isASCII)
+        && integer.allSatisfy(\.isNumber))
+    let fractionIsCanonical = fraction.map {
+      !$0.isEmpty && $0.utf8.count <= 28 && $0.allSatisfy(\.isASCII)
+        && $0.allSatisfy(\.isNumber) && !$0.hasSuffix("0")
+    } ?? true
+    let coefficient = String(spelling.filter { $0 != "." }.drop(while: { $0 == "0" }))
+    let maximumCoefficient = "79228162514264337593543950335"
+    let coefficientFits = coefficient.count < maximumCoefficient.count
+      || (coefficient.count == maximumCoefficient.count
+        && (coefficient == maximumCoefficient
+          || coefficient.lexicographicallyPrecedes(maximumCoefficient)))
+    guard !spelling.isEmpty,
+      spelling.utf8.count <= 30,
+      components.count <= 2,
+      integerIsCanonical,
+      fractionIsCanonical,
+      coefficientFits
+    else {
+      throw SignalboxCanonicalValueError.dollarAmount
+    }
+    rawValue = spelling
+  }
+}
+
+public struct SignalboxBillingRateVersion: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(from decoder: Decoder) throws {
+    let spelling = try decoder.singleValueContainer().decode(String.self)
+    let beginsWithProtocolTrimWhitespace = spelling.unicodeScalars.first.map {
+      signalboxIsProtocolTrimWhitespace($0)
+    } ?? false
+    let endsWithProtocolTrimWhitespace = spelling.unicodeScalars.last.map {
+      signalboxIsProtocolTrimWhitespace($0)
+    } ?? false
+    guard !spelling.isEmpty,
+      spelling.utf8.count <= 128,
+      !beginsWithProtocolTrimWhitespace,
+      !endsWithProtocolTrimWhitespace,
+      !spelling.contains("\0")
+    else {
+      throw SignalboxCanonicalValueError.rateVersion
+    }
+    rawValue = spelling
+  }
+}
+
+private func signalboxIsProtocolTrimWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+  switch scalar.value {
+  case 0x0009...0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+    0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+    return true
+  default:
+    return false
+  }
+}
+
+public struct SignalboxModelCallDollarCost: Decodable, Equatable, Sendable {
+  public let amountUSD: SignalboxCanonicalDollarAmount
+  public let rateVersion: SignalboxBillingRateVersion
+  public let label: SignalboxModelCallCostLabel
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["amount_usd", "rate_version", "label"], decoder: decoder)
+    try payload.requireFields(
+      ["amount_usd", "rate_version", "label"], decoder: decoder)
+    amountUSD = try decoder.decode("amount_usd")
+    rateVersion = try decoder.decode("rate_version")
+    label = try decoder.decode("label")
   }
 }
 
