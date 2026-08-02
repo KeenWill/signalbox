@@ -1827,6 +1827,7 @@ fn apply_terminal_observation(
                     response,
                     proof,
                     identities,
+                    dangerous_tool_auto_approval,
                     reclassified_pending_steering,
                 )
                 .map(ModelCallTerminalOutcome::CancelledWithToolResponse);
@@ -2236,6 +2237,8 @@ pub enum StoppedToolResponsePartIdentity {
         request: ToolRequestId,
         /// Fresh reference-only closed-result entry identity.
         closed_result_entry: SemanticTranscriptEntryId,
+        /// Frozen policy outcome for the request.
+        approval: InitialToolApproval,
     },
 }
 
@@ -2250,11 +2253,13 @@ impl StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     ) -> Self {
         Self::ToolCall {
             entry,
             request,
             closed_result_entry,
+            approval,
         }
     }
 }
@@ -3833,9 +3838,7 @@ fn assemble_tool_round(
                 if !used_entries.insert(entry) || !used_requests.insert(request) {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
                 }
-                let approval_matches =
-                    initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval);
-                if !approval_matches {
+                if !initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval) {
                     return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
@@ -3848,6 +3851,7 @@ fn assemble_tool_round(
                     call.id(),
                     ordinal,
                     proposal.clone(),
+                    approval,
                 );
                 match approval.resolution(request) {
                     Some(resolution) => automatic_approvals.push(resolution),
@@ -3914,21 +3918,24 @@ fn initial_tool_approval_matches_posture(
     approval: InitialToolApproval,
 ) -> bool {
     match (posture, approval) {
+        (DangerousToolAutoApproval::ApproveAll, InitialToolApproval::Confirm)
+        | (DangerousToolAutoApproval::Disabled, InitialToolApproval::SessionBlanket) => false,
         (
             DangerousToolAutoApproval::ApproveAll,
-            InitialToolApproval::AlwaysConfirm | InitialToolApproval::SessionBlanket,
+            InitialToolApproval::AlwaysConfirm
+            | InitialToolApproval::SessionBlanket
+            | InitialToolApproval::PolicyAuto
+            | InitialToolApproval::Human
+            | InitialToolApproval::Delegated,
         )
         | (
             DangerousToolAutoApproval::Disabled,
             InitialToolApproval::Confirm
             | InitialToolApproval::AlwaysConfirm
-            | InitialToolApproval::PolicyAuto,
+            | InitialToolApproval::PolicyAuto
+            | InitialToolApproval::Human
+            | InitialToolApproval::Delegated,
         ) => true,
-        (
-            DangerousToolAutoApproval::ApproveAll,
-            InitialToolApproval::Confirm | InitialToolApproval::PolicyAuto,
-        )
-        | (DangerousToolAutoApproval::Disabled, InitialToolApproval::SessionBlanket) => false,
     }
 }
 
@@ -3941,6 +3948,7 @@ fn assemble_stopped_tool_round(
     response: ToolUsingAssistantResponse,
     proof: AppliedInterruptProof,
     identities: StoppedToolRoundModelCallIdentities,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<CancelledToolRoundModelCallTurn, ModelCallClosureError> {
     let ModelCallTurnScope { session, turn } = scope;
@@ -3990,6 +3998,7 @@ fn assemble_stopped_tool_round(
                     entry,
                     request,
                     closed_result_entry,
+                    approval,
                 },
             ) => {
                 if !used_entries.insert(entry)
@@ -3997,6 +4006,9 @@ fn assemble_stopped_tool_round(
                     || !used_requests.insert(request)
                 {
                     return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                if !initial_tool_approval_matches_posture(dangerous_tool_auto_approval, approval) {
+                    return Err(ModelCallClosureError::InitialToolApprovalMismatch);
                 }
                 let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
                     .ok_or(ModelCallClosureError::ToolRequestOrdinalOverflow)?;
@@ -4008,6 +4020,7 @@ fn assemble_stopped_tool_round(
                     call.id(),
                     ordinal,
                     proposal.clone(),
+                    approval,
                 ));
                 closed_result_entries.push(SemanticTranscriptEntry::from_validated_parts(
                     closed_result_entry,
@@ -4475,6 +4488,9 @@ fn close_cancelled_turn(
 }
 
 #[cfg(test)]
+pub(crate) use tests::{cancelled_turn_fixture, completed_turn_fixture, failed_turn_fixture};
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -4511,7 +4527,11 @@ mod tests {
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::Confirm,
         ));
-        assert!(!initial_tool_approval_matches_posture(
+    }
+
+    #[test]
+    fn policy_auto_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::PolicyAuto,
         ));
@@ -4552,6 +4572,14 @@ mod tests {
             session_id,
             SessionConfigurationDefaultsVersion::first(),
             defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("session facts are correlated");
@@ -4830,6 +4858,90 @@ mod tests {
             usage: ProviderReportedTokenUsage::unreported(),
             provider_failure_cause: None,
         }
+    }
+
+    /// Canonical sealed completion fixture: the live call derives up to two
+    /// assistant entries from identities 10 and 11, terminal entry 12, and
+    /// terminal frontier 13 from the existing session-1, turn-3, call-9
+    /// execution fixture.
+    pub(crate) fn completed_turn_fixture(values: &[&str]) -> CompletedModelCallTurn {
+        assert!(values.len() <= 2, "fixture has two assistant identities");
+        let execution = in_flight_execution();
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: values
+                    .iter()
+                    .map(|value| {
+                        AssistantText::try_new((*value).to_owned()).expect("nonempty fixture text")
+                    })
+                    .collect(),
+            },
+        );
+        let assistant_entries = values
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| semantic_transcript_entry_id(10 + ordinal as u128))
+            .collect();
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    assistant_entries,
+                    semantic_transcript_entry_id(12),
+                    context_frontier_id(13),
+                )),
+            )
+            .expect("definitive fixture completion is admissible");
+        let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+            panic!("completed fixture evidence selects completed outcome");
+        };
+        completed
+    }
+
+    /// Canonical sealed failure fixture for the existing session-1, turn-3
+    /// active execution.
+    pub(crate) fn failed_turn_fixture() -> FailedModelCallTurn {
+        let mut execution = active_execution();
+        execution.targets =
+            ModelTargetCatalog::try_from_definitions([]).expect("empty fixture catalog is valid");
+        let preparation = execution
+            .prepare_initial_call(model_call_id(9))
+            .expect_err("empty fixture catalog cannot resolve a target");
+        let proof = preparation
+            .target_resolution_error()
+            .expect("fixture failure retains target-resolution evidence");
+        preparation
+            .execution()
+            .clone()
+            .fail_target_resolution(
+                proof,
+                FailedModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(10),
+                    context_frontier_id(11),
+                ),
+            )
+            .expect("matching fixture proof closes the turn as failed")
+    }
+
+    /// Canonical sealed cancellation fixture for the existing session-1,
+    /// turn-3 active execution.
+    pub(crate) fn cancelled_turn_fixture() -> CancelledModelCallTurn {
+        let execution = active_execution();
+        let interrupt = applied_interrupt(&execution);
+        let outcome = execution
+            .apply_interrupt(
+                interrupt,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(33),
+                    context_frontier_id(34),
+                ),
+            )
+            .expect("matching fixture interrupt cancels unsent work");
+        let ModelCallInterruptOutcome::Cancelled(cancelled) = outcome else {
+            panic!("unsent fixture work closes as cancelled");
+        };
+        cancelled
     }
 
     fn tool_proposal(name: &str, arguments: &str) -> crate::ToolCallProposal {
@@ -6573,6 +6685,7 @@ mod tests {
                             semantic_transcript_entry_id(41),
                             request,
                             semantic_transcript_entry_id(42),
+                            InitialToolApproval::Confirm,
                         )],
                         semantic_transcript_entry_id(43),
                         context_frontier_id(44),

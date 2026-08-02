@@ -574,12 +574,94 @@ impl SessionTemplateProvenance {
 }
 ```
 
+## domain: session_placement
+
+```rust
+pub struct SessionPlacementPath { /* private */ }
+impl SessionPlacementPath {
+    pub const MAX_DEPTH: usize;
+    pub const MAX_SEGMENT_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, SessionPlacementPathError>;
+    // accessors: as_str(), depth()
+}
+pub enum SessionPlacementPathError {
+    Empty,
+    EmptySegment,
+    MalformedSegment,
+    SegmentTooLong,
+    TooDeep,
+}
+// impl Display + std::error::Error
+
+pub enum RootPlacementGlobalReadIntent { Acknowledged }
+pub struct SessionPlacement { /* private */ }
+impl SessionPlacement {
+    pub const fn pathless() -> Self;
+    pub fn scoped(path: SessionPlacementPath) -> Result<Self, SessionPlacementError>;
+    pub fn root_global_read(
+        path: SessionPlacementPath,
+        intent: RootPlacementGlobalReadIntent,
+    ) -> Result<Self, SessionPlacementError>;
+    pub fn decide_cross_session_read(&self, target: &Self) -> SessionReadScopeDecision;
+    // accessors: path(), records_root_global_read_intent()
+}
+pub enum SessionPlacementError {
+    RootRequiresGlobalReadIntent,
+    GlobalReadIntentRequiresRoot,
+}
+// impl Display + std::error::Error
+pub struct SessionPlacementDirectory { /* private */ }
+impl SessionPlacementDirectory {
+    // accessors: as_str(), prefix(), is_root()
+}
+pub enum SessionReadScopeDecision {
+    Allowed,
+    Refused(SessionReadScopeRefusal),
+}
+pub struct SessionReadScopeRefusal { /* private */ }
+impl SessionReadScopeRefusal {
+    // accessors: requesting_directory(), reason()
+}
+pub enum SessionReadRefusalReason { OutsideRequestingDirectorySubtree }
+
+pub struct SessionPlacementVersion { /* private positive u64 */ }
+impl SessionPlacementVersion {
+    pub const INITIAL: Self;
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    // accessors: as_u64(), next()
+}
+pub struct VersionedSessionPlacement { /* private */ }
+impl VersionedSessionPlacement {
+    pub const fn initial(placement: SessionPlacement) -> Self;
+    pub const fn reconstitute(
+        version: SessionPlacementVersion,
+        placement: SessionPlacement,
+    ) -> Self;
+    // accessors: version(), placement()
+}
+pub enum SessionPlacementEventKind { Created, Updated }
+pub struct SessionPlacementEvent { /* private */ }
+impl SessionPlacementEvent {
+    pub fn created(
+        session: SessionId,
+        placement: SessionPlacement,
+        command_id: DurableCommandId,
+    ) -> Self;
+    pub fn updated(
+        session: SessionId,
+        prior_version: SessionPlacementVersion,
+        placement: SessionPlacement,
+        command_id: DurableCommandId,
+    ) -> Option<Self>;
+    // accessors: session(), kind(), placement(), prior_version(), command_id()
+}
+```
+
 ## domain: session
 
 ```rust
 pub enum SessionCreationCause {
     UserInitiated,
-    Delegated { spawning_request: ToolRequestId },
 }
 
 pub struct TranscriptFrontier { /* private */ }
@@ -606,7 +688,6 @@ pub enum TranscriptAncestry {
 pub struct SessionCreationProvenance { /* private */ }
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
-    pub const fn delegated(spawning_request: ToolRequestId) -> Self;
     // accessors: cause(), ancestry()
 }
 
@@ -617,17 +698,30 @@ impl CreateSession {
         provenance: SessionCreationProvenance,
         initial_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
+    pub const fn new_with_placement(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
+    ) -> Self;
     pub const fn new_from_template(
         command_id: DurableCommandId,
         provenance: SessionCreationProvenance,
         template_provenance: SessionTemplateProvenance,
         resolved_configuration_defaults: SessionConfigurationDefaults,
     ) -> Self;
+    pub const fn new_from_template_with_placement(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
+    ) -> Self;
     pub fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
     pub fn prepare(self, session: SessionId)
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
     // accessors: command_id(), provenance(), initial_configuration_defaults(),
-    //   template_provenance()
+    //   template_provenance(), placement()
 }
 // Eq/Hash exclude command_id; explicit mode compares defaults, template mode
 // compares the requested template name, and the two modes differ.
@@ -671,7 +765,7 @@ pub struct InitialSession { /* private */ }
 // and ReconstitutedSessionCreationFromImportedFrontier
 impl InitialSession {
     // accessors: id(), provenance(), template_provenance(),
-    //   configuration_defaults()
+    //   configuration_defaults(), placement()
 }
 
 pub struct Session { /* private */ }
@@ -682,12 +776,19 @@ pub struct Session { /* private */ }
 // spec/sessions-and-transcript.md)
 impl Session {
     // accessors: id(), creation_provenance(), template_provenance(),
-    //   current_configuration_defaults()
+    //   current_configuration_defaults(), current_placement()
+}
+
+pub struct SessionPlacementReconstitutionFacts {
+    pub current_pointer_session: SessionId,
+    pub current_pointer_version: SessionPlacementVersion,
+    pub selected_event_session: SessionId,
+    pub selected_event: VersionedSessionPlacement,
 }
 
 pub struct SessionReconstitutionInput { /* private */ }
 impl SessionReconstitutionInput {
-    pub const fn new(
+    pub fn new(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -696,8 +797,9 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
-    pub const fn new_with_template_provenance(
+    pub fn new_with_template_provenance(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -707,11 +809,25 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+    ) -> Self;
+    pub fn new_with_template_and_placement(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self;
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   template_provenance(), current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults()
+    //   defaults_session(), defaults_version(), defaults(), current_placement_session(),
+    //   current_placement_version(), placement_session(), current_placement()
 }
 
 pub enum SessionReconstitutionFailure {
@@ -719,8 +835,10 @@ pub enum SessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    CurrentPlacementSessionMismatch,
+    PlacementSessionMismatch,
+    CurrentPlacementVersionMismatch,
     ImportedSessionSeedUnavailable,
-    DelegatedAncestryMismatch,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -746,7 +864,6 @@ impl PreparedCreateSession {
 
 pub enum CreateSessionPreparationFailure {
     TranscriptAncestryUnavailable,
-    DelegatedCreationRequiresSpawn,
 }
 
 pub struct CreateSessionPreparationError { /* private */ }
@@ -777,19 +894,30 @@ impl CreateSessionReconstitutionInput {
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self;
+    pub const fn new_with_template_and_placement(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: VersionedSessionPlacement,
+    ) -> Self;
     pub fn reconstitute(self)
         -> Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError>;
     // accessors: command(), result_session(), session(), provenance(),
-    //   template_provenance(), defaults_session(), defaults_version(), defaults()
+    //   template_provenance(), defaults_session(), defaults_version(), defaults(), placement()
 }
 
 pub enum CreateSessionReconstitutionFailure {
     SessionResultMismatch,
     ProvenanceMismatch,
     TemplateProvenanceMismatch,
+    PlacementMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
-    DelegatedCreationRequiresSpawn,
     DefaultsVersionIsNotFirst,
     DefaultsMismatch,
 }
@@ -821,49 +949,85 @@ pub enum ChildRelationshipPolicy {
     },
 }
 pub enum DelegationWaitMode { Foreground, Background }
-pub enum DelegatedSpawnRejection { ActiveDirectChildLimit }
-impl DelegatedSpawnRejection {
-    pub const fn limit(self) -> u32;
-}
 pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
+pub enum ParentTerminationKind { Stopped, Cancelled }
+pub enum ParentTerminationCommandSource {
+    Turn { turn: TurnId },
+    Goal { generation: GoalGeneration },
+}
+pub struct ParentTerminationAuthority { /* private applied command authority */ }
+// sealed: exact applied parent-termination producer deferred to scheduling
+impl ParentTerminationAuthority {
+    // accessors: parent(), source(), turn(), goal_generation(), command(), scope(), kind()
+}
 
 pub struct DelegationContent(/* private NonEmptyUnicodeText */);
 impl DelegationContent {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, DelegationContentError>;
     pub fn as_str(&self) -> &str;
     pub fn from_assistant_text(parts: &[AssistantText]) -> Result<Self, DelegationContentError>;
 }
-pub enum DelegationContentError {
+pub enum DelegationContentFailure {
     Invalid(NonEmptyUnicodeTextFailure),
     Oversized { utf8_byte_length: usize },
+}
+pub struct DelegationContentError { /* private rejected String + failure */ }
+impl DelegationContentError {
+    pub fn into_parts(self) -> (String, DelegationContentFailure);
+    // accessors: value(), failure()
+}
+pub enum DelegationRequestFailure {
+    InvalidToolRequestPurpose,
+    InvalidContent(DelegationContentError),
+}
+pub struct DelegationRequestError { /* private unchanged ToolRequest + failure; Error::source forwards invalid content */ }
+impl DelegationRequestError {
+    pub fn into_request(self) -> ToolRequest;
+    // accessors: request(), failure()
+}
+pub struct DelegatedSpawnRequest { /* private canonical request + task + policy */ }
+impl DelegatedSpawnRequest {
+    pub fn parse(request: ToolRequest, task: String, policy: ChildRelationshipPolicy)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), task(), policy()
+}
+pub struct DelegationAwaitRequest { /* private canonical request + child + mode */ }
+impl DelegationAwaitRequest {
+    pub fn parse(request: ToolRequest, child: SessionId, mode: DelegationWaitMode)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), child(), mode()
+}
+pub struct DelegationMessageRequest { /* private canonical request + peer + content */ }
+impl DelegationMessageRequest {
+    pub fn parse(request: ToolRequest, peer: SessionId, content: String)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), peer(), content()
 }
 
 pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
 impl TerminalChildTurn {
-    pub fn from_scheduling(
-        value: &AcceptedInputTurnSchedulingProjection,
-        reason: DelegationOutcomeReason,
-        assistant_text: &[AssistantText],
-    ) -> Option<Self>;
-    // accessors: session(), turn()
-}
-
-pub enum ParentTerminationKind { Stopped, Cancelled }
-pub struct ParentTerminationAuthority { /* private exact applied command authority */ }
-impl ParentTerminationAuthority {
-    // accessors: parent(), turn(), command(), scope(), kind()
+    pub fn from_completed(value: &CompletedModelCallTurn) -> Option<Self>;
+    pub const fn from_failed(value: &FailedModelCallTurn) -> Self;
+    pub const fn from_cancelled(value: &CancelledModelCallTurn) -> Self;
+    pub const fn from_cancelled_tool_round(value: &CancelledToolRoundModelCallTurn) -> Self;
+    pub const fn from_refused(value: &RefusedModelCallTurn) -> Self;
+    // accessors: session(), turn(), reason()
 }
 
 pub struct DelegationProvenance { /* private typed authority */ }
 impl DelegationProvenance {
-    pub fn from_tool_request(request: &ToolRequest) -> Self;
+    pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self;
+    pub fn from_await(request: &DelegationAwaitRequest) -> Self;
+    pub fn from_message(request: &DelegationMessageRequest) -> Self;
     pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
     pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
-    // accessors: tool_request(), child_turn(), parent_command()
+    // accessors: tool_request(), child_turn(), parent_command() returning the sealed authority
 }
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
+// sealed: SessionDelegation::deliver_message
 impl DelegationMessage {
     // accessors: id(), direction(), content(), provenance()
 }
@@ -875,12 +1039,29 @@ pub enum DelegationOutcomeReason {
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
 }
-pub enum DelegationOutcome {
-    ResultReturned { content: DelegationContent, reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ChildFailed { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ChildStopped { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ChildCancelled { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
-    ContinueRunning { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+pub enum DelegationOutcomeKind {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    AlreadyTerminal,
+    ContinueRunning,
+}
+pub struct DelegationOutcome { /* private validated kind + content + reason + provenance */ }
+impl DelegationOutcome {
+    pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
+        -> Option<Self>;
+    // accessors: kind(), content(), reason(), provenance()
+}
+pub struct ChildWait { /* private awaiting request + spawning request + child */ }
+// sealed: DelegationWait::foreground_subject
+impl ChildWait {
+    // accessors: awaiting_request(), spawning_request(), child()
+}
+pub struct DelegationWait { /* private */ }
+// sealed: SessionDelegation::register_wait
+impl DelegationWait {
+    // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
 pub struct DelegationEventOrdinal(/* private NonZeroU64 */);
 impl DelegationEventOrdinal {
@@ -888,57 +1069,82 @@ impl DelegationEventOrdinal {
     pub const fn get(self) -> u64;
 }
 pub enum DelegationEvent {
-    Spawned { ordinal: DelegationEventOrdinal, provenance: DelegationProvenance },
-    MessageDelivered { ordinal: DelegationEventOrdinal, message: DelegationMessage },
-    OutcomeRecorded { ordinal: DelegationEventOrdinal, outcome: DelegationOutcome },
+    Spawned {
+        ordinal: DelegationEventOrdinal,
+        provenance: DelegationProvenance,
+    },
+    MessageDelivered {
+        ordinal: DelegationEventOrdinal,
+        message: DelegationMessage,
+    },
+    OutcomeRecorded {
+        ordinal: DelegationEventOrdinal,
+        outcome: DelegationOutcome,
+    },
 }
 impl DelegationEvent {
     // accessors: ordinal(), message(), outcome()
 }
 pub enum DelegationLifecycle { Active, Terminal }
-pub struct ChildWait { /* private awaiting request + spawning request + child */ }
-impl ChildWait {
-    // accessors: awaiting_request(), spawning_request(), child()
-}
-pub struct DelegationWait { /* private */ }
-impl DelegationWait {
-    // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
-}
 pub struct SessionDelegation { /* private */ }
 impl SessionDelegation {
-    pub fn spawn(
-        spawning_request: &ToolRequest,
-        child: SessionId,
-        policy: ChildRelationshipPolicy,
-    ) -> Result<Self, DelegationTransitionError>;
-    pub fn register_wait(&self, awaiting_request: &ToolRequest, mode: DelegationWaitMode)
-        -> Result<DelegationWait, DelegationTransitionError>;
+    pub fn register_wait(
+        &self,
+        awaiting_request: &DelegationAwaitRequest,
+        dispatch: &ToolDispatchAuthority,
+    ) -> Result<DelegationWait, DelegationTransitionError>;
     pub fn deliver_message(
         self,
-        sending_request: &ToolRequest,
+        sending_request: DelegationMessageRequest,
         id: DelegationMessageId,
-        content: DelegationContent,
+        dispatch: &ToolDispatchAuthority,
     ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
-    pub fn record_outcome(self, outcome: DelegationOutcome)
-        -> Result<Self, DelegationTransitionError>;
-    // accessors: spawning_request(), parent(), child(), task(), policy(), lifecycle(),
-    //   events(), child_creation_provenance()
+    pub fn record_outcome(
+        self,
+        outcome: DelegationOutcome,
+    ) -> Result<Self, DelegationTransitionError>;
+    pub fn record_parent_termination(
+        self,
+        authority: ParentTerminationAuthority,
+    ) -> Result<Self, DelegationTransitionError>;
+    // accessors: spawning_request(), parent(), child(), child_turn(), task(), policy(),
+    //   lifecycle(), events()
 }
 pub enum DelegationTransitionFailure {
     SameSession,
     AlreadyTerminal,
     MissingSpawnEvent,
     InvalidProvenance,
-    InvalidToolRequestPurpose,
-    InvalidTaskContent(DelegationContentError),
+    DescendantsNotSelected,
     DuplicateMessageIdentity,
     ConflictingMessageReplay,
     DuplicateOutcomeAuthority,
     OutcomeReasonMismatch,
     EventOrdinalExhausted,
 }
-pub struct DelegationTransitionError { /* private */ }
+pub enum RejectedDelegationTransition {
+    Spawn {
+        request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+    },
+    DeliverMessage {
+        relation: SessionDelegation,
+        request: DelegationMessageRequest,
+        id: DelegationMessageId,
+    },
+    RecordOutcome {
+        relation: SessionDelegation,
+        outcome: DelegationOutcome,
+    },
+    RecordParentTermination {
+        relation: SessionDelegation,
+        authority: ParentTerminationAuthority,
+    },
+}
+pub struct DelegationTransitionError { /* private unchanged consuming input */ }
 impl DelegationTransitionError {
+    pub fn into_rejected(self) -> Option<RejectedDelegationTransition>;
     // accessors: spawning_request(), failure()
 }
 ```
@@ -1016,6 +1222,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1032,6 +1239,7 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
     ) -> Self;
@@ -1040,8 +1248,9 @@ impl BoundedImportedSessionReconstitutionInput {
     ) -> Result<Session, BoundedImportedSessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(), seed_records(),
-    //   seed_headers()
+    //   defaults_session(), defaults_version(), defaults(), current_placement_session(),
+    //   current_placement_version(), placement_session(), current_placement(),
+    //   seed_records(), seed_headers()
 }
 
 pub enum BoundedImportedSessionReconstitutionFailure {
@@ -1049,6 +1258,9 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    CurrentPlacementSessionMismatch,
+    PlacementSessionMismatch,
+    CurrentPlacementVersionMismatch,
     AncestryNotImported,
     MissingSeedRecord,
     DuplicateSeedRecord,
@@ -1105,6 +1317,7 @@ impl ImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
         imported_conversation: ImportedConversation,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -1115,7 +1328,8 @@ impl ImportedSessionReconstitutionInput {
     ) -> Result<ReconstitutedImportedSession, ImportedSessionReconstitutionError>;
     // accessors: requested_session(), stored_session(), provenance(),
     //   current_defaults_session(), current_defaults_version(),
-    //   defaults_session(), defaults_version(), defaults(),
+    //   defaults_session(), defaults_version(), defaults(), current_placement_session(),
+    //   current_placement_version(), placement_session(), current_placement(),
     //   imported_conversation(), seed_records(), seed_snapshots(),
     //   semantic_entries()
 }
@@ -1125,6 +1339,9 @@ pub enum ImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    CurrentPlacementSessionMismatch,
+    PlacementSessionMismatch,
+    CurrentPlacementVersionMismatch,
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
@@ -1434,6 +1651,7 @@ pub enum DeliveryRequest {
     },
     Interrupt {
         expected_active_turn: TurnId,
+        descendant_scope: DescendantTerminationScope,
         configuration: PerInputConfigurationChoices,
     },
     NextSafePoint {
@@ -3039,6 +3257,7 @@ pub enum StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     },
 }
 impl StoppedToolResponsePartIdentity {
@@ -3047,6 +3266,7 @@ impl StoppedToolResponsePartIdentity {
         entry: SemanticTranscriptEntryId,
         request: ToolRequestId,
         closed_result_entry: SemanticTranscriptEntryId,
+        approval: InitialToolApproval,
     ) -> Self;
 }
 pub struct StoppedToolRoundModelCallIdentities { /* private */ }
@@ -3442,7 +3662,7 @@ impl ToolUsingAssistantResponseError {
 pub struct ToolRequest { /* private */ }
 // sealed live producer: definitive model-call tool-round transition
 impl ToolRequest {
-    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments()
+    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments(), approval_posture()
 }
 pub struct ToolRequestReconstitutionInput { /* private */ }
 impl ToolRequestReconstitutionInput {
@@ -3455,6 +3675,7 @@ impl ToolRequestReconstitutionInput {
         name: ToolName,
         arguments: NormalizedToolArguments,
     ) -> Self;
+    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
     pub fn into_request(self) -> ToolRequest;
 }
 
@@ -3467,6 +3688,12 @@ pub enum ToolPermissionDefault {
     Confirm,
     AlwaysConfirm,
 }
+pub enum ToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
 pub enum ToolEffectClass {
     EffectFree,
     ExternalEffect,
@@ -3476,8 +3703,41 @@ pub enum ToolDecisionSource {
     PolicyAuto,
     SessionBlanket,
     SessionOverride,
-    JudgeRecommendation,
+    Delegate,
 }
+
+pub enum ToolApprovalDecider {
+    User { command: DurableCommandId },
+    Delegate { model: DirectModelSelection, call: ModelCallId },
+}
+
+pub struct ToolDecisionRationale(/* private */);
+impl ToolDecisionRationale {
+    pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub struct ToolDecisionRationaleError { /* private */ }
+// accessors: value(), into_value()
+
+pub enum DelegateApprovalRecommendation {
+    Approve,
+    Deny,
+    EscalateToHuman,
+}
+pub struct DelegateToolApproval { /* private */ }
+impl DelegateToolApproval {
+    pub fn try_new(
+        request: &ToolRequest,
+        model: DirectModelSelection,
+        call: ModelCallId,
+        recommendation: DelegateApprovalRecommendation,
+        rationale: ToolDecisionRationale,
+    ) -> Result<Self, DelegateToolApprovalError>;
+    // accessors: request(), model(), call(), recommendation(), rationale()
+}
+pub struct DelegateToolApprovalError { /* private */ }
+// accessors: posture(), recommendation()
 
 pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
@@ -3499,13 +3759,14 @@ pub enum ToolApprovalDecision {
     Deny { reason: Option<ToolDenialReason> },
 }
 pub struct ToolApprovalResolution { /* private */ }
-// sealed live producers: user command, registry auto, or frozen session blanket
+// sealed live producers: user command, registry auto, frozen session blanket, or checked delegate
 impl ToolApprovalResolution {
-    // accessors: request(), decision(), source(), is_approved()
+    // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
+    pub fn delegate(approval: DelegateToolApproval) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -3520,8 +3781,13 @@ pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
 pub enum InitialToolApproval {
     Confirm,
     AlwaysConfirm,
+    Human,
+    Delegated,
     PolicyAuto,
     SessionBlanket,
+}
+impl InitialToolApproval {
+    pub const fn requires_decision(self) -> bool;
 }
 
 pub struct DecideToolRequest { /* private */ }
@@ -3704,6 +3970,8 @@ impl CurrentToolAttempt {
 }
 pub struct AuthorizedToolAttempt { /* private */ }
 // accessors: attempt(), correlation(), executor_fence(), into_parts()
+pub struct ToolDispatchAuthority { /* private */ }
+// accessors: request(), attempt(), correlation(), executor_fence()
 pub struct EndedToolAttempt { /* private */ }
 // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
 // generation(), end()
@@ -3811,6 +4079,11 @@ impl ToolBatch {
     ) -> impl Iterator<Item = ToolAttemptId> + '_;
     pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
     pub fn awaiting_recovery(&self) -> Option<AwaitingToolRecovery>;
+    pub fn prepare_delegate_decision(
+        self,
+        approval: DelegateToolApproval,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedDelegateToolApproval, DelegateToolApprovalTransitionError>;
     pub fn prepare_user_decision(
         self,
         command: DecideToolRequest,
@@ -3825,10 +4098,18 @@ impl ToolBatch {
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn authorize_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError>;
     pub fn resume_in_flight_attempt(
         &self,
         attempt: ToolAttemptId,
     ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError>;
+    pub fn resume_in_flight_dispatch(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<ToolDispatchAuthority, ToolBatchExecutionError>;
     pub fn authorize_runner_attempt(
         &self,
         attempt: ToolAttemptId,
@@ -3867,6 +4148,16 @@ pub struct AwaitingToolRecovery { /* private */ }
 // sealed: ToolBatch::awaiting_recovery
 // accessors: session(), turn(), producing_call(), yielded_frontier(),
 // issuing_attempt(), attempt()
+pub struct PreparedDelegateToolApproval { /* private */ }
+// accessors: batch(), approval(), resolution(), active_phase()
+pub enum DelegateToolApprovalTransitionFailure {
+    NoUndecidedRequest,
+    RequestMismatch,
+    ContinuationAttemptMismatch,
+}
+pub struct DelegateToolApprovalTransitionError { /* private */ }
+// accessors: batch(), approval(), failure()
+
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -5097,6 +5388,8 @@ impl ToolDefinition {
         permission_default: ToolPermissionDefault,
         effect_class: ToolEffectClass,
     ) -> Self;
+    pub const fn with_approval_posture(self, posture: ToolApprovalPosture) -> Self;
+    pub const fn approval_posture(&self) -> Option<ToolApprovalPosture>;
     // accessors: name(), description(), input_schema(), permission_default(), effect_class()
 }
 
@@ -5152,9 +5445,9 @@ pub enum ToolCatalogValidationFailure {
 
 pub struct ToolExecutionInvocation { /* private */ }
 // sealed: ToolExecutionService constructs only from checked request,
-// declaration, and AuthorizedToolAttempt correlations.
+// declaration, and ToolDispatchAuthority.
 impl ToolExecutionInvocation {
-    // accessors: request(), definition(), correlation()
+    // accessors: request(), dispatch_authority(), definition(), correlation()
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
 }
 
@@ -6425,7 +6718,7 @@ pub enum RetainedToolAttemptObservationStatus {
 
 pub enum ToolAttemptAuthorizationStatus {
     Prepared(CurrentToolAttempt),
-    InFlight(AuthorizedToolAttempt),
+    InFlight(ToolDispatchAuthority),
 }
 
 pub trait ToolExecutionTransaction {
@@ -6447,7 +6740,7 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,
@@ -7193,7 +7486,9 @@ impl GoalReconstitutionError {
 pub enum GoalUserAction {
     Attach(GoalStatement),
     Resume(Option<GoalGuidance>),
-    Stop,
+    Stop {
+        descendant_scope: DescendantTerminationScope,
+    },
     Supersede(GoalStatement),
 }
 pub struct GoalUserCommand { /* private command identity + session + action */ }
@@ -8036,8 +8331,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
-| domain: session                                    | 21                   |
-| domain: session_delegation                         | 23                   |
+| domain: session_placement                          | 13                   |
+| domain: session                                    | 22                   |
+| domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8053,9 +8349,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_execution                            | 51                   |
 | domain: context_frontier                           | 6                    |
 | domain: semantic_entry                             | 4                    |
-| domain: tool                                       | 38                   |
-| domain: tool_attempt                               | 26                   |
-| domain: tool_execution                             | 17                   |
+| domain: tool                                       | 45                   |
+| domain: tool_attempt                               | 27                   |
+| domain: tool_execution                             | 20                   |
 | domain: provider_evidence                          | 5                    |
 | domain: applied_interrupt                          | 2                    |
 | domain: fatal_mismatch                             | 0                    |
@@ -8065,7 +8361,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **623 (+7 free fn)** |
+| **signalbox-domain total**                         | **656 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

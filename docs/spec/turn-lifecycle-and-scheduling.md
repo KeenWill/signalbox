@@ -49,24 +49,12 @@ owning page rather than restating its material.
 ## Turns, states, and the single active slot
 
 A turn is one durable logical request for one conversational outcome from one
-closed origin under one frozen effective configuration. Its origin is exactly
-`AcceptedInput { accepted_input }` or `Delegation { trigger }`. A delegation
-origin carries no `AcceptedInputId`, user actor, or user content; its trigger is
-`InitialTask { spawning_request }` or `Wake { first_wake_sequence }`.
-Model-selection freeze is
+accepted-input origin under one frozen effective configuration. Model-selection
+freeze is
 [configuration-and-credentials](configuration-and-credentials.md#model-selection-validation)
 scope; defaults-epoch binding is
 [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
-scope. Every root turn has one session-local admission position allocated under
-the scheduler lock. Existing accepted-input acceptance position is the
-accepted-input form of that common order; root turns sort by admission position,
-each followed by its interrupt-successor chain. The initial delegated task gets
-the child's first position and freezes copied defaults version one. A wake turn
-freezes the recipient's then-current defaults epoch when its queued turn is
-created. Concurrent user, goal, and delegation roots are ordered by the
-transaction that first holds the scheduler lock; later items coalesced into an
-already queued wake turn do not allocate a position or rebind configuration. The
-implemented slice stores three lifecycle states per turn
+scope. The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, `refused`,
 `cancelled`, and `reconciliation_required` (migrations `202607220001` and
@@ -800,54 +788,58 @@ clones over the shared pool; no shared locked service instance exists.
 ## Delegated waits, messages, and wake turns
 
 This section is the session-delegation foundation proposal and becomes verified
-only with its implementing child pull requests. `AwaitingChild { wait }` is an
-active phase with no current attempt. Its wait names the exact foreground
-`await_session` request, spawning request, and child; it retains the parent's
-sole progressing-turn slot, and survives restart unchanged until that
-relationship has one deliverable terminal result. Result consumption atomically
-appends the parent's delivered-result entry, returns the result as that tool
-request's content, and moves the same turn back to running with a fresh
-continuation attempt. A raw child identity or an unrelated result cannot release
-the wait.
+only with its implementing child pull requests. A spawned child's first turn has
+a closed delegated-task origin naming the exact spawning request; its starting
+frontier contains the checked `DelegatedTask` entry and contains no synthetic
+accepted input. Every later turn uses the ordinary accepted-input or
+delegation-wake origin appropriate to the work that queued it.
+
+`AwaitingChild { wait }` is an active phase with no current attempt. Its wait
+names the exact foreground `await_session` request, spawning request, and child;
+it retains the parent's sole progressing-turn slot, and survives restart
+unchanged until that relationship has one deliverable terminal result. Result
+consumption atomically appends the parent's delivered-result entry, returns the
+result as that tool request's content, and moves the same turn back to running
+with a fresh continuation attempt. A raw child identity or an unrelated result
+cannot release the wait.
 
 A background await instead commits a delivery registration and returns its
 receipt immediately. It does not create `AwaitingChild` or retain the slot; the
 current turn may continue and end normally. Child result commit appends one
 parent-scoped `DelegationWake` event and makes the parent eligible for a new
-delegation-origin wake turn under the origin, ordering, and configuration rules
-above. A missing in-process nudge changes only latency: the eligibility sweep
-includes both a foreground wait with a deliverable result and an undelivered
-background result.
+delegation-origin turn. A missing in-process nudge changes only latency: the
+eligibility sweep includes both a foreground wait with a deliverable result and
+an undelivered background result.
 
 Pending inter-session messages use the same safety pattern. An active recipient
-consumes its FIFO inbox at the next model-call safe point. An idle recipient has
-at most one queued delegation-origin wake turn; later messages coalesce into
-that turn's starting frontier until activation. Wake activation appends the
-nonempty contiguous suffix of `DelegationMessage` and `DelegationResult` entries
-assigned to the turn, ordered by durable recipient-scoped wake sequence. Initial
-task activation appends one reference-only `DelegationTask` entry. These entries
-retain their delegation records as content authority and never become accepted
-user input. Reconstitution checks message ordinal, relationship,
-sender/recipient, and semantic-entry identity before any content becomes
-model-visible.
+consumes its FIFO inbox at the next model-call safe point. Pending messages and
+background results are ordered by their shared, gap-free recipient delivery
+sequence, not by relationship-local ordinals. An idle recipient has at most one
+queued delegation-origin wake turn; later items coalesce into that turn's
+starting frontier until activation. Reconstitution checks delivery sequence,
+message ordinal where present, relationship, sender/recipient, and
+semantic-entry identity before any content becomes model-visible.
 
 Parent termination evaluates descendants only when its explicit scope is
 `ParentAndDescendants`. The transaction locks the relationship frontier before
 applying each edge's background/bound policy and records one typed disposition
 per evaluated edge. `ParentAlone`, background, and bound `KeepRunning` never
 fabricate child stop authority. Parent-driven stop/cancel outcomes carry their
-exact parent turn, spawn request, and user-command provenance; partial or
+exact spawn request plus opaque authority from the applied parent termination; a
+turn command names its exact turn, while a goal-stop command names its exact
+goal generation and carries no turn. Raw identities cannot construct either
+source. Each edge verifies that authority's parent, command kind, and descendant
+scope against its typed outcome before applying the policy. Partial or
 unrecorded propagation does not commit. Equal reevaluation of the same edge by
-the same command returns the recorded disposition without appending another. The
-propagation transition receives opaque authority produced only by the exact
-applied parent stop or cancellation result; raw parent, turn, and command
-identities cannot construct it. Each edge verifies that authority's parent,
-command kind, and descendant scope against its typed outcome before applying the
-policy. Child-originated cancellation instead carries the child's exact
-proof-bearing cancelled turn. A reconciliation-required turn supplies no
-terminal child outcome, and the same cancelled-turn evidence cannot be selected
-as a stopped outcome. Detached child work stays independently schedulable after
-the parent's turn or goal has terminalized.
+the same command returns the recorded disposition without appending another. An
+edge whose child already has a terminal result records an `AlreadyTerminal`
+disposition for the evaluating command, creates no second terminal result, and
+still traverses the child's outgoing relationships. Child-originated
+cancellation instead carries the child's exact proof-bearing cancelled turn. A
+reconciliation-required turn supplies no terminal child outcome, and the same
+cancelled-turn evidence cannot be selected as a stopped outcome. Detached child
+work stays independently schedulable after the parent's turn or goal has
+terminalized.
 
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result

@@ -29,6 +29,7 @@ mod semantic_entry;
 mod session;
 mod session_delegation;
 mod session_metadata;
+mod session_placement;
 mod session_template;
 mod submit_input;
 mod tool;
@@ -208,17 +209,20 @@ pub use session::{
     CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
     InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
-    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
-    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-    TranscriptFrontier,
+    SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
+    SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry, TranscriptFrontier,
 };
 pub use session_delegation::{
-    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRejection,
-    DelegationContent, DelegationContentError, DelegationEvent, DelegationEventOrdinal,
-    DelegationLifecycle, DelegationMessage, DelegationMessageDirection, DelegationOutcome,
-    DelegationOutcomeReason, DelegationProvenance, DelegationTransitionError,
-    DelegationTransitionFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
-    ParentTerminationAuthority, ParentTerminationKind, SessionDelegation, TerminalChildTurn,
+    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
+    DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
+    DelegationEvent, DelegationEventOrdinal, DelegationLifecycle, DelegationMessage,
+    DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
+    DelegationRequestFailure, DelegationTransitionError, DelegationTransitionFailure,
+    DelegationWait, DelegationWaitMode, DescendantTerminationScope, ParentTerminationAuthority,
+    ParentTerminationCommandSource, ParentTerminationKind, RejectedDelegationTransition,
+    SessionDelegation, TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -227,6 +231,12 @@ pub use session_metadata::{
     ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult,
     ReplaceSessionMetadataSessionNotFound, SessionMetadataContent, SessionMetadataContentError,
     SessionMetadataLastWriter, SessionMetadataSnapshot, SessionMetadataUpdatedAt,
+};
+pub use session_placement::{
+    RootPlacementGlobalReadIntent, SessionPlacement, SessionPlacementDirectory,
+    SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
+    SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
+    SessionReadScopeDecision, SessionReadScopeRefusal, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
@@ -258,10 +268,12 @@ pub use tool::{
     AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecision,
-    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
-    ToolArgumentsKind, ToolCallProposal, ToolDecisionSource, ToolDenialReason,
+    DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
+    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
+    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
+    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
+    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
+    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
     ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
     ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
@@ -275,14 +287,15 @@ pub use tool_attempt::{
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
-    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
-    ToolExecutionErrorKind,
+    ToolAttemptTransitionFailure, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
+    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
 };
 pub use tool_execution::{
-    AwaitingToolApproval, AwaitingToolRecovery, PreparedToolAttempt, PreparedToolBatchDecision,
-    PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError, ToolBatchDecisionFailure,
-    ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
+    AwaitingToolApproval, AwaitingToolRecovery, DelegateToolApprovalTransitionError,
+    DelegateToolApprovalTransitionFailure, PreparedDelegateToolApproval, PreparedToolAttempt,
+    PreparedToolBatchDecision, PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError,
+    ToolBatchDecisionFailure, ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionError,
     ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolResultProjectionError,
     ToolResultProjectionFailure,
@@ -493,6 +506,7 @@ pub(crate) mod test_support {
         context_frontier_id -> crate::ContextFrontierId,
         semantic_transcript_entry_id -> crate::SemanticTranscriptEntryId,
         tool_request_id -> crate::ToolRequestId,
+        delegation_message_id -> crate::DelegationMessageId,
         tool_attempt_id -> crate::ToolAttemptId,
         runner_enrollment_id -> crate::RunnerEnrollmentId,
         runner_id -> crate::RunnerId,

@@ -48,6 +48,11 @@ credential_profile = "anthropic-primary"
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
 
+# Maximum exact bytes retained in memory while assembling one chunked
+# conversation import. Omit this table to use the 256 MiB default.
+[conversation_import]
+max_source_bytes = 268435456
+
 # web_fetch remains automatically approved only for these exact origins. An
 # absent or empty list disables its outbound requests. Add an origin only when
 # the deployment accepts it as an egress recipient for untrusted model context.
