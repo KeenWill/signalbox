@@ -330,7 +330,7 @@ struct ProcessSessionCreationRetryState {
     if error is CancellationError {
       unresolvedCreation = prepared
     } else if let serviceError = error as? SignalboxProcessServiceError,
-      case .mutationRetryExhausted = serviceError
+      serviceError.retainsPreparedMutationIdentity
     {
       unresolvedCreation = prepared
     } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -853,13 +853,17 @@ final class ProcessImportedContinuationRetryStore {
 }
 
 private extension SignalboxProcessServiceError {
-  var retainsPreparedImportedSessionCreation: Bool {
+  var retainsPreparedMutationIdentity: Bool {
     switch self {
-    case .mutationRetryExhausted:
+    case .mutationRetryExhausted, .remote(code: .unknown, message: _, detail: _):
       return true
     case .unexpectedMessage, .invalidPage, .deadlineExceeded, .remote:
       return false
     }
+  }
+
+  var retainsPreparedImportedSessionCreation: Bool {
+    retainsPreparedMutationIdentity
   }
 }
 
@@ -1336,7 +1340,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
   var canDecideToolRequest: Bool {
-    connectedService != nil && mutationBlocksByTurnID.isEmpty && !isDecidingTool
+    connectedService != nil && mutationBlocksByTurnID.isEmpty
   }
 
   init(
@@ -1471,7 +1475,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if error is CancellationError {
         unresolvedSubmission = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
-        case .mutationRetryExhausted = serviceError
+        serviceError.retainsPreparedMutationIdentity
       {
         unresolvedSubmission = preparedForAttempt
       } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -1541,7 +1545,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if error is CancellationError {
         unresolvedToolDecision = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
-        case .mutationRetryExhausted = serviceError
+        serviceError.retainsPreparedMutationIdentity
       {
         unresolvedToolDecision = preparedForAttempt
       } else if let openError = error as? SignalboxProcessRequestOpenError,
@@ -1636,7 +1640,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       if error is CancellationError {
         unresolvedTurnStop = preparedForAttempt
       } else if let serviceError = error as? SignalboxProcessServiceError,
-        case .mutationRetryExhausted = serviceError
+        serviceError.retainsPreparedMutationIdentity
       {
         unresolvedTurnStop = preparedForAttempt
       } else if let openError = error as? SignalboxProcessRequestOpenError,

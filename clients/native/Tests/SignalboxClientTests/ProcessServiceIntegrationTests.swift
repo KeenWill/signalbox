@@ -1624,6 +1624,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testFutureMutationErrorRetryReusesPreparedCommandIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let service = AmbiguousThenAcceptingProcessService(
+      firstError: ProcessDriverFixture.futureMutationRemoteError
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      service
+    }
+    await viewModel.connect()
+    viewModel.composerText = ProcessSubmissionFixture.content
+
+    await viewModel.send()
+    await viewModel.send()
+    let submittedCommandIDs = await service.submittedCommandIDs
+
+    XCTAssertEqual(submittedCommandIDs, ProcessSubmissionFixture.retriedCommandIDs)
+  }
+
+  @MainActor
   func testAmbiguousStopRetryReusesPreparedCommandIdentity() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3393,9 +3413,16 @@ private actor SuspendedArchiveProcessService: SignalboxProcessServiceProtocol {
 }
 
 private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProtocol {
+  private let firstError: SignalboxProcessServiceError
   private(set) var submittedCommandIDs: [String] = []
   private(set) var submittedContents: [String] = []
   private(set) var submittedContentBytes: [[UInt8]] = []
+
+  init(
+    firstError: SignalboxProcessServiceError = ProcessSubmissionFixture.ambiguousMutationError
+  ) {
+    self.firstError = firstError
+  }
 
   func testConnection() async throws {}
 
@@ -3435,10 +3462,7 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
     submittedContents.append(submission.content)
     submittedContentBytes.append(Array(submission.content.utf8))
     guard submittedCommandIDs.count > 1 else {
-      throw SignalboxProcessServiceError.mutationRetryExhausted(
-        code: .commitAmbiguous,
-        message: ProcessSubmissionFixture.failureMessage
-      )
+      throw firstError
     }
     return try ProcessSubmissionFixture.submittedReceipt(sessionID: submission.sessionID)
   }

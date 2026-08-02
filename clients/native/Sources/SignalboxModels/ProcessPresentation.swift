@@ -337,6 +337,13 @@ public struct SignalboxProcessActivity: Equatable, Sendable {
 }
 
 public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case role
+    case text
+    case unrecognizedKind
+  }
+
   public let kind: String
   public let role: SignalboxMessageRole
   public let text: String
@@ -350,7 +357,30 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     self.kind = "process_message"
     self.role = role
     self.text = text
-    self.unrecognizedKind = unrecognizedKind
+    self.unrecognizedKind = unrecognizedKind.map {
+      SignalboxProcessPresentation.retainedLabel($0)
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.kind = try container.decode(String.self, forKey: .kind)
+    self.role = try container.decode(SignalboxMessageRole.self, forKey: .role)
+    self.text = try container.decode(String.self, forKey: .text)
+    self.unrecognizedKind = try container.decodeIfPresent(
+      String.self,
+      forKey: .unrecognizedKind
+    ).map {
+      SignalboxProcessPresentation.retainedLabel($0)
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(kind, forKey: .kind)
+    try container.encode(role, forKey: .role)
+    try container.encode(text, forKey: .text)
+    try container.encodeIfPresent(unrecognizedKind, forKey: .unrecognizedKind)
   }
 }
 

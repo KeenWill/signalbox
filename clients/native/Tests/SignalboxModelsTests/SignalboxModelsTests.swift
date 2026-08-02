@@ -135,4 +135,47 @@ final class SignalboxModelsTests: XCTestCase {
       {"event_id":4,"event":{"kind":"message","message":{"role":"tool","parts":[{"kind":"function_response","call_id":"call-2","output":"0 failed checks; retry was not needed."}]},"visible_to_llm":true,"visible_to_user":true,"is_streaming":false,"parent_tool_invocation":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","created_at":"2026-05-10T12:00:02Z","last_modified_at":"2026-05-10T12:00:02Z","created_from":"runner:test"}}
     ]
     """
+
+    func testProcessMessageInitializerBoundsUnrecognizedKind() {
+        let value = String(
+            repeating: "x",
+            count: SignalboxProcessPresentation.maximumLabelUTF8Bytes + 1
+        )
+
+        let event = SignalboxProcessMessageEvent(
+            role: .unknown,
+            text: "Future message.",
+            unrecognizedKind: value
+        )
+
+        XCTAssertEqual(
+            event.unrecognizedKind,
+            SignalboxProcessPresentation.retainedLabel(value)
+        )
+    }
+
+    func testProcessMessageDecodeBoundsUnrecognizedKind() throws {
+        let value = String(
+            repeating: "x",
+            count: SignalboxProcessPresentation.maximumLabelUTF8Bytes + 1
+        )
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "kind": "process_message",
+                "role": "unknown",
+                "text": "Future message.",
+                "unrecognizedKind": value,
+            ]
+        )
+
+        let event = try SignalboxJSONCoding.decoder().decode(
+            SignalboxProcessMessageEvent.self,
+            from: data
+        )
+
+        XCTAssertEqual(
+            event.unrecognizedKind,
+            SignalboxProcessPresentation.retainedLabel(value)
+        )
+    }
 }

@@ -63,7 +63,7 @@ struct MessageBubble: View {
 
     private var roleLabel: String {
         if let unrecognizedKind = message.unrecognizedKind {
-            return "Unrecognized text: \(unrecognizedKind)"
+            return "Unrecognized: \(unrecognizedKind)"
         }
         switch message.role {
         case .user:
