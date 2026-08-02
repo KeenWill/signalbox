@@ -21557,6 +21557,67 @@ async fn insert_synthetic_dependency_projection(
     Ok(inserted.rows_affected())
 }
 
+async fn install_duplicate_dependency_projection(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    duplicate_event_ordinal: u64,
+) -> Result<(u64, u64), sqlx::Error> {
+    const FIRST_DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DROP CONSTRAINT session_plan_current_dependency_pkey",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO session_plan_current_dependency
+            (session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(fixture.dependent.as_u64()))
+    .bind(Decimal::from(fixture.prerequisite.as_u64()))
+    .bind(Decimal::from(duplicate_event_ordinal))
+    .bind(Decimal::from(FIRST_DEPENDENCY_EVENT_ORDINAL))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_head
+         DISABLE TRIGGER session_plan_head_maintenance_guard",
+    )
+    .execute(pool)
+    .await?;
+    let certified = sqlx::query(
+        "UPDATE session_plan_head
+            SET dependency_event_ordinal = $1
+          WHERE session_id = $2",
+    )
+    .bind(Decimal::from(duplicate_event_ordinal))
+    .bind(fixture.session.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_head
+         ENABLE TRIGGER session_plan_head_maintenance_guard",
+    )
+    .execute(pool)
+    .await?;
+    Ok((inserted.rows_affected(), certified.rows_affected()))
+}
+
 async fn insert_direct_malformed_status_event(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
@@ -22807,6 +22868,68 @@ async fn session_plan_read_rejects_malformed_dependency_predecessor() -> Result<
     Ok(())
 }
 
+/// A current read authenticates the complete predecessor shape of the status
+/// event from which it derives a prerequisite's readiness.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_malformed_dependency_status_predecessor()
+-> Result<(), Box<dyn Error>> {
+    const STATUS_EVENT_ORDINAL: u64 = 4;
+    const MALFORMED_PRIOR_EVENT_ORDINAL: u64 = 2;
+    const LATER_ENTRY_TEXT: &str = "keep the malformed status below the head";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            status_plan_arguments(prerequisite, PlanStatus::Completed),
+            create_plan_arguments(LATER_ENTRY_TEXT),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::SetStatus {
+            entry: prerequisite,
+            status: PlanStatus::Completed,
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(LATER_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let corrupted = corrupt_plan_event_predecessor(
+        &pool,
+        &fixture,
+        STATUS_EVENT_ORDINAL,
+        Some(MALFORMED_PRIOR_EVENT_ORDINAL),
+    )
+    .await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("readiness rejects the malformed status predecessor");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A dependency append rejects an older reachable edge whose predecessor no
 /// longer forms the certified append prefix.
 #[tokio::test(flavor = "multi_thread")]
@@ -22948,6 +23071,84 @@ async fn session_plan_projection_rejects_untrusted_reachable_dependency_edge()
     Ok(())
 }
 
+/// The projection trigger authenticates creation rows for interior and leaf
+/// nodes reached through the existing graph, not only the proposed endpoints.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_projection_rejects_malformed_reachable_creation() -> Result<(), Box<dyn Error>>
+{
+    const PREREQUISITE_EVENT_ORDINAL: u64 = 1;
+    const MALFORMED_PRIOR_EVENT_ORDINAL: u64 = 2;
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 4;
+    const PROPOSED_EVENT_ORDINAL: u64 = 5;
+    const OUTSIDE_ENTRY_TEXT: &str = "reach the malformed leaf creation";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let corrupted = corrupt_plan_event_predecessor(
+        &pool,
+        &fixture,
+        PREREQUISITE_EVENT_ORDINAL,
+        Some(MALFORMED_PRIOR_EVENT_ORDINAL),
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &proposed_attempt,
+        OUTSIDE_ENTRY_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        outside,
+        fixture.dependent,
+    )
+    .await
+    .expect_err("the projection trigger rejects the malformed reachable creation");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(proposed_attempt).await?;
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_graph_shape")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// The projection trigger rejects a proposed edge when a reachable node
 /// already exceeds the implemented dependency bound.
 #[tokio::test(flavor = "multi_thread")]
@@ -23018,6 +23219,161 @@ async fn session_plan_projection_rejects_reachable_over_limit_node() -> Result<(
             .as_database_error()
             .and_then(|database| database.constraint()),
         Some("session_plan_dependency_limit")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Graph loading rejects duplicate physical rows even when projection and head
+/// constraints have been deliberately bypassed together.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_duplicate_physical_dependency_edge()
+-> Result<(), Box<dyn Error>> {
+    const DUPLICATE_EVENT_ORDINAL: u64 = 4;
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 5;
+    const OUTSIDE_ENTRY_TEXT: &str = "append through duplicate physical edges";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            depends_plan_arguments(dependent, prerequisite),
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: fixture.dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let (inserted, certified) =
+        install_duplicate_dependency_projection(&pool, &fixture, DUPLICATE_EVENT_ORDINAL).await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::DependsOn {
+                entry: outside,
+                dependency: fixture.dependent,
+            },
+        ))
+        .await
+        .expect_err("graph loading rejects duplicate physical dependency rows");
+
+    assert_eq!(inserted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(certified, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The projection trigger independently rejects duplicate physical rows when
+/// its database uniqueness guard has been deliberately bypassed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_projection_rejects_duplicate_physical_dependency_edge()
+-> Result<(), Box<dyn Error>> {
+    const DUPLICATE_EVENT_ORDINAL: u64 = 4;
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 5;
+    const PROPOSED_EVENT_ORDINAL: u64 = 6;
+    const OUTSIDE_ENTRY_TEXT: &str = "project through duplicate physical edges";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            depends_plan_arguments(dependent, prerequisite),
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: fixture.dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let (inserted, certified) =
+        install_duplicate_dependency_projection(&pool, &fixture, DUPLICATE_EVENT_ORDINAL).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &proposed_attempt,
+        OUTSIDE_ENTRY_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        outside,
+        fixture.dependent,
+    )
+    .await
+    .expect_err("the projection trigger rejects duplicate physical dependency rows");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(proposed_attempt).await?;
+
+    assert_eq!(inserted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(certified, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_graph_shape")
     );
 
     pool.close().await;

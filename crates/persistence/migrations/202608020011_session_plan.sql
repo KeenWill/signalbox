@@ -377,9 +377,12 @@ DECLARE
     edge_shape_valid boolean;
     edge_authorized boolean;
     edge_found boolean;
+    node_shape_valid boolean;
+    node_authorized boolean;
     child_finished boolean;
     child_seen boolean;
     dependency_count bigint;
+    distinct_dependency_count bigint;
 BEGIN
     CREATE TEMP TABLE IF NOT EXISTS pg_temp.session_plan_dependency_visit (
         node numeric(20, 0) PRIMARY KEY,
@@ -430,11 +433,45 @@ BEGIN
              WHERE stack.depth = stack_depth;
 
             IF after_dependency IS NULL THEN
-                SELECT count(*)
-                  INTO dependency_count
+                SELECT count(*) = 1
+                           AND coalesce(
+                               bool_and(
+                                   session_plan_event_has_valid_shape(creation)
+                                   AND session_plan_creation_has_valid_shape(
+                                       creation
+                                   )
+                               ),
+                               FALSE
+                           ),
+                       count(*) = 1
+                           AND coalesce(
+                               bool_and(
+                                   session_plan_event_has_authority(creation)
+                               ),
+                               FALSE
+                           )
+                  INTO node_shape_valid, node_authorized
+                  FROM session_plan_event AS creation
+                 WHERE creation.session_id = target_session_id
+                   AND creation.event_ordinal = current_node;
+                IF NOT node_shape_valid THEN
+                    graph_shape_valid := FALSE;
+                    EXIT root_scan;
+                END IF;
+                IF NOT node_authorized THEN
+                    graph_authorized := FALSE;
+                    EXIT root_scan;
+                END IF;
+
+                SELECT count(*), count(DISTINCT edge.dependency_ordinal)
+                  INTO dependency_count, distinct_dependency_count
                   FROM session_plan_current_dependency AS edge
                  WHERE edge.session_id = target_session_id
                    AND edge.entry_ordinal = current_node;
+                IF dependency_count <> distinct_dependency_count THEN
+                    graph_shape_valid := FALSE;
+                    EXIT root_scan;
+                END IF;
                 -- Checked mechanically against MAX_PLAN_DEPENDENCIES_PER_ENTRY.
                 IF dependency_count > 32 THEN
                     graph_within_limit := FALSE;

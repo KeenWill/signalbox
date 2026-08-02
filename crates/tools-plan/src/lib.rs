@@ -293,6 +293,13 @@ impl PlanDependencyCycle {
         {
             return None;
         }
+        let mut distinct_vertices = HashSet::with_capacity(path.len() - 1);
+        if !path[..path.len() - 1]
+            .iter()
+            .all(|vertex| distinct_vertices.insert(*vertex))
+        {
+            return None;
+        }
         Some(Self {
             entry,
             dependency,

@@ -92,6 +92,7 @@ const CURRENT_DEPENDENCIES_SQL: &str = "SELECT edge.entry_ordinal, edge.dependen
        movement.event_ordinal AS dependency_status_event_ordinal,
        movement.entry_status AS dependency_status,
        movement.authorized AS dependency_status_authorized,
+       movement.shape_valid AS dependency_status_shape_valid,
        movement.dependency_ordinal AS dependency_status_dependency_ordinal,
        movement.entry_text AS dependency_status_text
   FROM unnest($2::numeric[]) AS root(entry_ordinal)
@@ -114,7 +115,8 @@ const CURRENT_DEPENDENCIES_SQL: &str = "SELECT edge.entry_ordinal, edge.dependen
   LEFT JOIN LATERAL (
       SELECT candidate.event_ordinal, candidate.entry_status,
              candidate.dependency_ordinal, candidate.entry_text,
-             session_plan_event_has_authority(candidate) AS authorized
+             session_plan_event_has_authority(candidate) AS authorized,
+             session_plan_event_has_valid_shape(candidate) AS shape_valid
         FROM session_plan_event AS candidate
        WHERE candidate.session_id = $1
          AND candidate.entry_ordinal = edge.dependency_ordinal
@@ -939,6 +941,12 @@ async fn load_relevant_dependency_graph(
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
         let dependencies = ordered_graph.entry(entry).or_default();
+        if dependencies
+            .iter()
+            .any(|(_ordinal, existing)| *existing == dependency)
+        {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
         if dependencies.len() >= MAX_PLAN_DEPENDENCIES_PER_ENTRY {
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
@@ -1144,9 +1152,11 @@ fn apply_dependency_rows(
         let status_event: Option<Decimal> = row.try_get("dependency_status_event_ordinal")?;
         let status: Option<String> = row.try_get("dependency_status")?;
         let status_authority = optional_projected_authority(row, "dependency_status_authorized")?;
+        let status_shape_valid: Option<bool> = row.try_get("dependency_status_shape_valid")?;
         let status_dependency: Option<Decimal> =
             row.try_get("dependency_status_dependency_ordinal")?;
         let status_text: Option<String> = row.try_get("dependency_status_text")?;
+        let has_status_event = status_event.is_some();
         let status = match (
             status_event,
             status,
@@ -1180,6 +1190,12 @@ fn apply_dependency_rows(
                 return Err(SessionPlanCorruption::InvalidEventPayload("dependency status").into());
             }
         };
+        if has_status_event && status_shape_valid != Some(true) {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        if !has_status_event && status_shape_valid.is_some() {
+            return Err(SessionPlanCorruption::InvalidEventPayload("dependency status").into());
+        }
         if !entries.iter().any(|candidate| candidate.id() == entry) {
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
@@ -1470,6 +1486,7 @@ mod tests {
     fn ordinary_read_uses_only_bounded_direct_dependencies() {
         assert!(CURRENT_DEPENDENCIES_SQL.contains("LIMIT $3"));
         assert!(CURRENT_DEPENDENCIES_SQL.contains("session_plan_event_has_valid_shape"));
+        assert!(CURRENT_DEPENDENCIES_SQL.contains("AS shape_valid"));
         assert!(CURRENT_PLAN_SQL.contains("session_plan_event_has_valid_shape(created)"));
         assert!(!CURRENT_DEPENDENCIES_SQL.contains("WITH RECURSIVE"));
     }
@@ -1496,6 +1513,9 @@ mod tests {
         assert!(!SESSION_PLAN_MIGRATION.contains("trim_array"));
         assert!(SESSION_PLAN_MIGRATION.contains("pg_temp.session_plan_dependency_visit"));
         assert!(SESSION_PLAN_MIGRATION.contains("pg_temp.session_plan_dependency_stack"));
+        assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_has_valid_shape(creation)"));
+        assert!(SESSION_PLAN_MIGRATION.contains("session_plan_event_has_authority(creation)"));
+        assert!(SESSION_PLAN_MIGRATION.contains("count(DISTINCT edge.dependency_ordinal)"));
         assert!(!SESSION_PLAN_MIGRATION.contains("dependency_path(origin, node)"));
     }
 

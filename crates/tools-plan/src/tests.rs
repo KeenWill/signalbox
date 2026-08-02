@@ -666,6 +666,15 @@ fn write_returns_a_known_failure_for_typed_cycle_evidence() {
 }
 
 #[test]
+fn dependency_cycle_evidence_rejects_a_repeated_internal_vertex() {
+    let dependent = entry(1);
+    let dependency = entry(2);
+    let repeated_path = vec![dependent, dependency, dependency, dependent];
+
+    assert!(PlanDependencyCycle::try_new(dependent, dependency, repeated_path).is_none());
+}
+
+#[test]
 fn dependency_overflow_fixture_has_exact_boundary_shape() {
     let provenance = PlanEventProvenance::from_invocation(correlation(10));
     let maximum = u64::try_from(MAX_PLAN_DEPENDENCIES_PER_ENTRY)
