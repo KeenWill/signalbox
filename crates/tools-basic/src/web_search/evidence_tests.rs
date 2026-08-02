@@ -1,3 +1,4 @@
+use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::CredentialValue;
 
 use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*};
@@ -42,6 +43,25 @@ fn web_search_rejects_populated_success_result_suffix_collision() {
 
     assert_eq!(
         success_evidence(response_with_result_count(0), &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential spanning a populated failure detail and its enclosing
+/// `Debug` suffix is rejected before that result can be returned.
+#[test]
+fn web_search_rejects_populated_failure_result_suffix_collision() {
+    let detail = ToolExecutionErrorDetail::try_new(String::from(FIXTURE_POPULATED_FAILURE_DETAIL))
+        .expect("fixture failure detail is valid");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_FAILURE_RESULT_SUFFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        known_failure_evidence(detail, &scrubber),
         Err(WebSearchExecutorError::EvidenceEncoding)
     );
 }

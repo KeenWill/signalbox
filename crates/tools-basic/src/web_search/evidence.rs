@@ -108,7 +108,15 @@ pub(super) fn known_failure_evidence(
     scrubber: &CredentialScrubber,
 ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
     let detail = (!scrubber.contains_credential(detail.as_str())).then_some(detail);
-    Ok(ToolExecutorEvidence::KnownFailed { detail })
+    let evidence = ToolExecutorEvidence::KnownFailed { detail };
+    let rendered_result = format!(
+        "{:?}",
+        Ok::<&ToolExecutorEvidence, WebSearchExecutorError>(&evidence)
+    );
+    if scrubber.contains_credential(&rendered_result) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
+    }
+    Ok(evidence)
 }
 
 pub(super) fn provider_error_detail(

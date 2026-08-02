@@ -425,6 +425,10 @@ pub(super) const SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(C";
 
 pub(super) const POPULATED_SUCCESS_RESULT_SUFFIX_COLLISION_KEY: &str = "}\"))";
 
+pub(super) const FIXTURE_POPULATED_FAILURE_DETAIL: &str = "synthetic failure evidence";
+
+pub(super) const POPULATED_FAILURE_RESULT_SUFFIX_COLLISION_KEY: &str = "e\")) })";
+
 pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
 
 pub(super) const KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(K";
