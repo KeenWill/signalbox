@@ -99,6 +99,22 @@ fn repository_config_rejects_a_tab_delimited_filter_section() {
 }
 
 #[test]
+fn repository_config_rejects_an_unsupported_reference_storage_extension() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n",
+    )
+    .expect("unsupported reference storage config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("unsupported reference storage extension rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
 fn repository_open_parses_the_validated_config_snapshot() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");

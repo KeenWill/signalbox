@@ -244,6 +244,9 @@ fn validate_repository_config_descriptor(
     let mut object_format_seen = false;
     for line in config.lines() {
         let mut normalized = line.trim().to_ascii_lowercase();
+        if normalized.is_empty() || normalized.starts_with('#') || normalized.starts_with(';') {
+            continue;
+        }
         if normalized.starts_with('[') {
             let closing = normalized
                 .find(']')
@@ -279,13 +282,11 @@ fn validate_repository_config_descriptor(
                 return Err(LocalGitToolsConstructionError::Repository);
             }
         }
-        if section == "extensions"
-            && let Some((key, value)) = normalized.split_once('=')
-        {
+        if section == "extensions" {
+            let (key, value) = normalized
+                .split_once('=')
+                .ok_or(LocalGitToolsConstructionError::Repository)?;
             match key.trim() {
-                "worktreeconfig" => {
-                    return Err(LocalGitToolsConstructionError::Repository);
-                }
                 "objectformat" if !object_format_seen => {
                     object_format = match value.trim() {
                         "sha1" => ObjectFormat::Sha1,
@@ -294,10 +295,9 @@ fn validate_repository_config_descriptor(
                     };
                     object_format_seen = true;
                 }
-                "objectformat" => {
+                _ => {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
-                _ => {}
             }
         }
     }

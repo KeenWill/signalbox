@@ -18,7 +18,10 @@ use rustix::{
     io::dup,
 };
 
-use crate::descriptor::{FileIdentity, descriptor_entry_exists, file_identity};
+use crate::descriptor::{
+    FileIdentity, QuarantineDirectory, descriptor_entry_exists, file_identity,
+    remove_entry_if_identity,
+};
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_REVISION_BYTES;
 use crate::packed_reference::{packed_reference_namespace_conflicts, packed_reference_target};
@@ -138,6 +141,10 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         target: git2::Oid,
     ) -> Result<(), LocalGitFailure> {
+        self.lock
+            .set_len(0)
+            .and_then(|()| self.lock.rewind())
+            .map_err(|_| LocalGitFailure::Operation)?;
         writeln!(self.lock, "{target}").map_err(|_| LocalGitFailure::Operation)?;
         self.lock
             .sync_all()
@@ -154,6 +161,10 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         target: &str,
     ) -> Result<(), LocalGitFailure> {
+        self.lock
+            .set_len(0)
+            .and_then(|()| self.lock.rewind())
+            .map_err(|_| LocalGitFailure::Operation)?;
         writeln!(self.lock, "ref: {target}").map_err(|_| LocalGitFailure::Operation)?;
         self.lock
             .sync_all()
@@ -281,21 +292,13 @@ impl ReferenceLock {
             return Err(LocalGitFailure::Operation);
         }
         before_cleanup();
-        if unlinkat(&self.parent, &self.lock_name, AtFlags::empty()).is_err() {
-            let displaced_snapshot_is_current =
-                reference_snapshot_identity_at(&self.parent, &self.lock_name)
-                    == Ok(Some(expected_leaf_snapshot));
-            let publication_is_current = self.prepared_publication_is_current();
-            if displaced_snapshot_is_current && publication_is_current {
-                renameat_with(
-                    &self.parent,
-                    &self.lock_name,
-                    &self.parent,
-                    &self.leaf,
-                    RenameFlags::EXCHANGE,
-                )
-                .map_err(|_| LocalGitFailure::Operation)?;
-            }
+        if remove_displaced_reference_if_current(
+            &self.parent,
+            &self.lock_name,
+            expected_leaf_snapshot,
+        )
+        .is_err()
+        {
             return Err(LocalGitFailure::Operation);
         }
         if !self.prepared_publication_is_current() {
@@ -393,6 +396,42 @@ impl ReferenceLock {
     }
 }
 
+fn remove_displaced_reference_if_current(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: ReferenceSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let quarantine = QuarantineDirectory::create(parent)?;
+    let quarantined_name = OsStr::new("displaced");
+    renameat_with(
+        parent,
+        name,
+        quarantine.descriptor(),
+        quarantined_name,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let quarantined_is_expected =
+        reference_snapshot_identity_at(quarantine.descriptor(), quarantined_name)
+            == Ok(Some(expected));
+    if !quarantined_is_expected {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_name,
+            parent,
+            name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(quarantine.descriptor(), quarantined_name, AtFlags::empty())
+        .map_err(|_| LocalGitFailure::Operation)?;
+    if descriptor_entry_exists(parent, name)? {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
+}
+
 fn reference_snapshot_identity(
     file: &mut fs::File,
 ) -> Result<ReferenceSnapshotIdentity, LocalGitFailure> {
@@ -457,8 +496,19 @@ pub(super) fn reference_permissions(
 
 impl Drop for ReferenceLock {
     fn drop(&mut self) {
-        if !self.committed && self.path_still_owned() {
-            let _ = unlinkat(&self.parent, &self.lock_name, AtFlags::empty());
+        let descriptor_is_owned = self
+            .lock
+            .metadata()
+            .map(|metadata| file_identity(&metadata))
+            .ok()
+            == Some(self.identity);
+        if !self.committed && descriptor_is_owned {
+            let _ = remove_entry_if_identity(
+                &self.parent,
+                &self.lock_name,
+                self.identity,
+                AtFlags::empty(),
+            );
         }
     }
 }
@@ -473,18 +523,8 @@ impl Drop for CreatedReferenceDirectories {
 
 impl CreatedReferenceDirectory {
     fn remove_if_owned(&self) {
-        let current_identity = openat(
-            &self.parent,
-            &self.name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .ok()
-        .and_then(|directory| fs::File::from(directory).metadata().ok())
-        .map(|metadata| file_identity(&metadata));
-        if current_identity == Some(self.identity) {
-            let _ = unlinkat(&self.parent, &self.name, AtFlags::REMOVEDIR);
-        }
+        let _ =
+            remove_entry_if_identity(&self.parent, &self.name, self.identity, AtFlags::REMOVEDIR);
     }
 }
 

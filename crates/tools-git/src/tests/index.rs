@@ -147,6 +147,39 @@ fn index_lock_rejects_an_in_place_rewrite_of_prepared_bytes() {
 }
 
 #[test]
+fn index_lock_rejects_prepared_bytes_rewritten_before_private_clone() {
+    let fixture = Fixture::new();
+    let actor_fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    fs::write(actor_fixture.root().join("tracked.txt"), "actor content\n")
+        .expect("actor fixture file rewrites");
+    let actor_repository =
+        git2::Repository::open(actor_fixture.root()).expect("actor fixture repository opens");
+    let mut actor_index = actor_repository.index().expect("actor fixture index opens");
+    actor_index
+        .add_path(std::path::Path::new("tracked.txt"))
+        .expect("actor fixture path stages");
+    actor_index.write().expect("actor fixture index writes");
+    let actor_bytes =
+        fs::read(actor_fixture.root().join(".git/index")).expect("actor fixture index reads");
+
+    let failure = IndexLock::acquire_with_preclone_hook(&index_path, &lock_path, || {
+        fs::write(&lock_path, &actor_bytes).expect("actor rewrites lock before private clone");
+    })
+    .err()
+    .expect("pre-clone prepared rewrite rejects acquisition");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("original index reads after rejection"),
+        original_index
+    );
+    assert_ne!(actor_bytes, original_index);
+}
+
+#[test]
 fn index_lock_preserves_a_displaced_replacement_after_exchange() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
@@ -202,6 +235,37 @@ fn index_lock_preserves_a_directory_replacing_the_displaced_cleanup_path() {
         prepared_index
     );
     assert!(lock_path.is_dir());
+}
+
+#[test]
+fn index_lock_preserves_a_file_replacing_the_displaced_cleanup_path() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let prepared_index = b"prepared index bytes".to_vec();
+    let actor_replacement = b"actor cleanup replacement".to_vec();
+    let (mut index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+    index_lock
+        .write_raw(&prepared_index)
+        .expect("prepared index writes");
+
+    let failure = index_lock
+        .commit_with_cleanup_test_hook(|| {
+            fs::remove_file(&lock_path).expect("displaced index removes before cleanup");
+            fs::write(&lock_path, &actor_replacement).expect("actor cleanup replacement writes");
+        })
+        .expect_err("cleanup-path file replacement rejects index cleanup");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("prepared live index reads"),
+        prepared_index
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("actor cleanup replacement reads"),
+        actor_replacement
+    );
 }
 
 #[test]

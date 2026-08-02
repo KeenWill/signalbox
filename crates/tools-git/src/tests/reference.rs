@@ -178,6 +178,64 @@ fn reference_publication_rejects_an_in_place_rewrite_of_prepared_bytes() {
 }
 
 #[test]
+fn direct_reference_preparation_truncates_injected_trailing_bytes() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let target = git2::Oid::ZERO_SHA1;
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    fs::write(&lock_path, b"actor payload with trailing bytes")
+        .expect("actor payload enters reference lock");
+
+    lock.prepare(&authority, target)
+        .expect("direct replacement reference prepares");
+    lock.publish(&authority, &expected)
+        .expect("direct replacement reference publishes");
+
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("direct reference reads"),
+        format!("{target}\n")
+    );
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn symbolic_reference_preparation_truncates_injected_trailing_bytes() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let target = "refs/heads/main";
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    fs::write(&lock_path, b"actor payload with trailing bytes")
+        .expect("actor payload enters reference lock");
+
+    lock.prepare_symbolic(&authority, target)
+        .expect("symbolic replacement reference prepares");
+    lock.publish(&authority, &expected)
+        .expect("symbolic replacement reference publishes");
+
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("symbolic reference reads"),
+        format!("ref: {target}\n")
+    );
+    assert!(!lock_path.exists());
+}
+
+#[test]
 fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";
@@ -206,6 +264,41 @@ fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
         format!("{}\n", git2::Oid::ZERO_SHA1)
     );
     assert!(lock_path.is_dir());
+}
+
+#[test]
+fn reference_publication_preserves_a_file_replacing_the_cleanup_path() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_replacement = b"actor cleanup replacement\n".to_vec();
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_cleanup_test_hook(&authority, &expected, || {
+            fs::remove_file(&lock_path).expect("displaced reference removes before cleanup");
+            fs::write(&lock_path, &actor_replacement).expect("actor cleanup replacement writes");
+        })
+        .expect_err("cleanup-path file replacement rejects reference cleanup");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("prepared live reference reads"),
+        format!("{}\n", git2::Oid::ZERO_SHA1)
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("actor cleanup replacement reads"),
+        actor_replacement
+    );
 }
 
 #[test]

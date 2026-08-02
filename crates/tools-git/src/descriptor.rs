@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     os::{
         fd::{AsRawFd, OwnedFd},
@@ -8,7 +8,10 @@ use std::{
     path::PathBuf,
 };
 
-use rustix::fs::{AtFlags, statat};
+use rustix::{
+    fs::{AtFlags, Mode, OFlags, openat, statat, unlinkat},
+    io::dup,
+};
 
 use crate::failure::LocalGitFailure;
 
@@ -33,6 +36,80 @@ pub(super) struct FileSnapshotIdentity {
     pub(super) modified_nanoseconds: i64,
     pub(super) changed_seconds: i64,
     pub(super) changed_nanoseconds: i64,
+}
+
+pub(super) struct QuarantineDirectory {
+    parent: OwnedFd,
+    name: OsString,
+    identity: FileIdentity,
+    directory: OwnedFd,
+}
+
+impl QuarantineDirectory {
+    pub(super) fn create(parent: &OwnedFd) -> Result<Self, LocalGitFailure> {
+        let pinned_parent = dup(parent).map_err(|_| LocalGitFailure::Operation)?;
+        let temporary = tempfile::Builder::new()
+            .prefix(".signalbox-cleanup-")
+            .tempdir_in(descriptor_path_from_fd(parent))
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let name = temporary
+            .path()
+            .file_name()
+            .ok_or(LocalGitFailure::Operation)?
+            .to_owned();
+        let _persisted_path = temporary.keep();
+        let directory = match openat(
+            parent,
+            &name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => directory,
+            Err(_) => {
+                let _ = unlinkat(parent, &name, AtFlags::REMOVEDIR);
+                return Err(LocalGitFailure::Operation);
+            }
+        };
+        let identity = match dup(&directory)
+            .ok()
+            .map(fs::File::from)
+            .and_then(|file| file.metadata().ok())
+            .map(|metadata| file_identity(&metadata))
+        {
+            Some(identity) => identity,
+            None => {
+                let _ = unlinkat(parent, &name, AtFlags::REMOVEDIR);
+                return Err(LocalGitFailure::Operation);
+            }
+        };
+        Ok(Self {
+            parent: pinned_parent,
+            name,
+            identity,
+            directory,
+        })
+    }
+
+    pub(super) fn descriptor(&self) -> &OwnedFd {
+        &self.directory
+    }
+}
+
+impl Drop for QuarantineDirectory {
+    fn drop(&mut self) {
+        let current = openat(
+            &self.parent,
+            &self.name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()
+        .and_then(|directory| fs::File::from(directory).metadata().ok())
+        .map(|metadata| file_identity(&metadata));
+        if current == Some(self.identity) {
+            let _ = unlinkat(&self.parent, &self.name, AtFlags::REMOVEDIR);
+        }
+    }
 }
 
 pub(super) fn descriptor_path_from_fd(file: &OwnedFd) -> PathBuf {
@@ -70,4 +147,48 @@ pub(super) fn descriptor_entry_exists(
         Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
         Err(_) => Err(LocalGitFailure::Operation),
     }
+}
+
+pub(super) fn remove_entry_if_identity(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: FileIdentity,
+    removal_flags: AtFlags,
+) -> Result<(), LocalGitFailure> {
+    let quarantine = QuarantineDirectory::create(parent)?;
+    let quarantined_name = OsStr::new("owned");
+    rustix::fs::renameat_with(
+        parent,
+        name,
+        quarantine.descriptor(),
+        quarantined_name,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let current = statat(
+        quarantine.descriptor(),
+        quarantined_name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .ok()
+    .map(|status| FileIdentity {
+        device: status.st_dev,
+        inode: status.st_ino,
+    });
+    if current != Some(expected) {
+        let _ = rustix::fs::renameat_with(
+            quarantine.descriptor(),
+            quarantined_name,
+            parent,
+            name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(quarantine.descriptor(), quarantined_name, removal_flags)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    if descriptor_entry_exists(parent, name)? {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
 }

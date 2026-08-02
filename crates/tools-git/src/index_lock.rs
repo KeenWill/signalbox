@@ -15,7 +15,9 @@ use rustix::{
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
-use crate::descriptor::{FileIdentity, descriptor_path, file_identity};
+use crate::descriptor::{
+    FileIdentity, QuarantineDirectory, descriptor_path, file_identity, remove_entry_if_identity,
+};
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::PinnedRepository;
@@ -69,6 +71,7 @@ impl IndexLock {
             index_installation_mode(authority)?,
             authority.object_format,
             tempfile::tempdir,
+            || {},
         )
     }
 
@@ -83,6 +86,7 @@ impl IndexLock {
             Mode::RUSR | Mode::WUSR,
             ObjectFormat::Sha1,
             tempfile::tempdir,
+            || {},
         )
     }
 
@@ -101,18 +105,37 @@ impl IndexLock {
             Mode::RUSR | Mode::WUSR,
             ObjectFormat::Sha1,
             create_private_directory,
+            || {},
         )
     }
 
-    fn acquire_with_private_directory_and_mode<Create>(
+    #[cfg(test)]
+    pub(super) fn acquire_with_preclone_hook<AfterPrepare: FnOnce()>(
+        index_path: &Path,
+        lock_path: &Path,
+        after_prepare: AfterPrepare,
+    ) -> Result<(Self, Index), LocalGitFailure> {
+        Self::acquire_with_private_directory_and_mode(
+            index_path,
+            lock_path,
+            Mode::RUSR | Mode::WUSR,
+            ObjectFormat::Sha1,
+            tempfile::tempdir,
+            after_prepare,
+        )
+    }
+
+    fn acquire_with_private_directory_and_mode<Create, AfterPrepare>(
         index_path: &Path,
         lock_path: &Path,
         missing_index_mode: Mode,
         object_format: ObjectFormat,
         create_private_directory: Create,
+        after_prepare: AfterPrepare,
     ) -> Result<(Self, Index), LocalGitFailure>
     where
         Create: FnOnce() -> std::io::Result<tempfile::TempDir>,
+        AfterPrepare: FnOnce(),
     {
         if index_path.parent() != lock_path.parent() {
             return Err(LocalGitFailure::Operation);
@@ -140,19 +163,22 @@ impl IndexLock {
             missing_index_mode,
             object_format,
             create_private_directory,
+            after_prepare,
         )
     }
 
-    fn acquire_at_with_private_directory_and_mode<Create>(
+    fn acquire_at_with_private_directory_and_mode<Create, AfterPrepare>(
         parent: OwnedFd,
         index_name: OsString,
         lock_name: OsString,
         missing_index_mode: Mode,
         object_format: ObjectFormat,
         create_private_directory: Create,
+        after_prepare: AfterPrepare,
     ) -> Result<(Self, Index), LocalGitFailure>
     where
         Create: FnOnce() -> std::io::Result<tempfile::TempDir>,
+        AfterPrepare: FnOnce(),
     {
         let descriptor = openat(
             &parent,
@@ -200,6 +226,7 @@ impl IndexLock {
             .sync_all()
             .map_err(|_| LocalGitFailure::Operation)?;
         guard.record_prepared_index()?;
+        after_prepare();
         guard.copy_lock_to_private_index()?;
         let index = Index::open_ext(&guard.private_index_path, guard.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -207,6 +234,12 @@ impl IndexLock {
     }
 
     fn copy_lock_to_private_index(&mut self) -> Result<(), LocalGitFailure> {
+        let prepared = self.prepared_index.ok_or(LocalGitFailure::Operation)?;
+        if self.lock_snapshot_identity()? != prepared
+            || index_snapshot_identity_at(&self.parent, &self.lock_name)? != Some(prepared)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
         let mut private_index = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -224,7 +257,19 @@ impl IndexLock {
         }
         private_index
             .sync_all()
-            .map_err(|_| LocalGitFailure::Operation)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let private_metadata = private_index
+            .metadata()
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let private_snapshot = snapshot_identity(&mut private_index, &private_metadata)?;
+        if private_snapshot.length != prepared.length
+            || private_snapshot.digest != prepared.digest
+            || self.lock_snapshot_identity()? != prepared
+            || index_snapshot_identity_at(&self.parent, &self.lock_name)? != Some(prepared)
+        {
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(())
     }
 
     pub(super) fn original_bytes(&self) -> Result<Vec<u8>, LocalGitFailure> {
@@ -380,22 +425,9 @@ impl IndexLock {
                     return Err(LocalGitFailure::Operation);
                 }
                 before_cleanup();
-                if unlinkat(&self.parent, &self.lock_name, AtFlags::empty()).is_err() {
-                    let publication_is_current =
-                        index_snapshot_identity_at(&self.parent, &self.index_name)
-                            == Ok(Some(prepared_index));
-                    let displaced_is_current =
-                        index_snapshot_identity_at(&self.parent, &self.lock_name)
-                            == Ok(Some(original_index));
-                    if publication_is_current && displaced_is_current {
-                        let _ = renameat_with(
-                            &self.parent,
-                            &self.lock_name,
-                            &self.parent,
-                            &self.index_name,
-                            RenameFlags::EXCHANGE,
-                        );
-                    }
+                if remove_displaced_index_if_current(&self.parent, &self.lock_name, original_index)
+                    .is_err()
+                {
                     return Err(LocalGitFailure::Operation);
                 }
                 if index_snapshot_identity_at(&self.parent, &self.index_name)
@@ -443,6 +475,41 @@ impl IndexLock {
             .map_err(|_| LocalGitFailure::Operation)?;
         snapshot_identity(&mut self.lock, &metadata)
     }
+}
+
+fn remove_displaced_index_if_current(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: IndexSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let quarantine = QuarantineDirectory::create(parent)?;
+    let quarantined_name = OsStr::new("displaced");
+    renameat_with(
+        parent,
+        name,
+        quarantine.descriptor(),
+        quarantined_name,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let quarantined_is_expected =
+        index_snapshot_identity_at(quarantine.descriptor(), quarantined_name) == Ok(Some(expected));
+    if !quarantined_is_expected {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_name,
+            parent,
+            name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(quarantine.descriptor(), quarantined_name, AtFlags::empty())
+        .map_err(|_| LocalGitFailure::Operation)?;
+    if entry_identity(parent, name)?.is_some() {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
 }
 
 pub(super) fn index_installation_mode(
@@ -592,13 +659,12 @@ pub(super) fn remove_owned_index_lock(
     lock: &fs::File,
     identity: FileIdentity,
 ) {
-    let path_identity = entry_identity(parent, lock_name).ok().flatten();
     let descriptor_identity = lock
         .metadata()
         .map(|metadata| file_identity(&metadata))
         .ok();
-    if path_identity == Some(identity) && descriptor_identity == Some(identity) {
-        let _ = unlinkat(parent, lock_name, AtFlags::empty());
+    if descriptor_identity == Some(identity) {
+        let _ = remove_entry_if_identity(parent, lock_name, identity, AtFlags::empty());
     }
 }
 
