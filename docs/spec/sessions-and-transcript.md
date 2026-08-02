@@ -929,6 +929,12 @@ safe point in ordinal order. An idle recipient gets one delegation-origin queued
 turn, and further messages coalesce into its starting frontier in the same order
 until activation.
 
+Request-carried task and message content has no separate raw-text capacity: the
+complete canonical `spawn_session` or `send_session_message` argument object,
+including JSON framing and escaping, must fit the 1 MiB normalized-tool-argument
+bound. Returned `DelegationContent` is not a request argument and independently
+admits at most 1 MiB of UTF-8.
+
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
 `DelegationContent` or a typed failed, stopped, or cancelled outcome together

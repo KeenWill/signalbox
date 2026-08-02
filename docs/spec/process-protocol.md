@@ -663,8 +663,11 @@ that variant. Every accepted non-review mutation request — `create_session`,
 - `session_created` with `session_id`;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`; a queued submit names the ordinary
-  origin turn held behind its expected active turn, and a `stop_turn` acceptance
-  names the accepted immediate successor;
+  origin turn held behind its expected active turn;
+- `turn_stop_submitted` with `session_id`, `accepted_input_id`,
+  `acceptance_position`, `turn_id`, selected `descendant_scope`, and nonnegative
+  canonical-decimal `descendant_disposition_count`; it names the accepted
+  immediate successor and exact recorded cascade;
 - `steering_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `source_turn_id`; this is the normal receipt for
   accepted pending steering, which creates no turn;
@@ -701,12 +704,15 @@ that variant. Every accepted non-review mutation request — `create_session`,
   promotion changes no session placement; or
 - `error` with a stable `code` and a non-sensitive `message`.
 
-**Implemented behavior.** An accepted goal mutation returns
-`goal_transition_applied { session_id, event_ordinal, generation }`. A
-successful `read_goal` returns `goal_history_start` with the current generation
-and immutable statement; `goal_history_state` with the current state; one or
-more contiguous `goal_history_item` messages with event ordinal, generation,
-event, and provenance; then `goal_history_end { event_count }`. Each of the two
+**Implemented behavior.** An accepted non-stop goal mutation returns
+`goal_transition_applied { session_id, event_ordinal, generation }`; `stop_goal`
+returns
+`goal_stop_applied { session_id, event_ordinal, generation, descendant_scope, descendant_disposition_count }`,
+where the count is a nonnegative canonical-decimal string. A successful
+`read_goal` returns `goal_history_start` with the current generation and
+immutable statement; `goal_history_state` with the current state; one or more
+contiguous `goal_history_item` messages with event ordinal, generation, event,
+and provenance; then `goal_history_end { event_count }`. Each of the two
 projection frames carries at most one bounded goal text, so even maximally
 JSON-escaped text remains below the frame cap. Because every attached lineage
 has its commissioning event, `event_count` is the exact number of preceding
@@ -1378,15 +1384,16 @@ does not let a client fabricate model provenance. `spawn_session`,
 session, turn, and `tool_request_id`, which must reconstitute one matching
 logical request before any mutation occurs.
 
-`spawn_session` additionally carries bounded `task` and the closed relationship
-object, and returns
+`spawn_session` additionally carries `task` inside the complete bounded
+normalized argument object and the closed relationship object, and returns
 `session_spawned { tool_request_id, child_session_id, relationship }`.
 `await_session` carries the related child and wait mode, and returns either
 `session_await_registered { tool_request_id, child_session_id, mode }` for
 background or
 `session_await_completed { tool_request_id, child_session_id, outcome, content, provenance }`
 for a foreground result already delivered. `send_session_message` carries the
-related peer and bounded content, and returns
+related peer and nonempty content inside the complete bounded normalized
+argument object, and returns
 `session_message_sent { tool_request_id, message_id, direction, ordinal }`.
 Replaying an already-applied logical request returns its recorded receipt.
 

@@ -774,6 +774,11 @@ additional fields are admitted.
   the next relationship message, and returns its identity and ordinal. Either
   side may call it while the other is active, idle, stopped, or cancelled.
 
+A spawned task or sent message must fit as part of its complete canonical 1 MiB
+`NormalizedToolArguments` object; JSON field and escaping overhead therefore
+participate in request admission. The child's returned `DelegationContent` is
+instead admitted against its independent 1 MiB UTF-8 result bound.
+
 `await_session` foreground parking is a logical tool transition, not a physical
 executor kept in flight. It ends any current physical attempt before committing
 `AwaitingChild`; restart therefore resumes from durable wait/result rows and

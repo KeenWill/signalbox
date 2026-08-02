@@ -9,7 +9,8 @@ use crate::{
     SessionId, ToolRequest, ToolRequestId, TurnId,
 };
 
-/// Shared admission bound for delegated messages and returned results.
+/// Returned-result content bound. Request-carried content must also fit its
+/// complete normalized tool-argument envelope.
 pub const MAX_DELEGATION_CONTENT_UTF8_BYTES: usize = 1_048_576;
 
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
@@ -812,16 +813,24 @@ fn validate_outcome(
         return Err(DelegationTransitionFailure::InvalidProvenance);
     }
     let combination_matches = match outcome {
-        DelegationOutcome::ResultReturned { .. } => {
-            matches!(reason, DelegationOutcomeReason::ChildCompleted)
-        }
-        DelegationOutcome::ChildFailed { .. } => {
-            matches!(
-                reason,
-                DelegationOutcomeReason::ChildExecutionFailed
-                    | DelegationOutcomeReason::ChildResultUnavailable
-            )
-        }
+        DelegationOutcome::ResultReturned { .. } => match reason {
+            DelegationOutcomeReason::ChildCompleted => true,
+            DelegationOutcomeReason::ChildExecutionFailed
+            | DelegationOutcomeReason::ChildResultUnavailable
+            | DelegationOutcomeReason::ChildStopped
+            | DelegationOutcomeReason::ChildCancelled
+            | DelegationOutcomeReason::ParentStopped { .. }
+            | DelegationOutcomeReason::ParentCancelled { .. } => false,
+        },
+        DelegationOutcome::ChildFailed { .. } => match reason {
+            DelegationOutcomeReason::ChildExecutionFailed
+            | DelegationOutcomeReason::ChildResultUnavailable => true,
+            DelegationOutcomeReason::ChildCompleted
+            | DelegationOutcomeReason::ChildStopped
+            | DelegationOutcomeReason::ChildCancelled
+            | DelegationOutcomeReason::ParentStopped { .. }
+            | DelegationOutcomeReason::ParentCancelled { .. } => false,
+        },
         DelegationOutcome::ChildStopped { .. } => {
             reason == DelegationOutcomeReason::ChildStopped
                 || descendant_action(relation.policy, reason) == Some(BoundChildAction::Stop)
@@ -1031,7 +1040,23 @@ impl std::fmt::Display for DelegationTransitionError {
         )
     }
 }
-impl std::error::Error for DelegationTransitionError {}
+impl std::error::Error for DelegationTransitionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.failure {
+            DelegationTransitionFailure::InvalidTaskContent(error) => Some(error),
+            DelegationTransitionFailure::SameSession
+            | DelegationTransitionFailure::AlreadyTerminal
+            | DelegationTransitionFailure::MissingSpawnEvent
+            | DelegationTransitionFailure::InvalidProvenance
+            | DelegationTransitionFailure::InvalidToolRequestPurpose
+            | DelegationTransitionFailure::DuplicateMessageIdentity
+            | DelegationTransitionFailure::ConflictingMessageReplay
+            | DelegationTransitionFailure::DuplicateOutcomeAuthority
+            | DelegationTransitionFailure::OutcomeReasonMismatch
+            | DelegationTransitionFailure::EventOrdinalExhausted => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1238,6 +1263,7 @@ mod tests {
                 crate::NonEmptyUnicodeTextFailure::Empty
             ))
         );
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     /// S18 / INV-010: a foreground delivery registration yields the exact slot-retaining wait.
@@ -1281,9 +1307,9 @@ mod tests {
         assert_eq!(registration.foreground_subject(), None);
     }
 
-    /// S18 / INV-010: the spawning request cannot masquerade as a later await request.
+    /// S18 / INV-010: await arguments must authorize the selected delivery mode.
     #[test]
-    fn s18_inv010_wait_registration_requires_distinct_parent_work() {
+    fn s18_inv010_wait_registration_requires_exact_mode() {
         let spawning_request = request(2);
         let relation = SessionDelegation::spawn(
             &spawning_request,
@@ -1298,6 +1324,35 @@ mod tests {
         assert_eq!(
             error.failure(),
             DelegationTransitionFailure::InvalidToolRequestPurpose
+        );
+    }
+
+    /// S18 / INV-010: the spawning request cannot masquerade as a later await request.
+    #[test]
+    fn s18_inv010_wait_registration_requires_distinct_request_identity() {
+        let spawning_request = request(2);
+        let colliding_request = named_request_with_id(
+            2,
+            AWAIT_SESSION_TOOL_NAME,
+            serde_json::json!({
+                "child_session_id": session_id(3).as_uuid().to_string(),
+                "mode": wait_mode_argument(DelegationWaitMode::Foreground),
+            }),
+            spawning_request.id(),
+        );
+        let relation = SessionDelegation::spawn(
+            &spawning_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let error = relation
+            .register_wait(&colliding_request, DelegationWaitMode::Foreground)
+            .expect_err("spawn identity cannot be reused for a wait");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidProvenance
         );
     }
 
