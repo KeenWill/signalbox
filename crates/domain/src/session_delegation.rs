@@ -1183,10 +1183,12 @@ mod tests {
     #[test]
     fn s19_inv010_bound_child_follows_parent_stop_policy() {
         let parent_request = request(2);
+        let parent_session = parent_request.session();
+        let parent_command = command_id(5);
         let provenance = DelegationProvenance::from_parent_command(
-            session_id(2),
+            parent_session,
             parent_request.turn(),
-            command_id(5),
+            parent_command,
         );
         let relation = SessionDelegation::spawn(
             &parent_request,
@@ -1208,7 +1210,7 @@ mod tests {
         assert_eq!(relation.lifecycle(), DelegationLifecycle::Terminal);
         assert_eq!(
             provenance.parent_command(),
-            Some((session_id(2), parent_request.turn(), command_id(5)))
+            Some((parent_session, parent_request.turn(), parent_command))
         );
     }
 
