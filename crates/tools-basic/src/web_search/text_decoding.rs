@@ -271,10 +271,15 @@ pub(super) fn decode_html_character_reference(entity: &str) -> Option<String> {
         "amp" | "AMP" => Some("&"),
         "apos" => Some("'"),
         "ast" => Some("*"),
+        "copy" | "COPY" => Some("©"),
         "gt" | "GT" => Some(">"),
+        "hellip" => Some("…"),
         "lt" | "LT" => Some("<"),
+        "mdash" => Some("—"),
         "nbsp" => Some("\u{a0}"),
+        "ndash" => Some("–"),
         "quot" | "QUOT" => Some("\""),
+        "rsquo" => Some("’"),
         _ => None,
     };
     if let Some(named) = named {

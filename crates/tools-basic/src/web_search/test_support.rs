@@ -107,6 +107,12 @@ pub(super) const FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE: &str = "Synthetic R&D; r
 pub(super) const FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
     "Synthetic &copy; snippet";
 
+pub(super) const FIXTURE_COMMON_NAMED_REFERENCES_SNIPPET: &str =
+    "Synthetic &copy; &mdash; &ndash; &hellip; &rsquo; snippet";
+
+pub(super) const FIXTURE_ESCAPED_COMMON_NAMED_REFERENCES_SNIPPET: &str =
+    "Synthetic &amp;copy; &amp;mdash; &amp;ndash; &amp;hellip; &amp;rsquo; snippet";
+
 pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE: &str = "nbsp";
 
 pub(super) const SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE: &str = "\u{a0}";
