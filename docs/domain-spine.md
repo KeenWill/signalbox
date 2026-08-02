@@ -54,11 +54,12 @@ impl <Identity> {
 }
 ```
 
-The twenty-one identities defined in `lib.rs`:
+The twenty-two identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
 pub struct SessionId(/* private */);
+pub struct DelegationMessageId(/* private */);
 pub struct ImportedConversationId(/* private */);
 pub struct ImportedTranscriptEntryId(/* private */);
 pub struct AcceptedInputId(/* private */);
@@ -578,6 +579,7 @@ impl SessionTemplateProvenance {
 ```rust
 pub enum SessionCreationCause {
     UserInitiated,
+    Delegated { spawning_request: ToolRequestId },
 }
 
 pub struct TranscriptFrontier { /* private */ }
@@ -604,6 +606,7 @@ pub enum TranscriptAncestry {
 pub struct SessionCreationProvenance { /* private */ }
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
+    pub const fn delegated(spawning_request: ToolRequestId) -> Self;
     // accessors: cause(), ancestry()
 }
 
@@ -717,6 +720,7 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
     ImportedSessionSeedUnavailable,
+    DelegatedAncestryMismatch,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -742,6 +746,7 @@ impl PreparedCreateSession {
 
 pub enum CreateSessionPreparationFailure {
     TranscriptAncestryUnavailable,
+    DelegatedCreationRequiresSpawn,
 }
 
 pub struct CreateSessionPreparationError { /* private */ }
@@ -784,6 +789,7 @@ pub enum CreateSessionReconstitutionFailure {
     TemplateProvenanceMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
+    DelegatedCreationRequiresSpawn,
     DefaultsVersionIsNotFirst,
     DefaultsMismatch,
 }
@@ -800,6 +806,113 @@ pub struct ReconstitutedSessionCreation { /* private */ }
 // sealed: CreateSessionReconstitutionInput::reconstitute; authorizes no effect
 impl ReconstitutedSessionCreation {
     // accessors: command(), session(), applied_result()
+}
+```
+
+## domain: session_delegation
+
+```rust
+pub enum BoundChildAction { KeepRunning, Stop, Cancel }
+pub enum ChildRelationshipPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: BoundChildAction,
+        on_parent_cancelled: BoundChildAction,
+    },
+}
+pub enum DelegationWaitMode { Foreground, Background }
+pub enum DescendantTerminationScope { ParentAlone, ParentAndDescendants }
+pub enum ParentTerminationKind { Stopped, Cancelled }
+pub struct ParentTerminationAuthority { /* private applied command authority */ }
+impl ParentTerminationAuthority {
+    // accessors: parent(), turn(), command(), scope(), kind()
+}
+
+pub struct DelegationContent(/* private NonEmptyUnicodeText */);
+impl DelegationContent {
+    pub const MAX_UTF8_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, DelegationContentError>;
+    pub fn as_str(&self) -> &str;
+    pub fn from_assistant_text(parts: &[AssistantText]) -> Result<Self, DelegationContentError>;
+}
+pub enum DelegationContentError {
+    Invalid(NonEmptyUnicodeTextFailure),
+    Oversized { utf8_byte_length: usize },
+}
+pub enum DelegationRequestFailure {
+    InvalidToolRequestPurpose,
+    InvalidContent(DelegationContentError),
+}
+pub struct DelegationRequestError { /* private unchanged ToolRequest + failure */ }
+impl DelegationRequestError {
+    pub fn into_request(self) -> ToolRequest;
+    // accessors: request(), failure()
+}
+pub struct DelegatedSpawnRequest { /* private canonical request + task + policy */ }
+impl DelegatedSpawnRequest {
+    pub fn parse(request: ToolRequest, policy: ChildRelationshipPolicy)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), task(), policy()
+}
+pub struct DelegationAwaitRequest { /* private canonical request + child + mode */ }
+impl DelegationAwaitRequest {
+    pub fn parse(request: ToolRequest, child: SessionId, mode: DelegationWaitMode)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), child(), mode()
+}
+pub struct DelegationMessageRequest { /* private canonical request + peer + content */ }
+impl DelegationMessageRequest {
+    pub fn parse(request: ToolRequest, peer: SessionId, content: DelegationContent)
+        -> Result<Self, DelegationRequestError>;
+    // accessors: request(), peer(), content()
+}
+
+pub struct TerminalChildTurn { /* private checked terminal scheduling evidence, exact reason, and result digest */ }
+impl TerminalChildTurn {
+    pub fn from_scheduling(
+        value: &AcceptedInputTurnSchedulingProjection,
+        reason: DelegationOutcomeReason,
+        assistant_text: &[AssistantText],
+    ) -> Option<Self>;
+    // accessors: session(), turn()
+}
+
+pub struct DelegationProvenance { /* private typed authority */ }
+impl DelegationProvenance {
+    pub fn from_spawn(request: &DelegatedSpawnRequest) -> Self;
+    pub fn from_await(request: &DelegationAwaitRequest) -> Self;
+    pub fn from_message(request: &DelegationMessageRequest) -> Self;
+    pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
+    pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
+    // accessors: tool_request(), child_turn(), parent_command()
+}
+
+pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
+pub struct DelegationMessage { /* private */ }
+impl DelegationMessage {
+    // accessors: id(), direction(), content(), provenance()
+}
+pub enum DelegationOutcomeReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildCancelled,
+    ParentStopped { scope: DescendantTerminationScope },
+    ParentCancelled { scope: DescendantTerminationScope },
+}
+pub enum DelegationOutcome {
+    ResultReturned { content: DelegationContent, reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ChildFailed { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ChildStopped { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ChildCancelled { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+    ContinueRunning { reason: DelegationOutcomeReason, provenance: DelegationProvenance },
+}
+pub struct ChildWait { /* private awaiting request + spawning request + child */ }
+impl ChildWait {
+    // accessors: awaiting_request(), spawning_request(), child()
+}
+pub struct DelegationWait { /* private */ }
+impl DelegationWait {
+    // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
 ```
 
@@ -7892,11 +8005,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types         |
 | -------------------------------------------------- | -------------------- |
-| domain: lib.rs identities                          | 21                   |
+| domain: lib.rs identities                          | 22                   |
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
+| domain: session_delegation                         | 21                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -7924,7 +8038,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **599 (+7 free fn)** |
+| **signalbox-domain total**                         | **621 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

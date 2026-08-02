@@ -876,6 +876,82 @@ provider-neutral messages and binds the frozen epoch's optional session system
 prompt; multi-source system-prompt composition remains deferred under the open
 edges of [model-call-execution](model-call-execution.md).
 
+## Session delegation
+
+This section is the foundation proposal at the bottom of the session-delegation
+stack and becomes verified only with that stack's scheduling and tool/client
+pull requests. A delegated child is a distinct, independently browsable session.
+Its `SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`;
+its `TranscriptAncestry` is independently `None`. Delegation does not copy,
+reference, merge, or expose the parent transcript, and it does not widen the
+none-or-one ancestry baseline.
+
+The child copies the complete `SessionConfigurationDefaults` value from the
+immutable defaults epoch frozen to the parent turn that owns the spawning
+request. The spawn transaction resolves that stored epoch through the parent
+turn's frozen defaults version and establishes the exact copy as the child's
+defaults version one. It never reads the parent's current-defaults pointer for
+this choice, so replacement after parent-turn acceptance, including replacement
+while the spawn request awaits approval or execution, cannot change the child.
+Tool arguments supply no defaults field.
+
+Each spawning request creates at most one immutable parent/child relationship.
+The relationship records the exact parent session and turn, child session, and
+one parent-chosen policy:
+
+- `Background` never derives a child stop or cancellation from a parent state;
+- `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
+  each exactly `KeepRunning`, `Stop`, or `Cancel`.
+
+A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
+`ParentAlone` does not evaluate descendants. The descendant form walks the
+durable relationship tree: background edges and bound `KeepRunning` edges
+produce explicit continue-running dispositions, while bound stop/cancel actions
+produce the corresponding typed outcome. Every evaluated relationship records an
+outcome with the parent event, exact spawn request, and user command provenance.
+No path deletes the child or its history, and neither a continued child nor a
+terminated child can become a silent orphan or silent kill.
+
+One parent may have at most 32 active direct children. The fixed bound is part
+of admission, needs no configuration knob, and does not bound completed
+relationships or descendant depth. Exceeding it is a typed spawn refusal and
+creates no child.
+
+Delegation messages are immutable, bounded, nonempty content records with a
+distinct `DelegationMessageId`, the spawning relationship, exact sender and
+recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
+child may each send to the other before or after either session stops, cancels,
+or completes. `DelegationMessage` semantic entries refer to those records; they
+do not reclassify model-authored content as input from the user. Undelivered
+messages remain FIFO. An active recipient consumes them at the next model-call
+safe point in ordinal order. An idle recipient gets one delegation-origin queued
+turn, and further messages coalesce into its starting frontier in the same order
+until activation.
+
+A child result is delivered content, never transcript access. Its immutable
+record targets the exact spawning request and carries either the returned
+`DelegationContent` or a typed failed, stopped, or cancelled outcome together
+with exact provenance. Returned content, failure, and a child's own cancellation
+carry the exact terminal child turn. Reconciliation-required work is not
+terminal delegation evidence and produces no outcome. A parent-policy stop or
+cancellation instead carries opaque authority from the exact applied parent
+termination result, exposing its parent session, turn, durable user command,
+command kind, and descendant scope. Raw identities cannot construct that
+authority, and the recorded outcome reason must match its command kind and
+scope. `ChildStopped` is produced only by a parent-policy stop; the existing
+child scheduling projection proves cancellation but does not fabricate a
+distinct stopped outcome from that evidence. Delivery appends a
+`DelegationResult` semantic entry only to the target parent and is idempotent by
+the spawning request. A detached child may return after the parent has stopped
+or cancelled; the result remains durable and independently inspectable even when
+no parent turn can consume it.
+
+**Committed unimplemented functionality.** A spawned child defaults into its
+parent's directory. No present delegation or placement surface implements or
+derives this default; its implementation is deferred to the session-placement
+surface. This compatibility constraint does not copy the parent's complete
+placement and this stack implements no placement logic.
+
 ## Open edges
 
 - Native fork creation remains typed but unimplemented: `SingleSource` ancestry
@@ -896,8 +972,10 @@ edges of [model-call-execution](model-call-execution.md).
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
 - Assistant text, tool-use/result references, completed-turn, steering, and
-  cancelled-turn semantic entries are implemented; refusal, reconciliation,
-  approval-event, and delegation entry variants remain open.
+  cancelled-turn semantic entries are implemented. The session-delegation stack
+  adds delegation-message and delegation-result entries. Refusal,
+  reconciliation, mismatch, accepted-risk, and approval-event variants remain
+  open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

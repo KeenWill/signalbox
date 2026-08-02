@@ -20,8 +20,8 @@ specification diff. Accepted cross-component and wire contracts live in the
   origin-accepted-input and failed-turn payloads plus their eligibility and
   terminal-failure commit boundaries, together with assistant text, logical
   tool-use and tool-result references, completed-turn markers, and their commit
-  boundaries. Refusal, reconciliation, mismatch, accepted-risk, approval-event,
-  and delegation variants remain open together with rich assistant content and
+  boundaries. Refusal, reconciliation, mismatch, accepted-risk, and
+  approval-event variants remain open together with rich assistant content and
   provider/client rendering. The tool-result content extension is tracked under
   [Tool safety](#tool-safety). The steering payload and stop marker are fixed by
   the steering and stop decision. Imported semantic history is owned separately
@@ -75,19 +75,8 @@ specification diff. Accepted cross-component and wire contracts live in the
   discovery of unimported sources beyond the explicit directory scan is not.
   (S28)
 
-## Delegation
+## Transcript ancestry
 
-- **Parent cancellation propagation to active delegated children.** Leaning:
-  explicit relationship policy with visible child outcomes. Blocks delegation.
-  (S18, S19)
-- **Detached delegated work in version one.** Leaning: exclude unless a core
-  scenario proves need. Blocks delegation scope. (S18, S19)
-- **Representation of child results in the parent conversation.** Leaning:
-  structured durable reference plus explicit delivered content. Blocks
-  delegation. (S18, S19)
-- **Waits on delegated children and the progressing-turn slot.** The accepted
-  turn lifecycle defers child waits to the delegation decision. Blocks
-  delegation. (S18, S19)
 - **Multi-source or merged transcript ancestry.** Accepted baseline is none or
   one immutable source frontier with an explicit extension boundary. Deferrable.
   (S17)
