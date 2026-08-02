@@ -28,12 +28,13 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified against this PR (`agent/plan-tool`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the session-placement event, current
-head, and update lock were verified through this PR (`agent/scoped-visibility`).
-This page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+head, and creation transaction were verified through this PR
+(`agent/scoped-visibility-creation`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -43,9 +44,8 @@ INV-tagged tests; this page cites tags resolved through the generated
 [invariant index](../invariants.md). The runner-orchestration transaction and
 lock paragraphs are the foundation proposal at the bottom of their implementing
 stack and become verified only with those child pull requests. The
-session-placement representation and transaction are the foundation proposal at
-the bottom of their implementing stack and become verified with its child pull
-request.
+session-placement update transaction is the foundation proposal at the bottom of
+its implementing stack and becomes verified only with its child pull request.
 
 ## Stack and boundaries
 
@@ -77,12 +77,17 @@ Concrete mapping rules:
 Migration `202608020016_session_placement_path.sql` adds the append-only
 `session_placement_event` history, its one-row mutable current pointer, and the
 typed `update_session_placement_command` record. Every existing session is
-backfilled with a pathless version-one creation event. New creation records use
-storage version 6, store the optional path and explicit root-global-read-intent
-bit, and append the same event atomically with the session. Checks make the
-intent bit true exactly for a one-segment root path and false for pathless and
-non-root scoped values. The current pointer may advance only to the next event;
-event rows and typed command records are immutable.
+backfilled with a pathless version-one creation event. Post-migration legacy
+native creation records below storage version 6 and imported creation records
+materialize that same pathless event and head when their typed creation receipt
+is inserted, so a daemon spanning the migration cannot create an unreadable
+session. A deferred reverse check requires every newly inserted session to end
+its transaction with a complete selected placement event. New native creation
+records use storage version 6, store the optional path and explicit
+root-global-read-intent bit, and append the same event atomically with the
+session. Checks make the intent bit true exactly for a one-segment root path and
+false for pathless and non-root scoped values. The current pointer may advance
+only to the next event; event rows and typed command records are immutable.
 
 Connection options are explicit: production parsing forces
 `PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing

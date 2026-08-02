@@ -63,7 +63,7 @@ use signalbox_domain::{
     TurnId, UserContent,
 };
 use signalbox_persistence::{
-    MIGRATOR,
+    MIGRATOR, ModelCredentialFamilyCatalog,
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
@@ -84,7 +84,8 @@ use signalbox_persistence::{
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
+        ProcessModelCallInputTokenSemantics, ProcessModelCallRecoveryPrecondition,
+        ProcessModelCallUsageProvenance, ProcessModelSelection,
         ProcessProviderModelCallFailureCause, ProcessReadCorruption, ProcessReadError,
         ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
         ProcessTranscriptEntry, ProcessTurnState,
@@ -303,6 +304,162 @@ async fn session_model_credentials_are_an_append_only_creation_snapshot()
     assert_eq!(
         delete_head_database_error.message(),
         "session model credential head is not deletable"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A call keeps the credential profile selected from its creation-time event
+/// after a later credential event advances the session head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_usage_keeps_credential_pin_after_update_event() -> Result<(), Box<dyn Error>> {
+    const FAMILY: &str = "cost-proof-family";
+    const SUBSCRIPTION_PROFILE: &str = "cost-proof-subscription";
+    const API_PROFILE: &str = "cost-proof-api";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(0xcf01));
+    let session = SessionId::from_uuid(Uuid::from_u128(0xcf02));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcf03));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xcf04));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xcf05));
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xcf06));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0xcf07)));
+    let pin = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        FAMILY,
+        SUBSCRIPTION_PROFILE,
+    )])
+    .expect("fixture credential snapshot is valid");
+    CreateSessionRepository::new(pool.clone(), pin)
+        .handle(prepared(
+            command.into_uuid().as_u128(),
+            session.into_uuid().as_u128(),
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xcf08,
+                session.into_uuid().as_u128(),
+                "credential pin cost proof",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xcf09)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xcf0a),
+            starting_frontier: Uuid::from_u128(0xcf0b),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one credential proof target forms a catalog");
+    let credential_families =
+        ModelCredentialFamilyCatalog::try_new([(target, Arc::<str>::from(FAMILY), None)])
+            .expect("one target-to-family route forms a catalog");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-fallback"),
+    )
+    .with_session_credentials(credential_families);
+    let prepared_call = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf0c)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcf0d)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xcf0e)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf0f)),
+                    TurnId::from_uuid(Uuid::from_u128(0xcf10)),
+                )
+            },
+        )
+        .await?;
+    assert_eq!(
+        prepared_call,
+        PrepareInitialModelCallOutcome::Checkpointed(call)
+    );
+    repository
+        .fail_prepared_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcf12)),
+            ),
+            |_| TurnId::from_uuid(Uuid::from_u128(0xcf13)),
+        )
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO session_model_credential_record
+            (session_id, event_ordinal, event_kind, provenance_kind,
+             provenance_command_id, recorded_at)
+         VALUES ($1, 2, 'updated', 'credential_update', $2, transaction_timestamp())",
+    )
+    .bind(session.into_uuid())
+    .bind(command.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_model_credential_entry
+            (session_id, event_ordinal, model_family, credential_reference)
+         VALUES ($1, 2, $2, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(FAMILY)
+    .bind(API_PROFILE)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_model_credentials
+            SET current_event_ordinal = 2
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        current_session_credential(&pool, session, FAMILY)
+            .await?
+            .as_str(),
+        API_PROFILE
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the terminal call has a transcript projection");
+    assert_eq!(snapshot.model_call_usage().len(), 1);
+    let usage = &snapshot.model_call_usage()[0];
+    assert_eq!(usage.call(), call);
+    assert_eq!(usage.target(), target);
+    assert_eq!(usage.credential_profile(), SUBSCRIPTION_PROFILE);
+    assert_eq!(
+        usage.provenance(),
+        ProcessModelCallUsageProvenance::Reported
+    );
+    assert_eq!(
+        usage.input_token_semantics(),
+        Some(ProcessModelCallInputTokenSemantics::CacheExclusive)
     );
 
     pool.close().await;
@@ -5486,6 +5643,94 @@ async fn model_call_usage_rejects_fractional_evidence_without_rounding()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_usage_provenance_rejects_unknown_values() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6d40, true).await?;
+
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                usage_provenance_kind = 'inferred'
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("the usage provenance vocabulary is closed");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.constraint()),
+        Some("model_call_usage_provenance_kind_closed")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_input_semantics_are_immutable() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6d60, true).await?;
+
+    let stored: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(!stored);
+    let error = sqlx::query(
+        "UPDATE model_call
+            SET usage_input_includes_cache_tokens = true
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared call's input semantics must be immutable");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_usage_metadata_immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_input_semantics_keep_historical_unknown_and_new_default()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let (is_nullable, column_default): (String, Option<String>) = sqlx::query_as(
+        "SELECT is_nullable, column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'model_call'
+            AND column_name = 'usage_input_includes_cache_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(is_nullable, "YES");
+    assert_eq!(column_default.as_deref(), Some("false"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]
@@ -7159,8 +7404,8 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
 }
 
 /// S01 / S20 / S21 / INV-014 / INV-015 / INV-032 / INV-035: the production
-/// persistence chain checkpoints Prepared with its non-secret credential
-/// reference, reloads that reference instead of a changed deployment value,
+/// persistence chain checkpoints Prepared with its credential and input-token
+/// semantics pins, reloads them instead of changed deployment values,
 /// separately authorizes send, and atomically commits exact assistant content,
 /// completion, terminal frontier, lifecycle, call, attempt, and typed outbox
 /// records.
@@ -7231,9 +7476,10 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     assert_eq!(activated.turn(), turn);
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe1));
+    let resolved_target = ResolvedProviderTarget::naming(provider_identity);
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         direct_selection,
-        ResolvedProviderTarget::naming(provider_identity),
+        resolved_target,
     )])
     .expect("one immutable direct target forms a catalog");
     let pinned_credential_reference = model_credential_reference();
@@ -7241,7 +7487,8 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         pool.clone(),
         targets.clone(),
         pinned_credential_reference.clone(),
-    );
+    )
+    .with_cache_inclusive_input_targets(HashSet::from([resolved_target]));
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xce2));
     let PrepareInitialModelCallOutcome::Checkpointed(checkpointed_call) = repository
         .prepare_initial_call(
@@ -7301,6 +7548,16 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     assert_eq!(prepared.attempt(), attempt);
     assert_eq!(prepared.call().id(), call);
     assert_eq!(prepared.call().target().identity(), provider_identity);
+    let input_includes_cache_tokens: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(input_includes_cache_tokens);
+
     assert_eq!(prepared.frontier_entries().len(), 1);
     assert_eq!(
         prepared

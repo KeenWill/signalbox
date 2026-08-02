@@ -664,12 +664,14 @@ private actor MockProcessProtocolState {
       "model_call_index": "0",
       "turn_id": turnID,
       "model_call_id": modelCallID,
+      "usage_provenance": "reported",
       "usage": [
         "input_tokens": NSNull(),
         "output_tokens": NSNull(),
         "cache_creation_input_tokens": NSNull(),
         "cache_read_input_tokens": NSNull(),
       ],
+      "cost": NSNull(),
     ]
   }
 

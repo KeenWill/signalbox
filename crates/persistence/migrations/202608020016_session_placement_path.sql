@@ -190,6 +190,94 @@ SELECT session_id, 1, NULL, 'created', NULL, FALSE, command_id,
 INSERT INTO session_current_placement (session_id, current_version)
 SELECT session_id, 1 FROM session_placement_event;
 
+CREATE FUNCTION materialize_legacy_creation_placement()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    matching_event boolean;
+    matching_head boolean;
+BEGIN
+    IF TG_TABLE_NAME = 'create_session_command' AND NEW.storage_version >= 6 THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+          FROM session_placement_event
+         WHERE session_id = NEW.created_session_id
+           AND version = 1
+           AND prior_version IS NULL
+           AND event_kind = 'created'
+           AND placement_path IS NULL
+           AND NOT root_global_read_intent
+           AND provenance_command_id = NEW.command_id
+    ) INTO matching_event;
+    SELECT EXISTS (
+        SELECT 1
+          FROM session_current_placement
+         WHERE session_id = NEW.created_session_id
+           AND current_version = 1
+    ) INTO matching_head;
+
+    IF matching_event AND matching_head THEN
+        RETURN NEW;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM session_placement_event
+         WHERE session_id = NEW.created_session_id
+    ) OR EXISTS (
+        SELECT 1 FROM session_current_placement
+         WHERE session_id = NEW.created_session_id
+    ) THEN
+        RAISE EXCEPTION
+            'legacy session % has a partial or inconsistent placement',
+            NEW.created_session_id
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'legacy_creation_placement_is_consistent';
+    END IF;
+
+    INSERT INTO session_placement_event
+        (session_id, version, prior_version, event_kind, placement_path,
+         root_global_read_intent, provenance_command_id, recorded_at)
+    VALUES
+        (NEW.created_session_id, 1, NULL, 'created', NULL, FALSE,
+         NEW.command_id, transaction_timestamp());
+    INSERT INTO session_current_placement (session_id, current_version)
+    VALUES (NEW.created_session_id, 1);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER legacy_native_creation_materializes_placement
+    AFTER INSERT ON create_session_command
+    FOR EACH ROW EXECUTE FUNCTION materialize_legacy_creation_placement();
+CREATE TRIGGER legacy_imported_creation_materializes_placement
+    AFTER INSERT ON create_session_from_imported_frontier_command
+    FOR EACH ROW EXECUTE FUNCTION materialize_legacy_creation_placement();
+
+CREATE FUNCTION require_session_placement()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM session_current_placement AS placement_head
+          JOIN session_placement_event AS placement_event
+            ON placement_event.session_id = placement_head.session_id
+           AND placement_event.version = placement_head.current_version
+         WHERE placement_head.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION 'session % requires a complete current placement', NEW.session_id
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'session_requires_placement';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER session_requires_placement
+    AFTER INSERT ON session
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_session_placement();
+
 CREATE OR REPLACE FUNCTION require_durable_command_typed_record()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE matching_records bigint;
