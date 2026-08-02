@@ -914,11 +914,6 @@ impl SessionReconstitutionInput {
             Some(SessionReconstitutionFailure::PlacementSessionMismatch)
         } else if self.current_placement_version != self.current_placement.version() {
             Some(SessionReconstitutionFailure::CurrentPlacementVersionMismatch)
-        } else if matches!(
-            self.provenance.ancestry(),
-            TranscriptAncestry::ImportedConversation { .. }
-        ) {
-            Some(SessionReconstitutionFailure::ImportedSessionSeedUnavailable)
         } else {
             session_provenance_failure(self.provenance)
         };
