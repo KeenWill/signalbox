@@ -1988,13 +1988,25 @@ extension SignalboxToolBatchState {
 
 extension SignalboxTranscriptTurnState {
   fileprivate var snapshotUnknownDiagnostic: SignalboxSnapshotAccumulatorOutcome? {
-    guard case .unknown(let kind, _, _) = self else {
+    switch self {
+    case .activeRunning(_, let currentModelCall):
+      guard case .unknown(let kind, _) = currentModelCall?.state else {
+        return nil
+      }
+      return .diagnostic(
+        kind: "transcript_turn.state.active_running.current_model_call.state.\(kind)",
+        decodingDiagnostic: nil
+      )
+    case .unknown(let kind, _, _):
+      return .diagnostic(
+        kind: "transcript_turn.state.\(kind)",
+        decodingDiagnostic: nil
+      )
+    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
       return nil
     }
-    return .diagnostic(
-      kind: "transcript_turn.state.\(kind)",
-      decodingDiagnostic: nil
-    )
   }
 }
 

@@ -383,7 +383,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testFutureNestedModelCallStateIsRetainedInAuthoritativeSnapshot() throws {
+  func testFutureNestedModelCallStateIsRetainedAndReportedInAuthoritativeSnapshot() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -395,7 +395,10 @@ final class SessionSynchronizationTests: XCTestCase {
       )
     )
 
-    XCTAssertTrue(effects.isEmpty)
+    XCTAssertEqual(
+      SynchronizationFixture.reportedDiagnosticMessage(in: effects),
+      SynchronizationFixture.unknownSnapshotModelCallStateDiagnostic
+    )
     XCTAssertEqual(
       transport.machine.phase,
       SynchronizationFixture.history(cursor: SynchronizationFixture.initialCursor)
@@ -2637,6 +2640,10 @@ private enum SynchronizationFixture {
   static let unknownTerminalDispositionDiagnostic =
     "Preserved unrecognized session-event content: "
     + "model_call_transition.state.terminal.disposition.fixture_future_disposition."
+  static let unknownSnapshotModelCallStateDiagnostic =
+    "Ignored an unrecognized process-protocol frame kind: "
+    + "transcript_turn.state.active_running.current_model_call.state."
+    + "fixture_future_model_call_state."
 
   static let policy = SignalboxSessionSynchronizationPolicy(
     deadlines: SignalboxSynchronizationDeadlines(

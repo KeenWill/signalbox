@@ -39,7 +39,8 @@ public enum SignalboxProcessServiceError: LocalizedError, Equatable {
       return SignalboxProcessPresentation.retainedLabel("\(code.rawValue): \(message)")
     case .mutationRetryExhausted(let code, let message):
       return SignalboxProcessPresentation.retainedLabel(
-        "\(code.rawValue): \(message) The exact command can be retried."
+        "\(code.rawValue): \(message)",
+        preserving: " The exact command can be retried."
       )
     }
   }

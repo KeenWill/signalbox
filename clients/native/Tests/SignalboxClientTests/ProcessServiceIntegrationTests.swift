@@ -540,6 +540,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testMutationRetryErrorPresentationPreservesGuidanceWhenBounded() throws {
+    let error = SignalboxProcessServiceError.mutationRetryExhausted(
+      code: .unknown(ProcessProjectionFixture.oversizedUnknownState),
+      message: ProcessProjectionFixture.remoteErrorMessage
+    )
+
+    let description = try XCTUnwrap(error.errorDescription)
+
+    XCTAssertEqual(
+      description.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+    XCTAssertTrue(description.hasSuffix(ProcessProjectionFixture.mutationRetryGuidance))
+  }
+
   func testTurnActivationSideProjectionRejectsMissingActivatedTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithoutTurns()
     let trigger = try ProcessProjectionFixture.activatedEvent()
@@ -4350,6 +4365,7 @@ private enum ProcessProjectionFixture {
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
   static let remoteErrorMessage = "Fixture remote error."
+  static let mutationRetryGuidance = " The exact command can be retried."
   static let oversizedUnknownState = String(
     repeating: "x",
     count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
