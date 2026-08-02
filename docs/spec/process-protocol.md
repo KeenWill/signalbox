@@ -130,20 +130,19 @@ import; other connections share the remaining seven. An admitted
 `begin_conversation_import` that must wait for the import permit first enters a
 separate seven-waiter bound, then releases its small decoded frame slot before
 waiting. Further begins retain a general frame slot until a waiter place opens.
-A source-bearing single-shot request
-retains its frame slot while waiting. The reservation therefore preserves frame
-progress for an active append or commit without allowing queued single-shot
-sources to escape the aggregate raw-frame bound. Once admitted, each append
-moves its decoded chunk from the inbound frame into the per-connection assembly
-and releases the frame slot; the configured total-source bound limits that
-assembly. Commit runs the existing whole-source conversion on the blocking pool
-so synchronous conversion does not occupy an asynchronous runtime worker.
-Commit, abort, terminal size or conversion rejection, or disconnect drops the
-assembly and releases the permit before response output. An
-`already_in_progress` refusal is nonterminal and leaves the existing assembly
-available for append, commit, or explicit abort. A peer that stops reading a
-terminal response therefore cannot retain rejected input or completed import
-content.
+A source-bearing single-shot request retains its frame slot while waiting. The
+reservation therefore preserves frame progress for an active append or commit
+without allowing queued single-shot sources to escape the aggregate raw-frame
+bound. Once admitted, each append moves its decoded chunk from the inbound frame
+into the per-connection assembly and releases the frame slot; the configured
+total-source bound limits that assembly. Commit runs the existing whole-source
+conversion on the blocking pool so synchronous conversion does not occupy an
+asynchronous runtime worker. Commit, abort, terminal size or conversion
+rejection, or disconnect drops the assembly and releases the permit before
+response output. An `already_in_progress` refusal is nonterminal and leaves the
+existing assembly available for append, commit, or explicit abort. A peer that
+stops reading a terminal response therefore cannot retain rejected input or
+completed import content.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
