@@ -49,7 +49,7 @@ fn created_reference_directory_replacement_is_never_treated_as_owned() {
             Ok(())
         },
     )
-    .expect("concurrent directory creation is adopted without ownership");
+    .expect("concurrent directory creation is adopted without delete authority");
 
     drop(opened);
     assert!(retired_path.exists());
