@@ -422,6 +422,21 @@ impl fmt::Display for RejectionDisplay {
                 requested_position.value(),
                 last_position.value()
             ),
+            RejectionDetail::ConversationImportAlreadyInProgress {} => {
+                formatter.write_str("conversation_import_already_in_progress")
+            }
+            RejectionDetail::ConversationImportNotInProgress {} => {
+                formatter.write_str("conversation_import_not_in_progress")
+            }
+            RejectionDetail::ConversationImportSourceTooLarge { .. } => {
+                formatter.write_str("conversation_import_source_too_large")
+            }
+            RejectionDetail::ConversationImportSourceSizeMismatch { .. } => {
+                formatter.write_str("conversation_import_source_size_mismatch")
+            }
+            RejectionDetail::ConversationImportConversionFailed { .. } => {
+                formatter.write_str("conversation_import_conversion_failed")
+            }
         }
     }
 }
