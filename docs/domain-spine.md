@@ -918,10 +918,6 @@ pub struct DelegationOutcome { /* private validated kind + content + reason + pr
 impl DelegationOutcome {
     pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
         -> Option<Self>;
-    pub const fn from_parent_policy(
-        authority: ParentTerminationAuthority,
-        action: BoundChildAction,
-    ) -> Option<Self>;
     // accessors: kind(), content(), reason(), provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
@@ -1114,6 +1110,7 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    DelegatedAncestryMismatch,
     AncestryNotImported,
     MissingSeedRecord,
     DuplicateSeedRecord,

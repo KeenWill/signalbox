@@ -700,6 +700,15 @@ pub enum DelegationOutcomeKind {
 }
 
 /// Validated child disposition with typed reason and sealed provenance.
+///
+/// Parent-policy construction remains crate-private so an external caller
+/// cannot bypass the relationship policy chosen at spawn time:
+///
+/// ```compile_fail
+/// use signalbox_domain::DelegationOutcome;
+///
+/// let _ = DelegationOutcome::from_parent_policy;
+/// ```
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DelegationOutcome {
     kind: DelegationOutcomeKind,
@@ -743,7 +752,8 @@ impl DelegationOutcome {
     }
 
     /// Derives a policy disposition from exact applied parent authority.
-    pub const fn from_parent_policy(
+    #[allow(dead_code, reason = "consumed by the stacked delegation aggregate")]
+    pub(crate) const fn from_parent_policy(
         authority: ParentTerminationAuthority,
         action: BoundChildAction,
     ) -> Option<Self> {
