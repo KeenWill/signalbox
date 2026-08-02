@@ -1056,8 +1056,8 @@ detail.
 
 ### Session plan tools
 
-This catalog family is verified through PR #387 (`agent/tool-exercise-smoke`) at
-implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
+This catalog family is verified through PR #385 (`agent/plan-dependencies`) at
+implementation ref `550c0f8a9d46560c5dfade52214f2c91982359db`.
 
 The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
 in both base and fully mapped production composition. `signalboxd` binds their
@@ -1069,21 +1069,23 @@ neither schema accepts a session identity. Both declarations default to `Auto`.
 
 `plan_write` accepts exactly one tagged operation. `create` takes nonempty text
 of at most 4,096 Unicode scalars and creates a pending entry whose identity is
-its positive creation-event ordinal. `revise` replaces the text of one positive
+its positive creation-event ordinal; `revise` replaces the text of one positive
 `entry_id`; `set_status` selects `pending`, `in_progress`, `completed`, or
-`abandoned` for that entry. Text cannot contain U+0000. One successful
-invocation appends exactly one session-local event with the trusted
-physical-attempt provenance and returns that event as compact JSON. A revision
-or status change for an absent entry is a definite known failure and appends
-nothing.
+`abandoned`; and `depends_on` links two existing entries. Text cannot contain
+U+0000. Success appends one event with trusted provenance and returns compact
+JSON. Missing entries and self or cyclic links yield typed known failures and
+append nothing. A thirty-third distinct dependency for one entry yields the
+typed `DependencyLimitReached` known failure and appends nothing; duplicate
+links remain in history but fold once by first append.
 
 `plan_read` accepts an optional positive exclusive `after_entry_id` cursor and
-`include_history`, which defaults to false. It returns folded current entries in
-creation order, at most 100 per page, with `next_after_entry_id` and
-`plan_truncated`; when requested, `history` contains at most 100 chronological
-events and carries an independent `history_truncated` label. Compact-result
-admission may retain a smaller prefix, preserving the matching truncation labels
-instead of returning oversized evidence.
+`include_history`, which defaults to false. It returns at most 100 folded
+entries in creation order, including dependencies and derived `ready` or
+`waiting` readiness: an entry is waiting exactly while any dependency is not
+completed. The page carries `next_after_entry_id` and `plan_truncated`;
+requested `history` contains at most 100 chronological events with independent
+`history_truncated`. Compact admission may retain a smaller prefix while
+preserving those labels.
 
 The merged catalog sorts declarations by checked tool name and rejects
 duplicates during construction. Its executor dispatches only those same four
