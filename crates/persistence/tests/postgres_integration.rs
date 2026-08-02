@@ -21534,6 +21534,12 @@ async fn insert_synthetic_dependency_projection(
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
+    .execute(pool)
+    .await?;
     let inserted = sqlx::query(
         "INSERT INTO session_plan_current_dependency
             (session_id, entry_ordinal, dependency_ordinal,
@@ -21546,6 +21552,12 @@ async fn insert_synthetic_dependency_projection(
     .bind(edge_count)
     .bind(SYNTHETIC_DEPENDENCY_ORDINAL_BASE)
     .bind(SYNTHETIC_EVENT_ORDINAL_BASE)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_predecessor_guard",
+    )
     .execute(pool)
     .await?;
     sqlx::query(
@@ -21958,6 +21970,81 @@ async fn session_plan_dependency_head_prevents_projection_loss() -> Result<(), B
             .as_database_error()
             .and_then(|database| database.constraint()),
         Some("session_plan_head_session_id_dependency_event_ordinal_fkey")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Bypassing projection immutability cannot rewrite the dependency head to
+/// skip the immediately preceding distinct edge.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_predecessor_cannot_skip_an_edge() -> Result<(), Box<dyn Error>> {
+    const NEW_DEPENDENT_TEXT: &str = "preserve the dependency predecessor";
+    const NEW_DEPENDENT_EVENT_ORDINAL: u64 = 4;
+    const NEW_DEPENDENCY_EVENT_ORDINAL: u64 = 5;
+    let new_dependent = PlanEntryId::try_from_u64(NEW_DEPENDENT_EVENT_ORDINAL)
+        .expect("the new dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(NEW_DEPENDENT_TEXT),
+            depends_plan_arguments(new_dependent, prerequisite),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(NEW_DEPENDENT_TEXT),
+        },
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::DependsOn {
+            entry: new_dependent,
+            dependency: fixture.prerequisite,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    let rewrite = sqlx::query(
+        "UPDATE session_plan_current_dependency
+            SET prior_first_event_ordinal = NULL
+          WHERE session_id = $1
+            AND first_event_ordinal = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(NEW_DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await
+    .expect_err("the newest edge must retain its immediate predecessor");
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        rewrite
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_predecessor")
     );
 
     pool.close().await;

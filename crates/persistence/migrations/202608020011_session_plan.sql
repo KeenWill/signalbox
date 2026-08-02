@@ -1048,6 +1048,41 @@ CREATE TRIGGER session_plan_head_rejects_truncate
 BEFORE TRUNCATE ON session_plan_head
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_plan_head_rewrite();
 
+CREATE FUNCTION guard_session_plan_dependency_predecessor()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    expected_predecessor numeric(20, 0);
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        SELECT max(edge.first_event_ordinal)
+          INTO expected_predecessor
+          FROM session_plan_current_dependency AS edge
+         WHERE edge.session_id = NEW.session_id
+           AND edge.first_event_ordinal < NEW.first_event_ordinal
+           AND NOT (
+               edge.session_id = OLD.session_id
+               AND edge.entry_ordinal = OLD.entry_ordinal
+               AND edge.dependency_ordinal = OLD.dependency_ordinal
+           );
+    ELSE
+        SELECT max(edge.first_event_ordinal)
+          INTO expected_predecessor
+          FROM session_plan_current_dependency AS edge
+         WHERE edge.session_id = NEW.session_id
+           AND edge.first_event_ordinal < NEW.first_event_ordinal;
+    END IF;
+    IF NEW.prior_first_event_ordinal IS DISTINCT FROM expected_predecessor THEN
+        RAISE EXCEPTION
+            'session plan dependency predecessor must be immediate'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_plan_dependency_predecessor';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION reject_session_plan_current_dependency_rewrite()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1065,6 +1100,10 @@ $$;
 CREATE TRIGGER session_plan_current_dependency_immutable
 BEFORE INSERT OR UPDATE OR DELETE ON session_plan_current_dependency
 FOR EACH ROW EXECUTE FUNCTION reject_session_plan_current_dependency_rewrite();
+
+CREATE TRIGGER session_plan_current_dependency_predecessor_guard
+BEFORE INSERT OR UPDATE ON session_plan_current_dependency
+FOR EACH ROW EXECUTE FUNCTION guard_session_plan_dependency_predecessor();
 
 CREATE TRIGGER session_plan_current_dependency_rejects_truncate
 BEFORE TRUNCATE ON session_plan_current_dependency
