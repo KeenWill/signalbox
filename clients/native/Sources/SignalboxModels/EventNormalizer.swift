@@ -270,6 +270,7 @@ public enum SignalboxEventNormalizer {
                     eventID: record.eventID,
                     role: .assistant,
                     text: event.text,
+                    unrecognizedKind: nil,
                     thinkingText: nil,
                     isStreaming: false,
                     createdAt: nil,

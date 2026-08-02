@@ -5092,6 +5092,15 @@ private enum ProcessProjectionFixture {
     return event
   }
 
+  static func conservativeEvent(
+    in record: SignalboxStoredEvent
+  ) throws -> SignalboxProcessConservativeEvent {
+    guard case .processConservative(let event) = record.event else {
+      throw ProcessDriverUpdateRecorderError.expectedUnknownEvent
+    }
+    return event
+  }
+
   static func snapshotWithFailedProviderCause() throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithFailedModelCall(
       disposition: "known_failed",
@@ -7398,6 +7407,8 @@ extension ProcessProjectionFixture {
         return .message
       case .tool:
         return .tool
+      case .processEvidence:
+        return .processEvidence
       case .turnFailure:
         return .turnFailure
       case .unknown:
@@ -7410,6 +7421,7 @@ extension ProcessProjectionFixture {
 private enum ProcessTimelineFixtureKind: Equatable {
   case message
   case tool
+  case processEvidence
   case turnFailure
   case unknown
 }
