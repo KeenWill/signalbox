@@ -2028,6 +2028,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     for acceptedInput in acceptedInputs {
       retainAcceptedInputAwaitingTranscript(acceptedInput)
     }
+    guard mutationBlocksByTurnID.isEmpty else {
+      return
+    }
     activity =
       if pendingInputs.isEmpty {
         terminalActivity

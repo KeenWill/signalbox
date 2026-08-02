@@ -1000,6 +1000,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testTerminalReplayPreservesAnotherTurnsUnknownActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let terminal = try ProcessProjectionFixture.submittedTurnRefusedEvent()
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownTurnState(),
+        trigger: terminal
+      )
+    )
+
+    viewModel.apply(.event(terminal))
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
   func testUnknownToolBatchStateRequiresRecovery() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -5511,11 +5534,21 @@ private enum ProcessProjectionFixture {
   }
 
   static func refusedEvent() throws -> SignalboxFollowedSessionEvent {
+    try refusedEvent(turnID: ProcessDriverFixture.turn)
+  }
+
+  static func submittedTurnRefusedEvent() throws -> SignalboxFollowedSessionEvent {
+    try refusedEvent(turnID: ProcessSubmissionFixture.acceptedTurnID)
+  }
+
+  private static func refusedEvent(
+    turnID: String
+  ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
       {
         "type":"turn_refused",
-        "turn_id":"\(ProcessDriverFixture.turn)",
+        "turn_id":"\(turnID)",
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
         "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
       }
