@@ -1057,7 +1057,7 @@ detail.
 ### Session plan tools
 
 This catalog family is verified through PR #385 (`agent/plan-dependencies`) at
-implementation ref `c9ca8ba54e2f93cb3a715321ffcae605ce925bed`.
+implementation ref `e1cf2d0953a87f2654815fde77bd9b755df8156c`.
 
 The process-lifetime daemon catalog always includes `plan_write` and `plan_read`
 in both base and fully mapped production composition. `signalboxd` binds their
@@ -1074,7 +1074,9 @@ its positive creation-event ordinal; `revise` replaces the text of one positive
 `abandoned`; and `depends_on` links two existing entries. Text cannot contain
 U+0000. Success appends one event with trusted provenance and returns compact
 JSON. Missing entries and self or cyclic links yield typed known failures and
-append nothing; duplicate links remain in history but fold once by first append.
+append nothing. A thirty-third distinct dependency for one entry yields the
+typed `DependencyLimitReached` known failure and appends nothing; duplicate
+links remain in history but fold once by first append.
 
 `plan_read` accepts an optional positive exclusive `after_entry_id` cursor and
 `include_history`, which defaults to false. It returns at most 100 folded
