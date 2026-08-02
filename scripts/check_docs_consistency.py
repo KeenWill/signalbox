@@ -3565,6 +3565,12 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     number not in integration_branches
                     and (event_match or local_match)
                 )
+                shed_carrier = carrier is None and any(
+                    identity[0] == number
+                    and identity[1] == branch
+                    and identity[2] is not None
+                    for identity in inherited_identities
+                )
                 if carrier is not None:
                     if history_error is not None:
                         violations.append(
@@ -3659,7 +3665,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     continue
                 if historical_match or inherited_match:
                     continue
-                if in_flight_match:
+                if in_flight_match and not shed_carrier:
                     candidate_identity = (number, branch)
                     if in_flight_identity is None:
                         in_flight_identity = candidate_identity
@@ -3672,7 +3678,7 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     )
                 elif event_error is not None:
                     message = f"cannot inspect GitHub pull-request event: {event_error}"
-                elif in_flight_match:
+                elif in_flight_match and not shed_carrier:
                     message = "only one unmerged verification PR identity is permitted"
                 elif number not in integration_branches:
                     message = (

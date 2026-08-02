@@ -3213,6 +3213,53 @@ class DocsConsistencyTests(unittest.TestCase):
             failures[0].message,
         )
 
+    def test_inherited_carrier_cannot_shed_its_tail_via_self_citation(
+        self,
+    ) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        carried_page = (
+            "# Example\n\n"
+            "Verified through PR #100 (`agent/stack-child`; via PR #77 "
+            "`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n"
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            carried_page, encoding="utf-8"
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #100 (`agent/stack-child`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
     def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
         run_git(
             self.root,

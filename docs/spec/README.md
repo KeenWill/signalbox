@@ -21,9 +21,14 @@ reference is accepted only when `#N` itself has no first-parent merge commit and
 the carrier's number and branch either match one or name the single in-flight
 pull request (the event identity, or the checked-out branch locally, and never
 the reference's own pull request) — a carrying merge cannot precede the
-carrier's own pull request, and a carrier claim is revalidated wherever it
-appears, inherited or not. `scripts/check_docs_consistency.py` enforces this
-form. The historical ADR corpus these pages distilled is retired: the
+carrier's own pull request. Inheritance preserves a carried reference's tail
+exactly, so a base page's carrier cannot be dropped by a child that merely
+repeats it; a matching inherited carrier that has not yet entered integration
+history stays accepted on that basis alone, deferring judgment to the
+integration branch's own run once the stack lands, while a primary with its own
+merge commit or a reference naming itself as carrier rejects even when
+inherited. `scripts/check_docs_consistency.py` enforces this form. The
+historical ADR corpus these pages distilled is retired: the
 [ADR mapping](#adr-mapping) below resolves every record number to its
 destination, and git history is the archive.
 
