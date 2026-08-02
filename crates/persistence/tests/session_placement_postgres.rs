@@ -181,7 +181,7 @@ async fn cross_wire_initial_placement_provenance(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_rejects_reserved_command_identities_before_claim()
+async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_claim()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x230);
@@ -1029,7 +1029,7 @@ async fn s36_rejected_update_replay_authenticates_the_reported_current_version()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_applied_update_replay_requires_the_event_to_reach_the_current_head()
+async fn s36_inv012_applied_update_replay_requires_the_event_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x223);
