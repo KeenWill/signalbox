@@ -63,6 +63,12 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 /// Maximum encoded frame size, including its final newline.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// Maximum decoded source bytes carried by one conversation-import append.
+///
+/// The half-frame raw-byte bound leaves fixed headroom for canonical padded
+/// base64, the request envelope, and the maximum-width correlation identity.
+pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
+
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
@@ -1203,6 +1209,46 @@ pub enum ConversationImportFormat {
     ClaudeCodeSessionJsonlV2,
     /// Codex rollout JSONL under Signalbox converter version one.
     CodexRolloutJsonlV1,
+}
+
+/// Content-silent reason an imported-conversation converter rejected source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationImportRejectionClass {
+    /// The supplied source contained no JSONL record.
+    EmptySource,
+    /// One physical JSONL record was empty.
+    BlankLine,
+    /// One physical record was not valid UTF-8.
+    InvalidUtf8,
+    /// One physical record was not valid JSON.
+    InvalidJson,
+    /// One physical record exceeded the JSON container-depth bound.
+    JsonDepthExceeded,
+    /// One physical record's top-level JSON value was not an object.
+    TopLevelNotObject,
+    /// A modeled record discriminator had an unsupported value shape.
+    InvalidRecordType,
+    /// Modeled source metadata had an unsupported value shape.
+    InvalidSourceMetadata,
+    /// A modeled message or response-item envelope had an unsupported shape.
+    InvalidMessageEnvelope,
+    /// A modeled message role had an unsupported value shape.
+    InvalidMessageRole,
+    /// A nested message role contradicted its enclosing source speaker.
+    MessageRoleMismatch,
+    /// Modeled message content had an unsupported value shape.
+    InvalidMessageContent,
+    /// A modeled message content block had an unsupported value shape.
+    InvalidContentBlock,
+    /// A modeled tool-result block had an unsupported value shape.
+    InvalidToolResultBlock,
+    /// A modeled reasoning item or block had an unsupported value shape.
+    InvalidReasoning,
+    /// A modeled tool call had an unsupported value shape.
+    InvalidToolCall,
+    /// A modeled tool result had an unsupported value shape.
+    InvalidToolResult,
 }
 
 /// Exact caller-supplied source bytes carried as canonical padded base64.
@@ -2366,6 +2412,22 @@ pub enum ClientRequest {
         /// Exact complete source bytes.
         source: ConversationImportSource,
     },
+    /// Begin one per-connection chunked conversation import.
+    BeginConversationImport {
+        /// Explicit format-versioned converter selection.
+        format: ConversationImportFormat,
+        /// Exact total source size the caller will append.
+        declared_size_bytes: CanonicalU64,
+    },
+    /// Append one source chunk to the connection's in-progress import.
+    AppendConversationImport {
+        /// Next exact source bytes in physical order.
+        chunk: ConversationImportSource,
+    },
+    /// Convert and store the connection's completely appended source.
+    CommitConversationImport {},
+    /// Discard the connection's in-progress import without conversion.
+    AbortConversationImport {},
     /// Read one immutable imported conversation's complete entry inventory.
     ///
     /// The read exposes the ordinals `create_session_from_imported_frontier`
@@ -2638,6 +2700,10 @@ impl ClientRequest {
             | Self::ReplaceSessionDefaults { .. }
             | Self::ReadSessionDefaults { .. }
             | Self::ImportConversation { .. }
+            | Self::BeginConversationImport { .. }
+            | Self::AppendConversationImport { .. }
+            | Self::CommitConversationImport {}
+            | Self::AbortConversationImport {}
             | Self::ReadImportedConversation { .. }
             | Self::CreateSessionFromImportedFrontier { .. }
             | Self::ReconcileTurn { .. }
@@ -2679,6 +2745,12 @@ impl ClientRequest {
             if !valid {
                 return Err(FrameValidationError::InputDeliveryShape);
             }
+        }
+        if let Self::AppendConversationImport { chunk } = self
+            && (chunk.as_bytes().is_empty()
+                || chunk.as_bytes().len() > MAX_CONVERSATION_IMPORT_CHUNK_BYTES)
+        {
+            return Err(FrameValidationError::ConversationImportShape);
         }
         if let Self::CreateSessionFromImportedFrontier {
             through_position, ..
@@ -3195,6 +3267,66 @@ pub enum RejectionDetail {
         /// Greatest selectable position on that conversation.
         last_position: CanonicalU64,
     },
+    /// This connection already has one in-progress conversation import.
+    ConversationImportAlreadyInProgress {},
+    /// This connection has no in-progress conversation import.
+    ConversationImportNotInProgress {},
+    /// The declared or observed source size exceeds the configured total bound.
+    ConversationImportSourceTooLarge {
+        /// Configured maximum assembled source size.
+        limit_bytes: CanonicalU64,
+        /// Exact total source size declared at begin.
+        declared_size_bytes: CanonicalU64,
+        /// Exact observed size at append or commit, or null at begin.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        actual_size_bytes: Option<CanonicalU64>,
+    },
+    /// The observed source size did not equal the size declared at begin.
+    ConversationImportSourceSizeMismatch {
+        /// Exact total source size declared at begin.
+        declared_size_bytes: CanonicalU64,
+        /// Exact number of source bytes observed across append requests.
+        actual_size_bytes: CanonicalU64,
+    },
+    /// A converter rejected the complete source with content-silent evidence.
+    ConversationImportConversionFailed {
+        /// Closed converter failure class.
+        class: ConversationImportRejectionClass,
+        /// One-based offending physical record, or null when not applicable.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        record_ordinal: Option<CanonicalU64>,
+    },
+}
+
+impl RejectionDetail {
+    const fn is_conversation_import(self) -> bool {
+        match self {
+            Self::ConversationImportAlreadyInProgress {}
+            | Self::ConversationImportNotInProgress {}
+            | Self::ConversationImportSourceTooLarge { .. }
+            | Self::ConversationImportSourceSizeMismatch { .. }
+            | Self::ConversationImportConversionFailed { .. } => true,
+            Self::SessionNotFound { .. }
+            | Self::GoalCommandRejected { .. }
+            | Self::ActiveTurnPresent { .. }
+            | Self::ActiveTurnMismatch { .. }
+            | Self::NoActiveTurn { .. }
+            | Self::TurnNotAwaitingReconciliation { .. }
+            | Self::InterruptAlreadyApplied { .. }
+            | Self::InterruptUnavailableWhileAwaitingApproval { .. }
+            | Self::SafePointUnavailableWhileStopping { .. }
+            | Self::ToolRequestNotFound { .. }
+            | Self::ToolRequestAlreadyResolved { .. }
+            | Self::ToolRequestNotEarliestUndecided { .. }
+            | Self::ToolRequestNotInSession { .. }
+            | Self::DefaultsVersionMismatch { .. }
+            | Self::UnknownModelAlias { .. }
+            | Self::AcceptancePositionExhausted { .. }
+            | Self::DefaultsVersionExhausted { .. }
+            | Self::ImportedConversationNotFound { .. }
+            | Self::ImportedFrontierPositionOutOfRange { .. } => false,
+        }
+    }
 }
 
 /// Presence-checked rejection detail on an error message.
@@ -3212,6 +3344,11 @@ impl ErrorDetail {
 
     /// Includes exact durable-rejection detail.
     pub const fn rejected(detail: RejectionDetail) -> Self {
+        Self(Some(detail))
+    }
+
+    /// Includes typed import evidence on an invalid request.
+    pub const fn invalid_request(detail: RejectionDetail) -> Self {
         Self(Some(detail))
     }
 
@@ -4361,6 +4498,18 @@ pub enum ServerMessage {
         /// Existing durable imported-conversation identity.
         imported_conversation_id: CanonicalUuid,
     },
+    /// One per-connection chunked import was initialized.
+    ConversationImportBegun {
+        /// Exact total source size admitted from the begin request.
+        declared_size_bytes: CanonicalU64,
+    },
+    /// One source chunk was appended to the in-progress import.
+    ConversationImportAppended {
+        /// Exact total source bytes observed after this append.
+        assembled_size_bytes: CanonicalU64,
+    },
+    /// One per-connection chunked import was discarded.
+    ConversationImportAborted {},
     /// Begins one imported-conversation entry sequence.
     ImportedConversationStart {
         /// Inspected imported conversation.
@@ -4596,7 +4745,7 @@ pub enum ServerMessage {
         code: ErrorCode,
         /// Non-sensitive human diagnostic.
         message: String,
-        /// Required only for a durable command rejection.
+        /// Typed durable-rejection or conversation-import failure evidence.
         #[serde(default, skip_serializing_if = "ErrorDetail::is_absent")]
         detail: ErrorDetail,
     },
@@ -4721,6 +4870,11 @@ impl ServerMessage {
                     preview.validate()?;
                 }
             }
+            Self::ConversationImportAppended {
+                assembled_size_bytes,
+            } if assembled_size_bytes.value() == 0 => {
+                return Err(FrameValidationError::ConversationImportShape);
+            }
             Self::TranscriptModelCallUsage { usage, cost, .. }
                 if cost.is_some()
                     && usage.input_tokens.is_none()
@@ -4828,7 +4982,16 @@ impl ServerFrame {
                         return Err(FrameValidationError::ImportedFrontierRangeShape);
                     }
                 }
-                if (*code == ErrorCode::Rejected) != detail.value().is_some() {
+                if let Some(detail) = detail.value() {
+                    if detail.is_conversation_import() {
+                        if *code != ErrorCode::InvalidRequest {
+                            return Err(FrameValidationError::ErrorDetailShape);
+                        }
+                        validate_conversation_import_detail(detail)?;
+                    } else if *code != ErrorCode::Rejected {
+                        return Err(FrameValidationError::ErrorDetailShape);
+                    }
+                } else if *code == ErrorCode::Rejected {
                     return Err(FrameValidationError::ErrorDetailShape);
                 }
             }
@@ -4865,6 +5028,82 @@ impl<'de> Deserialize<'de> for ServerFrame {
     }
 }
 
+fn validate_conversation_import_detail(
+    detail: RejectionDetail,
+) -> Result<(), FrameValidationError> {
+    let valid = match detail {
+        RejectionDetail::ConversationImportAlreadyInProgress {}
+        | RejectionDetail::ConversationImportNotInProgress {} => true,
+        RejectionDetail::ConversationImportSourceTooLarge {
+            limit_bytes,
+            declared_size_bytes,
+            actual_size_bytes,
+        } => {
+            limit_bytes.value() > 0
+                && match actual_size_bytes {
+                    Some(actual) => {
+                        actual.value() > limit_bytes.value()
+                            && (declared_size_bytes.value() <= limit_bytes.value()
+                                || declared_size_bytes == actual)
+                    }
+                    None => declared_size_bytes.value() > limit_bytes.value(),
+                }
+        }
+        RejectionDetail::ConversationImportSourceSizeMismatch {
+            declared_size_bytes,
+            actual_size_bytes,
+        } => declared_size_bytes != actual_size_bytes,
+        RejectionDetail::ConversationImportConversionFailed {
+            class,
+            record_ordinal,
+        } => match class {
+            ConversationImportRejectionClass::EmptySource => record_ordinal.is_none(),
+            ConversationImportRejectionClass::BlankLine
+            | ConversationImportRejectionClass::InvalidUtf8
+            | ConversationImportRejectionClass::InvalidJson
+            | ConversationImportRejectionClass::JsonDepthExceeded
+            | ConversationImportRejectionClass::TopLevelNotObject
+            | ConversationImportRejectionClass::InvalidRecordType
+            | ConversationImportRejectionClass::InvalidSourceMetadata
+            | ConversationImportRejectionClass::InvalidMessageEnvelope
+            | ConversationImportRejectionClass::InvalidMessageRole
+            | ConversationImportRejectionClass::MessageRoleMismatch
+            | ConversationImportRejectionClass::InvalidMessageContent
+            | ConversationImportRejectionClass::InvalidContentBlock
+            | ConversationImportRejectionClass::InvalidToolResultBlock
+            | ConversationImportRejectionClass::InvalidReasoning
+            | ConversationImportRejectionClass::InvalidToolCall
+            | ConversationImportRejectionClass::InvalidToolResult => {
+                record_ordinal.is_some_and(|ordinal| ordinal.value() > 0)
+            }
+        },
+        RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::ActiveTurnMismatch { .. }
+        | RejectionDetail::NoActiveTurn { .. }
+        | RejectionDetail::TurnNotAwaitingReconciliation { .. }
+        | RejectionDetail::InterruptAlreadyApplied { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::SafePointUnavailableWhileStopping { .. }
+        | RejectionDetail::ToolRequestNotFound { .. }
+        | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
+        | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::UnknownModelAlias { .. }
+        | RejectionDetail::AcceptancePositionExhausted { .. }
+        | RejectionDetail::DefaultsVersionExhausted { .. }
+        | RejectionDetail::ImportedConversationNotFound { .. }
+        | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::ConversationImportShape)
+    }
+}
+
 /// A structurally invalid frame value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameValidationError {
@@ -4885,6 +5124,8 @@ pub enum FrameValidationError {
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
     SystemPromptShape,
+    /// A chunked conversation-import frame carried a contradictory shape.
+    ConversationImportShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
     /// A context-compaction request carried a nonpositive position.
@@ -4923,6 +5164,7 @@ impl fmt::Display for FrameValidationError {
                 "unified conversation-listing frame shape is inconsistent"
             }
             Self::SystemPromptShape => "frame omits its required system-prompt member",
+            Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
             Self::ContextCompactionShape => "compaction through position is not positive",
             Self::ImportedConversationEntryShape => {
@@ -5342,23 +5584,24 @@ mod tests {
     use super::{
         BillingRateVersion, CanonicalDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
         ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
-        ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
-        ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-        FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
-        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
-        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
-        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
-        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-        ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
+        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
+        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
+        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
+        FrameEncodeError, FrameValidationError, GoalBlockedProvenance, GoalBlockedReason,
+        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
+        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
+        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
+        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -6684,6 +6927,253 @@ mod tests {
              \"format\":\"claude_code_session_jsonl_v2\",\"source\":\"AP8=\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: chunked import has one exact closed begin/append/commit/abort
+    /// request vocabulary.
+    #[test]
+    fn inv033_chunked_import_requests_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let begin = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            ClientRequest::BeginConversationImport {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                declared_size_bytes: CanonicalU64::new(5),
+            },
+        )?;
+        let append = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(2)?,
+            ClientRequest::AppendConversationImport {
+                chunk: ConversationImportSource::new(vec![0, 255]),
+            },
+        )?;
+        let commit = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(3)?,
+            ClientRequest::CommitConversationImport {},
+        )?;
+        let abort = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(4)?,
+            ClientRequest::AbortConversationImport {},
+        )?;
+
+        let encoded_begin = encode_client_line(&begin)?;
+        let encoded_append = encode_client_line(&append)?;
+        let encoded_commit = encode_client_line(&commit)?;
+        let encoded_abort = encode_client_line(&abort)?;
+        assert_eq!(
+            String::from_utf8(encoded_begin.clone())?,
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"begin_conversation_import\",\"format\":\"codex_rollout_jsonl_v1\",\"declared_size_bytes\":\"5\"}}\n"
+        );
+        assert_eq!(
+            String::from_utf8(encoded_append.clone())?,
+            "{\"version\":1,\"request_id\":\"2\",\"request\":{\"type\":\"append_conversation_import\",\"chunk\":\"AP8=\"}}\n"
+        );
+        assert_eq!(
+            String::from_utf8(encoded_commit.clone())?,
+            "{\"version\":1,\"request_id\":\"3\",\"request\":{\"type\":\"commit_conversation_import\"}}\n"
+        );
+        assert_eq!(
+            String::from_utf8(encoded_abort.clone())?,
+            "{\"version\":1,\"request_id\":\"4\",\"request\":{\"type\":\"abort_conversation_import\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded_begin)?, begin);
+        assert_eq!(decode_client_line(&encoded_append)?, append);
+        assert_eq!(decode_client_line(&encoded_commit)?, commit);
+        assert_eq!(decode_client_line(&encoded_abort)?, abort);
+        Ok(())
+    }
+
+    /// INV-033: every maximum-sized append still fits the unchanged complete
+    /// frame bound, while a larger raw chunk is invalid before encoding.
+    #[test]
+    fn inv033_import_append_respects_the_existing_frame_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let maximum = ClientRequest::AppendConversationImport {
+            chunk: ConversationImportSource::new(vec![
+                b'x';
+                super::MAX_CONVERSATION_IMPORT_CHUNK_BYTES
+            ]),
+        };
+        let oversized = ClientRequest::AppendConversationImport {
+            chunk: ConversationImportSource::new(vec![
+                b'x';
+                super::MAX_CONVERSATION_IMPORT_CHUNK_BYTES
+                    + 1
+            ]),
+        };
+
+        let maximum_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            RequestId::try_new(u64::MAX)?,
+            maximum,
+        )?;
+        assert!(encode_client_line(&maximum_frame)?.len() <= super::MAX_FRAME_BYTES);
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, oversized),
+            Err(FrameValidationError::ConversationImportShape)
+        );
+        Ok(())
+    }
+
+    /// INV-033: chunked-import transport acknowledgements have exact closed
+    /// shapes; commit deliberately keeps the existing terminal receipts.
+    #[test]
+    fn inv033_chunked_import_acknowledgements_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::ConversationImportBegun {
+                declared_size_bytes: CanonicalU64::new(9),
+            },
+            r#"{"type":"conversation_import_begun","declared_size_bytes":"9"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::ConversationImportAppended {
+                assembled_size_bytes: CanonicalU64::new(7),
+            },
+            r#"{"type":"conversation_import_appended","assembled_size_bytes":"7"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::ConversationImportAborted {},
+            r#"{"type":"conversation_import_aborted"}"#,
+        )?;
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(4)?,
+                ServerMessage::ConversationImportAppended {
+                    assembled_size_bytes: CanonicalU64::new(0),
+                },
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
+        Ok(())
+    }
+
+    /// INV-033: import-invalid-request evidence names exact sizes and only the
+    /// content-silent converter class plus record ordinal.
+    #[test]
+    fn inv033_conversation_import_rejection_evidence_has_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceTooLarge {
+                        limit_bytes: CanonicalU64::new(268_435_456),
+                        declared_size_bytes: CanonicalU64::new(300_000_000),
+                        actual_size_bytes: None,
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"conversation import was rejected","detail":{"type":"conversation_import_source_too_large","limit_bytes":"268435456","declared_size_bytes":"300000000","actual_size_bytes":null}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceSizeMismatch {
+                        declared_size_bytes: CanonicalU64::new(100),
+                        actual_size_bytes: CanonicalU64::new(99),
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"conversation import was rejected","detail":{"type":"conversation_import_source_size_mismatch","declared_size_bytes":"100","actual_size_bytes":"99"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportConversionFailed {
+                        class: ConversationImportRejectionClass::InvalidJson,
+                        record_ordinal: Some(CanonicalU64::new(7)),
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"conversation import was rejected","detail":{"type":"conversation_import_conversion_failed","class":"invalid_json","record_ordinal":"7"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportConversionFailed {
+                        class: ConversationImportRejectionClass::EmptySource,
+                        record_ordinal: None,
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"conversation import was rejected","detail":{"type":"conversation_import_conversion_failed","class":"empty_source","record_ordinal":null}}"#,
+        )?;
+        let empty_source_with_ordinal = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("conversation import was rejected"),
+            detail: ErrorDetail::invalid_request(
+                RejectionDetail::ConversationImportConversionFailed {
+                    class: ConversationImportRejectionClass::EmptySource,
+                    record_ordinal: Some(CanonicalU64::new(1)),
+                },
+            ),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(5)?,
+                empty_source_with_ordinal,
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
+        let invalid_json_without_ordinal = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("conversation import was rejected"),
+            detail: ErrorDetail::invalid_request(
+                RejectionDetail::ConversationImportConversionFailed {
+                    class: ConversationImportRejectionClass::InvalidJson,
+                    record_ordinal: None,
+                },
+            ),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(6)?,
+                invalid_json_without_ordinal,
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
+        let contradictory_observed_bound = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("conversation import was rejected"),
+            detail: ErrorDetail::invalid_request(
+                RejectionDetail::ConversationImportSourceTooLarge {
+                    limit_bytes: CanonicalU64::new(8),
+                    declared_size_bytes: CanonicalU64::new(9),
+                    actual_size_bytes: Some(CanonicalU64::new(10)),
+                },
+            ),
+        };
+        assert_eq!(
+            ServerFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(7)?,
+                contradictory_observed_bound,
+            ),
+            Err(FrameValidationError::ConversationImportShape)
+        );
         Ok(())
     }
 

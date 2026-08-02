@@ -4,6 +4,7 @@ members = [
     "apps/signalbox-runner",
     "apps/signalboxd",
     "crates/application",
+    "crates/egress-transport",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",
     "crates/conversation-import-json",
@@ -26,6 +27,7 @@ members = [
     "crates/tools-conversations",
     "crates/tools-github",
     "crates/tools-plan",
+    "crates/tools-web",
     "crates/tools-workspace",
 ]
 resolver = "3"

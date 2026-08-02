@@ -3027,6 +3027,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-egress-transport"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "rustls",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-expect-table"
 version = "0.0.0"
 dependencies = [
@@ -3202,29 +3212,17 @@ name = "signalbox-tools-basic"
 version = "0.0.0"
 dependencies = [
  "expect-test",
- "futures-util",
- "html-escape",
- "icu_casemap",
- "idna",
  "jiff",
- "proptest",
- "reqwest",
- "rustls",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
- "signalbox-model-runtime",
  "signalbox-persistence",
  "signalbox-tool-contract",
  "signalbox-tool-schema-derive",
  "sqlx",
  "tokio",
- "tracing",
- "tracing-subscriber",
- "unicode-normalization",
- "url",
  "uuid",
 ]
 
@@ -3241,9 +3239,9 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-egress-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
- "signalbox-tools-basic",
  "tokio",
 ]
 
@@ -3287,9 +3285,9 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-egress-transport",
  "signalbox-model-runtime",
  "signalbox-tool-contract",
- "signalbox-tools-basic",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3306,6 +3304,34 @@ dependencies = [
  "signalbox-application",
  "signalbox-domain",
  "signalbox-tool-contract",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-tools-web"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "futures-util",
+ "html-escape",
+ "icu_casemap",
+ "idna",
+ "proptest",
+ "reqwest",
+ "rustls",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-egress-transport",
+ "signalbox-model-runtime",
+ "signalbox-tool-contract",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-normalization",
+ "url",
  "uuid",
 ]
 
@@ -3356,6 +3382,7 @@ dependencies = [
  "signalbox-tools-conversations",
  "signalbox-tools-github",
  "signalbox-tools-plan",
+ "signalbox-tools-web",
  "signalbox-tools-workspace",
  "sqlx",
  "tempfile",
