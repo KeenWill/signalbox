@@ -8,7 +8,7 @@ use signalbox_domain::{
     DelegationMessageDirection, DelegationMessageId, DelegationOutcome, DelegationOutcomeReason,
     DelegationProvenance, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
     DurableCommandId, ModelCallId, NormalizedToolArguments, SessionDelegation, SessionId,
-    ToolArgumentsKind, ToolName, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    TerminalChildTurn, ToolArgumentsKind, ToolName, ToolRequest, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
@@ -136,9 +136,9 @@ impl SessionDelegationRepository {
     pub async fn deliver_message(
         &self,
         spawning_request: ToolRequestId,
+        sending_request: &ToolRequest,
         id: DelegationMessageId,
         content: DelegationContent,
-        provenance: DelegationProvenance,
     ) -> Result<SessionDelegation, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let current = load_from_connection(&mut transaction, spawning_request)
@@ -146,16 +146,18 @@ impl SessionDelegationRepository {
             .ok_or(SessionDelegationRepositoryError::Corruption(
                 "relation missing",
             ))?;
-        let updated = current
-            .deliver_message(id, content, provenance)
+        let prior_event_count = current.events().len();
+        let (updated, event) = current
+            .deliver_message(sending_request, id, content)
             .map_err(|error| SessionDelegationRepositoryError::Domain(error.failure()))?;
-        let event = updated
-            .events()
-            .last()
-            .ok_or(SessionDelegationRepositoryError::Corruption(
-                "message event missing",
-            ))?;
-        insert_event(&mut transaction, spawning_request, event).await?;
+        if updated.events().len() == prior_event_count {
+            transaction
+                .commit()
+                .await
+                .map_err(classify_commit_failure)?;
+            return Ok(updated);
+        }
+        insert_event(&mut transaction, spawning_request, &event).await?;
         let message = event
             .message()
             .ok_or(SessionDelegationRepositoryError::Corruption(
@@ -451,29 +453,29 @@ async fn load_from_connection(
         return Err(SessionDelegationRepositoryError::Corruption("spawn event"));
     }
     for row in rows.into_iter().skip(1) {
-        delegation = replay_event(delegation, row)?;
+        delegation = replay_event(connection, delegation, row).await?;
     }
     Ok(Some(delegation))
 }
 
-fn replay_event(
+async fn replay_event(
+    connection: &mut PgConnection,
     delegation: SessionDelegation,
     row: PgRow,
 ) -> Result<SessionDelegation, SessionDelegationRepositoryError> {
-    let provenance = decode_provenance(&row)?;
     match required_string(&row, "event_kind")?.as_str() {
         "message_delivered" => {
+            let sender = SessionId::from_uuid(row.try_get("provenance_session_id")?);
+            let request = load_event_request(&row, sender)?;
             let id = DelegationMessageId::from_uuid(row.try_get("message_id")?);
             let content = DelegationContent::try_new(row.try_get("content_text")?)
                 .map_err(|_| SessionDelegationRepositoryError::Corruption("message content"))?;
-            let updated = delegation
-                .deliver_message(id, content, provenance)
+            let (updated, event) = delegation
+                .deliver_message(&request, id, content)
                 .map_err(|error| SessionDelegationRepositoryError::Domain(error.failure()))?;
             let stored = required_string(&row, "direction")?;
-            let actual = updated
-                .events()
-                .last()
-                .and_then(DelegationEvent::message)
+            let actual = event
+                .message()
                 .map(|message| direction_to_str(message.direction()));
             if actual != Some(stored.as_str()) {
                 return Err(SessionDelegationRepositoryError::Corruption(
@@ -483,7 +485,10 @@ fn replay_event(
             Ok(updated)
         }
         "outcome_recorded" => delegation
-            .record_outcome(decode_outcome(&row, provenance)?)
+            .record_outcome(decode_outcome(
+                &row,
+                decode_provenance(connection, &row).await?,
+            )?)
             .map_err(|error| SessionDelegationRepositoryError::Domain(error.failure())),
         _ => Err(SessionDelegationRepositoryError::Corruption("event kind")),
     }
@@ -596,7 +601,8 @@ fn terminal_result(outcome: &DelegationOutcome) -> Option<(&'static str, Option<
     }
 }
 
-fn decode_provenance(
+async fn decode_provenance(
+    connection: &mut PgConnection,
     row: &PgRow,
 ) -> Result<DelegationProvenance, SessionDelegationRepositoryError> {
     let session = SessionId::from_uuid(row.try_get("provenance_session_id")?);
@@ -604,10 +610,26 @@ fn decode_provenance(
         "tool_request" => Ok(DelegationProvenance::from_tool_request(
             &load_event_request(row, session)?,
         )),
-        "child_turn" => Ok(DelegationProvenance::from_child_turn(
-            session,
-            TurnId::from_uuid(row.try_get("provenance_turn_id")?),
-        )),
+        "child_turn" => {
+            let child = crate::session::load_session_from_connection(connection, session)
+                .await
+                .map_err(map_session_load)?
+                .ok_or(SessionDelegationRepositoryError::Corruption(
+                    "child session",
+                ))?;
+            let scheduling = crate::submit_input::load_scheduling_projection(connection, child)
+                .await
+                .map_err(map_scheduling_load)?;
+            let turn = TurnId::from_uuid(row.try_get("provenance_turn_id")?);
+            let reason = reason_from_str(&required_string(row, "reason_kind")?)?;
+            let terminal = scheduling
+                .turn(turn)
+                .and_then(|projection| TerminalChildTurn::from_scheduling(projection, reason))
+                .ok_or(SessionDelegationRepositoryError::Corruption(
+                    "terminal child turn",
+                ))?;
+            Ok(DelegationProvenance::from_terminal_child(terminal))
+        }
         "parent_command" => Ok(DelegationProvenance::from_parent_command(
             session,
             TurnId::from_uuid(row.try_get("provenance_turn_id")?),
@@ -616,6 +638,38 @@ fn decode_provenance(
         _ => Err(SessionDelegationRepositoryError::Corruption(
             "provenance kind",
         )),
+    }
+}
+
+fn map_session_load(
+    error: crate::session::SessionRepositoryError,
+) -> SessionDelegationRepositoryError {
+    match error {
+        crate::session::SessionRepositoryError::Database(error) => {
+            SessionDelegationRepositoryError::Database(error)
+        }
+        crate::session::SessionRepositoryError::Corruption(_) => {
+            SessionDelegationRepositoryError::Corruption("child session")
+        }
+    }
+}
+
+fn map_scheduling_load(
+    error: crate::submit_input::SubmitInputRepositoryError,
+) -> SessionDelegationRepositoryError {
+    match error {
+        crate::submit_input::SubmitInputRepositoryError::Database(error)
+        | crate::submit_input::SubmitInputRepositoryError::CommitAmbiguous(error) => {
+            SessionDelegationRepositoryError::Database(error)
+        }
+        crate::submit_input::SubmitInputRepositoryError::DifferentCommandKind { .. }
+        | crate::submit_input::SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+            ..
+        }
+        | crate::submit_input::SubmitInputRepositoryError::Corruption(_)
+        | crate::submit_input::SubmitInputRepositoryError::ModelExecution(_) => {
+            SessionDelegationRepositoryError::Corruption("child scheduling projection")
+        }
     }
 }
 

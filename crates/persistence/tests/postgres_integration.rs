@@ -142,13 +142,33 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
     .expect("test credential pin is valid")
 }
 
+const DELEGATED_TASK: &str = "inspect delegated work";
+
+fn background_spawn_arguments() -> String {
+    serde_json::json!({
+        "relationship": { "kind": "background" }, "task": DELEGATED_TASK,
+    })
+    .to_string()
+}
+
+fn bound_spawn_arguments() -> String {
+    serde_json::json!({
+        "relationship": {
+            "kind": "bound", "on_parent_cancelled": "cancel", "on_parent_stopped": "stop",
+        },
+        "task": DELEGATED_TASK,
+    })
+    .to_string()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_spawn_persists_exact_child_creation_provenance() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd300;
+    let spawn_arguments = background_spawn_arguments();
     let (fixture, _model_repository, _observation, request_id) =
-        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", &spawn_arguments).await?;
     let request = ToolRequestReconstitutionInput::new(
         request_id,
         fixture.session,
@@ -156,7 +176,7 @@ async fn delegated_spawn_persists_exact_child_creation_provenance() -> Result<()
         fixture.call,
         ToolRequestOrdinal::from_u32(0),
         ToolName::try_new("spawn_session".to_owned()).expect("valid tool name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned())
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments)
             .expect("valid tool arguments"),
     )
     .into_request();
@@ -236,10 +256,19 @@ async fn delegated_spawn_persists_exact_child_creation_provenance() -> Result<()
 async fn delegated_foreground_wait_persists_distinct_await_request() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd600;
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
+    let spawn_arguments = background_spawn_arguments();
+    let await_arguments = serde_json::json!({
+        "child_session_id": child.as_uuid().to_string(), "mode": "foreground",
+    })
+    .to_string();
     let (fixture, _model_repository, _observation, request_ids) = checkpoint_confirmed_tool_batch(
         &pool,
         seed,
-        &[("spawn_session", "{}"), ("await_session", "{}")],
+        &[
+            ("spawn_session", spawn_arguments.as_str()),
+            ("await_session", await_arguments.as_str()),
+        ],
     )
     .await?;
     let spawn = ToolRequestReconstitutionInput::new(
@@ -249,7 +278,7 @@ async fn delegated_foreground_wait_persists_distinct_await_request() -> Result<(
         fixture.call,
         ToolRequestOrdinal::from_u32(0),
         ToolName::try_new("spawn_session".to_owned()).expect("valid spawn name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments).expect("valid arguments"),
     )
     .into_request();
     let awaiting = ToolRequestReconstitutionInput::new(
@@ -259,10 +288,9 @@ async fn delegated_foreground_wait_persists_distinct_await_request() -> Result<(
         fixture.call,
         ToolRequestOrdinal::from_u32(1),
         ToolName::try_new("await_session".to_owned()).expect("valid await name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(await_arguments).expect("valid arguments"),
     )
     .into_request();
-    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
     let relation = SessionDelegation::spawn(&spawn, child, ChildRelationshipPolicy::Background)
         .expect("distinct child");
     let repository = SessionDelegationRepository::new(pool.clone(), test_session_credential_pin());
@@ -300,10 +328,20 @@ async fn delegated_foreground_wait_persists_distinct_await_request() -> Result<(
 async fn delegated_parent_message_round_trips_direction() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd800;
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
+    let content = DelegationContent::try_new("work packet".to_owned()).expect("valid content");
+    let spawn_arguments = background_spawn_arguments();
+    let send_arguments = serde_json::json!({
+        "content": content.as_str(), "peer_session_id": child.as_uuid().to_string(),
+    })
+    .to_string();
     let (fixture, _model_repository, _observation, request_ids) = checkpoint_confirmed_tool_batch(
         &pool,
         seed,
-        &[("spawn_session", "{}"), ("send_session_message", "{}")],
+        &[
+            ("spawn_session", spawn_arguments.as_str()),
+            ("send_session_message", send_arguments.as_str()),
+        ],
     )
     .await?;
     let spawn = ToolRequestReconstitutionInput::new(
@@ -313,7 +351,7 @@ async fn delegated_parent_message_round_trips_direction() -> Result<(), Box<dyn 
         fixture.call,
         ToolRequestOrdinal::from_u32(0),
         ToolName::try_new("spawn_session".to_owned()).expect("valid spawn name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments).expect("valid arguments"),
     )
     .into_request();
     let send = ToolRequestReconstitutionInput::new(
@@ -323,26 +361,17 @@ async fn delegated_parent_message_round_trips_direction() -> Result<(), Box<dyn 
         fixture.call,
         ToolRequestOrdinal::from_u32(1),
         ToolName::try_new("send_session_message".to_owned()).expect("valid send name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(send_arguments).expect("valid arguments"),
     )
     .into_request();
-    let relation = SessionDelegation::spawn(
-        &spawn,
-        SessionId::from_uuid(Uuid::from_u128(seed + 0x200)),
-        ChildRelationshipPolicy::Background,
-    )
-    .expect("distinct child");
+    let relation = SessionDelegation::spawn(&spawn, child, ChildRelationshipPolicy::Background)
+        .expect("distinct child");
     let repository = SessionDelegationRepository::new(pool.clone(), test_session_credential_pin());
     repository.create(&relation).await?;
     let message_id = DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x400));
 
     let updated = repository
-        .deliver_message(
-            spawn.id(),
-            message_id,
-            DelegationContent::try_new("work packet".to_owned()).expect("valid content"),
-            DelegationProvenance::from_tool_request(&send),
-        )
+        .deliver_message(spawn.id(), &send, message_id, content)
         .await?;
     let loaded = repository
         .load(spawn.id())
@@ -389,8 +418,9 @@ async fn delegated_terminal_outcome_wakes_parent_and_replay_is_idempotent()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd900;
+    let spawn_arguments = bound_spawn_arguments();
     let (fixture, _model_repository, _observation, request_id) =
-        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", &spawn_arguments).await?;
     let request = ToolRequestReconstitutionInput::new(
         request_id,
         fixture.session,
@@ -398,7 +428,7 @@ async fn delegated_terminal_outcome_wakes_parent_and_replay_is_idempotent()
         fixture.call,
         ToolRequestOrdinal::from_u32(0),
         ToolName::try_new("spawn_session".to_owned()).expect("valid name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments).expect("valid arguments"),
     )
     .into_request();
     let relation = SessionDelegation::spawn(
@@ -463,8 +493,9 @@ async fn delegated_terminal_outcome_wakes_parent_and_replay_is_idempotent()
 async fn delegated_parent_alone_outcome_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xdc00;
+    let spawn_arguments = background_spawn_arguments();
     let (fixture, _model_repository, _observation, request_id) =
-        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", &spawn_arguments).await?;
     let request = ToolRequestReconstitutionInput::new(
         request_id,
         fixture.session,
@@ -472,7 +503,7 @@ async fn delegated_parent_alone_outcome_cannot_commit() -> Result<(), Box<dyn Er
         fixture.call,
         ToolRequestOrdinal::from_u32(0),
         ToolName::try_new("spawn_session".to_owned()).expect("valid name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments).expect("valid arguments"),
     )
     .into_request();
     let relation = SessionDelegation::spawn(
@@ -521,8 +552,9 @@ async fn delegated_parent_alone_outcome_cannot_commit() -> Result<(), Box<dyn Er
 async fn delegated_parent_outcome_rejects_another_sessions_command() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xdf00;
+    let spawn_arguments = background_spawn_arguments();
     let (fixture, _model_repository, _observation, request_id) =
-        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", &spawn_arguments).await?;
     let request = ToolRequestReconstitutionInput::new(
         request_id,
         fixture.session,
@@ -530,7 +562,7 @@ async fn delegated_parent_outcome_rejects_another_sessions_command() -> Result<(
         fixture.call,
         ToolRequestOrdinal::from_u32(0),
         ToolName::try_new("spawn_session".to_owned()).expect("valid name"),
-        NormalizedToolArguments::try_from_provider_text("{}".to_owned()).expect("valid arguments"),
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments).expect("valid arguments"),
     )
     .into_request();
     let relation = SessionDelegation::spawn(
