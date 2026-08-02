@@ -3573,17 +3573,6 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                             )
                         )
                         continue
-                    if event_error is not None:
-                        violations.append(
-                            Violation(
-                                source_label,
-                                line,
-                                "spec-verification-history",
-                                "cannot inspect GitHub pull-request event: "
-                                f"{event_error}",
-                            )
-                        )
-                        continue
                     if number in integration_branches:
                         violations.append(
                             Violation(
@@ -3615,6 +3604,17 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                         in integration_branches[carrier_number]
                     )
                     if carrier_in_history:
+                        continue
+                    if event_error is not None:
+                        violations.append(
+                            Violation(
+                                source_label,
+                                line,
+                                "spec-verification-history",
+                                "cannot inspect GitHub pull-request event: "
+                                f"{event_error}",
+                            )
+                        )
                         continue
                     carrier_event_match = event_pull_request == carrier_identity
                     carrier_local_match = (

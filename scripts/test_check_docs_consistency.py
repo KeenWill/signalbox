@@ -3062,6 +3062,24 @@ class DocsConsistencyTests(unittest.TestCase):
 
         self.assertEqual(failure_categories(failures), [])
 
+    def test_historical_carrier_passes_on_a_push_event(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        event = self.root / "event.json"
+        event.write_text('{"ref": "refs/heads/main"}', encoding="utf-8")
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
     def test_verification_ref_rejects_a_pr_naming_itself_as_carrier(self) -> None:
         run_git(self.root, "checkout", "-q", "-b", "agent/stack-top")
         (self.root / "docs/spec/example.md").write_text(
