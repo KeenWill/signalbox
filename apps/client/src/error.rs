@@ -1,8 +1,12 @@
-use std::{error::Error, fmt, io};
+use std::{
+    error::Error,
+    fmt, io,
+    path::{Path, PathBuf},
+};
 
 use signalbox_process_protocol::{
     ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError,
-    RejectionDetail,
+    GoalCommandRejection, RejectionDetail,
 };
 
 #[derive(Debug)]
@@ -10,6 +14,10 @@ pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
     SystemPromptFile(io::Error),
+    GoalTextFile {
+        path: PathBuf,
+        source: io::Error,
+    },
     ReviewInputFile(io::Error),
     ReviewInputJson(serde_json::Error),
     ReviewInputExceedsFrame,
@@ -52,6 +60,13 @@ impl ClientError {
         Self::SystemPromptFile(error)
     }
 
+    pub(crate) fn goal_text_file(path: &Path, source: io::Error) -> Self {
+        Self::GoalTextFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     pub(crate) fn review_input_file(error: io::Error) -> Self {
         Self::ReviewInputFile(error)
     }
@@ -73,6 +88,7 @@ impl ClientError {
             Self::Remote { .. }
             | Self::SourceFile(_)
             | Self::SystemPromptFile(_)
+            | Self::GoalTextFile { .. }
             | Self::ReviewInputFile(_)
             | Self::ReviewInputJson(_)
             | Self::ReviewInputExceedsFrame
@@ -108,6 +124,11 @@ impl fmt::Display for ClientError {
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
             }
+            Self::GoalTextFile { path, source } => write!(
+                formatter,
+                "the goal text file '{}' could not be read: {source}",
+                path.display()
+            ),
             Self::ReviewInputFile(_) => {
                 formatter.write_str("the review JSON input file could not be read")
             }
@@ -173,6 +194,7 @@ impl Error for ClientError {
             Self::Io(error)
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
+            | Self::GoalTextFile { source: error, .. }
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
             Self::ReviewInputJson(error) => Some(error),
@@ -242,6 +264,20 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
     }
 }
 
+const fn goal_command_rejection_name(reason: GoalCommandRejection) -> &'static str {
+    match reason {
+        GoalCommandRejection::SessionNotFound => "session_not_found",
+        GoalCommandRejection::GoalAlreadyAttached => "goal_already_attached",
+        GoalCommandRejection::GoalNotAttached => "goal_not_attached",
+        GoalCommandRejection::UnknownModelAlias => "unknown_model_alias",
+        GoalCommandRejection::AcceptancePositionExhausted => "acceptance_position_exhausted",
+        GoalCommandRejection::RequiresBlocked => "requires_blocked",
+        GoalCommandRejection::RequiresPursuingOrBlocked => "requires_pursuing_or_blocked",
+        GoalCommandRejection::GenerationExhausted => "generation_exhausted",
+        GoalCommandRejection::EventOrdinalExhausted => "event_ordinal_exhausted",
+    }
+}
+
 struct RejectionDisplay(RejectionDetail);
 
 impl fmt::Display for RejectionDisplay {
@@ -250,6 +286,11 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::GoalCommandRejected { session_id, reason } => write!(
+                formatter,
+                "goal_command_rejected session={session_id} reason={}",
+                goal_command_rejection_name(reason)
+            ),
             RejectionDetail::ActiveTurnPresent {
                 session_id,
                 active_turn_id,
@@ -381,6 +422,21 @@ impl fmt::Display for RejectionDisplay {
                 requested_position.value(),
                 last_position.value()
             ),
+            RejectionDetail::ConversationImportAlreadyInProgress {} => {
+                formatter.write_str("conversation_import_already_in_progress")
+            }
+            RejectionDetail::ConversationImportNotInProgress {} => {
+                formatter.write_str("conversation_import_not_in_progress")
+            }
+            RejectionDetail::ConversationImportSourceTooLarge { .. } => {
+                formatter.write_str("conversation_import_source_too_large")
+            }
+            RejectionDetail::ConversationImportSourceSizeMismatch { .. } => {
+                formatter.write_str("conversation_import_source_size_mismatch")
+            }
+            RejectionDetail::ConversationImportConversionFailed { .. } => {
+                formatter.write_str("conversation_import_conversion_failed")
+            }
         }
     }
 }

@@ -4,6 +4,7 @@ mod identity;
 mod index;
 mod layout;
 mod pack_install;
+mod packed_reference;
 mod reference;
 mod status_reference;
 mod support;

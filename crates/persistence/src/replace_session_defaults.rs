@@ -256,7 +256,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession,
+                | CommandKind::CompactSession
+                | CommandKind::Goal,
             ) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
@@ -296,7 +297,8 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::DecideToolRequest
                     | CommandKind::ReviewWorkflow
                     | CommandKind::ReviewOrchestration
-                    | CommandKind::CompactSession,
+                    | CommandKind::CompactSession
+                    | CommandKind::Goal,
                 ) => ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -394,7 +396,8 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::DecideToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession,
+                | CommandKind::CompactSession
+                | CommandKind::Goal,
             ) => Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id }),
         }
     }

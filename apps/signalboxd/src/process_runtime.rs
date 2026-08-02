@@ -29,14 +29,21 @@ use signalbox_application::{
     UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
 };
-use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
-use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
+use signalbox_conversation_import_claude_code::{
+    ClaudeCodeJsonlConversionError, ClaudeCodeJsonlConversionFailure, ClaudeCodeJsonlConverter,
+};
+use signalbox_conversation_import_codex::{
+    CodexRolloutJsonlConversionError, CodexRolloutJsonlConversionFailure,
+    CodexRolloutJsonlConverter,
+};
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedConversation,
-    ImportedConversationFormat, ImportedConversationId,
+    DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
+    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
@@ -77,6 +84,8 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
+    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
+    goal_turn::GoalTurnCandidates,
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
         DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
@@ -85,11 +94,11 @@ use signalbox_persistence::{
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
         ProcessImportedContentKind, ProcessImportedSourceSpeaker,
-        ProcessModelCallRecoveryPrecondition, ProcessModelSelection,
-        ProcessProviderModelCallFailureCause, ProcessReadError, ProcessReadRepository,
-        ProcessReconciliationOperation, ProcessSessionDefaultsRead, ProcessTranscriptEntry,
-        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
-        ProcessTurnState,
+        ProcessModelCallRecoveryPrecondition, ProcessModelCallUsageProvenance,
+        ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -100,18 +109,22 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, ConversationCursor as WireConversationCursor,
-    ConversationImportFormat, ConversationOrigin as WireConversationOrigin,
+    BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
+    ConversationCursor as WireConversationCursor, ConversationImportFormat,
+    ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError, ImportedContentKind,
-    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
+    GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
+    GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ModelCallTokenUsage,
-    ModelSelection as WireModelSelection, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelSelection as WireModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
@@ -119,8 +132,8 @@ use signalbox_process_protocol::{
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
     ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, content_fragments, decode_client_line, encode_server_line,
-    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
+    TranscriptTextEntry, TurnState, UsageProvenance, content_fragments, decode_client_line,
+    encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -151,6 +164,10 @@ const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
 const MAX_CONCURRENT_IMPORTS: usize = 1;
+const RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES: usize = MAX_CONCURRENT_IMPORTS;
+const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
+    MAX_BUFFERED_INBOUND_FRAMES - RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES;
+const MAX_IMPORT_ADMISSION_WAITERS: usize = GENERAL_BUFFERED_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
@@ -189,10 +206,39 @@ struct ConnectionServices {
     context_compaction_model: Arc<dyn ContextCompactionModel>,
     template_configuration: Arc<SessionTemplateConfiguration>,
     fanouts: ProcessFanouts,
-    inbound_frame_budget: Arc<Semaphore>,
+    inbound_frame_budgets: InboundFrameBudgets,
     import_budget: Arc<Semaphore>,
+    import_waiter_budget: Arc<Semaphore>,
     review_command_budget: Arc<Semaphore>,
     snapshot_reader_budget: Arc<Semaphore>,
+}
+
+#[derive(Clone, Debug)]
+struct InboundFrameBudgets {
+    general: Arc<Semaphore>,
+    active_import: Arc<Semaphore>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ConversationImportState {
+    Inactive,
+    Active,
+}
+
+impl InboundFrameBudgets {
+    fn new() -> Self {
+        Self {
+            general: Arc::new(Semaphore::new(GENERAL_BUFFERED_INBOUND_FRAMES)),
+            active_import: Arc::new(Semaphore::new(RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES)),
+        }
+    }
+
+    fn for_connection(&self, import_state: ConversationImportState) -> Arc<Semaphore> {
+        match import_state {
+            ConversationImportState::Inactive => Arc::clone(&self.general),
+            ConversationImportState::Active => Arc::clone(&self.active_import),
+        }
+    }
 }
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
@@ -416,6 +462,7 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         }
         DispatchedOutboxEventKind::SessionCreated
         | DispatchedOutboxEventKind::InputAccepted { .. }
+        | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
         | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
     }
@@ -466,8 +513,9 @@ async fn serve_connections(
         context_compaction_model: dependencies.context_compaction_model,
         template_configuration: Arc::new(dependencies.template_configuration),
         fanouts: dependencies.fanouts,
-        inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
+        inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
+        import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
     };
@@ -540,14 +588,17 @@ async fn serve_connection(
 ) -> Result<(), ProcessConnectionError> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::with_capacity(INBOUND_READ_AHEAD_BYTES, reader);
+    let mut pending_import = None;
 
     loop {
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
+        let import_state = ConversationImportState::from_pending(pending_import.as_ref());
+        let inbound_frame_budget = services.inbound_frame_budgets.for_connection(import_state);
         let Some(frame_buffer_permit) = acquire_inbound_frame_permit_after_input(
             &mut reader,
-            Arc::clone(&services.inbound_frame_budget),
+            inbound_frame_budget,
             &mut shutdown,
         )
         .await?
@@ -573,6 +624,9 @@ async fn serve_connection(
                         FrameDecodeErrorKind::OversizedFrame
                         | FrameDecodeErrorKind::MalformedFrame => ErrorCode::MalformedFrame,
                     };
+                    drop(line);
+                    drop(pending_import.take());
+                    drop(frame_buffer_permit);
                     write_error(
                         &mut writer,
                         admitted_version.unwrap_or(ProtocolVersion::One),
@@ -587,6 +641,8 @@ async fn serve_connection(
                 request_id,
                 admitted_version,
             } => {
+                drop(pending_import.take());
+                drop(frame_buffer_permit);
                 write_error(
                     &mut writer,
                     admitted_version.unwrap_or(ProtocolVersion::One),
@@ -599,7 +655,32 @@ async fn serve_connection(
         };
         let (version, request_id, request) = frame.into_parts();
         let follows = matches!(request, ClientRequest::FollowSession { .. });
-        let import_permit = if matches!(&request, ClientRequest::ImportConversation { .. }) {
+        let import_limit = services
+            .model_configuration
+            .conversation_import_max_source_bytes();
+        let import_requires_permit =
+            conversation_import_request_requires_permit(&request, import_state, import_limit);
+        let import_waiter_permit = if import_requires_permit
+            && matches!(&request, ClientRequest::BeginConversationImport { .. })
+        {
+            let Some(permit) = acquire_import_waiter_permit(
+                Arc::clone(&services.import_waiter_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            Some(permit)
+        } else {
+            None
+        };
+        let frame_buffer_permit = retain_inbound_frame_permit_during_import_admission(
+            &request,
+            import_requires_permit,
+            frame_buffer_permit,
+        );
+        let import_permit = if import_requires_permit {
             let Some(permit) =
                 acquire_import_permit(Arc::clone(&services.import_budget), &mut shutdown).await?
             else {
@@ -609,6 +690,7 @@ async fn serve_connection(
         } else {
             None
         };
+        drop(import_waiter_permit);
         let Some((frame_buffer_permit, review_command_permit)) =
             acquire_review_command_permit_while_buffered(
                 ReviewCommandAdmission::for_request(&request),
@@ -626,9 +708,10 @@ async fn serve_connection(
             version,
             request_id,
             request,
-            ConnectionRequestPermits {
-                import: import_permit,
-                review: review_command_permit,
+            ConnectionRequestResources {
+                import_permit,
+                review_command_permit,
+                pending_import: &mut pending_import,
             },
             &services,
             shutdown.clone(),
@@ -694,7 +777,96 @@ async fn acquire_review_orchestration_snapshot_permit(
     }
 }
 
+fn conversation_import_request_requires_permit(
+    request: &ClientRequest,
+    import_state: ConversationImportState,
+    limit: usize,
+) -> bool {
+    match import_state {
+        ConversationImportState::Inactive => {}
+        ConversationImportState::Active => return false,
+    }
+    match request {
+        ClientRequest::ImportConversation { source, .. } => source.as_bytes().len() <= limit,
+        ClientRequest::BeginConversationImport {
+            declared_size_bytes,
+            ..
+        } => usize::try_from(declared_size_bytes.value()).is_ok_and(|size| size <= limit),
+        ClientRequest::CreateSession { .. }
+        | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::ListTemplates {}
+        | ClientRequest::ListSessions {}
+        | ClientRequest::AttachGoal { .. }
+        | ClientRequest::ReadGoal { .. }
+        | ClientRequest::ResumeGoal { .. }
+        | ClientRequest::StopGoal { .. }
+        | ClientRequest::SupersedeGoal { .. }
+        | ClientRequest::SubmitInput { .. }
+        | ClientRequest::CompactSession { .. }
+        | ClientRequest::ReadTranscript { .. }
+        | ClientRequest::FollowSession { .. }
+        | ClientRequest::ListSessionMetadata { .. }
+        | ClientRequest::ListConversations { .. }
+        | ClientRequest::ListModelAliases {}
+        | ClientRequest::ReadSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionDefaults { .. }
+        | ClientRequest::ReadSessionDefaults { .. }
+        | ClientRequest::AppendConversationImport { .. }
+        | ClientRequest::CommitConversationImport {}
+        | ClientRequest::AbortConversationImport {}
+        | ClientRequest::ReadImportedConversation { .. }
+        | ClientRequest::CreateSessionFromImportedFrontier { .. }
+        | ClientRequest::ReconcileTurn { .. }
+        | ClientRequest::CreateReviewTarget { .. }
+        | ClientRequest::StartReviewRun { .. }
+        | ClientRequest::ActivateReviewPass { .. }
+        | ClientRequest::CompleteReviewPass { .. }
+        | ClientRequest::RecordReviewFindings { .. }
+        | ClientRequest::RecordReviewFindingEvent { .. }
+        | ClientRequest::ReserveReviewExternalLink { .. }
+        | ClientRequest::AttachReviewExternalLink { .. }
+        | ClientRequest::ReadReviewTarget { .. }
+        | ClientRequest::ReadReviewRun { .. }
+        | ClientRequest::ReadReviewFinding { .. }
+        | ClientRequest::ListReviewFindings { .. }
+        | ClientRequest::StartReviewOrchestration { .. }
+        | ClientRequest::RecordReviewImportOutcome { .. }
+        | ClientRequest::RecordReviewConcernOutcome { .. }
+        | ClientRequest::RecordReviewJudgmentPlan { .. }
+        | ClientRequest::RecordReviewJudgmentEffect { .. }
+        | ClientRequest::RecordReviewRepairOutcomes { .. }
+        | ClientRequest::RecordReviewPublicationOutcomes { .. }
+        | ClientRequest::ReadReviewOrchestration { .. }
+        | ClientRequest::StopTurn { .. }
+        | ClientRequest::DecideToolRequest { .. } => false,
+    }
+}
+fn retain_inbound_frame_permit_during_import_admission(
+    request: &ClientRequest,
+    import_requires_permit: bool,
+    permit: OwnedSemaphorePermit,
+) -> Option<OwnedSemaphorePermit> {
+    if import_requires_permit && matches!(request, ClientRequest::BeginConversationImport { .. }) {
+        None
+    } else {
+        Some(permit)
+    }
+}
+
 async fn acquire_import_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::ImportBudgetClosed),
+    }
+}
+
+async fn acquire_import_waiter_permit(
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
@@ -736,10 +908,13 @@ impl ReviewCommandAdmission {
 
 async fn acquire_review_command_permit_while_buffered(
     review_admission: ReviewCommandAdmission,
-    frame_buffer_permit: OwnedSemaphorePermit,
+    frame_buffer_permit: Option<OwnedSemaphorePermit>,
     budget: Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
-) -> Result<Option<(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>)>, ProcessConnectionError> {
+) -> Result<
+    Option<(Option<OwnedSemaphorePermit>, Option<OwnedSemaphorePermit>)>,
+    ProcessConnectionError,
+> {
     let review_command_permit = match review_admission {
         ReviewCommandAdmission::Required => {
             let Some(permit) = acquire_review_command_permit(budget, shutdown).await? else {
@@ -843,9 +1018,27 @@ where
     }
 }
 
-struct ConnectionRequestPermits {
-    import: Option<OwnedSemaphorePermit>,
-    review: Option<OwnedSemaphorePermit>,
+struct ConnectionRequestResources<'connection> {
+    import_permit: Option<OwnedSemaphorePermit>,
+    review_command_permit: Option<OwnedSemaphorePermit>,
+    pending_import: &'connection mut Option<PendingConversationImport>,
+}
+
+struct PendingConversationImport {
+    format: ConversationImportFormat,
+    declared_size_bytes: u64,
+    actual_size_bytes: u64,
+    source: Vec<u8>,
+    import_permit: OwnedSemaphorePermit,
+}
+
+impl ConversationImportState {
+    fn from_pending(pending: Option<&PendingConversationImport>) -> Self {
+        match pending {
+            Some(_) => Self::Active,
+            None => Self::Inactive,
+        }
+    }
 }
 
 async fn handle_request<Writer>(
@@ -853,7 +1046,7 @@ async fn handle_request<Writer>(
     version: ProtocolVersion,
     request_id: RequestId,
     mut request: ClientRequest,
-    permits: ConnectionRequestPermits,
+    resources: ConnectionRequestResources<'_>,
     services: &ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
@@ -861,10 +1054,11 @@ where
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
-    let ConnectionRequestPermits {
-        import: import_permit,
-        review: mut review_command_permit,
-    } = permits;
+    let ConnectionRequestResources {
+        import_permit,
+        mut review_command_permit,
+        pending_import,
+    } = resources;
     debug_assert_eq!(review_request, review_command_permit.is_some());
     let review_digest = if review_request {
         canonical_review_request_digest(&mut request)
@@ -973,6 +1167,115 @@ where
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
         }
+        ClientRequest::AttachGoal {
+            command_id,
+            session_id,
+            statement,
+        } => {
+            let Ok(statement) = GoalStatement::try_new(statement) else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Attach(statement),
+                services,
+            )
+            .await
+        }
+        ClientRequest::ReadGoal { session_id } => {
+            let Some(snapshot_permit) = acquire_snapshot_reader_permit(
+                Arc::clone(&services.snapshot_reader_budget),
+                &mut shutdown,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            handle_read_goal(
+                writer,
+                version,
+                request_id,
+                session_id,
+                &services.pool,
+                snapshot_permit,
+            )
+            .await
+        }
+        ClientRequest::ResumeGoal {
+            command_id,
+            session_id,
+            guidance,
+        } => {
+            let Ok(guidance) = guidance.map(GoalGuidance::try_new).transpose() else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Resume(guidance),
+                services,
+            )
+            .await
+        }
+        ClientRequest::StopGoal {
+            command_id,
+            session_id,
+        } => {
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Stop,
+                services,
+            )
+            .await
+        }
+        ClientRequest::SupersedeGoal {
+            command_id,
+            session_id,
+            statement,
+        } => {
+            let Ok(statement) = GoalStatement::try_new(statement) else {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            };
+            handle_goal_user_command(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                GoalUserAction::Supersede(statement),
+                services,
+            )
+            .await
+        }
         ClientRequest::ListTemplates {} => {
             handle_list_templates(
                 writer,
@@ -1043,6 +1346,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
+                &services.model_configuration,
                 snapshot_permit,
             )
             .await
@@ -1062,6 +1366,7 @@ where
                 request_id,
                 session_id,
                 &services.pool,
+                &services.model_configuration,
                 &services.fanouts,
                 shutdown,
                 snapshot_permit,
@@ -1197,17 +1502,89 @@ where
             .await
         }
         ClientRequest::ImportConversation { format, source } => {
+            if pending_import.is_some() {
+                drop(source);
+                return write_import_rejection(
+                    writer,
+                    version,
+                    request_id,
+                    RejectionDetail::ConversationImportAlreadyInProgress {},
+                )
+                .await;
+            }
+            let source = source.into_bytes();
+            let source_size =
+                u64::try_from(source.len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+            let limit = services
+                .model_configuration
+                .conversation_import_max_source_bytes();
+            if source.len() > limit {
+                let detail = RejectionDetail::ConversationImportSourceTooLarge {
+                    limit_bytes: wire_size(limit)?,
+                    declared_size_bytes: CanonicalU64::new(source_size),
+                    actual_size_bytes: Some(CanonicalU64::new(source_size)),
+                };
+                drop(source);
+                return write_import_rejection(writer, version, request_id, detail).await;
+            }
             let import_permit = import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
             handle_import_conversation(
                 writer,
                 version,
                 request_id,
                 format,
-                source.into_bytes(),
+                source,
                 &services.pool,
                 import_permit,
             )
             .await
+        }
+        ClientRequest::BeginConversationImport {
+            format,
+            declared_size_bytes,
+        } => {
+            handle_begin_conversation_import(
+                writer,
+                version,
+                request_id,
+                format,
+                declared_size_bytes,
+                services
+                    .model_configuration
+                    .conversation_import_max_source_bytes(),
+                import_permit,
+                pending_import,
+            )
+            .await
+        }
+        ClientRequest::AppendConversationImport { chunk } => {
+            handle_append_conversation_import(
+                writer,
+                version,
+                request_id,
+                chunk.into_bytes(),
+                services
+                    .model_configuration
+                    .conversation_import_max_source_bytes(),
+                pending_import,
+            )
+            .await
+        }
+        ClientRequest::CommitConversationImport {} => {
+            handle_commit_conversation_import(
+                writer,
+                version,
+                request_id,
+                services
+                    .model_configuration
+                    .conversation_import_max_source_bytes(),
+                &services.pool,
+                pending_import,
+            )
+            .await
+        }
+        ClientRequest::AbortConversationImport {} => {
+            handle_abort_conversation_import(writer, version, request_id, pending_import).await
         }
         ClientRequest::CreateReviewTarget {
             command_id,
@@ -3526,6 +3903,276 @@ where
     }
 }
 
+fn wire_size(value: usize) -> Result<CanonicalU64, ProcessConnectionError> {
+    u64::try_from(value)
+        .map(CanonicalU64::new)
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)
+}
+
+async fn write_import_rejection<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    detail: RejectionDetail,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_error(
+        writer,
+        version,
+        request_id,
+        ProtocolError::invalid_import(detail),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_begin_conversation_import<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    format: ConversationImportFormat,
+    declared_size_bytes: CanonicalU64,
+    limit: usize,
+    import_permit: Option<OwnedSemaphorePermit>,
+    pending: &mut Option<PendingConversationImport>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    if pending.is_some() {
+        return write_import_rejection(
+            writer,
+            version,
+            request_id,
+            RejectionDetail::ConversationImportAlreadyInProgress {},
+        )
+        .await;
+    }
+    let limit_bytes = wire_size(limit)?;
+    if declared_size_bytes.value() > limit_bytes.value() {
+        return write_import_rejection(
+            writer,
+            version,
+            request_id,
+            RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes,
+                declared_size_bytes,
+                actual_size_bytes: None,
+            },
+        )
+        .await;
+    }
+    let import_permit = import_permit.ok_or(ProcessConnectionError::ImportBudgetClosed)?;
+    *pending = Some(PendingConversationImport {
+        format,
+        declared_size_bytes: declared_size_bytes.value(),
+        actual_size_bytes: 0,
+        source: Vec::new(),
+        import_permit,
+    });
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        },
+    )
+    .await
+}
+
+async fn handle_append_conversation_import<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    chunk: Vec<u8>,
+    limit: usize,
+    pending: &mut Option<PendingConversationImport>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Some(active_import) = pending.as_mut() else {
+        drop(chunk);
+        return write_import_rejection(
+            writer,
+            version,
+            request_id,
+            RejectionDetail::ConversationImportNotInProgress {},
+        )
+        .await;
+    };
+    let chunk_size =
+        u64::try_from(chunk.len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    active_import.actual_size_bytes = active_import
+        .actual_size_bytes
+        .checked_add(chunk_size)
+        .ok_or(ProcessConnectionError::EncodeInvariant)?;
+    let limit_bytes = wire_size(limit)?;
+    if active_import.actual_size_bytes > limit_bytes.value() {
+        let detail = RejectionDetail::ConversationImportSourceTooLarge {
+            limit_bytes,
+            declared_size_bytes: CanonicalU64::new(active_import.declared_size_bytes),
+            actual_size_bytes: Some(CanonicalU64::new(active_import.actual_size_bytes)),
+        };
+        drop(chunk);
+        drop(pending.take());
+        return write_import_rejection(writer, version, request_id, detail).await;
+    }
+    let required_capacity = usize::try_from(active_import.actual_size_bytes)
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let declared_capacity = usize::try_from(active_import.declared_size_bytes)
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let target_capacity = conversation_import_capacity_target(
+        active_import.source.capacity(),
+        required_capacity,
+        declared_capacity,
+        limit,
+    );
+    let additional_capacity = target_capacity
+        .checked_sub(active_import.source.len())
+        .ok_or(ProcessConnectionError::EncodeInvariant)?;
+    if active_import
+        .source
+        .try_reserve_exact(additional_capacity)
+        .is_err()
+    {
+        drop(chunk);
+        drop(pending.take());
+        return write_error(
+            writer,
+            version,
+            request_id,
+            unavailable_protocol_error(InternalDiagnostic::ConversationImportAllocationFailure),
+        )
+        .await;
+    }
+    active_import.source.extend_from_slice(&chunk);
+    drop(chunk);
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ConversationImportAppended {
+            assembled_size_bytes: CanonicalU64::new(active_import.actual_size_bytes),
+        },
+    )
+    .await
+}
+
+fn conversation_import_capacity_target(
+    current_capacity: usize,
+    required_capacity: usize,
+    declared_capacity: usize,
+    limit: usize,
+) -> usize {
+    let growth_ceiling = if required_capacity <= declared_capacity {
+        declared_capacity
+    } else {
+        limit
+    };
+    if required_capacity <= current_capacity {
+        return current_capacity;
+    }
+    current_capacity
+        .saturating_mul(2)
+        .max(required_capacity)
+        .min(growth_ceiling)
+}
+
+async fn handle_commit_conversation_import<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    limit: usize,
+    pool: &PgPool,
+    pending: &mut Option<PendingConversationImport>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let Some(pending) = pending.take() else {
+        return write_import_rejection(
+            writer,
+            version,
+            request_id,
+            RejectionDetail::ConversationImportNotInProgress {},
+        )
+        .await;
+    };
+    let limit_bytes = wire_size(limit)?;
+    let declared_size_bytes = CanonicalU64::new(pending.declared_size_bytes);
+    let actual_size_bytes = CanonicalU64::new(pending.actual_size_bytes);
+    if pending.actual_size_bytes > limit_bytes.value() {
+        let detail = RejectionDetail::ConversationImportSourceTooLarge {
+            limit_bytes,
+            declared_size_bytes,
+            actual_size_bytes: Some(actual_size_bytes),
+        };
+        drop(pending);
+        return write_import_rejection(writer, version, request_id, detail).await;
+    }
+    if pending.actual_size_bytes != pending.declared_size_bytes {
+        let detail = RejectionDetail::ConversationImportSourceSizeMismatch {
+            declared_size_bytes,
+            actual_size_bytes,
+        };
+        drop(pending);
+        return write_import_rejection(writer, version, request_id, detail).await;
+    }
+    let observed_source_size =
+        u64::try_from(pending.source.len()).map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    if observed_source_size != pending.actual_size_bytes {
+        drop(pending);
+        return write_error(
+            writer,
+            version,
+            request_id,
+            internal_protocol_error(None, InternalDiagnostic::ConversationImportContractDefect),
+        )
+        .await;
+    }
+    handle_import_conversation(
+        writer,
+        version,
+        request_id,
+        pending.format,
+        pending.source,
+        pool,
+        pending.import_permit,
+    )
+    .await
+}
+
+async fn handle_abort_conversation_import<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    pending: &mut Option<PendingConversationImport>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    if pending.take().is_none() {
+        return write_import_rejection(
+            writer,
+            version,
+            request_id,
+            RejectionDetail::ConversationImportNotInProgress {},
+        )
+        .await;
+    }
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ConversationImportAborted {},
+    )
+    .await
+}
+
 async fn handle_import_conversation<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -3570,12 +4217,15 @@ where
             )
             .await
         }
-        Err(OperationalImportError::InvalidSource) => {
-            write_error(
+        Err(OperationalImportError::InvalidSource(evidence)) => {
+            write_import_rejection(
                 writer,
                 version,
                 request_id,
-                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                RejectionDetail::ConversationImportConversionFailed {
+                    class: evidence.class,
+                    record_ordinal: evidence.record_ordinal.map(CanonicalU64::new),
+                },
             )
             .await
         }
@@ -3601,10 +4251,188 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ImportRejectionEvidence {
+    class: ConversationImportRejectionClass,
+    record_ordinal: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OperationalImportError {
-    InvalidSource,
+    InvalidSource(ImportRejectionEvidence),
     Database,
     Internal(InternalDiagnostic),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConversionFailureDisposition {
+    Rejected(ImportRejectionEvidence),
+    Internal,
+}
+
+trait ClassifyConversationImportError {
+    fn disposition(self) -> ConversionFailureDisposition;
+}
+
+impl ClassifyConversationImportError for ClaudeCodeJsonlConversionError {
+    fn disposition(self) -> ConversionFailureDisposition {
+        claude_conversion_failure_disposition(self.failure())
+    }
+}
+
+fn claude_conversion_failure_disposition(
+    failure: ClaudeCodeJsonlConversionFailure,
+) -> ConversionFailureDisposition {
+    use ClaudeCodeJsonlConversionFailure as Failure;
+    let evidence = match failure {
+        Failure::EmptySource => {
+            import_evidence(ConversationImportRejectionClass::EmptySource, None)
+        }
+        Failure::BlankLine { line } => {
+            import_evidence(ConversationImportRejectionClass::BlankLine, Some(line))
+        }
+        Failure::InvalidUtf8 { line } => {
+            import_evidence(ConversationImportRejectionClass::InvalidUtf8, Some(line))
+        }
+        Failure::InvalidJson { line } => {
+            import_evidence(ConversationImportRejectionClass::InvalidJson, Some(line))
+        }
+        Failure::JsonDepthExceeded { line } => import_evidence(
+            ConversationImportRejectionClass::JsonDepthExceeded,
+            Some(line),
+        ),
+        Failure::TopLevelNotObject { line } => import_evidence(
+            ConversationImportRejectionClass::TopLevelNotObject,
+            Some(line),
+        ),
+        Failure::InvalidRecordType { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidRecordType,
+            Some(line),
+        ),
+        Failure::InvalidSourceMetadata { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidSourceMetadata,
+            Some(line),
+        ),
+        Failure::InvalidMessageEnvelope { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidMessageEnvelope,
+            Some(line),
+        ),
+        Failure::InvalidMessageRole { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidMessageRole,
+            Some(line),
+        ),
+        Failure::MessageRoleMismatch { line } => import_evidence(
+            ConversationImportRejectionClass::MessageRoleMismatch,
+            Some(line),
+        ),
+        Failure::InvalidMessageContent { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidMessageContent,
+            Some(line),
+        ),
+        Failure::InvalidContentBlock { line, .. } => import_evidence(
+            ConversationImportRejectionClass::InvalidContentBlock,
+            Some(line),
+        ),
+        Failure::InvalidToolResultBlock { line, .. } => import_evidence(
+            ConversationImportRejectionClass::InvalidToolResultBlock,
+            Some(line),
+        ),
+        Failure::PositionExhausted | Failure::InvalidAggregate(_) => {
+            return ConversionFailureDisposition::Internal;
+        }
+    };
+    ConversionFailureDisposition::Rejected(evidence)
+}
+
+impl ClassifyConversationImportError for CodexRolloutJsonlConversionError {
+    fn disposition(self) -> ConversionFailureDisposition {
+        codex_conversion_failure_disposition(self.failure())
+    }
+}
+
+fn codex_conversion_failure_disposition(
+    failure: CodexRolloutJsonlConversionFailure,
+) -> ConversionFailureDisposition {
+    use CodexRolloutJsonlConversionFailure as Failure;
+    let evidence = match failure {
+        Failure::EmptySource => {
+            import_evidence(ConversationImportRejectionClass::EmptySource, None)
+        }
+        Failure::BlankLine { line } => {
+            import_evidence(ConversationImportRejectionClass::BlankLine, Some(line))
+        }
+        Failure::InvalidUtf8 { line } => {
+            import_evidence(ConversationImportRejectionClass::InvalidUtf8, Some(line))
+        }
+        Failure::InvalidJson { line } => {
+            import_evidence(ConversationImportRejectionClass::InvalidJson, Some(line))
+        }
+        Failure::JsonDepthExceeded { line } => import_evidence(
+            ConversationImportRejectionClass::JsonDepthExceeded,
+            Some(line),
+        ),
+        Failure::TopLevelNotObject { line } => import_evidence(
+            ConversationImportRejectionClass::TopLevelNotObject,
+            Some(line),
+        ),
+        Failure::InvalidRecordType { line } | Failure::InvalidResponseItemType { line } => {
+            import_evidence(
+                ConversationImportRejectionClass::InvalidRecordType,
+                Some(line),
+            )
+        }
+        Failure::InvalidSourceMetadata { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidSourceMetadata,
+            Some(line),
+        ),
+        Failure::InvalidResponseItemEnvelope { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidMessageEnvelope,
+            Some(line),
+        ),
+        Failure::InvalidMessageRole { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidMessageRole,
+            Some(line),
+        ),
+        Failure::InvalidMessageContent { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidMessageContent,
+            Some(line),
+        ),
+        Failure::InvalidMessageBlock { line, .. } => import_evidence(
+            ConversationImportRejectionClass::InvalidContentBlock,
+            Some(line),
+        ),
+        Failure::InvalidReasoning { line } | Failure::InvalidReasoningBlock { line, .. } => {
+            import_evidence(
+                ConversationImportRejectionClass::InvalidReasoning,
+                Some(line),
+            )
+        }
+        Failure::InvalidToolCall { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidToolCall,
+            Some(line),
+        ),
+        Failure::InvalidToolResult { line } => import_evidence(
+            ConversationImportRejectionClass::InvalidToolResult,
+            Some(line),
+        ),
+        Failure::InvalidToolResultBlock { line, .. } => import_evidence(
+            ConversationImportRejectionClass::InvalidToolResultBlock,
+            Some(line),
+        ),
+        Failure::PositionExhausted | Failure::InvalidAggregate(_) => {
+            return ConversionFailureDisposition::Internal;
+        }
+    };
+    ConversionFailureDisposition::Rejected(evidence)
+}
+
+const fn import_evidence(
+    class: ConversationImportRejectionClass,
+    record_ordinal: Option<u64>,
+) -> ImportRejectionEvidence {
+    ImportRejectionEvidence {
+        class,
+        record_ordinal,
+    }
 }
 
 /// Converts typed import evidence into closed operational diagnostics.
@@ -3614,9 +4442,19 @@ enum OperationalImportError {
 /// record, so source content, durable values, and database prose remain absent.
 fn operational_import_error<ConverterError>(
     error: ImportConversationError<ConverterError, ImportedConversationRepositoryError>,
-) -> OperationalImportError {
+) -> OperationalImportError
+where
+    ConverterError: ClassifyConversationImportError,
+{
     match error {
-        ImportConversationError::Conversion(_) => OperationalImportError::InvalidSource,
+        ImportConversationError::Conversion(error) => match error.disposition() {
+            ConversionFailureDisposition::Rejected(evidence) => {
+                OperationalImportError::InvalidSource(evidence)
+            }
+            ConversionFailureDisposition::Internal => OperationalImportError::Internal(
+                InternalDiagnostic::ConversationImportContractDefect,
+            ),
+        },
         ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
             OperationalImportError::Database
         }
@@ -3640,6 +4478,7 @@ async fn execute_import<Converter>(
 ) -> Result<ImportConversationOutcome, OperationalImportError>
 where
     Converter: ImportedConversationConverter + Send + 'static,
+    Converter::Error: ClassifyConversationImportError,
 {
     let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
@@ -7673,6 +8512,7 @@ async fn handle_read_transcript<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -7684,6 +8524,7 @@ where
         selected_session,
         version,
         request_id,
+        model_configuration,
     )
     .await;
     drop(snapshot_permit);
@@ -7719,6 +8560,7 @@ async fn handle_follow_session<Writer>(
     request_id: RequestId,
     session_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     fanouts: &ProcessFanouts,
     mut shutdown: watch::Receiver<bool>,
     snapshot_permit: OwnedSemaphorePermit,
@@ -7735,6 +8577,7 @@ where
             selected_session,
             version,
             request_id,
+            model_configuration,
         ),
     )
     .await;
@@ -7879,6 +8722,7 @@ async fn spool_transcript(
     session: SessionId,
     version: ProtocolVersion,
     request_id: RequestId,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
     let reader = repository.open_transcript(session).await;
     let Some(mut reader) = reader.map_err(TranscriptSpoolError::Read)? else {
@@ -7913,10 +8757,17 @@ async fn spool_transcript(
                     .map_err(TranscriptSpoolError::Spool)?;
             }
             ProcessTranscriptItem::ModelCallUsage(usage) => {
-                write_model_call_usage(&mut file, version, request_id, model_call_count, &usage)
-                    .await
-                    .map_err(SnapshotSpoolError::from_connection)
-                    .map_err(TranscriptSpoolError::Spool)?;
+                write_model_call_usage(
+                    &mut file,
+                    version,
+                    request_id,
+                    model_call_count,
+                    &usage,
+                    model_configuration,
+                )
+                .await
+                .map_err(SnapshotSpoolError::from_connection)
+                .map_err(TranscriptSpoolError::Spool)?;
                 model_call_count = model_call_count
                     .checked_add(1)
                     .ok_or(SnapshotSpoolError::EncodeInvariant)
@@ -8036,11 +8887,39 @@ async fn write_model_call_usage<Writer>(
     request_id: RequestId,
     model_call_index: u64,
     evidence: &ProcessTranscriptModelCallUsage,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let usage = evidence.usage();
+    let cost = model_configuration
+        .derive_model_call_cost(
+            evidence.target(),
+            evidence.credential_profile(),
+            crate::configuration::ModelCallInputUsage::from_persisted(
+                usage.input_tokens(),
+                evidence.input_token_semantics(),
+            ),
+            usage.output_tokens(),
+            usage.cache_creation_input_tokens(),
+            usage.cache_read_input_tokens(),
+        )
+        .map(|cost| -> Result<_, ProcessConnectionError> {
+            Ok(ModelCallDollarCost {
+                amount_usd: CanonicalDollarAmount::try_new(
+                    cost.amount_usd().normalize().to_string(),
+                )
+                .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                rate_version: BillingRateVersion::try_new(cost.rate_version().to_owned())
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                label: match cost.billing_kind() {
+                    crate::BillingKind::ApiMetered => ModelCallCostLabel::Real,
+                    crate::BillingKind::Subscription => ModelCallCostLabel::MeteredEquivalent,
+                },
+            })
+        })
+        .transpose()?;
     write_message(
         writer,
         version,
@@ -8049,6 +8928,10 @@ where
             model_call_index: CanonicalU64::new(model_call_index),
             turn_id: wire_uuid(evidence.turn().into_uuid()),
             model_call_id: wire_uuid(evidence.call().into_uuid()),
+            usage_provenance: match evidence.provenance() {
+                ProcessModelCallUsageProvenance::Reported => UsageProvenance::Reported,
+                ProcessModelCallUsageProvenance::Estimated => UsageProvenance::Estimated,
+            },
             usage: ModelCallTokenUsage {
                 input_tokens: usage.input_tokens().map(CanonicalU64::new),
                 output_tokens: usage.output_tokens().map(CanonicalU64::new),
@@ -8057,6 +8940,7 @@ where
                     .map(CanonicalU64::new),
                 cache_read_input_tokens: usage.cache_read_input_tokens().map(CanonicalU64::new),
             },
+            cost,
         },
     )
     .await
@@ -8837,6 +9721,7 @@ enum InternalDiagnostic {
     ReviewOrchestrationWorkflowCorruption,
     ReviewOrchestrationSessionCorruption,
     ReviewOrchestrationServiceContract,
+    ConversationImportAllocationFailure,
     ConversationImportContractDefect,
     ConversationImportWorkerTerminated,
     ImportedSessionDatabase,
@@ -8883,6 +9768,7 @@ enum InternalDiagnostic {
     ToolLoopCorruption,
     ToolLoopInvalidTransition,
     ProcessReadCorruption,
+    GoalRepositoryCorruption,
 }
 
 impl InternalDiagnostic {
@@ -8900,6 +9786,9 @@ impl InternalDiagnostic {
             | Self::SessionMetadataCommitAmbiguous
             | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
+            },
+            Self::ConversationImportAllocationFailure => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
             },
             Self::ReviewOrchestrationServiceContract
             | Self::ConversationImportContractDefect
@@ -8942,7 +9831,8 @@ impl InternalDiagnostic {
             | Self::SubmitInputCorruption
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
-            | Self::ProcessReadCorruption => OperatorFailureClass::FailClosedCorruption,
+            | Self::ProcessReadCorruption
+            | Self::GoalRepositoryCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
 
@@ -8955,6 +9845,7 @@ impl InternalDiagnostic {
             }
             Self::ReviewOrchestrationSessionCorruption => "review_orchestration_session_corruption",
             Self::ReviewOrchestrationServiceContract => "review_orchestration_service_contract",
+            Self::ConversationImportAllocationFailure => "conversation_import_allocation_failure",
             Self::ConversationImportContractDefect => "conversation_import_contract_defect",
             Self::ConversationImportWorkerTerminated => "conversation_import_worker_terminated",
             Self::ImportedSessionDatabase => "imported_session_database",
@@ -9013,6 +9904,7 @@ impl InternalDiagnostic {
             Self::ToolLoopCorruption => "tool_loop_corruption",
             Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
             Self::ProcessReadCorruption => "process_read_corruption",
+            Self::GoalRepositoryCorruption => "goal_repository_corruption",
         }
     }
 }
@@ -9051,6 +9943,18 @@ fn internal_protocol_error(
 ) -> ProtocolError {
     record_internal_diagnostic(session_id, diagnostic);
     ProtocolError::without_detail(ErrorCode::Internal)
+}
+
+fn unavailable_protocol_error(diagnostic: InternalDiagnostic) -> ProtocolError {
+    let failure_class = diagnostic.failure_class();
+    let cause_code = diagnostic.cause_code();
+    tracing::error!(
+        ?failure_class,
+        cause_code,
+        session_id = tracing::field::Empty,
+        "requested operation is unavailable"
+    );
+    ProtocolError::without_detail(ErrorCode::Unavailable)
 }
 
 async fn write_error<Writer>(
@@ -9308,6 +10212,339 @@ fn wire_provider_failure_cause(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn handle_goal_user_command<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_uuid: uuid::Uuid,
+    session_id: CanonicalUuid,
+    action: GoalUserAction,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let schedules_turn = match &action {
+        GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_) => {
+            true
+        }
+        GoalUserAction::Stop => false,
+    };
+    let command = GoalUserCommand::new(DurableCommandId::from_uuid(command_uuid), session, action);
+    let candidates = schedules_turn.then(|| {
+        GoalTurnCandidates::new(
+            AcceptedInputId::from_uuid(uuid::Uuid::now_v7()),
+            TurnId::from_uuid(uuid::Uuid::now_v7()),
+        )
+    });
+    let outcome = GoalRepository::new(services.pool.clone())
+        .handle_user_command(command, candidates, |alias| {
+            services.model_configuration.resolve_alias(alias)
+        })
+        .await;
+    match outcome {
+        Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(event))) => {
+            if schedules_turn {
+                let _ = services.eligibility_nudge.nudge(session);
+            }
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::GoalTransitionApplied {
+                    session_id,
+                    event_ordinal: CanonicalU64::new(event.ordinal().get()),
+                    generation: CanonicalU64::new(event.generation().get()),
+                },
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(reason))) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::GoalCommandRejected {
+                    session_id,
+                    reason: wire_goal_command_rejection(reason),
+                }),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(error) => {
+            write_goal_repository_error(
+                writer,
+                version,
+                request_id,
+                Some(session_id.into_uuid()),
+                error,
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_read_goal<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let loaded = GoalRepository::new(pool.clone())
+        .load_goal(SessionId::from_uuid(session_id.into_uuid()))
+        .await;
+    let goal = match loaded {
+        Ok(Some(goal)) => goal,
+        Ok(None) => {
+            drop(snapshot_permit);
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::NotFound),
+            )
+            .await;
+        }
+        Err(error) => {
+            drop(snapshot_permit);
+            return write_goal_repository_error(
+                writer,
+                version,
+                request_id,
+                Some(session_id.into_uuid()),
+                error,
+            )
+            .await;
+        }
+    };
+    let spool_result = spool_goal_snapshot(&goal, version, request_id, session_id).await;
+    drop(goal);
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(error) => return write_snapshot_spool_error(writer, version, request_id, error).await,
+    };
+    write_spooled_file(writer, &mut spool).await
+}
+
+async fn spool_goal_snapshot(
+    goal: &Goal,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+) -> Result<tokio::fs::File, SnapshotSpoolError> {
+    let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryStart {
+            session_id,
+            current_generation: CanonicalU64::new(goal.current().generation().get()),
+            current_statement: goal.current().statement().as_str().to_owned(),
+        },
+    )
+    .await?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryState {
+            current_state: wire_goal_state(goal.current().state()),
+        },
+    )
+    .await?;
+    for event in goal.events() {
+        let wire_event = wire_goal_event(event).map_err(SnapshotSpoolError::from_connection)?;
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(event.ordinal().get()),
+                generation: CanonicalU64::new(event.generation().get()),
+                event: wire_event,
+            },
+        )
+        .await?;
+    }
+    let event_count =
+        u64::try_from(goal.events().len()).map_err(|_| SnapshotSpoolError::EncodeInvariant)?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::GoalHistoryEnd {
+            event_count: CanonicalU64::new(event_count),
+        },
+    )
+    .await?;
+    file.flush().await.map_err(SnapshotSpoolError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)?;
+    Ok(file)
+}
+
+fn wire_goal_state(state: &GoalState) -> GoalLifecycleState {
+    match state {
+        GoalState::Pursuing => GoalLifecycleState::Pursuing {},
+        GoalState::Blocked { reason, need } => GoalLifecycleState::Blocked {
+            reason: wire_goal_blocked_reason(*reason),
+            need: need.as_str().to_owned(),
+        },
+        GoalState::Achieved { report } => GoalLifecycleState::Achieved {
+            turn_id: wire_uuid(report.turn().into_uuid()),
+            tool_request_id: wire_uuid(report.tool_request().into_uuid()),
+        },
+        GoalState::UserStopped => GoalLifecycleState::UserStopped {},
+        GoalState::Superseded { by_generation } => GoalLifecycleState::Superseded {
+            by_generation: CanonicalU64::new(by_generation.get()),
+        },
+    }
+}
+
+fn wire_goal_event(event: &GoalEvent) -> Result<GoalHistoryEvent, ProcessConnectionError> {
+    match event.kind() {
+        GoalEventKind::Commissioned {
+            statement,
+            provenance,
+        } => Ok(GoalHistoryEvent::Commissioned {
+            statement: statement.as_str().to_owned(),
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::Blocked { block, need } => Ok(GoalHistoryEvent::Blocked {
+            reason: wire_goal_blocked_reason(block.reason_kind()),
+            need: need.as_str().to_owned(),
+            provenance: wire_goal_blocked_provenance(*block),
+        }),
+        GoalEventKind::Resumed {
+            guidance,
+            provenance,
+        } => Ok(GoalHistoryEvent::Resumed {
+            guidance: guidance.as_ref().map(|value| value.as_str().to_owned()),
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::Achieved { report, provenance } => Ok(GoalHistoryEvent::Achieved {
+            report: report.as_str().to_owned(),
+            turn_id: wire_uuid(provenance.turn().into_uuid()),
+            tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
+        }),
+        GoalEventKind::UserStopped { provenance } => Ok(GoalHistoryEvent::UserStopped {
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+        GoalEventKind::Superseded {
+            replacement_statement,
+            provenance,
+        } => Ok(GoalHistoryEvent::Superseded {
+            replacement_statement: replacement_statement.as_str().to_owned(),
+            command_id: wire_goal_command_id(provenance.command())?,
+        }),
+    }
+}
+
+fn wire_goal_blocked_provenance(value: GoalBlockProvenance) -> WireGoalBlockedProvenance {
+    match value {
+        GoalBlockProvenance::Model { provenance, .. } => WireGoalBlockedProvenance::Model {
+            turn_id: wire_uuid(provenance.turn().into_uuid()),
+            tool_request_id: wire_uuid(provenance.tool_request().into_uuid()),
+        },
+        GoalBlockProvenance::ExecutionFailure { provenance } => {
+            WireGoalBlockedProvenance::ExecutionFailure {
+                turn_id: wire_uuid(provenance.turn().into_uuid()),
+            }
+        }
+    }
+}
+
+const fn wire_goal_blocked_reason(value: GoalBlockedReasonKind) -> WireGoalBlockedReason {
+    match value {
+        GoalBlockedReasonKind::UserInputRequired => WireGoalBlockedReason::UserInputRequired,
+        GoalBlockedReasonKind::ExternalChangeRequired => {
+            WireGoalBlockedReason::ExternalChangeRequired
+        }
+        GoalBlockedReasonKind::AuthorizationRequired => {
+            WireGoalBlockedReason::AuthorizationRequired
+        }
+        GoalBlockedReasonKind::ExecutionFailure => WireGoalBlockedReason::ExecutionFailure,
+    }
+}
+
+const fn wire_goal_command_rejection(
+    value: DomainGoalCommandRejection,
+) -> WireGoalCommandRejection {
+    match value {
+        DomainGoalCommandRejection::SessionNotFound => WireGoalCommandRejection::SessionNotFound,
+        DomainGoalCommandRejection::GoalAlreadyAttached => {
+            WireGoalCommandRejection::GoalAlreadyAttached
+        }
+        DomainGoalCommandRejection::GoalNotAttached => WireGoalCommandRejection::GoalNotAttached,
+        DomainGoalCommandRejection::UnknownModelAlias => {
+            WireGoalCommandRejection::UnknownModelAlias
+        }
+        DomainGoalCommandRejection::AcceptancePositionExhausted => {
+            WireGoalCommandRejection::AcceptancePositionExhausted
+        }
+        DomainGoalCommandRejection::RequiresBlocked => WireGoalCommandRejection::RequiresBlocked,
+        DomainGoalCommandRejection::RequiresPursuingOrBlocked => {
+            WireGoalCommandRejection::RequiresPursuingOrBlocked
+        }
+        DomainGoalCommandRejection::GenerationExhausted => {
+            WireGoalCommandRejection::GenerationExhausted
+        }
+        DomainGoalCommandRejection::EventOrdinalExhausted => {
+            WireGoalCommandRejection::EventOrdinalExhausted
+        }
+    }
+}
+
+fn wire_goal_command_id(
+    value: DurableCommandId,
+) -> Result<signalbox_process_protocol::CommandId, ProcessConnectionError> {
+    signalbox_process_protocol::CommandId::try_from_uuid(value.into_uuid())
+        .map_err(|_| ProcessConnectionError::EncodeInvariant)
+}
+
+async fn write_goal_repository_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: Option<uuid::Uuid>,
+    error: GoalRepositoryError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        GoalRepositoryError::Database(_) => ProtocolError::mutation_definitely_unavailable(),
+        GoalRepositoryError::CommitAmbiguous(_) => ProtocolError::mutation_commit_ambiguous(),
+        GoalRepositoryError::DifferentCommandKind { .. } => {
+            ProtocolError::without_detail(ErrorCode::ConflictingReuse)
+        }
+        GoalRepositoryError::Corruption(_) => {
+            internal_protocol_error(session_id, InternalDiagnostic::GoalRepositoryCorruption)
+        }
+    };
+    write_error(writer, version, request_id, protocol_error).await
+}
+
 fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
     CanonicalUuid::from_uuid(value)
 }
@@ -9366,11 +10603,27 @@ impl ProtocolError {
         }
     }
 
+    const fn invalid_import(detail: RejectionDetail) -> Self {
+        Self {
+            code: ErrorCode::InvalidRequest,
+            message: "conversation import was rejected",
+            detail: ErrorDetail::invalid_request(detail),
+        }
+    }
+
+    const fn mutation_definitely_unavailable() -> Self {
+        Self::without_detail(ErrorCode::Unavailable)
+    }
+
+    const fn mutation_commit_ambiguous() -> Self {
+        Self::without_detail(ErrorCode::CommitAmbiguous)
+    }
+
     const fn mutation_unavailable(commit_ambiguous: bool) -> Self {
         if commit_ambiguous {
-            Self::without_detail(ErrorCode::CommitAmbiguous)
+            Self::mutation_commit_ambiguous()
         } else {
-            Self::without_detail(ErrorCode::Unavailable)
+            Self::mutation_definitely_unavailable()
         }
     }
 
@@ -9411,6 +10664,9 @@ enum ProcessUpdateEvent {
         turn: signalbox_domain::TurnId,
         acceptance_position: u64,
         content: String,
+    },
+    GoalTurnRetired {
+        turn: signalbox_domain::TurnId,
     },
     TurnActivated {
         turn: signalbox_domain::TurnId,
@@ -9476,6 +10732,9 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
+            DispatchedOutboxEventKind::GoalTurnRetired { turn } => {
+                Self::GoalTurnRetired { turn: *turn }
+            }
             DispatchedOutboxEventKind::TurnActivated {
                 turn,
                 current_attempt,
@@ -9577,6 +10836,9 @@ impl ProcessUpdateEvent {
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
                 content: InputContent::new(content.clone()),
+            },
+            Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
+                turn_id: wire_uuid(turn.into_uuid()),
             },
             Self::TurnActivated {
                 turn,
@@ -9864,22 +11126,26 @@ mod tests {
     };
 
     use signalbox_application::{ImportConversationError, ImportedConversationConverter};
+    use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
+    use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest, ReviewPass,
-        ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
-        ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
-        ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
-        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
-        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
+        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId, Goal,
+        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
+        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
+        ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
+        ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
+        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId,
+        SessionInputPosition, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
+        TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, FrameEncodeError,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion, RejectionDetail, ReviewFindingInput,
-        ReviewSeverity, ServerFrame, ServerMessage, SessionEvent, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
+        ErrorCode, ErrorDetail, FrameEncodeError, GoalLifecycleState, ImportedContentKind,
+        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
+        ProtocolVersion, RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry,
+        TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -9890,28 +11156,72 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionRangeLoadError, INBOUND_READ_AHEAD_BYTES,
-        ImportedConversationRepositoryError, IncomingLine, InternalDiagnostic,
+        ContextCompactionRangeLoadError, ConversationImportState, ConversionFailureDisposition,
+        GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
+        ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
-        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
-        OperationalImportError, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
-        ProtocolError, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
+        MAX_SUBMITTED_INPUT_BYTES, OperationalImportError, PendingConversationImport,
+        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
         REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS, RequestId, ReviewCommandAdmission,
         SnapshotSpoolError, SubmitInputModelExecutionDiagnostic, acquire_import_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_review_orchestration_snapshot_permit, acquire_snapshot_reader_permit,
-        admitted_user_content, canonical_review_request_digest, consume_snapshot_queued_update,
-        context_compaction_failure_disposition, execute_import,
+        acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_review_orchestration_snapshot_permit,
+        acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
+        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
+        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, observe_outbox_metrics_once,
         operational_import_error, read_frame_line, replacement_model_is_admitted,
+        retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
-        snapshot_reader_capacity, submit_input_model_execution_diagnostic, wire_model_call_state,
-        wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
+        submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
+        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
     };
+
+    macro_rules! assert_import_failure_ordinal {
+        ($mapping:path, $ordinal:literal, $failure:expr, $class:path) => {{
+            let ordinal = $ordinal;
+            assert_eq!(
+                $mapping(($failure)(ordinal)),
+                ConversionFailureDisposition::Rejected(import_evidence($class, Some(ordinal)))
+            );
+        }};
+    }
+
+    macro_rules! assert_simple_import_failures {
+        (
+            $mapping:path,
+            $failure_type:ident;
+            $( $ordinal:literal => $failure:ident => $class:path ),+ $(,)?
+        ) => {
+            $(
+                assert_import_failure_ordinal!(
+                    $mapping,
+                    $ordinal,
+                    |line| $failure_type::$failure { line },
+                    $class
+                );
+            )+
+        };
+    }
+
+    impl super::ClassifyConversationImportError for io::Error {
+        fn disposition(self) -> super::ConversionFailureDisposition {
+            super::ConversionFailureDisposition::Rejected(super::import_evidence(
+                signalbox_process_protocol::ConversationImportRejectionClass::InvalidJson,
+                None,
+            ))
+        }
+    }
+
     use crate::{FatalExecutionSupervisor, TelemetryMetrics};
     use signalbox_model_provider_runtime::ContextCompactionModelError;
     use signalbox_persistence::{
@@ -10475,11 +11785,11 @@ mod tests {
     #[test]
     fn commit_ambiguity_selects_the_stable_process_error_code() {
         assert_eq!(
-            ProtocolError::mutation_unavailable(false).code,
+            ProtocolError::mutation_definitely_unavailable().code,
             ErrorCode::Unavailable
         );
         assert_eq!(
-            ProtocolError::mutation_unavailable(true).code,
+            ProtocolError::mutation_commit_ambiguous().code,
             ErrorCode::CommitAmbiguous
         );
         assert!(
@@ -10530,6 +11840,10 @@ mod tests {
         let current_catalog = crate::HubModelConfiguration::parse(
             r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -10772,7 +12086,7 @@ context_window_tokens = 200000
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
         let acquire = acquire_review_command_permit_while_buffered(
             ReviewCommandAdmission::Required,
-            frame_permit,
+            Some(frame_permit),
             Arc::clone(&review_budget),
             &mut shutdown_receiver,
         );
@@ -10788,6 +12102,8 @@ context_window_tokens = 200000
         let (held_frame, review_permit) = timeout(Duration::from_secs(1), &mut acquire)
             .await??
             .ok_or_else(|| io::Error::other("the admitted request must retain both permits"))?;
+        let held_frame =
+            held_frame.ok_or_else(|| io::Error::other("the frame permit must remain"))?;
         assert!(review_permit.is_some());
         assert_eq!(frame_budget.available_permits(), 0);
         drop(held_frame);
@@ -10929,6 +12245,621 @@ context_window_tokens = 200000
         Ok(())
     }
 
+    #[test]
+    fn claude_converter_failures_map_to_typed_content_silent_evidence() {
+        use ClaudeCodeJsonlConversionFailure as Failure;
+        use ConversationImportRejectionClass as Class;
+        use ConversionFailureDisposition::Rejected;
+
+        assert_eq!(
+            claude_conversion_failure_disposition(Failure::EmptySource),
+            Rejected(import_evidence(Class::EmptySource, None))
+        );
+        assert_simple_import_failures!(
+            claude_conversion_failure_disposition,
+            Failure;
+            2 => BlankLine => Class::BlankLine,
+            3 => InvalidUtf8 => Class::InvalidUtf8,
+            4 => InvalidJson => Class::InvalidJson,
+            5 => JsonDepthExceeded => Class::JsonDepthExceeded,
+            6 => TopLevelNotObject => Class::TopLevelNotObject,
+            7 => InvalidRecordType => Class::InvalidRecordType,
+            8 => InvalidSourceMetadata => Class::InvalidSourceMetadata,
+            9 => InvalidMessageEnvelope => Class::InvalidMessageEnvelope,
+            10 => InvalidMessageRole => Class::InvalidMessageRole,
+            11 => MessageRoleMismatch => Class::MessageRoleMismatch,
+            12 => InvalidMessageContent => Class::InvalidMessageContent,
+        );
+        assert_import_failure_ordinal!(
+            claude_conversion_failure_disposition,
+            13,
+            |line| Failure::InvalidContentBlock { line, block: 1 },
+            Class::InvalidContentBlock
+        );
+        assert_import_failure_ordinal!(
+            claude_conversion_failure_disposition,
+            14,
+            |line| Failure::InvalidToolResultBlock {
+                line,
+                block: 1,
+                result_block: 2,
+            },
+            Class::InvalidToolResultBlock
+        );
+        assert_eq!(
+            claude_conversion_failure_disposition(Failure::PositionExhausted),
+            ConversionFailureDisposition::Internal
+        );
+    }
+
+    #[test]
+    fn codex_converter_failures_map_to_typed_content_silent_evidence() {
+        use CodexRolloutJsonlConversionFailure as Failure;
+        use ConversationImportRejectionClass as Class;
+        use ConversionFailureDisposition::Rejected;
+
+        assert_eq!(
+            codex_conversion_failure_disposition(Failure::EmptySource),
+            Rejected(import_evidence(Class::EmptySource, None))
+        );
+        assert_simple_import_failures!(
+            codex_conversion_failure_disposition,
+            Failure;
+            2 => BlankLine => Class::BlankLine,
+            3 => InvalidUtf8 => Class::InvalidUtf8,
+            4 => InvalidJson => Class::InvalidJson,
+            5 => JsonDepthExceeded => Class::JsonDepthExceeded,
+            6 => TopLevelNotObject => Class::TopLevelNotObject,
+            7 => InvalidRecordType => Class::InvalidRecordType,
+            8 => InvalidResponseItemType => Class::InvalidRecordType,
+            9 => InvalidSourceMetadata => Class::InvalidSourceMetadata,
+            10 => InvalidResponseItemEnvelope => Class::InvalidMessageEnvelope,
+            11 => InvalidMessageRole => Class::InvalidMessageRole,
+            12 => InvalidMessageContent => Class::InvalidMessageContent,
+            14 => InvalidReasoning => Class::InvalidReasoning,
+            16 => InvalidToolCall => Class::InvalidToolCall,
+            17 => InvalidToolResult => Class::InvalidToolResult,
+        );
+        assert_import_failure_ordinal!(
+            codex_conversion_failure_disposition,
+            13,
+            |line| Failure::InvalidMessageBlock { line, block: 1 },
+            Class::InvalidContentBlock
+        );
+        assert_import_failure_ordinal!(
+            codex_conversion_failure_disposition,
+            15,
+            |line| Failure::InvalidReasoningBlock { line, block: 1 },
+            Class::InvalidReasoning
+        );
+        assert_import_failure_ordinal!(
+            codex_conversion_failure_disposition,
+            18,
+            |line| Failure::InvalidToolResultBlock { line, block: 1 },
+            Class::InvalidToolResultBlock
+        );
+        assert_eq!(
+            codex_conversion_failure_disposition(Failure::PositionExhausted),
+            ConversionFailureDisposition::Internal
+        );
+    }
+
+    #[test]
+    fn oversized_begin_is_rejected_without_reserving_import_capacity() {
+        let limit = 8;
+        let oversized = ClientRequest::BeginConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes: CanonicalU64::new(u64::try_from(limit + 1).expect("limit fits")),
+        };
+        let admitted = ClientRequest::BeginConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes: CanonicalU64::new(u64::try_from(limit).expect("limit fits")),
+        };
+
+        assert!(!super::conversation_import_request_requires_permit(
+            &oversized,
+            ConversationImportState::Inactive,
+            limit,
+        ));
+        assert!(super::conversation_import_request_requires_permit(
+            &admitted,
+            ConversationImportState::Inactive,
+            limit,
+        ));
+        assert!(!super::conversation_import_request_requires_permit(
+            &admitted,
+            ConversationImportState::Active,
+            limit,
+        ));
+    }
+
+    #[tokio::test]
+    async fn duplicate_begin_refusal_preserves_the_active_import() -> Result<(), Box<dyn Error>> {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = Arc::clone(&budget).acquire_owned().await?;
+        let format = signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1;
+        let source = b"partial".to_vec();
+        let expected_source = source.clone();
+        let declared_size_bytes = u64::try_from(source.len())?;
+        let mut pending = Some(PendingConversationImport {
+            format,
+            declared_size_bytes,
+            actual_size_bytes: declared_size_bytes,
+            source,
+            import_permit: permit,
+        });
+        let request_id = RequestId::try_new(1)?;
+        let (mut writer, mut reader) = duplex(1_024);
+
+        handle_begin_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            request_id,
+            format,
+            CanonicalU64::new(declared_size_bytes),
+            usize::try_from(declared_size_bytes)?,
+            None,
+            &mut pending,
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportAlreadyInProgress {},
+                ),
+            },
+        )?;
+        let active = pending
+            .as_ref()
+            .expect("the active import remains available");
+
+        assert_eq!(observed, expected);
+        assert_eq!(active.source, expected_source);
+        assert_eq!(budget.available_permits(), capacity - 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_begin_releases_its_inbound_slot_before_import_admission()
+    -> Result<(), Box<dyn Error>> {
+        let capacity = 1;
+        let frame_budgets = InboundFrameBudgets::new();
+        let import_budget = Arc::new(Semaphore::new(capacity));
+        let occupied_import = Arc::clone(&import_budget).acquire_owned().await?;
+        let frame_permit = frame_budgets
+            .for_connection(ConversationImportState::Inactive)
+            .acquire_owned()
+            .await?;
+        let begin = ClientRequest::BeginConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes: CanonicalU64::new(u64::try_from(capacity)?),
+        };
+        let import_requires_permit = super::conversation_import_request_requires_permit(
+            &begin,
+            ConversationImportState::Inactive,
+            capacity,
+        );
+
+        let retained = retain_inbound_frame_permit_during_import_admission(
+            &begin,
+            import_requires_permit,
+            frame_permit,
+        );
+
+        assert!(retained.is_none());
+        assert_eq!(import_budget.available_permits(), 0);
+        let general_slots = frame_budgets
+            .for_connection(ConversationImportState::Inactive)
+            .acquire_many_owned(u32::try_from(GENERAL_BUFFERED_INBOUND_FRAMES)?)
+            .await?;
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let active_slot = timeout(
+            Duration::from_secs(1),
+            acquire_inbound_frame_permit(
+                frame_budgets.for_connection(ConversationImportState::Active),
+                &mut shutdown_receiver,
+            ),
+        )
+        .await??
+        .ok_or_else(|| io::Error::other("the active import must retain frame progress"))?;
+
+        assert_eq!(general_slots.num_permits(), GENERAL_BUFFERED_INBOUND_FRAMES);
+        assert_eq!(
+            active_slot.num_permits(),
+            RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES
+        );
+        assert_eq!(
+            general_slots.num_permits() + active_slot.num_permits(),
+            MAX_BUFFERED_INBOUND_FRAMES
+        );
+        drop(occupied_import);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_begin_waiters_have_a_separate_bound() -> Result<(), Box<dyn Error>> {
+        let capacity = MAX_IMPORT_ADMISSION_WAITERS;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let occupied = Arc::clone(&budget)
+            .acquire_many_owned(u32::try_from(capacity)?)
+            .await?;
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let acquire = acquire_import_waiter_permit(Arc::clone(&budget), &mut shutdown_receiver);
+        tokio::pin!(acquire);
+
+        assert!(
+            timeout(Duration::from_millis(20), &mut acquire)
+                .await
+                .is_err()
+        );
+        assert_eq!(occupied.num_permits(), capacity);
+
+        drop(occupied);
+        let admitted = timeout(Duration::from_secs(1), &mut acquire)
+            .await??
+            .ok_or_else(|| io::Error::other("a released waiter place must admit the begin"))?;
+
+        assert_eq!(admitted.num_permits(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_import_allocation_exhaustion_is_unavailable() {
+        let diagnostic = InternalDiagnostic::ConversationImportAllocationFailure;
+        let error = unavailable_protocol_error(diagnostic);
+
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        assert_eq!(error.detail, ErrorDetail::none());
+        assert_eq!(
+            diagnostic.failure_class(),
+            signalbox_application::OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
+    }
+
+    #[test]
+    fn conversation_import_capacity_grows_geometrically_within_declared_and_configured_bounds() {
+        let chunk_capacity = 4;
+        let declared_capacity = chunk_capacity * 4;
+        let configured_capacity = declared_capacity * 2;
+        let first_capacity = super::conversation_import_capacity_target(
+            0,
+            chunk_capacity,
+            declared_capacity,
+            configured_capacity,
+        );
+        let second_capacity = super::conversation_import_capacity_target(
+            first_capacity,
+            chunk_capacity * 2,
+            declared_capacity,
+            configured_capacity,
+        );
+        let retained_capacity = super::conversation_import_capacity_target(
+            second_capacity,
+            chunk_capacity * 2 - 1,
+            declared_capacity,
+            configured_capacity,
+        );
+        let third_capacity = super::conversation_import_capacity_target(
+            retained_capacity,
+            chunk_capacity * 2 + 1,
+            declared_capacity,
+            configured_capacity,
+        );
+        let declared_bound = super::conversation_import_capacity_target(
+            third_capacity,
+            declared_capacity,
+            declared_capacity,
+            configured_capacity,
+        );
+        let configured_bound = super::conversation_import_capacity_target(
+            declared_bound,
+            declared_capacity + 1,
+            declared_capacity,
+            configured_capacity,
+        );
+
+        assert_eq!(first_capacity, chunk_capacity);
+        assert_eq!(second_capacity, chunk_capacity * 2);
+        assert_eq!(retained_capacity, second_capacity);
+        assert_eq!(third_capacity, declared_capacity);
+        assert_eq!(declared_bound, declared_capacity);
+        assert_eq!(configured_bound, configured_capacity);
+    }
+
+    #[tokio::test]
+    async fn chunk_appends_assemble_exact_source_order() -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = budget.clone().acquire_owned().await?;
+        let first = b"first".to_vec();
+        let second = b"second".to_vec();
+        let expected_source = [first.as_slice(), second.as_slice()].concat();
+        let expected_size = u64::try_from(expected_source.len())?;
+        let limit = 32;
+        let mut pending = Some(PendingConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes: expected_size,
+            actual_size_bytes: 0,
+            source: Vec::new(),
+            import_permit: permit,
+        });
+        let (mut writer, _reader) = duplex(1_024);
+
+        handle_append_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            RequestId::try_new(1)?,
+            first,
+            limit,
+            &mut pending,
+        )
+        .await?;
+        handle_append_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            RequestId::try_new(2)?,
+            second,
+            limit,
+            &mut pending,
+        )
+        .await?;
+
+        let assembled = pending.as_ref().expect("the import remains pending");
+        assert_eq!(assembled.source, expected_source);
+        assert_eq!(assembled.actual_size_bytes, expected_size);
+        assert!(assembled.source.capacity() <= limit);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn begin_rejects_a_declared_size_above_the_configured_bound() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = budget.clone().acquire_owned().await?;
+        let request_id = RequestId::try_new(1)?;
+        let limit = 8;
+        let declared_size_bytes = CanonicalU64::new(9);
+        let mut pending = None;
+        let (mut writer, mut reader) = duplex(1_024);
+
+        handle_begin_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            request_id,
+            signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes,
+            limit,
+            Some(permit),
+            &mut pending,
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceTooLarge {
+                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
+                        declared_size_bytes,
+                        actual_size_bytes: None,
+                    },
+                ),
+            },
+        )?;
+
+        assert_eq!(observed, expected);
+        assert!(pending.is_none());
+        assert_eq!(budget.available_permits(), capacity);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn append_rejects_observed_size_above_the_configured_bound() -> Result<(), Box<dyn Error>>
+    {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = budget.clone().acquire_owned().await?;
+        let request_id = RequestId::try_new(1)?;
+        let limit = 8;
+        let declared_size_bytes = u64::try_from(limit)?;
+        let prior_size_bytes = u64::try_from(limit - 1)?;
+        let chunk = vec![b'x'; 2];
+        let observed_size_bytes = prior_size_bytes + u64::try_from(chunk.len())?;
+        let mut pending = Some(PendingConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes,
+            actual_size_bytes: prior_size_bytes,
+            source: vec![b'x'; usize::try_from(prior_size_bytes)?],
+            import_permit: permit,
+        });
+        let (mut writer, mut reader) = duplex(1_024);
+
+        handle_append_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            request_id,
+            chunk,
+            limit,
+            &mut pending,
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceTooLarge {
+                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
+                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
+                        actual_size_bytes: Some(CanonicalU64::new(observed_size_bytes)),
+                    },
+                ),
+            },
+        )?;
+
+        assert_eq!(budget.available_permits(), capacity);
+        assert_eq!(observed, expected);
+        assert!(pending.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_declared_and_actual_size_mismatch() -> Result<(), Box<dyn Error>> {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = budget.clone().acquire_owned().await?;
+        let source = vec![b'x'];
+        let actual_size_bytes = u64::try_from(source.len())?;
+        let declared_size_bytes = actual_size_bytes + 1;
+        let request_id = RequestId::try_new(1)?;
+        let limit = 8;
+        let mut pending = Some(PendingConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes,
+            actual_size_bytes,
+            source,
+            import_permit: permit,
+        });
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let (mut writer, mut reader) = duplex(1);
+        let write = tokio::spawn(async move {
+            let result = handle_commit_conversation_import(
+                &mut writer,
+                ProtocolVersion::One,
+                request_id,
+                limit,
+                &pool,
+                &mut pending,
+            )
+            .await;
+            (result, pending)
+        });
+
+        let reacquired = timeout(Duration::from_secs(1), budget.acquire_owned()).await??;
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let (write_result, pending) = write.await?;
+        write_result?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceSizeMismatch {
+                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
+                        actual_size_bytes: CanonicalU64::new(actual_size_bytes),
+                    },
+                ),
+            },
+        )?;
+
+        assert_eq!(reacquired.num_permits(), capacity);
+        assert_eq!(observed, expected);
+        assert!(pending.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_rechecks_the_configured_total_bound() -> Result<(), Box<dyn Error>> {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = budget.clone().acquire_owned().await?;
+        let request_id = RequestId::try_new(1)?;
+        let declared_size_bytes = 7;
+        let actual_size_bytes = 9;
+        let limit = 8;
+        let mut pending = Some(PendingConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes,
+            actual_size_bytes,
+            source: Vec::new(),
+            import_permit: permit,
+        });
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://signalbox:fixture@127.0.0.1/signalbox")?;
+        let (mut writer, mut reader) = duplex(1_024);
+
+        handle_commit_conversation_import(
+            &mut writer,
+            ProtocolVersion::One,
+            request_id,
+            limit,
+            &pool,
+            &mut pending,
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let observed = decode_server_line(&encoded)?;
+        let expected = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request_id,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("conversation import was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::ConversationImportSourceTooLarge {
+                        limit_bytes: CanonicalU64::new(u64::try_from(limit)?),
+                        declared_size_bytes: CanonicalU64::new(declared_size_bytes),
+                        actual_size_bytes: Some(CanonicalU64::new(actual_size_bytes)),
+                    },
+                ),
+            },
+        )?;
+
+        assert_eq!(observed, expected);
+        assert!(pending.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_drop_discards_partial_import_and_releases_its_permit()
+    -> Result<(), Box<dyn Error>> {
+        let capacity = 1;
+        let budget = Arc::new(Semaphore::new(capacity));
+        let permit = budget.clone().acquire_owned().await?;
+        let pending = PendingConversationImport {
+            format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
+            declared_size_bytes: 4,
+            actual_size_bytes: 2,
+            source: b"pa".to_vec(),
+            import_permit: permit,
+        };
+
+        drop(pending);
+        let reacquired = timeout(Duration::from_secs(1), budget.acquire_owned()).await??;
+
+        assert_eq!(reacquired.num_permits(), capacity);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn import_budget_admits_one_retained_aggregate_at_a_time() -> Result<(), Box<dyn Error>> {
         assert_eq!(MAX_CONCURRENT_IMPORTS, 1);
@@ -10974,7 +12905,15 @@ context_window_tokens = 200000
         .await;
         let conversion_worker = thread_receiver.recv_timeout(Duration::from_secs(1))?;
 
-        assert_eq!(outcome, Err(OperationalImportError::InvalidSource));
+        assert_eq!(
+            outcome,
+            Err(OperationalImportError::InvalidSource(
+                super::import_evidence(
+                    signalbox_process_protocol::ConversationImportRejectionClass::InvalidJson,
+                    None,
+                )
+            ))
+        );
         assert_ne!(conversion_worker, async_worker);
         Ok(())
     }
@@ -11226,6 +13165,61 @@ context_window_tokens = 200000
     }
 
     #[tokio::test]
+    async fn goal_history_is_completed_in_spool_before_socket_write() -> Result<(), Box<dyn Error>>
+    {
+        let session = SessionId::from_uuid(Uuid::from_u128(40));
+        let session_id = wire_uuid(session.into_uuid());
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(41));
+        let statement = GoalStatement::try_new(String::from("finish the fixture task"))?;
+        let goal = Goal::commission(session, statement.clone(), GoalUserProvenance::new(command));
+        let request_id = RequestId::try_new(42)?;
+        let mut spool = spool_goal_snapshot(&goal, ProtocolVersion::One, request_id, session_id)
+            .await
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "goal spool fixture failed: {}",
+                    spool_error_display(&error)
+                ))
+            })?;
+        let mut encoded = Vec::new();
+        spool.read_to_end(&mut encoded).await?;
+
+        let mut expected = encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryStart {
+                session_id,
+                current_generation: CanonicalU64::new(goal.current().generation().get()),
+                current_statement: statement.as_str().to_owned(),
+            },
+        )?)?;
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::Pursuing {},
+            },
+        )?)?);
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(goal.events()[0].ordinal().get()),
+                generation: CanonicalU64::new(goal.events()[0].generation().get()),
+                event: wire_goal_event(&goal.events()[0])?,
+            },
+        )?)?);
+        expected.extend(encode_server_line(&ServerFrame::try_new(
+            request_id,
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(
+                    u64::try_from(goal.events().len()).expect("fixture event count fits u64"),
+                ),
+            },
+        )?)?);
+
+        assert_eq!(encoded, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn blocked_follow_write_is_cancelled_by_shutdown() -> Result<(), Box<dyn Error>> {
         let (mut writer, _reader) = duplex(1);
         writer.write_all(b"x").await?;
@@ -11458,6 +13452,19 @@ context_window_tokens = 200000
             )),
             ModelCallState::Terminal {
                 disposition: ModelCallDisposition::Ambiguous
+            }
+        );
+    }
+
+    #[test]
+    fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(7));
+        let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
+
+        assert_eq!(
+            update.wire(),
+            SessionEvent::GoalTurnRetired {
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
             }
         );
     }

@@ -12,9 +12,8 @@ use signalbox_model_runtime::CredentialAccess;
 use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
     CURRENT_TIME_NAME, CurrentTimeClock, CurrentTimeExecutor, CurrentTimeTool, ECHO_NAME,
-    EchoExecutor, EchoTool, PostgresSessionStatusWriter, ReqwestWebFetchTransport,
-    SESSION_STATUS_UPDATE_NAME, SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
-    WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
+    EchoExecutor, EchoTool, PostgresSessionStatusWriter, SESSION_STATUS_UPDATE_NAME,
+    SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
 };
 use signalbox_tools_code_host::{
     CODE_HOST_TOOL_NAMES, CodeHostExecutor, CodeHostTools, CodeHostTransport,
@@ -28,6 +27,10 @@ use signalbox_tools_github::{
     GitHubTransport,
 };
 use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
+use signalbox_tools_web::{
+    ReqwestWebFetchTransport, WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool,
+    WebFetchTransport,
+};
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES,
     WorkspaceDirectoryRead, WorkspaceEntryKind, WorkspaceFileBytes, WorkspaceFileMutation,
@@ -39,7 +42,10 @@ use signalbox_tools_workspace::{
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-use crate::{FileCredentialAccess, PostgresConversationIntrospection};
+use crate::{
+    FileCredentialAccess, PostgresConversationIntrospection,
+    goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor, GoalDeclarationTool},
+};
 
 /// Daemon-local filesystem adapter that shares one pinned root across both
 /// workspace suites.
@@ -137,6 +143,7 @@ struct ComposedToolFamilies<
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
+    goal: Option<GoalDeclarationTool>,
 }
 
 /// The complete daemon-local declarations and their matching dispatch executor.
@@ -205,6 +212,8 @@ impl<Clock>
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
+        let goal = GoalDeclarationTool::try_new(pool.clone())
+            .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -218,6 +227,7 @@ impl<Clock>
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
                 plan,
+                goal: Some(goal),
             },
         )
     }
@@ -235,6 +245,8 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
+        let goal = GoalDeclarationTool::try_new(pool.clone())
+            .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(credentials, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
@@ -250,6 +262,7 @@ impl<Clock>
                 workspace_mutation: None,
                 conversations: None,
                 plan,
+                goal: Some(goal),
             },
         )
     }
@@ -324,6 +337,7 @@ where
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
                 plan,
+                goal: None,
             },
         )
     }
@@ -350,6 +364,7 @@ where
             workspace_mutation,
             conversations,
             plan,
+            goal,
         } = families;
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
             .map_err(|_| DaemonToolsConstructionError::CurrentTime)?
@@ -365,6 +380,7 @@ where
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
+        let goal = goal.map(GoalDeclarationTool::into_parts);
         let mut catalogs = vec![
             current_time_catalog,
             echo_catalog,
@@ -381,6 +397,7 @@ where
                 .map(|(catalog, _)| catalog.clone()),
         );
         catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(goal.as_ref().map(|(catalog, _)| catalog.clone()));
         let catalog = DaemonToolCatalog::try_new(catalogs)
             .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
         Ok(Self {
@@ -397,6 +414,7 @@ where
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
+                goal: goal.map(|(_, executor)| executor),
             },
         })
     }
@@ -447,6 +465,8 @@ pub enum DaemonToolsConstructionError {
     Conversations,
     /// The plan declarations or session plan port were invalid.
     Plan,
+    /// The goal declaration or its static validation details were invalid.
+    GoalDeclaration,
     /// Two declarations unexpectedly shared one name.
     Duplicate,
 }
@@ -464,6 +484,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
+            Self::GoalDeclaration => "goal_declare tool construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
     }
@@ -602,6 +623,7 @@ pub struct DaemonToolExecutor<
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
+    goal: Option<GoalDeclarationExecutor>,
 }
 
 /// Sanitized aggregate executor failure.
@@ -726,6 +748,13 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if CONVERSATION_TOOL_NAMES.contains(&name) => self
                 .conversations
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            GOAL_DECLARE_NAME => self
+                .goal
                 .as_mut()
                 .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
@@ -974,6 +1003,7 @@ mod tests {
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
+                goal: None,
             },
         )
         .expect("base daemon tools compile")

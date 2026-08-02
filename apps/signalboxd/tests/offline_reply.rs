@@ -8,15 +8,17 @@ use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
-    CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
+    CreateSessionRequest, CreateSessionService, EligibilityNudge, GoalAwareEligibilityPass,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass, SchedulerLoop,
+    SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
+    AcceptedInputId, DeliveryRequest, DirectModelSelection, DurableCommandId, Goal,
+    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandResult, GoalEvent, GoalEventKind,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
     ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
@@ -27,14 +29,22 @@ use signalbox_model_provider_runtime::{
 };
 use signalbox_model_runtime::{
     AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
-    Script, ScriptedModel, TerminalEvidence, TokenUsage,
+    RefusalEvidence, Script, ScriptedModel, TerminalEvidence, TokenUsage,
 };
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, local_test_connection_options, migrate,
-    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+    create_session::CreateSessionRepository,
+    goal::{GoalCommandHandlingOutcome, GoalRepository},
+    goal_turn::GoalTurnCandidates,
+    local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository,
+    scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::SubmitInputRepository,
 };
-use signalboxd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
+use signalboxd::{
+    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution,
+};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -50,6 +60,29 @@ const SERVED_PROVIDER_MODEL: &str = "claude-haiku-4-5-20251001";
 const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const GOAL_MODEL_CONFIGURATION: &str = r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "subscription"
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
+[compaction]
+prompt = "Summarize faithfully."
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000002001"
+target_id = "00000000-0000-0000-0000-000000002004"
+model_family = "anthropic"
+provider_model = "claude-haiku-4-5"
+max_output_tokens = 64
+context_window_tokens = 200000
+"#;
 
 fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
     signalbox_persistence::SessionCredentialPin::try_new(vec![
@@ -134,6 +167,90 @@ async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_execution_failure_block(pool: &PgPool, session: SessionId) {
+    loop {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM goal_event
+                 WHERE session_id = $1
+                   AND event_kind = 'blocked'
+                   AND blocked_reason = 'execution_failure'
+            )",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn goal_completion_script() -> Script {
+    Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
+        finish: CompletionFinish::EndTurn,
+        content: vec![AssistantPart::Text(String::from(
+            "first goal turn completed",
+        ))],
+        usage: TokenUsage::unreported(),
+    }))
+}
+
+fn goal_refusal_script() -> Script {
+    Script::delivering(TerminalEvidence::Refused(RefusalEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
+        content: Vec::new(),
+        usage: TokenUsage::unreported(),
+    }))
+}
+
+fn goal_statement(value: &str) -> GoalStatement {
+    GoalStatement::try_new(value.to_owned()).expect("fixture goal statement is admitted")
+}
+
+fn goal_turn_candidates(value: u128) -> GoalTurnCandidates {
+    GoalTurnCandidates::new(
+        AcceptedInputId::from_uuid(Uuid::from_u128(value)),
+        TurnId::from_uuid(Uuid::from_u128(value + 1)),
+    )
+}
+
+#[track_caller]
+fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
+    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) = outcome else {
+        panic!("fixture goal command must apply");
+    };
+}
+
+#[track_caller]
+fn assert_execution_failure_blocked(goal: &Goal) {
+    let GoalState::Blocked { reason, need } = goal.current().state() else {
+        panic!("fixture goal must be blocked");
+    };
+    assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
+    assert!(!need.as_str().is_empty());
+}
+
+#[track_caller]
+fn execution_failure_turn(goal: &Goal) -> TurnId {
+    let Some(GoalEventKind::Blocked {
+        block: GoalBlockProvenance::ExecutionFailure { provenance },
+        ..
+    }) = goal.events().last().map(GoalEvent::kind)
+    else {
+        panic!("fixture goal must end with scheduler failure provenance");
+    };
+    provenance.turn()
 }
 
 /// S01 / S02 / INV-014 / INV-015: the complete offline
@@ -370,6 +487,114 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             (String::from("terminal"), Some(String::from("completed"))),
         ]
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-048: a completed goal turn is followed without user input, and an
+/// unsuccessful successor blocks with scheduler provenance without a retry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone(), configuration.session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x2101)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture command must create its session")
+    };
+    let session = created.session();
+    let first_turn = goal_turn_candidates(0x2201);
+    let goal_repository = GoalRepository::new(pool.clone());
+    let attached = goal_repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x2102)),
+                session,
+                GoalUserAction::Attach(goal_statement("finish the commissioned task")),
+            ),
+            Some(first_turn),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(attached);
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let _ = nudge.nudge(session);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let runtime = ScriptedModel::following([goal_completion_script(), goal_refusal_script()]);
+    let provider =
+        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog());
+    let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
+    let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+        PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                configuration.target_catalog(),
+                credential_reference,
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        )
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
+    );
+    let activated_pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        execution,
+    );
+    let pass = GoalAwareEligibilityPass::new(
+        activated_pass,
+        PostgresGoalPassDisposition::new(pool.clone(), configuration, nudge),
+    );
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let observation_pool = pool.clone();
+    let fatal_shutdown = fatal_execution.clone();
+    let shutdown = async move {
+        tokio::select! {
+            () = wait_for_execution_failure_block(&observation_pool, session) => {}
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        SchedulerLoopExit::Shutdown
+    );
+    assert!(
+        !fatal_execution.is_triggered(),
+        "a provider refusal is a durable unsuccessful turn, not a fatal execution defect"
+    );
+
+    let goal = goal_repository
+        .load_goal(session)
+        .await?
+        .expect("the attached goal remains readable");
+    let goal_turn_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM goal_turn WHERE session_id = $1")
+            .bind(session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_execution_failure_blocked(&goal);
+    assert_eq!(goal_turn_count, 2);
+    assert_eq!(runtime.received_operations().len(), 2);
+    assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
 
     pool.close().await;
     drop(container);

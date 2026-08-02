@@ -60,6 +60,7 @@ pub(crate) enum Command {
     Imported {
         imported_conversation_id: CanonicalUuid,
     },
+    Goal(GoalCommand),
     List,
     Templates,
     Search(SessionMetadataPageRequest),
@@ -118,6 +119,38 @@ pub(crate) enum Command {
         session_id: CanonicalUuid,
         tool_request_id: CanonicalUuid,
         reason: String,
+        command_id: Option<CommandId>,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum GoalTextArgument {
+    Inline(String),
+    File(PathBuf),
+}
+
+#[derive(Debug)]
+pub(crate) enum GoalCommand {
+    Attach {
+        session_id: CanonicalUuid,
+        statement: GoalTextArgument,
+        command_id: Option<CommandId>,
+    },
+    Show {
+        session_id: CanonicalUuid,
+    },
+    Resume {
+        session_id: CanonicalUuid,
+        guidance: Option<GoalTextArgument>,
+        command_id: Option<CommandId>,
+    },
+    Stop {
+        session_id: CanonicalUuid,
+        command_id: Option<CommandId>,
+    },
+    Supersede {
+        session_id: CanonicalUuid,
+        statement: GoalTextArgument,
         command_id: Option<CommandId>,
     },
 }
@@ -318,6 +351,8 @@ enum CliCommand {
     Compact(CompactArguments),
     /// Print one imported conversation's selectable entry positions.
     Imported(ImportedArguments),
+    /// Commission, inspect, or transition one session goal.
+    Goal(GoalArguments),
     /// List current sessions.
     List,
     /// List available session templates.
@@ -352,6 +387,80 @@ enum CliCommand {
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
     Deny(DenyArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct GoalArguments {
+    #[command(subcommand)]
+    command: GoalSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum GoalSubcommand {
+    /// Attach one immutable statement and start autonomous pursuit.
+    Attach(GoalStatementArguments),
+    /// Show current state and the complete ordered event history.
+    Show(SessionArguments),
+    /// Resume a blocked goal with optional next-turn guidance.
+    Resume(GoalResumeArguments),
+    /// Explicitly end a pursuing or blocked goal.
+    Stop(GoalMutationArguments),
+    /// Replace the active statement with a new immutable generation.
+    Supersede(GoalStatementArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("goal_statement_source")
+        .required(true)
+        .multiple(false)
+        .args(["statement", "statement_file"])
+))]
+struct GoalStatementArguments {
+    /// Session whose goal lineage is changed.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Exact immutable commissioned statement; at most 1 MiB of UTF-8.
+    #[arg(long, value_name = "TEXT")]
+    statement: Option<String>,
+    /// Read the exact immutable commissioned statement from one file; at most 1 MiB of UTF-8.
+    #[arg(long, value_name = "FILE")]
+    statement_file: Option<PathBuf>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("goal_guidance_source")
+        .required(false)
+        .multiple(false)
+        .args(["guidance", "guidance_file"])
+))]
+struct GoalResumeArguments {
+    /// Session whose blocked goal resumes.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Optional exact next-turn guidance; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
+    #[arg(long, value_name = "TEXT")]
+    guidance: Option<String>,
+    /// Read optional next-turn guidance from one file; at most 1 MiB of UTF-8. Omit both guidance options to use the immutable statement.
+    #[arg(long, value_name = "FILE")]
+    guidance_file: Option<PathBuf>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct GoalMutationArguments {
+    /// Session whose current goal is changed.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1173,6 +1282,35 @@ pub(crate) enum SystemPromptArgument {
     Clear,
 }
 
+fn goal_statement_argument(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<GoalTextArgument, UsageError> {
+    match (inline, file) {
+        (Some(value), None) => Ok(GoalTextArgument::Inline(value)),
+        (None, Some(path)) => Ok(GoalTextArgument::File(path)),
+        (Some(_), Some(_)) | (None, None) => Err(UsageError(Cli::command().error(
+            ErrorKind::ArgumentConflict,
+            "goal attach and supersede require exactly one of --statement or --statement-file",
+        ))),
+    }
+}
+
+fn goal_guidance_argument(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<Option<GoalTextArgument>, UsageError> {
+    match (inline, file) {
+        (Some(value), None) => Ok(Some(GoalTextArgument::Inline(value))),
+        (None, Some(path)) => Ok(Some(GoalTextArgument::File(path))),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(UsageError(Cli::command().error(
+            ErrorKind::ArgumentConflict,
+            "goal resume accepts at most one of --guidance or --guidance-file",
+        ))),
+    }
+}
+
 pub(crate) fn parse(
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<ParseOutcome, UsageError> {
@@ -1228,6 +1366,30 @@ pub(crate) fn parse(
         CliCommand::Imported(arguments) => Command::Imported {
             imported_conversation_id: arguments.imported_conversation_id,
         },
+        CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
+            GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
+                session_id: arguments.session_id,
+                statement: goal_statement_argument(arguments.statement, arguments.statement_file)?,
+                command_id: arguments.command_id,
+            },
+            GoalSubcommand::Show(arguments) => GoalCommand::Show {
+                session_id: arguments.session_id,
+            },
+            GoalSubcommand::Resume(arguments) => GoalCommand::Resume {
+                session_id: arguments.session_id,
+                guidance: goal_guidance_argument(arguments.guidance, arguments.guidance_file)?,
+                command_id: arguments.command_id,
+            },
+            GoalSubcommand::Stop(arguments) => GoalCommand::Stop {
+                session_id: arguments.session_id,
+                command_id: arguments.command_id,
+            },
+            GoalSubcommand::Supersede(arguments) => GoalCommand::Supersede {
+                session_id: arguments.session_id,
+                statement: goal_statement_argument(arguments.statement, arguments.statement_file)?,
+                command_id: arguments.command_id,
+            },
+        }),
         CliCommand::List => Command::List,
         CliCommand::Templates => Command::Templates,
         CliCommand::Search(arguments) => {
@@ -1947,8 +2109,8 @@ mod tests {
 
     use super::{
         Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
-        ImportSourceArgument, ParseOutcome, SendDeliveryArgument, SessionMetadataPageRequest,
-        ThroughPositionArgument, UsageError, parse,
+        GoalCommand, GoalTextArgument, ImportSourceArgument, ParseOutcome, SendDeliveryArgument,
+        SessionMetadataPageRequest, ThroughPositionArgument, UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -3328,6 +3490,164 @@ mod tests {
         .expect("the explicit supported format and scan directory parse");
 
         assert_codex_scan_import(parsed, Path::new("conversation-directory"));
+    }
+
+    #[test]
+    fn goal_help_states_text_bounds_and_absent_guidance_behavior() {
+        let ParseOutcome::Help(attach_help) =
+            parse(["goal", "attach", "--help"].map(OsString::from))
+                .expect("goal attach help renders")
+        else {
+            panic!("goal attach --help must return help text");
+        };
+        let ParseOutcome::Help(resume_help) =
+            parse(["goal", "resume", "--help"].map(OsString::from))
+                .expect("goal resume help renders")
+        else {
+            panic!("goal resume --help must return help text");
+        };
+
+        assert!(attach_help.contains("at most 1 MiB of UTF-8"));
+        assert!(resume_help.contains("at most 1 MiB of UTF-8"));
+        assert!(resume_help.contains("Omit both guidance options to use the immutable statement"));
+    }
+
+    #[test]
+    fn goal_supersede_parses_a_new_immutable_statement() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+        const COMMAND_ID: &str = "00000000-0000-0000-0000-000000000002";
+        const STATEMENT: &str = "Ship the replacement scope";
+
+        let parsed = parse(
+            [
+                "goal",
+                "supersede",
+                SESSION_ID,
+                "--statement",
+                STATEMENT,
+                "--command-id",
+                COMMAND_ID,
+            ]
+            .map(Into::into),
+        );
+
+        assert_goal_supersede_parse(parsed, SESSION_ID, STATEMENT, COMMAND_ID);
+    }
+
+    #[test]
+    fn goal_attach_parses_a_statement_file() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "goal",
+                "attach",
+                SESSION_ID,
+                "--statement-file",
+                "commission.txt",
+            ]
+            .map(Into::into),
+        )
+        .expect("the goal statement file parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the goal statement file runs the client");
+        };
+        let Command::Goal(GoalCommand::Attach {
+            statement: GoalTextArgument::File(path),
+            ..
+        }) = arguments.command
+        else {
+            panic!("the goal statement file selects attach");
+        };
+
+        assert_eq!(path, Path::new("commission.txt"));
+    }
+
+    #[test]
+    fn goal_resume_parses_a_guidance_file() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+        let parsed = parse(
+            [
+                "goal",
+                "resume",
+                SESSION_ID,
+                "--guidance-file",
+                "guidance.txt",
+            ]
+            .map(Into::into),
+        )
+        .expect("the goal guidance file parses");
+        let ParseOutcome::Run(arguments) = parsed else {
+            panic!("the goal guidance file runs the client");
+        };
+        let Command::Goal(GoalCommand::Resume {
+            guidance: Some(GoalTextArgument::File(path)),
+            ..
+        }) = arguments.command
+        else {
+            panic!("the goal guidance file selects resume");
+        };
+
+        assert_eq!(path, Path::new("guidance.txt"));
+    }
+
+    #[test]
+    fn goal_resume_preserves_absent_guidance() {
+        const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+        let parsed = parse(["goal", "resume", SESSION_ID].map(Into::into));
+
+        assert_goal_resume_without_guidance_parse(parsed, SESSION_ID);
+    }
+
+    #[track_caller]
+    fn assert_goal_supersede_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_session: &str,
+        expected_statement: &str,
+        expected_command: &str,
+    ) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful goal supersede parse runs the client");
+        };
+        let Command::Goal(GoalCommand::Supersede {
+            session_id,
+            statement: GoalTextArgument::Inline(statement),
+            command_id: Some(command_id),
+        }) = arguments.command
+        else {
+            panic!("the successful goal supersede parse selects goal supersede");
+        };
+        assert_eq!(
+            session_id.into_uuid().hyphenated().to_string(),
+            expected_session
+        );
+        assert_eq!(statement, expected_statement);
+        assert_eq!(
+            command_id.into_uuid().hyphenated().to_string(),
+            expected_command
+        );
+    }
+
+    #[track_caller]
+    fn assert_goal_resume_without_guidance_parse(
+        parsed: Result<ParseOutcome, UsageError>,
+        expected_session: &str,
+    ) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the successful goal resume parse runs the client");
+        };
+        let Command::Goal(GoalCommand::Resume {
+            session_id,
+            guidance: None,
+            command_id: None,
+        }) = arguments.command
+        else {
+            panic!("the successful goal resume parse selects goal resume");
+        };
+        assert_eq!(
+            session_id.into_uuid().hyphenated().to_string(),
+            expected_session
+        );
     }
 
     #[test]

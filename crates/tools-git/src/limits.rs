@@ -1,6 +1,8 @@
 pub(super) const MAX_BRANCH_BYTES: usize = 255;
 
-pub(super) const MAX_REVISION_BYTES: usize = 1024;
+pub(super) const MAX_REFERENCE_BYTES: usize = 1024;
+
+pub(super) const MAX_REVISION_BYTES: usize = MAX_REFERENCE_BYTES + "ref: \n".len();
 
 pub(super) const MAX_COMMIT_MESSAGE_BYTES: usize = 64 * 1024;
 
@@ -20,7 +22,7 @@ pub(super) const MAX_PACKED_REFS_BYTES: usize = 1024 * 1024;
 
 pub(super) const MAX_SHALLOW_ENTRIES: usize = 1024;
 
-pub(super) const MAX_SHALLOW_BYTES: usize = MAX_SHALLOW_ENTRIES * 41;
+pub(super) const MAX_SHALLOW_BYTES: usize = MAX_SHALLOW_ENTRIES * 65;
 
 pub(super) const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -28,9 +30,13 @@ pub(super) const MAX_INDEX_ENTRIES: usize = MAX_WORKTREE_INSPECTIONS;
 
 pub(super) const MAX_OBJECT_BYTES: usize = 1024 * 1024;
 
+pub(super) const MAX_LOOSE_OBJECT_HEADER_BYTES: usize = 128;
+
 pub(super) const MAX_PACK_FILE_BYTES: usize = MAX_OBJECT_DATABASE_BYTES;
 
 pub(super) const MAX_OBJECT_DATABASE_BYTES: usize = 128 * MAX_OBJECT_BYTES;
+
+pub(super) const MAX_REPOSITORY_INSPECTIONS: usize = 100_000;
 
 pub(super) const MAX_TREE_BLOB_BYTES: usize = 64 * MAX_OBJECT_BYTES;
 
@@ -40,7 +46,7 @@ pub(super) const MAX_WORKTREE_INSPECTIONS: usize = 4096;
 
 pub(super) const MAX_MERGE_PARENTS: usize = 64;
 
-pub(super) const MAX_MERGE_HEAD_BYTES: usize = MAX_MERGE_PARENTS * 41;
+pub(super) const MAX_MERGE_HEAD_BYTES: usize = MAX_MERGE_PARENTS * 65;
 
 pub(super) const MAX_WORKTREE_PATH_BYTES: usize = 4 * 1024 * 1024;
 
