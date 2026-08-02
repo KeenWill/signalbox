@@ -541,19 +541,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testModelUsageKeepsItsTranscriptAnchorAfterNormalization() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithAnchoredUsageAndLaterMessage()
-    var projector = SignalboxProcessTranscriptProjector()
-
-    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
-
-    XCTAssertEqual(
-      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
-      ProcessProjectionFixture.anchoredUsageTimelineKinds
-    )
-  }
-
   func testUnknownFollowedEventProjectsAsConservativeEvidence() throws {
     let followed = try ProcessProjectionFixture.unknownFollowedEvent()
     let projector = SignalboxProcessTranscriptProjector()
@@ -572,19 +559,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       event.diagnostic,
       ProcessProjectionFixture.futureFollowedModelCallDiagnostic
-    )
-  }
-
-  func testUnknownTerminalDispositionRetainsAttribution() throws {
-    let followed = try ProcessProjectionFixture.unknownDispositionModelCallEvent()
-    let projector = SignalboxProcessTranscriptProjector()
-
-    let event = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
-
-    XCTAssertEqual(event.kind, ProcessProjectionFixture.unknownDispositionPresentationKind)
-    XCTAssertEqual(
-      event.diagnostic,
-      ProcessProjectionFixture.unknownDispositionPresentationDiagnostic
     )
   }
 
@@ -839,126 +813,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       tool.outputPreview,
       ProcessProjectionFixture.futurePlanEntryReferenceOutput
-    )
-  }
-
-  func testDuplicatePlanReadArgumentKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.duplicatePlanReadArgumentToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(
-      tool.compactArgumentSummary,
-      ProcessProjectionFixture.duplicatePlanReadArguments
-    )
-  }
-
-  func testDuplicatePlanWriteArgumentKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.duplicatePlanWriteArgumentToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(
-      tool.compactArgumentSummary,
-      ProcessProjectionFixture.duplicatePlanWriteArguments
-    )
-  }
-
-  func testMismatchedPlanWriteResultKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.mismatchedPlanWriteResultToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateOutput)
-  }
-
-  func testMismatchedPlanWriteTextKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.mismatchedPlanWriteTextToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.mismatchedPlanCreateOutput)
-  }
-
-  func testPlanReadResultBeforeRequestedCursorKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.planReadBeforeCursorToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadBeforeCursorOutput)
-  }
-
-  func testIncompletePlanHistoryKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.incompletePlanHistoryToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.incompletePlanHistoryPreview)
-  }
-
-  func testPlanHistoryMismatchKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.mismatchedPlanHistoryToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.mismatchedPlanHistoryPreview)
-  }
-
-  func testRepeatedPlanHistoryAttemptKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.repeatedPlanHistoryAttemptToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.repeatedPlanHistoryAttemptPreview)
-  }
-
-  func testPlanHistoryDependencyOverflowKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.planHistoryDependencyOverflowToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(
-      tool.outputPreview,
-      ProcessProjectionFixture.planHistoryDependencyOverflowPreview
-    )
-  }
-
-  func testUnrequestedPlanHistoryKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.unrequestedPlanHistoryToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.emptyIncludedPlanHistoryOutput)
-  }
-
-  func testCyclicPlanHistoryKeepsRawEvidenceVisible() throws {
-    let record = ProcessProjectionFixture.cyclicPlanHistoryToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.cyclicPlanHistoryPreview)
-  }
-
-  func testDenseAcyclicPlanPageUsesTypedEvidence() throws {
-    let record = ProcessProjectionFixture.denseAcyclicPlanToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertNotEqual(tool.outputPreview, ProcessProjectionFixture.denseAcyclicPlanOutput)
-  }
-
-  func testMultilinePlanTextCannotCreateSummaryLabels() throws {
-    let record = ProcessProjectionFixture.multilinePlanCreateToolRecord()
-    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
-    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
-
-    XCTAssertEqual(
-      tool.compactArgumentSummary,
-      ProcessProjectionFixture.multilinePlanArgumentPresentation
-    )
-    XCTAssertEqual(
-      tool.outputPreview,
-      ProcessProjectionFixture.multilinePlanOutputPresentation
     )
   }
 
@@ -2818,8 +2672,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       viewModel.latestDiagnostic,
       ProcessProjectionFixture.unknownDispositionDiagnostic
     )
-    let unknown = try ProcessProjectionFixture.onlyUnknownCard(in: viewModel.timeline)
-    XCTAssertEqual(unknown.kind, ProcessProjectionFixture.unknownDispositionPresentationKind)
   }
 
   @MainActor
@@ -8539,6 +8391,164 @@ extension ProcessServiceIntegrationTests {
       ProcessProjectionFixture.unknownHistoryDiagnostic
     )
     XCTAssertEqual(boundaryCards.newest.kind, ProcessProjectionFixture.unknownNestedStateKind)
+  }
+
+  func testModelUsageKeepsItsTranscriptAnchorAfterNormalization() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithAnchoredUsageAndLaterMessage()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.anchoredUsageTimelineKinds
+    )
+  }
+
+  func testUnknownTerminalDispositionRetainsAttribution() throws {
+    let followed = try ProcessProjectionFixture.unknownDispositionModelCallEvent()
+    let projector = SignalboxProcessTranscriptProjector()
+
+    let event = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
+
+    XCTAssertEqual(event.kind, ProcessProjectionFixture.unknownDispositionPresentationKind)
+    XCTAssertEqual(
+      event.diagnostic,
+      ProcessProjectionFixture.unknownDispositionPresentationDiagnostic
+    )
+  }
+
+  @MainActor
+  func testUnknownTerminalDispositionAddsTimelineCard() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(.event(try ProcessProjectionFixture.unknownDispositionModelCallEvent()))
+    let unknown = try ProcessProjectionFixture.onlyUnknownCard(in: viewModel.timeline)
+
+    XCTAssertEqual(unknown.kind, ProcessProjectionFixture.unknownDispositionPresentationKind)
+  }
+
+  func testDuplicatePlanReadArgumentKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.duplicatePlanReadArgumentToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.duplicatePlanReadArguments
+    )
+  }
+
+  func testDuplicatePlanWriteArgumentKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.duplicatePlanWriteArgumentToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.duplicatePlanWriteArguments
+    )
+  }
+
+  func testMismatchedPlanWriteResultKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedPlanWriteResultToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateOutput)
+  }
+
+  func testMismatchedPlanWriteTextKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedPlanWriteTextToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.mismatchedPlanCreateOutput)
+  }
+
+  func testPlanReadResultBeforeRequestedCursorKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadBeforeCursorToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadBeforeCursorOutput)
+  }
+
+  func testIncompletePlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.incompletePlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.incompletePlanHistoryPreview)
+  }
+
+  func testPlanHistoryMismatchKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.mismatchedPlanHistoryPreview)
+  }
+
+  func testRepeatedPlanHistoryAttemptKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.repeatedPlanHistoryAttemptToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.repeatedPlanHistoryAttemptPreview)
+  }
+
+  func testPlanHistoryDependencyOverflowKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planHistoryDependencyOverflowToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.planHistoryDependencyOverflowPreview
+    )
+  }
+
+  func testUnrequestedPlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.unrequestedPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.emptyIncludedPlanHistoryOutput)
+  }
+
+  func testCyclicPlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.cyclicPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.cyclicPlanHistoryPreview)
+  }
+
+  func testDenseAcyclicPlanPageUsesTypedEvidence() throws {
+    let record = ProcessProjectionFixture.denseAcyclicPlanToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertNotEqual(tool.outputPreview, ProcessProjectionFixture.denseAcyclicPlanOutput)
+  }
+
+  func testMultilinePlanTextCannotCreateSummaryLabels() throws {
+    let record = ProcessProjectionFixture.multilinePlanCreateToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.multilinePlanArgumentPresentation
+    )
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.multilinePlanOutputPresentation
+    )
   }
 }
 
