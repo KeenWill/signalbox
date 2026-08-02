@@ -313,6 +313,8 @@ pub(crate) enum PlanEventStorageKind {
     TextRevised,
     /// Status change.
     StatusChanged,
+    /// Entry dependency.
+    DependsOn,
 }
 
 /// Encodes a plan-event kind as its closed PostgreSQL spelling.
@@ -321,6 +323,7 @@ pub(crate) const fn plan_event_kind_to_str(value: PlanEventStorageKind) -> &'sta
         PlanEventStorageKind::Created => "created",
         PlanEventStorageKind::TextRevised => "text_revised",
         PlanEventStorageKind::StatusChanged => "status_changed",
+        PlanEventStorageKind::DependsOn => "depends_on",
     }
 }
 
@@ -330,6 +333,7 @@ pub(crate) fn plan_event_kind_from_str(value: &str) -> Option<PlanEventStorageKi
         "created" => Some(PlanEventStorageKind::Created),
         "text_revised" => Some(PlanEventStorageKind::TextRevised),
         "status_changed" => Some(PlanEventStorageKind::StatusChanged),
+        "depends_on" => Some(PlanEventStorageKind::DependsOn),
         _ => None,
     }
 }
@@ -494,6 +498,10 @@ mod tests {
         assert_eq!(
             plan_event_kind_from_str(plan_event_kind_to_str(PlanEventStorageKind::StatusChanged)),
             Some(PlanEventStorageKind::StatusChanged)
+        );
+        assert_eq!(
+            plan_event_kind_from_str(plan_event_kind_to_str(PlanEventStorageKind::DependsOn)),
+            Some(PlanEventStorageKind::DependsOn)
         );
         assert_eq!(plan_event_kind_from_str("unknown"), None);
     }
