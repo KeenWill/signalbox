@@ -57,6 +57,16 @@ jobs:
         run: >-
           cargo test --no-fail-fast -p signalbox-tools-github
           --test live_smoke -- --ignored
+      # Gated inside the test rather than on this step: an absent secret
+      # expands to an empty value, which the smoke reports and skips on. That
+      # keeps the same skip path covering local runs with no credential file.
+      - name: Run web search smoke
+        continue-on-error: true
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        run: >-
+          cargo test --no-fail-fast -p signalbox-tools-web
+          --lib -- --ignored --nocapture web_search::live_smoke_tests
       - name: Run whole-daemon tool exercise
         env:
           GITHUB_TOKEN: ${{ github.token }}
