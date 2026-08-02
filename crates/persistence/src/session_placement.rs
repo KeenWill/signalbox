@@ -323,6 +323,69 @@ pub(crate) async fn load_current(
     decode_authenticated_placement(row).map(Some)
 }
 
+async fn load_authenticated_version(
+    connection: &mut PgConnection,
+    session: SessionId,
+    version: SessionPlacementVersion,
+) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
+    let row = sqlx::query(
+        "SELECT session_row.ancestry_kind,
+                event.version, event.prior_version, event.event_kind,
+                event.placement_path, event.root_global_read_intent,
+                native_registry.command_id AS native_creation_command_id,
+                imported_registry.command_id AS imported_creation_command_id,
+                placement_update_registry.command_id AS placement_update_command_id
+           FROM session AS session_row
+           JOIN session_placement_event AS event
+             ON event.session_id = session_row.session_id
+            AND event.version = $2
+           LEFT JOIN create_session_command AS native_creation
+             ON native_creation.command_id = event.provenance_command_id
+            AND native_creation.created_session_id = event.session_id
+            AND native_creation.command_kind = 'create_session'
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6)
+            AND native_creation.result_kind = 'applied'
+            AND native_creation.placement_path IS NOT DISTINCT FROM event.placement_path
+            AND native_creation.root_global_read_intent = event.root_global_read_intent
+           LEFT JOIN durable_command AS native_registry
+             ON native_registry.command_id = native_creation.command_id
+            AND native_registry.command_kind = native_creation.command_kind
+            AND native_registry.storage_version = native_creation.storage_version
+           LEFT JOIN create_session_from_imported_frontier_command AS imported_creation
+             ON imported_creation.command_id = event.provenance_command_id
+            AND imported_creation.created_session_id = event.session_id
+            AND imported_creation.command_kind = 'create_session_from_imported_frontier'
+            AND imported_creation.storage_version BETWEEN 1 AND 3
+            AND imported_creation.result_kind = 'applied'
+            AND event.placement_path IS NULL
+            AND NOT event.root_global_read_intent
+           LEFT JOIN durable_command AS imported_registry
+             ON imported_registry.command_id = imported_creation.command_id
+            AND imported_registry.command_kind = imported_creation.command_kind
+            AND imported_registry.storage_version = imported_creation.storage_version
+           LEFT JOIN update_session_placement_command AS placement_update
+             ON placement_update.command_id = event.provenance_command_id
+            AND placement_update.session_id = event.session_id
+            AND placement_update.command_kind = 'update_session_placement'
+            AND placement_update.storage_version = 1
+            AND placement_update.result_kind = 'applied'
+            AND placement_update.result_version = event.version
+            AND placement_update.expected_version = event.prior_version
+            AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
+            AND placement_update.root_global_read_intent = event.root_global_read_intent
+           LEFT JOIN durable_command AS placement_update_registry
+             ON placement_update_registry.command_id = placement_update.command_id
+            AND placement_update_registry.command_kind = placement_update.command_kind
+            AND placement_update_registry.storage_version = placement_update.storage_version
+          WHERE session_row.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(version_to_numeric(version))
+    .fetch_optional(&mut *connection)
+    .await?;
+    row.map(decode_authenticated_placement).transpose()
+}
+
 async fn load_current_for_update(
     connection: &mut PgConnection,
     session: SessionId,
@@ -521,12 +584,27 @@ async fn load_record(
     .bind(durable_command_id_to_uuid(command_id))
     .fetch_optional(&mut *connection)
     .await?;
-    row.map(|row| decode_record(row, command_id)).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let authenticated_rejection_version =
+        match row.try_get::<Option<Decimal>, _>("result_current_version")? {
+            Some(version) => {
+                let session = session_id_from_uuid(row.try_get("session_id")?);
+                let version = decode_version(version)?;
+                load_authenticated_version(connection, session, version)
+                    .await?
+                    .map(|placement| placement.version())
+            }
+            None => None,
+        };
+    decode_record(row, command_id, authenticated_rejection_version).map(Some)
 }
 
 fn decode_record(
     row: PgRow,
     command_id: DurableCommandId,
+    authenticated_rejection_version: Option<SessionPlacementVersion>,
 ) -> Result<(UpdateSessionPlacement, UpdateSessionPlacementResult), SessionPlacementRepositoryError>
 {
     validate_typed_header(
@@ -643,6 +721,11 @@ fn decode_record(
                     "mismatch rejection version",
                 ));
             }
+            if authenticated_rejection_version != Some(current) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "rejection current placement event",
+                ));
+            }
             UpdateSessionPlacementResult::Rejected(
                 UpdateSessionPlacementRejection::current_version_mismatch(&command, current)
                     .ok_or(SessionPlacementRepositoryError::Corruption(
@@ -660,6 +743,11 @@ fn decode_record(
             if expected.as_u64() != u64::MAX || current.as_u64() != u64::MAX {
                 return Err(SessionPlacementRepositoryError::Corruption(
                     "version exhaustion ordinal",
+                ));
+            }
+            if authenticated_rejection_version != Some(current) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "rejection current placement event",
                 ));
             }
             UpdateSessionPlacementResult::Rejected(

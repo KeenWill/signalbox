@@ -618,23 +618,27 @@ async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_current_read_and_update_authenticate_the_placement_update_receipt()
--> Result<(), Box<dyn Error>> {
+struct CorruptPlacementUpdateReceiptFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    session: SessionId,
+}
+
+async fn corrupt_placement_update_receipt_fixture()
+-> Result<CorruptPlacementUpdateReceiptFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x20a);
+    let session = session(0x20a);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
             command(0x116),
-            session_id,
+            session,
             SessionPlacement::pathless(),
         ))
         .await?;
     SessionPlacementRepository::new(pool.clone())
         .handle(UpdateSessionPlacement::new(
             command(0x117),
-            session_id,
+            session,
             SessionPlacementVersion::INITIAL,
             scoped("projects.foo.recorded"),
         ))
@@ -647,34 +651,108 @@ async fn s36_current_read_and_update_authenticate_the_placement_update_receipt()
             SET placement_path = 'projects.foo.forged'
           WHERE session_id = $1 AND version = 2",
     )
-    .bind(*session_id.as_uuid())
+    .bind(*session.as_uuid())
     .execute(&pool)
     .await?;
     sqlx::query("ALTER TABLE session_placement_event ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
+    Ok(CorruptPlacementUpdateReceiptFixture {
+        container,
+        pool,
+        session,
+    })
+}
 
-    let error = SessionRepository::new(pool.clone())
-        .load_session(session_id)
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_current_read_authenticates_the_placement_update_receipt() -> Result<(), Box<dyn Error>>
+{
+    let fixture = corrupt_placement_update_receipt_fixture().await?;
+    let error = SessionRepository::new(fixture.pool.clone())
+        .load_session(fixture.session)
         .await
         .expect_err("current placement must agree with its provenance receipt");
     let SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(reason)) = error else {
         panic!("cross-wired current placement fails with typed session corruption")
     };
     assert_eq!(reason, "current placement provenance receipt");
-    let update_error = SessionPlacementRepository::new(pool.clone())
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_placement_update_authenticates_the_current_placement_receipt()
+-> Result<(), Box<dyn Error>> {
+    let fixture = corrupt_placement_update_receipt_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(UpdateSessionPlacement::new(
             command(0x118),
-            session_id,
+            fixture.session,
             SessionPlacementVersion::try_from_u64(2).expect("fixture current version is positive"),
             scoped("projects.foo.replacement"),
         ))
         .await
         .expect_err("an update must authenticate the current event before advancing it");
-    let SessionPlacementRepositoryError::Corruption(update_reason) = update_error else {
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
         panic!("cross-wired current placement fails update with typed corruption")
     };
-    assert_eq!(update_reason, "session placement provenance receipt");
+    assert_eq!(reason, "session placement provenance receipt");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_rejected_update_replay_authenticates_the_reported_current_version()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session = session(0x224);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(0x127),
+            session,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let command_id = command(0x128);
+    let update = UpdateSessionPlacement::new(
+        command_id,
+        session,
+        SessionPlacementVersion::try_from_u64(2).expect("fixture mismatch version is positive"),
+        scoped("projects.foo.rejected"),
+    );
+    let repository = SessionPlacementRepository::new(pool.clone());
+    repository.handle(update.clone()).await?;
+    sqlx::query("ALTER TABLE update_session_placement_command DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE update_session_placement_command
+            SET result_current_version = 3
+          WHERE command_id = $1",
+    )
+    .bind(*command_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE update_session_placement_command ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = repository
+        .handle(update)
+        .await
+        .expect_err("rejected replay must authenticate its reported current placement event");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a nonexistent rejection version fails replay with typed corruption")
+    };
+    assert_eq!(reason, "rejection current placement event");
+
     pool.close().await;
     drop(container);
     Ok(())
