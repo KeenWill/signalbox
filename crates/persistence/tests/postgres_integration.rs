@@ -21049,6 +21049,9 @@ async fn session_plan_append_and_read_round_trip_through_postgres() -> Result<()
 
 const DEPENDENCY_PREREQUISITE_TEXT: &str = "finish the durable base";
 const DEPENDENCY_DEPENDENT_TEXT: &str = "ship dependent work";
+const EXPECTED_PLAN_MUTATED_ROW_COUNT: u64 = 1;
+const SYNTHETIC_DEPENDENCY_ORDINAL_BASE: i64 = 100;
+const SYNTHETIC_EVENT_ORDINAL_BASE: i64 = 200;
 
 struct DependencyPlanFixture {
     session: SessionId,
@@ -21166,6 +21169,135 @@ async fn insert_direct_dependency_event_at(
     .execute(pool)
     .await
     .map(|_| ())
+}
+
+async fn corrupt_plan_event_predecessor(
+    pool: &PgPool,
+    fixture: &DependencyPlanFixture,
+    event_ordinal: u64,
+    malformed_prior_event_ordinal: Option<u64>,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_predecessor_shape",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_event
+            SET prior_event_ordinal = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(malformed_prior_event_ordinal.map(Decimal::from))
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(event_ordinal))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(pool)
+    .await?;
+    Ok(corrupted.rows_affected())
+}
+
+async fn corrupt_dependency_event_authority(
+    pool: &PgPool,
+    session: SessionId,
+    event_ordinal: u64,
+    mismatched_arguments: &str,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE tool_request
+         DISABLE TRIGGER tool_request_is_append_only",
+    )
+    .execute(pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE tool_request AS request
+            SET arguments_text = $1
+           FROM session_plan_event AS event
+          WHERE event.session_id = $2
+            AND event.event_ordinal = $3
+            AND request.request_id = event.provenance_request_id",
+    )
+    .bind(mismatched_arguments)
+    .bind(session.into_uuid())
+    .bind(Decimal::from(event_ordinal))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE tool_request
+         ENABLE TRIGGER tool_request_is_append_only",
+    )
+    .execute(pool)
+    .await?;
+    Ok(corrupted.rows_affected())
+}
+
+async fn insert_synthetic_dependency_projection(
+    pool: &PgPool,
+    session: SessionId,
+    entry: PlanEntryId,
+    edge_count: i64,
+) -> Result<u64, sqlx::Error> {
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT quote_ident(conname)
+           FROM pg_constraint
+          WHERE conrelid = 'session_plan_current_dependency'::regclass
+            AND contype = 'f'
+            AND (
+                pg_get_constraintdef(oid) LIKE
+                    'FOREIGN KEY (session_id, dependency_ordinal)%'
+                OR pg_get_constraintdef(oid) LIKE
+                    'FOREIGN KEY (session_id, first_event_ordinal)%'
+            )
+          ORDER BY conname",
+    )
+    .fetch_all(pool)
+    .await?;
+    for constraint in constraints {
+        let statement =
+            format!("ALTER TABLE session_plan_current_dependency DROP CONSTRAINT {constraint}");
+        sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(pool)
+            .await?;
+    }
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         DISABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO session_plan_current_dependency
+            (session_id, entry_ordinal, dependency_ordinal,
+             first_event_ordinal, prior_first_event_ordinal)
+         SELECT $1, $2, $4 + fixture.value, $5 + fixture.value, NULL
+           FROM generate_series(0, $3 - 1) AS fixture(value)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(entry.as_u64()))
+    .bind(edge_count)
+    .bind(SYNTHETIC_DEPENDENCY_ORDINAL_BASE)
+    .bind(SYNTHETIC_EVENT_ORDINAL_BASE)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_current_dependency
+         ENABLE TRIGGER session_plan_current_dependency_immutable",
+    )
+    .execute(pool)
+    .await?;
+    Ok(inserted.rows_affected())
 }
 
 async fn insert_direct_malformed_status_event(
@@ -22373,12 +22505,430 @@ async fn session_plan_read_rejects_malformed_current_creation_payload() -> Resul
     Ok(())
 }
 
-/// Head certification rejects forbidden dependency payload before either a
-/// later append or a current-plan read can extend or expose malformed history.
+/// A current read rejects an older dependency event whose predecessor no
+/// longer forms the certified append prefix.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_append_and_read_reject_malformed_dependency_head()
+async fn session_plan_read_rejects_malformed_dependency_predecessor() -> Result<(), Box<dyn Error>>
+{
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MALFORMED_PRIOR_EVENT_ORDINAL: u64 = 1;
+    const LATER_ENTRY_TEXT: &str = "keep the malformed edge below the head";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![create_plan_arguments(LATER_ENTRY_TEXT)]).await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(LATER_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let corrupted = corrupt_plan_event_predecessor(
+        &pool,
+        &fixture,
+        DEPENDENCY_EVENT_ORDINAL,
+        Some(MALFORMED_PRIOR_EVENT_ORDINAL),
+    )
+    .await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("the current projection rejects the malformed edge predecessor");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A dependency append rejects an older reachable edge whose predecessor no
+/// longer forms the certified append prefix.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_malformed_reachable_dependency_predecessor()
 -> Result<(), Box<dyn Error>> {
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MALFORMED_PRIOR_EVENT_ORDINAL: u64 = 1;
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 4;
+    const OUTSIDE_ENTRY_TEXT: &str = "depend on the existing component";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let corrupted = corrupt_plan_event_predecessor(
+        &pool,
+        &fixture,
+        DEPENDENCY_EVENT_ORDINAL,
+        Some(MALFORMED_PRIOR_EVENT_ORDINAL),
+    )
+    .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::DependsOn {
+                entry: outside,
+                dependency: fixture.dependent,
+            },
+        ))
+        .await
+        .expect_err("graph loading rejects the malformed reachable predecessor");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The projection trigger rejects a proposed edge that reaches an existing
+/// dependency event without its original request authority.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_projection_rejects_untrusted_reachable_dependency_edge()
+-> Result<(), Box<dyn Error>> {
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 4;
+    const PROPOSED_EVENT_ORDINAL: u64 = 5;
+    const OUTSIDE_ENTRY_TEXT: &str = "reach the untrusted interior edge";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let mismatched_arguments = depends_plan_arguments(outside, dependent);
+    let corrupted = corrupt_dependency_event_authority(
+        &pool,
+        fixture.session,
+        DEPENDENCY_EVENT_ORDINAL,
+        &mismatched_arguments,
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &proposed_attempt,
+        OUTSIDE_ENTRY_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        outside,
+        fixture.dependent,
+    )
+    .await
+    .expect_err("the projection trigger rejects the untrusted reachable edge");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(proposed_attempt).await?;
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_graph_authority")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The projection trigger rejects a proposed edge when a reachable node
+/// already exceeds the implemented dependency bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_projection_rejects_reachable_over_limit_node() -> Result<(), Box<dyn Error>> {
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 4;
+    const PROPOSED_EVENT_ORDINAL: u64 = 5;
+    const SYNTHETIC_EDGE_COUNT: i64 = 32;
+    const EXPECTED_INSERTED_EDGE_COUNT: u64 = 32;
+    const OUTSIDE_ENTRY_TEXT: &str = "reach the over-limit component";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, dependent),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let inserted = insert_synthetic_dependency_projection(
+        &pool,
+        fixture.session,
+        fixture.dependent,
+        SYNTHETIC_EDGE_COUNT,
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &proposed_attempt,
+        OUTSIDE_ENTRY_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        outside,
+        fixture.dependent,
+    )
+    .await
+    .expect_err("the projection trigger rejects the over-limit reachable node");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(proposed_attempt).await?;
+
+    assert_eq!(inserted, EXPECTED_INSERTED_EDGE_COUNT);
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_limit")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A current read rejects an endpoint creation whose predecessor no longer
+/// forms the certified append prefix.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_malformed_dependency_root_creation() -> Result<(), Box<dyn Error>>
+{
+    const ROOT_EVENT_ORDINAL: u64 = 1;
+    const MALFORMED_PRIOR_EVENT_ORDINAL: u64 = 1;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    let corrupted = corrupt_plan_event_predecessor(
+        &pool,
+        &fixture,
+        ROOT_EVENT_ORDINAL,
+        Some(MALFORMED_PRIOR_EVENT_ORDINAL),
+    )
+    .await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("the current projection rejects the malformed endpoint creation");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A repository append rejects a dependency endpoint creation whose
+/// predecessor no longer forms the certified append prefix.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_malformed_dependency_root_creation()
+-> Result<(), Box<dyn Error>> {
+    const ROOT_EVENT_ORDINAL: u64 = 1;
+    const MALFORMED_PRIOR_EVENT_ORDINAL: u64 = 1;
+    const OUTSIDE_ENTRY_ORDINAL: u64 = 4;
+    const OUTSIDE_ENTRY_TEXT: &str = "name the malformed dependency root";
+    let outside = PlanEntryId::try_from_u64(OUTSIDE_ENTRY_ORDINAL)
+        .expect("the outside fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture = dependency_plan_fixture(
+        &pool,
+        vec![
+            create_plan_arguments(OUTSIDE_ENTRY_TEXT),
+            depends_plan_arguments(outside, prerequisite),
+        ],
+    )
+    .await?;
+    append_plan_write(
+        &mut fixture.batch,
+        &fixture.repository,
+        PlanEventDraft::Create {
+            text: plan_text(OUTSIDE_ENTRY_TEXT),
+        },
+    )
+    .await?;
+    let corrupted = corrupt_plan_event_predecessor(
+        &pool,
+        &fixture,
+        ROOT_EVENT_ORDINAL,
+        Some(MALFORMED_PRIOR_EVENT_ORDINAL),
+    )
+    .await?;
+    let append_attempt = fixture.batch.authorize_next().await?;
+
+    let error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::DependsOn {
+                entry: outside,
+                dependency: fixture.prerequisite,
+            },
+        ))
+        .await
+        .expect_err("append target validation rejects the malformed dependency root");
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The projection trigger rejects an entry endpoint creation whose predecessor
+/// no longer forms the certified append prefix.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_projection_rejects_malformed_entry_root_creation()
+-> Result<(), Box<dyn Error>> {
+    const ENTRY_EVENT_ORDINAL: u64 = 2;
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const PROPOSED_EVENT_ORDINAL: u64 = 4;
+    let dependent =
+        PlanEntryId::try_from_u64(2).expect("the dependent fixture identity is positive");
+    let prerequisite =
+        PlanEntryId::try_from_u64(1).expect("the prerequisite fixture identity is positive");
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![depends_plan_arguments(dependent, prerequisite)])
+            .await?;
+    let corrupted =
+        corrupt_plan_event_predecessor(&pool, &fixture, ENTRY_EVENT_ORDINAL, None).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    let proposed_attempt = fixture.batch.authorize_next().await?;
+    let trigger_error = insert_direct_dependency_event_at(
+        &pool,
+        &fixture,
+        &proposed_attempt,
+        DEPENDENCY_EVENT_ORDINAL,
+        PROPOSED_EVENT_ORDINAL,
+        fixture.dependent,
+        fixture.prerequisite,
+    )
+    .await
+    .expect_err("the projection trigger rejects the malformed entry root");
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_append_guard",
+    )
+    .execute(&pool)
+    .await?;
+    fixture.batch.finish(proposed_attempt).await?;
+
+    assert_eq!(corrupted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        trigger_error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_plan_dependency_entry")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Head certification prevents a later append from extending a malformed
+/// dependency event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_append_rejects_malformed_dependency_head() -> Result<(), Box<dyn Error>> {
     const LATER_ENTRY_TEXT: &str = "must not append after malformed history";
     const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
     const MALFORMED_EDGE_TEXT: &str = "dependency event must not carry text";
@@ -22408,7 +22958,7 @@ async fn session_plan_append_and_read_reject_malformed_dependency_head()
     .bind(Decimal::from(DEPENDENCY_EVENT_ORDINAL))
     .execute(&pool)
     .await?;
-    assert_eq!(corrupted.rows_affected(), 1);
+    assert_eq!(corrupted.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
     sqlx::query(
         "ALTER TABLE session_plan_event
          ENABLE TRIGGER session_plan_event_immutable",
@@ -22427,18 +22977,65 @@ async fn session_plan_append_and_read_reject_malformed_dependency_head()
         ))
         .await
         .expect_err("a later append cannot extend the malformed dependency head");
-    let read_error = fixture
-        .repository
-        .read(PlanReadRequest::new(fixture.session, None, None))
-        .await
-        .expect_err("a dependency edge carrying text is corruption");
 
     assert_eq!(
         plan_repository_error_kind(append_error),
         PlanRepositoryErrorKind::EventSequence
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A current-plan read rejects forbidden payload on its certified dependency
+/// head without requiring history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_malformed_dependency_head() -> Result<(), Box<dyn Error>> {
+    const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
+    const MALFORMED_EDGE_TEXT: &str = "dependency event must not carry text";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DROP CONSTRAINT session_plan_event_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         DISABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted = sqlx::query(
+        "UPDATE session_plan_event
+            SET entry_text = $1
+          WHERE session_id = $2
+            AND event_ordinal = $3",
+    )
+    .bind(MALFORMED_EDGE_TEXT)
+    .bind(fixture.session.into_uuid())
+    .bind(Decimal::from(DEPENDENCY_EVENT_ORDINAL))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session_plan_event
+         ENABLE TRIGGER session_plan_event_immutable",
+    )
+    .execute(&pool)
+    .await?;
+
+    let error = fixture
+        .repository
+        .read(PlanReadRequest::new(fixture.session, None, None))
+        .await
+        .expect_err("a dependency edge carrying text is corruption");
+
+    assert_eq!(corrupted.rows_affected(), EXPECTED_PLAN_MUTATED_ROW_COUNT);
     assert_eq!(
-        plan_repository_error_kind(read_error),
+        plan_repository_error_kind(error),
         PlanRepositoryErrorKind::EventSequence
     );
 

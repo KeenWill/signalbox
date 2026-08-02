@@ -358,7 +358,13 @@ CREATE FUNCTION inspect_session_plan_dependency_graph(
     target_entry_ordinal numeric(20, 0),
     target_dependency_ordinal numeric(20, 0)
 )
-RETURNS TABLE (graph_cyclic boolean, closes_cycle boolean)
+RETURNS TABLE (
+    graph_cyclic boolean,
+    closes_cycle boolean,
+    graph_shape_valid boolean,
+    graph_authorized boolean,
+    graph_within_limit boolean
+)
 LANGUAGE plpgsql
 AS $$
 DECLARE
@@ -368,9 +374,12 @@ DECLARE
     current_node numeric(20, 0);
     after_dependency numeric(20, 0);
     next_dependency numeric(20, 0);
+    edge_shape_valid boolean;
+    edge_authorized boolean;
     edge_found boolean;
     child_finished boolean;
     child_seen boolean;
+    dependency_count bigint;
 BEGIN
     CREATE TEMP TABLE IF NOT EXISTS pg_temp.session_plan_dependency_visit (
         node numeric(20, 0) PRIMARY KEY,
@@ -386,6 +395,9 @@ BEGIN
 
     graph_cyclic := FALSE;
     closes_cycle := FALSE;
+    graph_shape_valid := TRUE;
+    graph_authorized := TRUE;
+    graph_within_limit := TRUE;
     <<root_scan>>
     FOR root_node, detects_proposed_cycle IN
         SELECT root.node, root.detects_cycle
@@ -416,9 +428,40 @@ BEGIN
               INTO current_node, after_dependency
               FROM pg_temp.session_plan_dependency_stack AS stack
              WHERE stack.depth = stack_depth;
-            SELECT edge.dependency_ordinal
-              INTO next_dependency
+
+            IF after_dependency IS NULL THEN
+                SELECT count(*)
+                  INTO dependency_count
+                  FROM session_plan_current_dependency AS edge
+                 WHERE edge.session_id = target_session_id
+                   AND edge.entry_ordinal = current_node;
+                -- Checked mechanically against MAX_PLAN_DEPENDENCIES_PER_ENTRY.
+                IF dependency_count > 32 THEN
+                    graph_within_limit := FALSE;
+                    EXIT root_scan;
+                END IF;
+            END IF;
+
+            SELECT edge.dependency_ordinal,
+                   coalesce(
+                       session_plan_event_has_valid_shape(first_event)
+                       AND first_event.event_kind = 'depends_on'
+                       AND first_event.entry_ordinal = edge.entry_ordinal
+                       AND first_event.dependency_ordinal =
+                           edge.dependency_ordinal
+                       AND first_event.event_ordinal =
+                           edge.first_event_ordinal,
+                       FALSE
+                   ),
+                   coalesce(
+                       session_plan_event_has_authority(first_event),
+                       FALSE
+                   )
+              INTO next_dependency, edge_shape_valid, edge_authorized
               FROM session_plan_current_dependency AS edge
+              LEFT JOIN session_plan_event AS first_event
+                ON first_event.session_id = edge.session_id
+               AND first_event.event_ordinal = edge.first_event_ordinal
              WHERE edge.session_id = target_session_id
                AND edge.entry_ordinal = current_node
                AND (
@@ -437,6 +480,15 @@ BEGIN
                  WHERE stack.depth = stack_depth;
                 stack_depth := stack_depth - 1;
                 CONTINUE;
+            END IF;
+
+            IF NOT edge_shape_valid THEN
+                graph_shape_valid := FALSE;
+                EXIT root_scan;
+            END IF;
+            IF NOT edge_authorized THEN
+                graph_authorized := FALSE;
+                EXIT root_scan;
             END IF;
 
             UPDATE pg_temp.session_plan_dependency_stack AS stack
@@ -485,6 +537,9 @@ DECLARE
     target_authorized boolean;
     closes_cycle boolean;
     graph_cyclic boolean;
+    graph_shape_valid boolean;
+    graph_authorized boolean;
+    graph_within_limit boolean;
     dependency_count bigint;
 BEGIN
     PERFORM 1
@@ -613,7 +668,8 @@ BEGIN
 
     IF NEW.event_kind <> 'created' THEN
         SELECT target.event_kind,
-               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_valid_shape(target)
+               AND session_plan_creation_has_valid_shape(target),
                session_plan_event_has_authority(target)
           INTO target_kind, target_shape_valid, target_authorized
           FROM session_plan_event AS target
@@ -633,7 +689,8 @@ BEGIN
 
     IF NEW.event_kind = 'depends_on' THEN
         SELECT target.event_kind,
-               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_valid_shape(target)
+               AND session_plan_creation_has_valid_shape(target),
                session_plan_event_has_authority(target)
           INTO target_kind, target_shape_valid, target_authorized
           FROM session_plan_event AS target
@@ -672,13 +729,38 @@ BEGIN
             END IF;
         END IF;
 
-        SELECT inspection.graph_cyclic, inspection.closes_cycle
-          INTO graph_cyclic, closes_cycle
+        SELECT inspection.graph_cyclic,
+               inspection.closes_cycle,
+               inspection.graph_shape_valid,
+               inspection.graph_authorized,
+               inspection.graph_within_limit
+          INTO graph_cyclic,
+               closes_cycle,
+               graph_shape_valid,
+               graph_authorized,
+               graph_within_limit
           FROM inspect_session_plan_dependency_graph(
               NEW.session_id,
               NEW.entry_ordinal,
               NEW.dependency_ordinal
           ) AS inspection;
+        IF NOT graph_shape_valid THEN
+            RAISE EXCEPTION
+                'session plan dependency graph has invalid event shape'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_graph_shape';
+        END IF;
+        IF NOT graph_authorized THEN
+            RAISE EXCEPTION
+                'session plan dependency graph lacks certified authority'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_graph_authority';
+        END IF;
+        IF NOT graph_within_limit THEN
+            RAISE EXCEPTION 'session plan dependency graph exceeds its limit'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_limit';
+        END IF;
         IF graph_cyclic THEN
             RAISE EXCEPTION 'session plan dependency graph is already cyclic'
                 USING ERRCODE = '23514',
@@ -710,6 +792,9 @@ DECLARE
     target_authorized boolean;
     closes_cycle boolean;
     graph_cyclic boolean;
+    graph_shape_valid boolean;
+    graph_authorized boolean;
+    graph_within_limit boolean;
     projected boolean := FALSE;
 BEGIN
     SELECT dependency_event_ordinal
@@ -732,7 +817,8 @@ BEGIN
         END IF;
 
         SELECT target.event_kind,
-               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_valid_shape(target)
+               AND session_plan_creation_has_valid_shape(target),
                session_plan_event_has_authority(target)
           INTO target_kind, target_shape_valid, target_authorized
           FROM session_plan_event AS target
@@ -747,7 +833,8 @@ BEGIN
                     CONSTRAINT = 'session_plan_dependency_entry';
         END IF;
         SELECT target.event_kind,
-               session_plan_creation_has_valid_shape(target),
+               session_plan_event_has_valid_shape(target)
+               AND session_plan_creation_has_valid_shape(target),
                session_plan_event_has_authority(target)
           INTO target_kind, target_shape_valid, target_authorized
           FROM session_plan_event AS target
@@ -762,13 +849,38 @@ BEGIN
                     CONSTRAINT = 'session_plan_dependency_target';
         END IF;
 
-        SELECT inspection.graph_cyclic, inspection.closes_cycle
-          INTO graph_cyclic, closes_cycle
+        SELECT inspection.graph_cyclic,
+               inspection.closes_cycle,
+               inspection.graph_shape_valid,
+               inspection.graph_authorized,
+               inspection.graph_within_limit
+          INTO graph_cyclic,
+               closes_cycle,
+               graph_shape_valid,
+               graph_authorized,
+               graph_within_limit
           FROM inspect_session_plan_dependency_graph(
               NEW.session_id,
               NEW.entry_ordinal,
               NEW.dependency_ordinal
           ) AS inspection;
+        IF NOT graph_shape_valid THEN
+            RAISE EXCEPTION
+                'session plan dependency graph has invalid event shape'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_graph_shape';
+        END IF;
+        IF NOT graph_authorized THEN
+            RAISE EXCEPTION
+                'session plan dependency graph lacks certified authority'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_graph_authority';
+        END IF;
+        IF NOT graph_within_limit THEN
+            RAISE EXCEPTION 'session plan dependency graph exceeds its limit'
+                USING ERRCODE = '23514',
+                    CONSTRAINT = 'session_plan_dependency_limit';
+        END IF;
         IF graph_cyclic THEN
             RAISE EXCEPTION 'session plan dependency graph is already cyclic'
                 USING ERRCODE = '23514',

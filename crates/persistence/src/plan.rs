@@ -30,6 +30,7 @@ const CURRENT_PLAN_SQL: &str = "SELECT created.event_ordinal AS creation_event_o
        created.dependency_ordinal AS created_dependency_ordinal,
        created.entry_text AS created_text,
        created.entry_status AS created_status,
+       session_plan_event_has_valid_shape(created) AS created_shape_valid,
        session_plan_event_has_authority(created) AS created_authorized,
        revision.event_ordinal AS revision_event_ordinal,
        revision.dependency_ordinal AS revision_dependency_ordinal,
@@ -72,7 +73,8 @@ const CURRENT_DEPENDENCIES_SQL: &str = "SELECT edge.entry_ordinal, edge.dependen
        edge.first_event_ordinal,
        session_plan_event_has_authority(first_event) AS authorized,
        coalesce(
-           first_event.event_kind = 'depends_on'
+           session_plan_event_has_valid_shape(first_event)
+           AND first_event.event_kind = 'depends_on'
            AND first_event.entry_ordinal = edge.entry_ordinal
            AND first_event.dependency_ordinal = edge.dependency_ordinal
            AND first_event.entry_text IS NULL
@@ -85,6 +87,7 @@ const CURRENT_DEPENDENCIES_SQL: &str = "SELECT edge.entry_ordinal, edge.dependen
        dependency.dependency_ordinal AS dependency_payload_dependency_ordinal,
        dependency.entry_text AS dependency_created_text,
        dependency.entry_status AS dependency_created_status,
+       session_plan_event_has_valid_shape(dependency) AS dependency_shape_valid,
        session_plan_event_has_authority(dependency) AS dependency_authorized,
        movement.event_ordinal AS dependency_status_event_ordinal,
        movement.entry_status AS dependency_status,
@@ -134,7 +137,8 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
        edge.first_event_ordinal,
        session_plan_event_has_authority(first_event) AS edge_authorized,
        coalesce(
-           first_event.event_kind = 'depends_on'
+           session_plan_event_has_valid_shape(first_event)
+           AND first_event.event_kind = 'depends_on'
            AND first_event.entry_ordinal = edge.entry_ordinal
            AND first_event.dependency_ordinal = edge.dependency_ordinal
            AND first_event.entry_text IS NULL
@@ -144,7 +148,8 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
        ) AS edge_payload_valid,
        entry.event_ordinal IS NOT NULL AS entry_created,
        coalesce(
-           entry.entry_ordinal = entry.event_ordinal
+           session_plan_event_has_valid_shape(entry)
+           AND entry.entry_ordinal = entry.event_ordinal
            AND entry.dependency_ordinal IS NULL
            AND entry.entry_text IS NOT NULL
            AND char_length(entry.entry_text) BETWEEN 1 AND 4096
@@ -154,7 +159,8 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
        session_plan_event_has_authority(entry) AS entry_authorized,
        dependency.event_ordinal IS NOT NULL AS dependency_created,
        coalesce(
-           dependency.entry_ordinal = dependency.event_ordinal
+           session_plan_event_has_valid_shape(dependency)
+           AND dependency.entry_ordinal = dependency.event_ordinal
            AND dependency.dependency_ordinal IS NULL
            AND dependency.entry_text IS NOT NULL
            AND char_length(dependency.entry_text) BETWEEN 1 AND 4096
@@ -179,7 +185,10 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
 const APPEND_TARGET_SQL: &str = "SELECT target.event_kind,
-       session_plan_creation_has_valid_shape(target) AS payload_valid,
+       (
+           session_plan_event_has_valid_shape(target)
+           AND session_plan_creation_has_valid_shape(target)
+       ) AS payload_valid,
        session_plan_event_has_authority(target) AS authorized
   FROM session_plan_event AS target
  WHERE target.session_id = $1
@@ -989,6 +998,9 @@ fn decode_entry(row: &PgRow) -> Result<PlanEntry, SessionPlanRepositoryError> {
     if created_dependency.is_some() || created_status.is_some() {
         return Err(SessionPlanCorruption::InvalidEventPayload("current creation").into());
     }
+    if !required::<bool>(row, "created_shape_valid")? {
+        return Err(SessionPlanCorruption::InvalidEventSequence.into());
+    }
     let revision_ordinal: Option<Decimal> = row.try_get("revision_event_ordinal")?;
     let revision_dependency: Option<Decimal> = row.try_get("revision_dependency_ordinal")?;
     let revised_text: Option<String> = row.try_get("revised_text")?;
@@ -1119,6 +1131,9 @@ fn apply_dependency_rows(
             "dependency creation",
         ))?;
         PlanText::try_new(dependency_text).map_err(|_| SessionPlanCorruption::InvalidText)?;
+        if !required::<bool>(row, "dependency_shape_valid")? {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
         if required_projected_authority(row, "authorized")? != ProjectedAuthority::Trusted
             || required_projected_authority(row, "dependency_authorized")?
                 != ProjectedAuthority::Trusted
@@ -1442,7 +1457,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, INVALID_EVENT_SEQUENCE_SQL,
+        APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, CURRENT_PLAN_SQL, INVALID_EVENT_SEQUENCE_SQL,
         MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL, SessionPlanCorruption,
         validate_dependency_graph_acyclic,
     };
@@ -1454,6 +1469,8 @@ mod tests {
     #[test]
     fn ordinary_read_uses_only_bounded_direct_dependencies() {
         assert!(CURRENT_DEPENDENCIES_SQL.contains("LIMIT $3"));
+        assert!(CURRENT_DEPENDENCIES_SQL.contains("session_plan_event_has_valid_shape"));
+        assert!(CURRENT_PLAN_SQL.contains("session_plan_event_has_valid_shape(created)"));
         assert!(!CURRENT_DEPENDENCIES_SQL.contains("WITH RECURSIVE"));
     }
 
@@ -1467,6 +1484,7 @@ mod tests {
     #[test]
     fn append_targets_are_authenticated_before_graph_loading() {
         assert!(APPEND_TARGET_SQL.contains("session_plan_creation_has_valid_shape"));
+        assert!(APPEND_TARGET_SQL.contains("session_plan_event_has_valid_shape"));
         assert!(APPEND_TARGET_SQL.contains("session_plan_event_has_authority"));
     }
 
@@ -1484,6 +1502,10 @@ mod tests {
     #[test]
     fn dependency_graph_reads_the_bounded_current_projection() {
         assert!(RELEVANT_DEPENDENCY_GRAPH_SQL.contains("session_plan_current_dependency"));
+        assert!(
+            RELEVANT_DEPENDENCY_GRAPH_SQL
+                .contains("session_plan_event_has_valid_shape(first_event)")
+        );
         assert!(!RELEVANT_DEPENDENCY_GRAPH_SQL.contains("walk(origin, node)"));
         assert!(!RELEVANT_DEPENDENCY_GRAPH_SQL.contains("GROUP BY"));
     }
@@ -1516,12 +1538,21 @@ mod tests {
     #[test]
     fn migration_dependency_limit_matches_the_tools_plan_constant() {
         const DEPENDENCY_LIMIT_GUARD_COUNT: usize = 2;
+        const COMPONENT_LIMIT_GUARD_COUNT: usize = 1;
         let expected_guard =
             format!("IF dependency_count >= {MAX_PLAN_DEPENDENCIES_PER_ENTRY} THEN");
 
+        let expected_component_guard =
+            format!("IF dependency_count > {MAX_PLAN_DEPENDENCIES_PER_ENTRY} THEN");
         assert_eq!(
             SESSION_PLAN_MIGRATION.matches(&expected_guard).count(),
             DEPENDENCY_LIMIT_GUARD_COUNT
+        );
+        assert_eq!(
+            SESSION_PLAN_MIGRATION
+                .matches(&expected_component_guard)
+                .count(),
+            COMPONENT_LIMIT_GUARD_COUNT
         );
     }
 }
