@@ -8,27 +8,32 @@ use signalbox_domain::{
     CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
     ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, TranscriptAncestry,
+    RootPlacementGlobalReadIntent, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionPlacement, SessionPlacementEventKind, SessionPlacementPath, SessionPlacementVersion,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::command_registry::{self, CommandKind, RegistryCorruption, RegistryInspectionError};
+use crate::command_registry::{
+    self, CommandKind, RegistryCorruption, RegistryInspectionError,
+    create_session_storage_version_is_supported,
+};
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
     defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-    session_id_to_uuid,
+    session_id_to_uuid, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const MIN_SUPPORTED_STORAGE_VERSION: i16 = 1;
-const WRITTEN_STORAGE_VERSION: i16 = 4;
+const WRITTEN_STORAGE_VERSION: i16 = 6;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
+const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
 // Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
@@ -218,7 +223,8 @@ impl CreateSessionRepository {
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
-                | CommandKind::Goal,
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement,
             ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
@@ -259,7 +265,8 @@ impl CreateSessionRepository {
                     | CommandKind::ReviewWorkflow
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
-                    | CommandKind::Goal,
+                    | CommandKind::Goal
+                    | CommandKind::UpdateSessionPlacement,
                 ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 None => {
                     return Err(
@@ -305,7 +312,8 @@ impl CreateSessionRepository {
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
-                | CommandKind::Goal,
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement,
             ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
@@ -375,6 +383,30 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
+    let (placement_path, root_intent) = encode_placement(session.placement().placement());
+    sqlx::query(
+        "INSERT INTO session_placement_event
+            (session_id, version, prior_version, event_kind, placement_path,
+             root_global_read_intent, provenance_command_id, recorded_at)
+         VALUES ($1, 1, NULL, $2, $3, $4, $5, transaction_timestamp())",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .bind(session_placement_event_kind_to_str(
+        SessionPlacementEventKind::Created,
+    ))
+    .bind(placement_path)
+    .bind(root_intent)
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_placement (session_id, current_version)
+         VALUES ($1, 1)",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .execute(&mut *connection)
+    .await?;
+
     crate::session_credentials::insert_initial_session_credential_event(
         connection,
         session_id_to_uuid(session.id()),
@@ -432,8 +464,9 @@ async fn insert_prepared(
              model_selection_kind, direct_model_selection_id, model_alias_id,
              dangerous_tool_auto_approval, system_prompt,
              template_name, template_content_digest,
+             placement_path, root_global_read_intent,
              result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -465,6 +498,8 @@ async fn insert_prepared(
             .template_provenance()
             .map(|value| value.content_digest().as_bytes().to_vec()),
     )
+    .bind(placement_path)
+    .bind(root_intent)
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
@@ -523,6 +558,8 @@ async fn load_from_connection(
             c.system_prompt AS command_system_prompt,
             c.template_name AS command_template_name,
             c.template_content_digest AS command_template_digest,
+            c.placement_path AS command_placement_path,
+            c.root_global_read_intent AS command_root_intent,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -537,6 +574,11 @@ async fn load_from_connection(
             v.model_alias_id AS stored_alias_id,
             v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
             v.system_prompt AS stored_system_prompt
+            ,pe.version AS stored_placement_version
+            ,pe.placement_path AS stored_placement_path
+            ,pe.root_global_read_intent AS stored_root_intent
+            ,placement_head.current_version AS current_placement_head_version
+            ,current_placement.version AS current_placement_event_version
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -545,6 +587,15 @@ async fn load_from_connection(
          LEFT JOIN session_defaults_version AS v
            ON v.session_id = c.created_session_id
           AND v.version = c.initial_defaults_version
+         LEFT JOIN session_placement_event AS pe
+           ON pe.session_id = c.created_session_id
+          AND pe.version = 1
+          AND pe.provenance_command_id = c.command_id
+         LEFT JOIN session_current_placement AS placement_head
+           ON placement_head.session_id = c.created_session_id
+         LEFT JOIN session_placement_event AS current_placement
+           ON current_placement.session_id = placement_head.session_id
+          AND current_placement.version = placement_head.current_version
          WHERE d.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -590,6 +641,11 @@ fn decode_complete(
         row.try_get("command_template_digest")?,
         "command template provenance",
     )?;
+    let command_placement = decode_placement(
+        row.try_get("command_placement_path")?,
+        required(&row, "command_root_intent")?,
+        typed_version,
+    )?;
     if !storage_version_supports_template_provenance(typed_version)
         && command_template_provenance.is_some()
     {
@@ -604,15 +660,21 @@ fn decode_complete(
         .into());
     }
     let command = match command_template_provenance {
-        Some(template_provenance) => signalbox_domain::CreateSession::new_from_template(
+        Some(template_provenance) => {
+            signalbox_domain::CreateSession::new_from_template_with_placement(
+                command_id,
+                command_provenance,
+                template_provenance,
+                command_defaults,
+                command_placement,
+            )
+        }
+        None => signalbox_domain::CreateSession::new_with_placement(
             command_id,
             command_provenance,
-            template_provenance,
             command_defaults,
+            command_placement,
         ),
-        None => {
-            signalbox_domain::CreateSession::new(command_id, command_provenance, command_defaults)
-        }
     };
     require_spelling(&row, "result_kind", APPLIED)?;
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
@@ -649,8 +711,28 @@ fn decode_complete(
         typed_version,
         "stored model selection",
     )?;
+    let stored_placement_version = placement_version_from_numeric(
+        required(&row, "stored_placement_version")?,
+        "stored placement version",
+    )?;
+    let stored_placement = decode_placement(
+        row.try_get("stored_placement_path")?,
+        required(&row, "stored_root_intent")?,
+        PLACEMENT_FROM_STORAGE_VERSION,
+    )?;
+    let placement_head = placement_version_from_numeric(
+        required(&row, "current_placement_head_version")?,
+        "current placement head version",
+    )?;
+    let current_placement_event = placement_version_from_numeric(
+        required(&row, "current_placement_event_version")?,
+        "current placement event version",
+    )?;
+    if placement_head != current_placement_event {
+        return Err(CreateSessionCorruption::Inconsistent("current placement head event").into());
+    }
 
-    CreateSessionReconstitutionInput::new_with_template_provenance(
+    CreateSessionReconstitutionInput::new_with_template_and_placement(
         command,
         result_session,
         stored_session,
@@ -659,9 +741,56 @@ fn decode_complete(
         session_id_from_uuid(defaults_session),
         stored_version,
         stored_defaults,
+        VersionedSessionPlacement::reconstitute(stored_placement_version, stored_placement),
     )
     .reconstitute()
     .map_err(|error| CreateSessionCorruption::Domain(error.failure()).into())
+}
+
+fn encode_placement(placement: &SessionPlacement) -> (Option<&str>, bool) {
+    (
+        placement.path().map(SessionPlacementPath::as_str),
+        placement.records_root_global_read_intent(),
+    )
+}
+
+fn decode_placement(
+    path: Option<String>,
+    root_intent: bool,
+    storage_version: i16,
+) -> Result<SessionPlacement, CreateSessionRepositoryError> {
+    if storage_version < PLACEMENT_FROM_STORAGE_VERSION {
+        return if path.is_none() && !root_intent {
+            Ok(SessionPlacement::pathless())
+        } else {
+            Err(CreateSessionCorruption::Inconsistent("pre-version-six placement").into())
+        };
+    }
+    let Some(path) = path else {
+        return if root_intent {
+            Err(CreateSessionCorruption::Inconsistent("pathless root intent").into())
+        } else {
+            Ok(SessionPlacement::pathless())
+        };
+    };
+    let path = SessionPlacementPath::try_new(path)
+        .map_err(|_| CreateSessionCorruption::Inconsistent("placement path"))?;
+    if root_intent {
+        SessionPlacement::root_global_read(path, RootPlacementGlobalReadIntent::Acknowledged)
+            .map_err(|_| CreateSessionCorruption::Inconsistent("root placement intent").into())
+    } else {
+        SessionPlacement::scoped(path)
+            .map_err(|_| CreateSessionCorruption::Inconsistent("scoped placement").into())
+    }
+}
+
+fn placement_version_from_numeric(
+    value: Decimal,
+    field: &'static str,
+) -> Result<SessionPlacementVersion, CreateSessionRepositoryError> {
+    let value = u64::try_from(value).map_err(|_| CreateSessionCorruption::Inconsistent(field))?;
+    SessionPlacementVersion::try_from_u64(value)
+        .ok_or_else(|| CreateSessionCorruption::Inconsistent(field).into())
 }
 
 fn decode_template_provenance(
@@ -718,7 +847,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, CreateSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if (MIN_SUPPORTED_STORAGE_VERSION..=WRITTEN_STORAGE_VERSION).contains(&actual) {
+    if create_session_storage_version_is_supported(actual) {
         Ok(actual)
     } else {
         Err(CreateSessionCorruption::Unsupported {
