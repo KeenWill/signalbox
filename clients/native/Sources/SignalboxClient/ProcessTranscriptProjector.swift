@@ -298,7 +298,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message,
         event: .processConservative(
           SignalboxProcessConservativeEvent(
-            kind: "imported_\(contentKind.rawValue)",
+            kind: SignalboxProcessPresentation.retainedLabel(
+              "imported_\(contentKind.rawValue)"
+            ),
             diagnostic: "The process snapshot preserves this imported content conservatively."
           )
         )

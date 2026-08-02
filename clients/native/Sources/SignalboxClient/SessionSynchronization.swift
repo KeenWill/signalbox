@@ -1381,6 +1381,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
   private var turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64] = [:]
+  private var firstTurnID: SignalboxCanonicalUUID?
   private var modelCallOwningTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var unmatchedTerminalModelCallOwners:
     [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
@@ -1456,6 +1457,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         modelCallOwningTurnIDs.insert(turn.turnID)
         forbiddenModelCallOwners[forbiddenModelCallID] = turn.turnID
       }
+      if firstTurnID == nil {
+        firstTurnID = turn.turnID
+      }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
       guard append(.turn(turn)) else {
@@ -1512,6 +1516,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       guard
         modelCallsEnded && pendingModelIdentityTurnID == nil,
         !entry.entry.hasMalformedStoredProjection && entry.entry.modelIdentityTurnIsKnown(in: turnAcceptancePositions),
+        entry.entry.modelIdentityTurnID == nil || entry.entry.modelIdentityTurnID != firstTurnID,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(

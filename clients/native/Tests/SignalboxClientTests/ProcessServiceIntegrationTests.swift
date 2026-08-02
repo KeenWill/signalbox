@@ -509,6 +509,22 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testUnknownImportedContentPresentationKindIsBounded() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedContentKind(
+      ProcessProjectionFixture.oversizedUnknownState
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let record = try XCTUnwrap(projection.records.first)
+    let event = try ProcessProjectionFixture.conservativeEvent(in: record)
+
+    XCTAssertEqual(
+      event.kind.utf8.count,
+      SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
   func testTurnActivationSideProjectionRejectsMissingActivatedTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithoutTurns()
     let trigger = try ProcessProjectionFixture.activatedEvent()
@@ -731,6 +747,37 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testRecognizedSideSnapshotClearsPriorRecoveryActivity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(.event(trigger))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState(),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithKnownActiveTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertTrue(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testKnownRecoverySideSnapshotSurvivesBufferedTransition() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -819,6 +866,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
     XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
+  func testSideSnapshotFenceKeepsRecoveryAcrossBufferedActivation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.activatedEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessDriverFixture.turn)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertFalse(viewModel.canStopAndSend)
   }
 
   @MainActor
@@ -4500,6 +4579,47 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithImportedContentKind(
+    _ kind: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"imported",
+            "imported_conversation_id":"\(ProcessDriverFixture.session)",
+            "imported_entry_id":"\(completedUserEntry)",
+            "source_speaker":{"type":"not_attested"},
+            "content_kind":"\(kind)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
   static func snapshotWithModelIdentityMarker() throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -4513,8 +4633,20 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_turn",
-          "turn_id":"\(ProcessDriverFixture.turn)",
+          "turn_id":"\(crossTurn)",
           "acceptance_position":"1",
+          "state":{
+            "type":"queued",
+            "accepted_input_id":"\(firstPendingID)",
+            "content":"\(userText)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"2",
           "state":{
             "type":"active_running",
             "current_attempt_id":"\(ProcessDriverFixture.attempt)",
@@ -4525,8 +4657,30 @@ private enum ProcessProjectionFixture {
         emptyModelCallsBoundary,
         """
         {
-          "type":"transcript_entry",
+          "type":"transcript_text_entry",
           "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(firstPendingID)",
+            "turn_id":"\(crossTurn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
           "source_session_id":"\(ProcessDriverFixture.session)",
           "entry_id":"\(proposedToolEntry)",
           "entry":{
@@ -4540,7 +4694,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_text_entry",
-          "entry_index":"1",
+          "entry_index":"2",
           "source_session_id":"\(ProcessDriverFixture.session)",
           "entry_id":"\(completedUserEntry)",
           "entry":{
@@ -4553,7 +4707,7 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_content",
-          "entry_index":"1",
+          "entry_index":"2",
           "fragment_index":"0",
           "final_fragment":true,
           "content_fragment":"\(userText)"
@@ -4564,8 +4718,8 @@ private enum ProcessProjectionFixture {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
-          "turn_count":"1",
-          "entry_count":"2"
+          "turn_count":"2",
+          "entry_count":"3"
         }
         """,
       ]

@@ -1706,6 +1706,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
+        let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = Dictionary(
           uniqueKeysWithValues: snapshot.records.compactMap { record in
@@ -1717,6 +1718,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
         if !mutationBlocksByTurnID.isEmpty
           || projection.activity.state == .recoveryRequired
+          || (wasMutationBlocked && projection.activity.state == .running)
         {
           activity = projection.activity
         } else if projection.activity.state == .waitingForToolDecision,
@@ -1917,6 +1919,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
     case .turnActivated(let turnID, _):
       activeTurnID = turnID
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
