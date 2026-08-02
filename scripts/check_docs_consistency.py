@@ -27,10 +27,13 @@ The check is deterministic and offline. It verifies:
    A PR that landed inside another PR's merge (a stack merged from the top has
    no first-parent merge commits for its inner PRs) cites its carrier as the
    entire scope tail, anchored to the exact form
-   ``PR #N (`branch-ref`; via PR #M `carrier-branch`)``. The token is accepted
-   only when ``#N`` has no first-parent merge commit of its own and the
-   carrier's number and branch match one; any other tail containing
-   carrier-like prose is ordinary unvalidated scope text.
+   ``PR #N (`branch-ref`; via PR #M `carrier-branch`)``. A present carrier
+   tail always governs: the token is accepted only when ``#N`` has no
+   first-parent merge commit of its own and the carrier's number and branch
+   match one, and it is a violation otherwise — including when ``#N`` has its
+   own merge commit. Any other tail containing carrier-like prose is ordinary
+   unvalidated scope text, and the carrier components may wrap across
+   block-quote continuation markers like any scope tail.
 
 External links and semantic freshness beyond reachability are outside this
 check. Run from any directory; exits nonzero with one stable line per
@@ -193,8 +196,8 @@ PR_TOKEN = re.compile(
 )
 CARRIED_PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
-    r"`([^\s`]+)`;[ \t\r\n]*"
-    r"via[ \t\r\n]+PR[ \t]*#([1-9][0-9]*)[ \t\r\n]+`([^\s`]+)`"
+    rf"`([^\s`]+)`;{SCOPED_DETAIL_SCAFFOLD}"
+    rf"via[\s>]+PR[ \t]*#([1-9][0-9]*)[\s>]+`([^\s`]+)`"
     r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
@@ -3522,9 +3525,8 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 )
                 inherited_match = (number, branch) in inherited_identities
                 carrier = CARRIED_PR_TOKEN.match(text, candidate_start)
-                carrier_match = (
+                carrier_ok = (
                     carrier is not None
-                    and number not in integration_branches
                     and int(carrier.group(3)) in integration_branches
                     and carrier.group(4)
                     in integration_branches[int(carrier.group(3))]
@@ -3533,7 +3535,36 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     number not in integration_branches
                     and (event_match or local_match)
                 )
-                if historical_match or inherited_match or carrier_match:
+                if carrier is not None:
+                    if number in integration_branches:
+                        violations.append(
+                            Violation(
+                                source_label,
+                                line,
+                                "spec-verification-history",
+                                f"PR #{number} has its own merge commit in "
+                                f"the `{INTEGRATION_BRANCH}` integration "
+                                "history; a `via` carrier tail is not "
+                                "permitted",
+                            )
+                        )
+                        continue
+                    if not carrier_ok:
+                        violations.append(
+                            Violation(
+                                source_label,
+                                line,
+                                "spec-verification-history",
+                                f"PR #{number} cites carrier "
+                                f"PR #{carrier.group(3)} "
+                                f"(`{carrier.group(4)}`), which has no "
+                                "matching merge commit in the "
+                                f"`{INTEGRATION_BRANCH}` integration history",
+                            )
+                        )
+                        continue
+                    continue
+                if historical_match or inherited_match:
                     continue
                 if in_flight_match:
                     candidate_identity = (number, branch)
@@ -3550,13 +3581,6 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                     message = f"cannot inspect GitHub pull-request event: {event_error}"
                 elif in_flight_match:
                     message = "only one unmerged verification PR identity is permitted"
-                elif carrier is not None and number not in integration_branches:
-                    message = (
-                        f"PR #{number} cites carrier PR #{carrier.group(3)} "
-                        f"(`{carrier.group(4)}`), which has no matching "
-                        f"merge commit in the `{INTEGRATION_BRANCH}` "
-                        "integration history"
-                    )
                 elif number not in integration_branches:
                     message = (
                         f"PR #{number} has no merge commit in the "

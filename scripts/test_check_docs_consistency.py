@@ -2957,8 +2957,46 @@ class DocsConsistencyTests(unittest.TestCase):
             ["spec-verification-history"],
         )
         self.assertIn(
-            f"names `{self.merged_pr_branch}`", failures[0].message
+            "a `via` carrier tail is not permitted", failures[0].message
         )
+
+    def test_verification_ref_rejects_carrier_tail_on_a_merged_primary(self) -> None:
+        carrier_number = 88
+        carrier_branch = "agent/missing"
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            f"Verified through PR #12 (`{self.merged_pr_branch}`; via "
+            f"PR #{carrier_number} `{carrier_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "a `via` carrier tail is not permitted", failures[0].message
+        )
+
+    def test_verification_ref_accepts_carrier_wrapped_in_a_block_quote(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "> Verified through PR #99 (`agent/missing`; via PR #12\n"
+            f"> `{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
 
     def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
         run_git(
