@@ -159,18 +159,23 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    active_wait boolean;
     request_posture text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        IF NOT EXISTS (
-            SELECT 1
-              FROM turn_lifecycle AS lifecycle
-             WHERE lifecycle.turn_id = NEW.turn_id
-               AND lifecycle.session_id = NEW.session_id
-               AND lifecycle.state_kind = 'active'
-               AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
-               AND lifecycle.approval_tool_request_id = NEW.request_id
-        ) OR EXISTS (
+        SELECT true INTO active_wait
+          FROM turn_lifecycle AS lifecycle
+         WHERE lifecycle.turn_id = NEW.turn_id
+           AND lifecycle.session_id = NEW.session_id
+           AND lifecycle.state_kind = 'active'
+           AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+           AND lifecycle.approval_tool_request_id = NEW.request_id
+           FOR UPDATE;
+        SELECT approval_posture INTO request_posture
+          FROM tool_request
+         WHERE request_id = NEW.request_id
+           FOR UPDATE;
+        IF active_wait IS DISTINCT FROM true OR EXISTS (
             SELECT 1
               FROM tool_approval_decision AS decision
              WHERE decision.request_id = NEW.request_id
@@ -354,6 +359,21 @@ AS $$
 DECLARE
     matched bigint;
 BEGIN
+    PERFORM 1
+       FROM tool_request
+      WHERE request_id = NEW.request_id
+        FOR UPDATE;
+    IF EXISTS (
+        SELECT 1
+          FROM tool_approval_judge_model_call AS judge
+         WHERE judge.request_id = NEW.request_id
+           AND judge.state_kind <> 'terminal'
+    ) THEN
+        RAISE EXCEPTION 'approval decision races an unfinished judge call'
+            USING ERRCODE = '23514',
+                  CONSTRAINT =
+                      'tool_approval_decision_requires_terminal_judge';
+    END IF;
     IF NEW.decision_source IN ('policy_auto', 'session_blanket') THEN
         SELECT count(*) INTO matched
           FROM tool_request

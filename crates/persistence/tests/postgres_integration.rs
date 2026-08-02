@@ -3496,6 +3496,70 @@ async fn approval_judge_terminal_transition_accepts_estimated_usage_provenance()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_preparation_serializes_a_concurrent_user_decision()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ec0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)
+            .await?;
+    let mut judge_transaction = pool.begin().await?;
+    let (_, judge_call) =
+        insert_prepared_judge(&mut judge_transaction, &fixture, request, seed + 0xe0).await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let decision_task = tokio::spawn(async move {
+        repository
+            .decide(
+                decide_tool_request(
+                    DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xe8)),
+                    request,
+                    ToolApprovalDecision::Approve,
+                ),
+                || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe9)),
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the user decision must wait for judge preparation"
+    );
+
+    judge_transaction.commit().await?;
+    let _decision_error = decision_task
+        .await?
+        .expect_err("an unfinished judge prevents a concurrent user decision");
+    let durable_state: (bool, bool, bool) = sqlx::query_as(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM tool_approval_judge_model_call
+                 WHERE model_call_id = $1 AND state_kind = 'prepared'
+            ),
+            EXISTS (
+                SELECT 1 FROM tool_approval_decision WHERE request_id = $2
+            ),
+            EXISTS (
+                SELECT 1 FROM turn_lifecycle
+                 WHERE turn_id = $3 AND session_id = $4
+                   AND state_kind = 'active'
+                   AND active_phase_kind = 'awaiting_tool_approval'
+                   AND approval_tool_request_id = $2
+            )",
+    )
+    .bind(judge_call)
+    .bind(request.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_state, (true, false, true));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_automatic_decision_cannot_widen_a_human_request()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
