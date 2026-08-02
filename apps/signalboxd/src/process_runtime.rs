@@ -219,6 +219,12 @@ struct InboundFrameBudgets {
     active_import: Arc<Semaphore>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ConversationImportState {
+    Inactive,
+    Active,
+}
+
 impl InboundFrameBudgets {
     fn new() -> Self {
         Self {
@@ -227,11 +233,10 @@ impl InboundFrameBudgets {
         }
     }
 
-    fn for_connection(&self, import_is_pending: bool) -> Arc<Semaphore> {
-        if import_is_pending {
-            Arc::clone(&self.active_import)
-        } else {
-            Arc::clone(&self.general)
+    fn for_connection(&self, import_state: ConversationImportState) -> Arc<Semaphore> {
+        match import_state {
+            ConversationImportState::Inactive => Arc::clone(&self.general),
+            ConversationImportState::Active => Arc::clone(&self.active_import),
         }
     }
 }
@@ -589,9 +594,8 @@ async fn serve_connection(
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
-        let inbound_frame_budget = services
-            .inbound_frame_budgets
-            .for_connection(pending_import.is_some());
+        let import_state = ConversationImportState::from_pending(pending_import.as_ref());
+        let inbound_frame_budget = services.inbound_frame_budgets.for_connection(import_state);
         let Some(frame_buffer_permit) = acquire_inbound_frame_permit_after_input(
             &mut reader,
             inbound_frame_budget,
@@ -654,11 +658,8 @@ async fn serve_connection(
         let import_limit = services
             .model_configuration
             .conversation_import_max_source_bytes();
-        let import_requires_permit = conversation_import_request_requires_permit(
-            &request,
-            pending_import.is_some(),
-            import_limit,
-        );
+        let import_requires_permit =
+            conversation_import_request_requires_permit(&request, import_state, import_limit);
         let import_waiter_permit = if import_requires_permit
             && matches!(&request, ClientRequest::BeginConversationImport { .. })
         {
@@ -778,11 +779,12 @@ async fn acquire_review_orchestration_snapshot_permit(
 
 fn conversation_import_request_requires_permit(
     request: &ClientRequest,
-    import_is_pending: bool,
+    import_state: ConversationImportState,
     limit: usize,
 ) -> bool {
-    if import_is_pending {
-        return false;
+    match import_state {
+        ConversationImportState::Inactive => {}
+        ConversationImportState::Active => return false,
     }
     match request {
         ClientRequest::ImportConversation { source, .. } => source.as_bytes().len() <= limit,
@@ -1028,6 +1030,15 @@ struct PendingConversationImport {
     actual_size_bytes: u64,
     source: Vec<u8>,
     import_permit: OwnedSemaphorePermit,
+}
+
+impl ConversationImportState {
+    fn from_pending(pending: Option<&PendingConversationImport>) -> Self {
+        match pending {
+            Some(_) => Self::Active,
+            None => Self::Inactive,
+        }
+    }
 }
 
 async fn handle_request<Writer>(
@@ -11108,7 +11119,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionRangeLoadError, ConversionFailureDisposition,
+        ContextCompactionRangeLoadError, ConversationImportState, ConversionFailureDisposition,
         GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
@@ -12298,23 +12309,30 @@ context_window_tokens = 200000
 
     #[test]
     fn oversized_begin_is_rejected_without_reserving_import_capacity() {
+        let limit = 8;
         let oversized = ClientRequest::BeginConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: CanonicalU64::new(9),
+            declared_size_bytes: CanonicalU64::new(u64::try_from(limit + 1).expect("limit fits")),
         };
         let admitted = ClientRequest::BeginConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
-            declared_size_bytes: CanonicalU64::new(8),
+            declared_size_bytes: CanonicalU64::new(u64::try_from(limit).expect("limit fits")),
         };
 
         assert!(!super::conversation_import_request_requires_permit(
-            &oversized, false, 8,
+            &oversized,
+            ConversationImportState::Inactive,
+            limit,
         ));
         assert!(super::conversation_import_request_requires_permit(
-            &admitted, false, 8,
+            &admitted,
+            ConversationImportState::Inactive,
+            limit,
         ));
         assert!(!super::conversation_import_request_requires_permit(
-            &admitted, true, 8,
+            &admitted,
+            ConversationImportState::Active,
+            limit,
         ));
     }
 
@@ -12380,13 +12398,19 @@ context_window_tokens = 200000
         let frame_budgets = InboundFrameBudgets::new();
         let import_budget = Arc::new(Semaphore::new(capacity));
         let occupied_import = Arc::clone(&import_budget).acquire_owned().await?;
-        let frame_permit = frame_budgets.for_connection(false).acquire_owned().await?;
+        let frame_permit = frame_budgets
+            .for_connection(ConversationImportState::Inactive)
+            .acquire_owned()
+            .await?;
         let begin = ClientRequest::BeginConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
             declared_size_bytes: CanonicalU64::new(u64::try_from(capacity)?),
         };
-        let import_requires_permit =
-            super::conversation_import_request_requires_permit(&begin, false, capacity);
+        let import_requires_permit = super::conversation_import_request_requires_permit(
+            &begin,
+            ConversationImportState::Inactive,
+            capacity,
+        );
 
         let retained = retain_inbound_frame_permit_during_import_admission(
             &begin,
@@ -12397,14 +12421,14 @@ context_window_tokens = 200000
         assert!(retained.is_none());
         assert_eq!(import_budget.available_permits(), 0);
         let general_slots = frame_budgets
-            .for_connection(false)
+            .for_connection(ConversationImportState::Inactive)
             .acquire_many_owned(u32::try_from(GENERAL_BUFFERED_INBOUND_FRAMES)?)
             .await?;
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
         let active_slot = timeout(
             Duration::from_secs(1),
             acquire_inbound_frame_permit(
-                frame_budgets.for_connection(true),
+                frame_budgets.for_connection(ConversationImportState::Active),
                 &mut shutdown_receiver,
             ),
         )
@@ -12568,8 +12592,9 @@ context_window_tokens = 200000
         let request_id = RequestId::try_new(1)?;
         let limit = 8;
         let declared_size_bytes = u64::try_from(limit)?;
-        let prior_size_bytes = 7;
-        let observed_size_bytes = 9;
+        let prior_size_bytes = u64::try_from(limit - 1)?;
+        let chunk = vec![b'x'; 2];
+        let observed_size_bytes = prior_size_bytes + u64::try_from(chunk.len())?;
         let mut pending = Some(PendingConversationImport {
             format: signalbox_process_protocol::ConversationImportFormat::CodexRolloutJsonlV1,
             declared_size_bytes,
@@ -12577,7 +12602,6 @@ context_window_tokens = 200000
             source: vec![b'x'; usize::try_from(prior_size_bytes)?],
             import_permit: permit,
         });
-        let chunk = vec![b'x'; 2];
         let (mut writer, mut reader) = duplex(1_024);
 
         handle_append_conversation_import(
