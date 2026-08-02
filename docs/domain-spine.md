@@ -911,6 +911,7 @@ pub enum DelegationOutcomeKind {
     ChildFailed,
     ChildStopped,
     ChildCancelled,
+    AlreadyTerminal,
     ContinueRunning,
 }
 pub struct DelegationOutcome { /* private validated kind + content + reason + provenance */ }

@@ -694,7 +694,7 @@ produces exactly one of:
   `child_session_id`, `outcome`, nullable `content`, closed `reason`, and exact
   `provenance`;
 - `session_message_sent` with `tool_request_id`, `message_id`, `direction`, and
-  `ordinal`;
+  `ordinal` plus the positive recipient-wide `delivery_sequence`;
 - `runner_replaced` with `session_id`, `prior_runner_id`, `new_runner_id`,
   successor `placement_revision`, and `sandbox_profile`;
 - `runner_abandoned` with `session_id` and `placement_revision`;
@@ -1379,22 +1379,31 @@ imported content and verbatim raw source remain authoritative only in the
 immutable imported-conversation aggregate; the wire snapshot neither fabricates
 native evidence nor replaces that authority.
 
-**Session-delegation foundation proposal.** The delegation stack adds two
+**Session-delegation foundation proposal.** The delegation stack adds three
 non-text `transcript_entry` arms:
 
-- `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
-- `delegation_result { await_request_id, spawning_request_id, child_session_id, outcome, content, reason, provenance }`.
+- `delegated_task { spawning_request_id, parent_session_id, parent_turn_id, content }`;
+- `delegation_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, delivery_sequence, content }`;
+- `delegation_result { await_request_id, spawning_request_id, child_session_id, mode, delivery_sequence, outcome, content, reason, provenance }`.
 
-The message arm resolves the immutable message record referenced by the semantic
-entry and requires `source_session_id` to equal its recipient. The result arm
-resolves both the immutable child-result record and the exact delegation wait
-named by `await_request_id`; that wait must name the same spawning request and
-child, and `source_session_id` must equal its parent. Thus separate waits for
-one child retain distinct model-visible tool-result correlation. `content` is
-required for a returned result and null for every other closed outcome; `reason`
-and `provenance` use the same closed shapes as the corresponding
-`session_event`. A missing record, mismatched wait, relationship, or endpoint,
-or incompatible outcome fails the snapshot before transmission.
+The task arm resolves the immutable spawn request and relationship, requires
+`source_session_id` to equal the child, and carries the exact checked task
+argument. It is a distinct delegated-task origin, never a user accepted-input
+entry. The message arm resolves the immutable message record referenced by the
+semantic entry and requires `source_session_id` to equal its recipient. The
+result arm resolves both the immutable child-result record and the exact
+delegation wait named by `await_request_id`; that wait must name the same
+spawning request and child, and `source_session_id` must equal its parent. Thus
+separate waits for one child retain distinct model-visible tool-result
+correlation. `mode` equals that wait's `foreground` or `background`;
+`delivery_sequence` is null for foreground and is the positive canonical decimal
+recipient-wide sequence for background. Message entries likewise resolve their
+positive recipient-wide delivery sequence even though the wire retains the
+relationship-local ordinal. `content` is required for a returned result and null
+for every other closed outcome; `reason` and `provenance` use the same closed
+shapes as the corresponding `session_event`. A missing record, mismatched wait,
+relationship, endpoint, delivery sequence, or incompatible outcome fails the
+snapshot before transmission.
 
 Snapshot deduplication uses the complete `(source_session_id, entry_id)`
 semantic identity. Neither `message_id` nor `spawning_request_id` is a
@@ -1444,8 +1453,8 @@ object, and returns
 `session_await_registered { tool_request_id, child_session_id, mode }` for
 background or the already-delivered child outcome for foreground.
 `send_session_message` carries the related peer and bounded content, and returns
-`session_message_sent { tool_request_id, message_id, direction, ordinal }`. For
-a sent-message receipt or update, `direction` is the closed string
+`session_message_sent { tool_request_id, message_id, direction, ordinal, delivery_sequence }`.
+For a sent-message receipt or update, `direction` is the closed string
 `parent_to_child` or `child_to_parent`. For a result that predates the wait,
 background records delivery and returns `session_await_registered`, while
 foreground returns the child outcome. Equal replay returns that same
@@ -1457,14 +1466,15 @@ Session-follow updates add these closed event shapes:
 
 - `child_spawned { spawning_request_id, child_session_id, relationship }`;
 - `child_waiting { await_request_id, spawning_request_id, child_session_id, mode }`;
-- `session_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
+- `session_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, delivery_sequence, content }`;
 - `child_result { spawning_request_id, child_session_id, outcome, content, reason, provenance }`;
 - `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`.
 
 The two outcome events use one closed nested union. `outcome` is `returned`,
-`failed`, `stopped`, `cancelled`, or `continue_running`; `reason` is
-`child_completed`, `child_execution_failed`, `child_result_unavailable`,
-`child_cancelled`, `parent_stopped`, or `parent_cancelled`. `provenance` is
+`failed`, `stopped`, `cancelled`, `already_terminal`, or `continue_running`;
+`reason` is `child_completed`, `child_execution_failed`,
+`child_result_unavailable`, `child_cancelled`, `parent_stopped`, or
+`parent_cancelled`. `provenance` is
 `child_turn { child_session_id, child_turn_id }`,
 `parent_turn_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
 or
@@ -1480,20 +1490,33 @@ carries or fabricates a parent turn. The admitted correlations are exhaustive:
 | `cancelled`        | `child_cancelled`                                      | `child_turn`   | null         |
 | `stopped`          | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
 | `cancelled`        | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
+| `already_terminal` | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
 | `continue_running` | `parent_stopped` or `parent_cancelled`                 | parent command | null         |
 
-`child_result` admits every row except `continue_running`;
-`child_lifecycle_disposition` admits only parent-command `stopped`, `cancelled`,
-and `continue_running` rows. A A parent-command outcome admits either
-`parent_turn_command` or `parent_goal_command` provenance and requires
-`parent_and_descendants` for `stopped`, parent-caused `cancelled`, and
-`continue_running`. The outcome names the bound-child action, while the reason
-independently names whether the parent stopped or was cancelled; both
-cross-action combinations are valid. A `continue_running` row is the explicit
-evaluated no-change disposition for an edge included by the caller-selected
-cascade. Any other outcome/reason/provenance/content combination is a
-contradictory frame and is rejected. Thus every lifecycle result names both why
-it happened and the exact child turn or parent command that caused it.
+`child_result` admits every row except `already_terminal` and
+`continue_running`; `child_lifecycle_disposition` admits only parent-command
+`stopped`, `cancelled`, `already_terminal`, and `continue_running` rows. A
+parent-command outcome admits either `parent_turn_command` or
+`parent_goal_command` provenance and requires `parent_and_descendants` for
+`stopped`, parent-caused `cancelled`, and `continue_running`. An
+`already_terminal` row additionally requires the relationship's pre-existing
+immutable child result and never creates or replaces it; traversal continues
+through the child's outgoing edges. For a nonterminal child, the outcome names
+the bound-child action while the reason independently names whether the parent
+stopped or was cancelled; both cross-action combinations are valid.
+`already_terminal` names no new child action. A `continue_running` row is the
+explicit evaluated no-change disposition for an edge included by the
+caller-selected cascade. Any other outcome/reason/provenance/content combination
+is a contradictory frame and is rejected. Thus every lifecycle result names both
+why it happened and the exact child turn or parent command that caused it.
+
+`delivery_sequence` is a positive canonical decimal string allocated under the
+recipient session lock. It is required on every `session_message` update and on
+the transcript's background `delegation_result`, null on its foreground
+`delegation_result`, and unique and gap-free per recipient across messages and
+background-result deliveries. The result-availability `child_result` update is
+not an inbox delivery and carries no sequence. Relationship-local `ordinal`
+never breaks a cross-relationship tie.
 
 The internal `delegation_wake` outbox event is a scheduler nudge, not a
 session-follow update. Clients observe the durable result or message update that

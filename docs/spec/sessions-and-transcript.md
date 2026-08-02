@@ -901,6 +901,14 @@ this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
+The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
+referencing the exact spawning request and its parent session and turn. It is
+model/tool-authored delegation work, not accepted input and not `Actor::User`;
+the child's first turn has a distinct delegation-task origin and starts from
+that entry. Reconstitution resolves the request and requires its checked task
+bytes, parent, turn, child relationship, and entry to agree before the task
+becomes model-visible.
+
 Each spawning request creates at most one immutable parent/child relationship.
 The relationship records the exact parent session and turn, child session, and
 one parent-chosen policy:
@@ -913,10 +921,14 @@ A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the
 durable relationship tree: background edges and bound `KeepRunning` edges
 produce explicit continue-running dispositions, while bound stop/cancel actions
-produce the corresponding typed outcome. Every evaluated relationship records an
-outcome with the parent event, exact spawn request, and user command provenance.
-No path deletes the child or its history, and neither a continued child nor a
-terminated child can become a silent orphan or silent kill.
+produce the corresponding typed outcome. If the child already has its unique
+terminal result, the edge instead records `AlreadyTerminal` with the new parent
+command provenance and an exact check of that prior result; it creates no second
+terminal result. Traversal still visits that child's outgoing relationships.
+Every evaluated relationship therefore records an outcome with the parent event,
+exact spawn request, and user command provenance. No path deletes the child or
+its history, and neither a continued child nor a terminated child can become a
+silent orphan or silent kill.
 
 Delegation messages are immutable, bounded, nonempty content records with a
 distinct `DelegationMessageId`, the spawning relationship, exact sender and
@@ -924,10 +936,13 @@ recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
 child may each send to the other before or after either session stops, cancels,
 or completes. `DelegationMessage` semantic entries refer to those records; they
 do not reclassify model-authored content as input from the user. Undelivered
-messages remain FIFO. An active recipient consumes them at the next model-call
-safe point in ordinal order. An idle recipient gets one delegation-origin queued
-turn, and further messages coalesce into its starting frontier in the same order
-until activation.
+messages and background results share one positive, gap-free `delivery_sequence`
+allocated under the recipient session lock. An active recipient consumes pending
+items at the next model-call safe point in that recipient-wide order. An idle
+recipient gets one delegation-origin queued turn, and further items coalesce
+into its starting frontier in the same order until activation. Per-relationship
+message ordinals remain provenance and do not serve as a cross-relationship
+tie-break.
 
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned

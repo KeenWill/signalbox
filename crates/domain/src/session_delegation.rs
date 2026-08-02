@@ -747,6 +747,7 @@ pub enum DelegationOutcomeKind {
     ChildFailed,
     ChildStopped,
     ChildCancelled,
+    AlreadyTerminal,
     ContinueRunning,
 }
 
@@ -846,6 +847,38 @@ impl DelegationOutcome {
                 };
                 Some(Self {
                     kind,
+                    content: None,
+                    reason,
+                    provenance: DelegationProvenance::from_parent_termination(authority),
+                })
+            }
+        }
+    }
+
+    /// Records that an evaluated descendant edge was already terminal.
+    ///
+    /// The relationship aggregate calls this only after resolving the
+    /// relationship's unique immutable child result. That result remains the
+    /// authority for the prior terminal state; this disposition records the
+    /// exact parent command that evaluated the edge without fabricating a
+    /// second child result.
+    #[allow(dead_code, reason = "consumed by the stacked delegation aggregate")]
+    pub(crate) const fn from_parent_already_terminal(
+        authority: ParentTerminationAuthority,
+    ) -> Option<Self> {
+        match authority.scope {
+            DescendantTerminationScope::ParentAlone => None,
+            DescendantTerminationScope::ParentAndDescendants => {
+                let reason = match authority.kind {
+                    ParentTerminationKind::Stopped => DelegationOutcomeReason::ParentStopped {
+                        scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                    ParentTerminationKind::Cancelled => DelegationOutcomeReason::ParentCancelled {
+                        scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                };
+                Some(Self {
+                    kind: DelegationOutcomeKind::AlreadyTerminal,
                     content: None,
                     reason,
                     provenance: DelegationProvenance::from_parent_termination(authority),
@@ -1372,9 +1405,27 @@ mod tests {
         assert_eq!(
             outcome.reason(),
             DelegationOutcomeReason::ParentStopped {
-                scope: DescendantTerminationScope::ParentAndDescendants,
+                scope: authority.scope(),
             }
         );
+    }
+
+    /// S18 / INV-010: an already-terminal edge records its evaluating command.
+    #[test]
+    fn s18_inv010_already_terminal_edge_has_typed_command_disposition() {
+        let authority =
+            parent_termination_authority(DescendantTerminationScope::ParentAndDescendants);
+        let outcome = DelegationOutcome::from_parent_already_terminal(authority)
+            .expect("descendant-scoped authority records terminal-edge evaluation");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::AlreadyTerminal);
+        assert_eq!(
+            outcome.reason(),
+            DelegationOutcomeReason::ParentStopped {
+                scope: authority.scope(),
+            }
+        );
+        assert_eq!(outcome.provenance().parent_command(), Some(authority));
     }
 
     /// S18 / INV-010: descendant-scoped cancellation selects its exact reason.

@@ -798,6 +798,7 @@ never from model arguments.
   request. Version one imposes no fixed active-child-count limit; admission
   checks the complete locked relationship inventory for request and child
   uniqueness.
+
 - `await_session` takes the related child identity and `foreground` or
   `background`. Foreground converts the exact logical request into a durable
   child wait and produces its tool result only when the child's delivered
@@ -807,10 +808,19 @@ never from model arguments.
   `session_await_registered`, while foreground returns the child outcome.
   Replaying an already delivered wait returns that same mode-specific receipt or
   outcome.
+
 - `send_session_message` takes the related peer identity and bounded nonempty
   content. It verifies that the invoker is exactly the parent or child, appends
   the next relationship message, and returns its identity and ordinal. Either
   side may call it while the other is active, idle, stopped, or cancelled.
+
+The initial task is not accepted user input. Spawn records one `DelegatedTask`
+semantic origin in the child, bound to the exact spawning request and its parent
+session and turn; the task bytes are the checked `spawn_session` argument. The
+child's first turn is a delegation-origin turn whose starting frontier contains
+that entry, never an `OriginAcceptedInput`, and no `Actor::User` or
+accepted-input row is invented. Exact replay reuses the same semantic entry and
+turn origin.
 
 `await_session` foreground parking is a logical tool transition, not a physical
 executor kept in flight. It ends any current physical attempt before committing
