@@ -1077,16 +1077,19 @@ working_directory = "{}"
 
     #[test]
     fn conversation_import_bound_accepts_an_explicit_positive_byte_count() {
+        let max_source_bytes = 1_048_576;
         let configured = CONFIGURATION.replace(
             "[compaction]",
-            "[conversation_import]\nmax_source_bytes = 1048576\n\n[compaction]",
+            &format!(
+                "[conversation_import]\nmax_source_bytes = {max_source_bytes}\n\n[compaction]"
+            ),
         );
         let configuration =
             HubModelConfiguration::parse(&configured).expect("the explicit import bound is valid");
 
         assert_eq!(
             configuration.conversation_import_max_source_bytes(),
-            1_048_576
+            max_source_bytes
         );
     }
 
