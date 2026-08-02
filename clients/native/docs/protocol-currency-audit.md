@@ -21,8 +21,8 @@ The audit compared:
   [synchronizer](../Sources/SignalboxClient/SessionSynchronization.swift), and
   [timeline projector](../Sources/SignalboxClient/ProcessTranscriptProjector.swift).
 
-The current Rust protocol has 46 client request verbs and 63 server message
-kinds. Before this work, native modeled 16 request verbs and 35 server message
+The current Rust protocol has 46 client request verbs and 62 server message
+kinds. Before this work, native modeled 16 request verbs and 34 server message
 kinds, plus a generic unknown-message envelope. Twelve of the 13 current durable
 `SessionEvent` variants and all four current text-entry variants were named, but
 some nested future variants were rejected during synchronization. Native named

@@ -655,6 +655,38 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testNewerSideSnapshotGateSurvivesBufferedKnownTransition() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(.event(trigger))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithUnknownCurrentModelCallState(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.completedModelCallEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testProposedToolWaitsOnlyWhenSideSnapshotShowsApproval() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -4068,6 +4100,8 @@ private enum ProcessProjectionFixture {
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
+  static let bufferedTransitionCursor: UInt64 = 2
+  static let sideSnapshotCursor: UInt64 = 3
 
   static func materializedAcceptedInputIDs() throws -> Set<SignalboxCanonicalUUID> {
     [try SignalboxCanonicalUUID(validating: ProcessSubmissionFixture.acceptedInputID)]
@@ -4157,7 +4191,9 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func snapshotWithUnknownCurrentModelCallState() throws
+  static func snapshotWithUnknownCurrentModelCallState(
+    cursor: UInt64 = 1
+  ) throws
     -> SignalboxSynchronizationSnapshot
   {
     try snapshotWithActiveTurnState(
@@ -4170,7 +4206,8 @@ private enum ProcessProjectionFixture {
           "state":{"type":"\(unknownModelCallState)"}
         }
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 
@@ -4291,7 +4328,8 @@ private enum ProcessProjectionFixture {
   }
 
   private static func snapshotWithActiveTurnState(
-    _ state: String
+    _ state: String,
+    cursor: UInt64 = 1
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -4299,7 +4337,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_start",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1"
+          "cursor":"\(cursor)"
         }
         """,
         """
@@ -4315,7 +4353,7 @@ private enum ProcessProjectionFixture {
         {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
-          "cursor":"1",
+          "cursor":"\(cursor)",
           "turn_count":"1",
           "entry_count":"0"
         }
@@ -5063,8 +5101,10 @@ private enum ProcessProjectionFixture {
     )
   }
 
-  static func completedModelCallEvent() throws -> SignalboxFollowedSessionEvent {
-    try modelCallEvent(disposition: "completed")
+  static func completedModelCallEvent(
+    cursor: UInt64 = 1
+  ) throws -> SignalboxFollowedSessionEvent {
+    try modelCallEvent(disposition: "completed", cursor: cursor)
   }
 
   static func ambiguousModelCallEvent() throws -> SignalboxFollowedSessionEvent {
@@ -5089,7 +5129,8 @@ private enum ProcessProjectionFixture {
   }
 
   private static func modelCallEvent(
-    disposition: String
+    disposition: String,
+    cursor: UInt64 = 1
   ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -5102,7 +5143,8 @@ private enum ProcessProjectionFixture {
           "disposition":"\(disposition)"
         }
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 
@@ -5212,13 +5254,14 @@ private enum ProcessProjectionFixture {
 
   private static func followedEvent(
     _ event: String,
-    sessionID: String = ProcessDriverFixture.session
+    sessionID: String = ProcessDriverFixture.session,
+    cursor: UInt64 = 1
   ) throws -> SignalboxFollowedSessionEvent {
     let message = try message(
       """
       {
         "type":"session_event",
-        "cursor":"1",
+        "cursor":"\(cursor)",
         "session_id":"\(sessionID)",
         "event":\(event)
       }

@@ -1329,6 +1329,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   }
 
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
+  private var sideSnapshotBlockCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -1694,6 +1695,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         terminalTurnIDs = terminalTurnIDs(in: snapshot)
         activeTurnID = activeTurnID(in: snapshot)
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
+        sideSnapshotBlockCursorsByTurnID = [:]
         activity = projection.activity
         streamedText = nil
         errorMessage = nil
@@ -1702,6 +1704,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
+        sideSnapshotBlockCursorsByTurnID = Dictionary(
+          uniqueKeysWithValues: mutationBlocksByTurnID.keys.map {
+            ($0, snapshot.cursor.rawValue)
+          }
+        )
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
         if !mutationBlocksByTurnID.isEmpty {
           activity = projection.activity
@@ -1721,7 +1728,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
         streamedText = nil
       case .event(let followed):
-        applyLiveEvent(followed.event)
+        applyLiveEvent(followed)
       case .providerTextDelta(let delta):
         if var current = streamedText,
           current.turnID == delta.turnID,
@@ -1861,6 +1868,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     activity = .unavailable
     activeTurnID = nil
     mutationBlocksByTurnID = [:]
+    sideSnapshotBlockCursorsByTurnID = [:]
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -1875,8 +1883,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     normalizer = SignalboxIncrementalEventNormalizer()
   }
 
-  private func applyLiveEvent(_ event: SignalboxProcessSessionEvent) {
-    switch event {
+  private func applyLiveEvent(_ followed: SignalboxFollowedSessionEvent) {
+    switch followed.event {
     case .inputAccepted(let acceptedInputID, let turnID, let acceptancePosition, let content):
       if !materializedAcceptedInputIDs.contains(acceptedInputID) {
         let acceptedInput = SignalboxProcessPendingInput(
@@ -1896,15 +1904,21 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           pendingInputs.append(acceptedInput)
         }
         pendingInputs.sort { $0.acceptancePosition.rawValue < $1.acceptancePosition.rawValue }
-        if !activityRepresentsActiveTurn {
+        if mutationBlocksByTurnID.isEmpty, !activityRepresentsActiveTurn {
           activity = .init(state: .queued, label: "Queued")
         }
       }
     case .turnActivated(let turnID, _):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       activeTurnID = turnID
       mutationBlocksByTurnID.removeValue(forKey: turnID)
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       if modelCallStateBlocksMutation(state) {
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
@@ -1916,6 +1930,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       applyModelCallState(state)
     case .toolBatchTransition(let turnID, _, let state):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       switch state {
       case .proposed:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
@@ -1940,27 +1957,42 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         latestDiagnostic = "Preserved an unrecognized tool-batch state: \(kind)."
       }
     case .turnCompleted(let turnID, _, _, _):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .completed, label: "Completed")
       )
     case .turnFailed(let turnID, _, _):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .failed, label: "Failed")
       )
     case .turnRefused(let turnID, _, _):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .refused, label: "Refused")
       )
     case .turnCancelled(let turnID, _, _):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .cancelled, label: "Cancelled")
       )
     case .turnReconciliationRequired(let turnID, _, _),
       .turnToolReconciliationRequired(let turnID, _, _):
+      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+        return
+      }
       applyTerminalTurn(
         turnID: turnID,
         terminalActivity: .init(state: .recoveryRequired, label: "Recovery required")
@@ -1970,12 +2002,27 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  private func admitsStateTransition(
+    for turnID: SignalboxCanonicalUUID,
+    at cursor: SignalboxCanonicalUInt64
+  ) -> Bool {
+    guard let snapshotCursor = sideSnapshotBlockCursorsByTurnID[turnID] else {
+      return true
+    }
+    guard cursor.rawValue > snapshotCursor else {
+      return false
+    }
+    sideSnapshotBlockCursorsByTurnID.removeValue(forKey: turnID)
+    return true
+  }
+
   private func applyTerminalTurn(
     turnID: SignalboxCanonicalUUID,
     terminalActivity: SignalboxProcessActivity
   ) {
     terminalTurnIDs.insert(turnID)
     mutationBlocksByTurnID.removeValue(forKey: turnID)
+    sideSnapshotBlockCursorsByTurnID.removeValue(forKey: turnID)
     if activeTurnID == turnID {
       activeTurnID = nil
     }

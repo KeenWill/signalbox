@@ -653,7 +653,7 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.phase, .hello(generation: 1, reconnectAttempt: 0))
   }
 
-  func testRetainedDiagnosticMessageBytesAreBoundedWithoutTruncatingEffect() throws {
+  func testRetainedDiagnosticMessageBytesBoundBothHistoryAndEffect() throws {
     var transport = try SynchronizationFixture.transport()
     _ = transport.send(.start)
     _ = transport.send(.connected(generation: SynchronizationFixture.initialGeneration))
@@ -670,8 +670,8 @@ final class SessionSynchronizationTests: XCTestCase {
       SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes
     )
     XCTAssertEqual(
-      SynchronizationFixture.reportedDiagnosticMessage(in: effects),
-      SynchronizationFixture.oversizedUnknownDiagnosticMessage
+      SynchronizationFixture.reportedDiagnosticMessage(in: effects)?.utf8.count,
+      SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes
     )
   }
 
@@ -1890,6 +1890,90 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testModelIdentityMarkerRejectsLaterUserEntryForSameTurn() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.textEntry()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.content()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelIdentityMarker(
+          turnID: SynchronizationFixture.turn,
+          index: 1,
+          entryID: SynchronizationFixture.secondAcceptedInput
+        )
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.textEntry(
+          index: 2,
+          entryID: SynchronizationFixture.toolRequest
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
+  func testUnknownTerminalDispositionAdvancesSteadyCursorWithDiagnostic() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownTerminalDispositionEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(
+      SynchronizationFixture.effectNames(effects),
+      SynchronizationFixture.unknownNestedSteadyEffectNames
+    )
+    XCTAssertEqual(
+      SynchronizationFixture.reportedDiagnosticMessage(in: effects),
+      SynchronizationFixture.unknownTerminalDispositionDiagnostic
+    )
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.steady(cursor: SynchronizationFixture.unknownCursor)
+    )
+  }
+
   func testTurnActivatedRequestsSideSnapshotRefresh() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
@@ -2401,8 +2485,9 @@ private enum SynchronizationFixture {
     repeating: "x",
     count: SignalboxSessionSynchronizationMachine.maximumRetainedDiagnosticMessageUTF8Bytes + 1
   )
-  static let oversizedUnknownDiagnosticMessage =
-    "Ignored an unrecognized process-protocol frame kind: \(oversizedDiagnosticKind)."
+  static let unknownTerminalDispositionDiagnostic =
+    "Preserved unrecognized session-event content: "
+    + "model_call_transition.state.terminal.disposition.fixture_future_disposition."
 
   static let policy = SignalboxSessionSynchronizationPolicy(
     deadlines: SignalboxSynchronizationDeadlines(
@@ -3032,14 +3117,17 @@ private enum SynchronizationFixture {
     )
   }
 
-  static func textEntry() throws -> SignalboxProcessServerMessage {
+  static func textEntry(
+    index: UInt64 = 0,
+    entryID: String = entry
+  ) throws -> SignalboxProcessServerMessage {
     try message(
       """
       {
         "type":"transcript_text_entry",
-        "entry_index":"0",
+        "entry_index":"\(index)",
         "source_session_id":"\(session)",
-        "entry_id":"\(entry)",
+        "entry_id":"\(entryID)",
         "entry":{
           "type":"user",
           "accepted_input_id":"\(acceptedInput)",
