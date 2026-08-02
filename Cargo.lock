@@ -1222,6 +1222,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "html-escape"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3197,6 +3203,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "futures-util",
+ "html-escape",
  "icu_casemap",
  "idna",
  "jiff",
@@ -3215,6 +3222,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "unicode-normalization",
+ "url",
  "uuid",
 ]
 

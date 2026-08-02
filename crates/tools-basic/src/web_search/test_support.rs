@@ -425,6 +425,10 @@ pub(super) const SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(C";
 
 pub(super) const POPULATED_SUCCESS_RESULT_SUFFIX_COLLISION_KEY: &str = "}\"))";
 
+pub(super) const FIXTURE_POPULATED_FAILURE_DETAIL: &str = "synthetic failure evidence";
+
+pub(super) const POPULATED_FAILURE_RESULT_SUFFIX_COLLISION_KEY: &str = "e\")) })";
+
 pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
 
 pub(super) const KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(K";
@@ -479,14 +483,6 @@ pub(super) fn response_with_result_count(count: usize) -> WebSearchResponse {
 pub(super) fn scrubber() -> CredentialScrubber {
     CredentialScrubber::try_new(&CredentialValue::new(SYNTHETIC_KEY.as_bytes().to_vec()))
         .expect("fixture credential is usable")
-}
-
-pub(super) fn ascii_json_unicode_escape(value: &str) -> String {
-    assert!(value.is_ascii(), "fixture must be ASCII");
-    value
-        .encode_utf16()
-        .map(|code_unit| format!(r"\u{code_unit:04x}"))
-        .collect()
 }
 
 pub(super) fn debug_result_count_collision_key() -> String {

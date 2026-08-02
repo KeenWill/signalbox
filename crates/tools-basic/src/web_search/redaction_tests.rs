@@ -456,10 +456,11 @@ fn web_search_redacts_terminated_standard_named_reference_in_result_text() {
 
 #[test]
 fn web_search_decodes_supported_named_nonbreaking_space_reference() {
-    assert_eq!(
-        decode_html_character_reference(SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE).as_deref(),
-        Some(SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE)
-    );
+    let source = format!("&{SUPPORTED_NAMED_NONBREAKING_SPACE_REFERENCE};");
+    let decoded = decode_html_character_references(&source);
+
+    assert_eq!(decoded.text, SUPPORTED_NAMED_NONBREAKING_SPACE_VALUE);
+    assert_eq!(decoded.change, ReversibleTextChange::Changed);
 }
 
 /// Common named references in provider prose remain available as safely
@@ -485,17 +486,20 @@ fn web_search_preserves_common_named_references_as_entity_escaped_text() {
 /// references and cannot be normalized into provider evidence.
 #[test]
 fn web_search_rejects_signed_numeric_escape_digits() {
-    assert_eq!(decode_json_code_unit(SIGNED_JSON_UNICODE_ESCAPE), None);
-    assert_eq!(
-        decode_html_character_reference(SIGNED_HTML_NUMERIC_REFERENCE),
-        None
-    );
+    let json = decode_json_string_escapes(SIGNED_JSON_UNICODE_ESCAPE);
+    let html_source = format!("&{SIGNED_HTML_NUMERIC_REFERENCE};");
+    let html = decode_html_character_references(&html_source);
+
+    assert_eq!(json.text, SIGNED_JSON_UNICODE_ESCAPE);
+    assert_eq!(json.change, ReversibleTextChange::Unchanged);
+    assert_eq!(html.text, html_source);
+    assert_eq!(html.change, ReversibleTextChange::Unchanged);
 }
 
-/// INV-035: a syntactically plausible but unimplemented terminated named
-/// reference fails closed instead of being treated as irreversibly literal.
+/// The HTML library preserves an unknown terminated name as provider text,
+/// which typed evidence escapes again.
 #[test]
-fn web_search_rejects_entity_escaped_unknown_named_references() {
+fn web_search_preserves_entity_escaped_unknown_named_references() {
     let result = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -505,10 +509,12 @@ fn web_search_rejects_entity_escaped_unknown_named_references() {
     let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
         .expect("fixture response is admitted");
 
-    assert_eq!(
-        success_evidence(response, &scrubber()),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber()).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    let escaped =
+        html_escape::encode_quoted_attribute(FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET);
+    assert!(content.contains(escaped.as_ref()));
 }
 
 /// INV-035: credential removal cannot turn an entity-escaped literal into
@@ -534,10 +540,10 @@ fn web_search_rejects_credential_collision_with_entity_escape_syntax() {
     );
 }
 
-/// INV-035: semicolonless numeric HTML-reference syntax fails closed
-/// before provider-controlled text enters completed evidence.
+/// Semicolonless numeric syntax is ordinary provider text to the library
+/// decoder and remains entity-escaped in typed evidence.
 #[test]
-fn web_search_rejects_semicolonless_numeric_reference_in_result_text() {
+fn web_search_preserves_semicolonless_numeric_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -551,16 +557,17 @@ fn web_search_rejects_semicolonless_numeric_reference_in_result_text() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    let escaped = html_escape::encode_quoted_attribute(SEMICOLONLESS_NUMERIC_HTML_COLLISION_VALUE);
+    assert!(content.contains(escaped.as_ref()));
 }
 
-/// INV-035: legacy named HTML-reference syntax that accepts no semicolon
-/// fails closed before provider-controlled text enters completed evidence.
+/// Semicolonless named syntax is ordinary provider text to the library
+/// decoder and remains entity-escaped in typed evidence.
 #[test]
-fn web_search_rejects_semicolonless_named_reference_in_result_text() {
+fn web_search_preserves_semicolonless_named_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -574,10 +581,11 @@ fn web_search_rejects_semicolonless_named_reference_in_result_text() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    let escaped = html_escape::encode_quoted_attribute(SEMICOLONLESS_NAMED_HTML_COLLISION_VALUE);
+    assert!(content.contains(escaped.as_ref()));
 }
 
 /// INV-035: an unknown named-reference prefix cannot hide a later recognized
@@ -604,10 +612,10 @@ fn web_search_redacts_recognized_reference_after_nested_ampersand() {
     assert!(!content.contains(NESTED_NAMED_HTML_COLLISION_VALUE));
 }
 
-/// INV-035: an unknown named reference beginning with a semicolonless legacy
-/// name fails closed before reversible parsing can reveal a credential.
+/// A prefixed legacy name is ordinary provider text to the library decoder
+/// and remains entity-escaped in typed evidence.
 #[test]
-fn web_search_rejects_prefixed_legacy_named_reference_in_result_text() {
+fn web_search_preserves_prefixed_legacy_named_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(PREFIXED_LEGACY_NAMED_HTML_COLLISION_VALUE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -621,10 +629,11 @@ fn web_search_rejects_prefixed_legacy_named_reference_in_result_text() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    let escaped = html_escape::encode_quoted_attribute(PREFIXED_LEGACY_NAMED_HTML_COLLISION_VALUE);
+    assert!(content.contains(escaped.as_ref()));
 }
 
 /// INV-035: credential scrubbing cannot turn a checked result title into
@@ -695,10 +704,10 @@ fn web_search_redacts_html_encoded_credential_in_result_text() {
     assert!(!content.contains(HTML_ENTITY_COLLISION_VALUE));
 }
 
-/// INV-035: an over-window numeric HTML reference fails closed before
-/// provider-controlled evidence is retained.
+/// The HTML library decodes a numeric reference independently of the source
+/// spelling's leading-zero width before defense-in-depth scrubbing.
 #[test]
-fn web_search_rejects_over_window_numeric_reference_in_result_text() {
+fn web_search_preserves_over_window_numeric_reference_in_result_text() {
     let reflection = over_window_numeric_html_reflection();
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: reflection.clone(),
@@ -713,10 +722,11 @@ fn web_search_rejects_over_window_numeric_reference_in_result_text() {
     ))
     .expect("fixture credential is usable");
 
-    assert_eq!(
-        success_evidence(response, &scrubber),
-        Err(WebSearchExecutorError::EvidenceEncoding)
-    );
+    let evidence = success_evidence(response, &scrubber).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(!content.contains(OVER_WINDOW_NUMERIC_HTML_COLLISION_KEY));
+    assert!(!content.contains(&reflection));
 }
 
 /// INV-035: an HTML C1 numeric reference is decoded through its standard
@@ -853,13 +863,15 @@ fn web_search_html_reference_scan_handles_multibyte_boundaries() {
     ));
 }
 
-/// INV-035: numeric character-reference terminator search is bounded and
-/// fails closed in a maximum-size provider body.
+/// The library decoder leaves a non-reference with a distant terminator
+/// unchanged; the provider-body limit bounds the surrounding input.
 #[test]
-fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
+fn web_search_html_reference_decoder_preserves_distant_terminator() {
     let source = distant_html_reference_terminator();
+    let decoded = decode_html_character_references(&source);
 
-    assert!(decode_html_character_references(&source).is_none());
+    assert_eq!(decoded.text, source);
+    assert_eq!(decoded.change, ReversibleTextChange::Unchanged);
 }
 
 /// INV-035: credential removal cannot reproduce a key that overlaps the

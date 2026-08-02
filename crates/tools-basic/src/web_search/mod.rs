@@ -5,7 +5,6 @@
 #![allow(dead_code)]
 
 mod brave;
-mod canonicalization;
 mod diagnostic;
 mod egress;
 mod evidence;
@@ -18,8 +17,6 @@ mod transport_failure;
 
 #[cfg(test)]
 mod brave_tests;
-#[cfg(test)]
-mod canonicalization_tests;
 #[cfg(test)]
 mod egress_tests;
 #[cfg(test)]

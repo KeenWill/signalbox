@@ -1,3 +1,4 @@
+use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::CredentialValue;
 
 use super::{diagnostic::*, evidence::*, redaction::*, result::*, test_support::*};
@@ -46,12 +47,33 @@ fn web_search_rejects_populated_success_result_suffix_collision() {
     );
 }
 
-/// INV-035: JSON-aware error sanitization decodes an escaped credential
-/// before the body can enter durable failure evidence.
+/// INV-035: a credential spanning a populated failure detail and its enclosing
+/// `Debug` suffix is rejected before that result can be returned.
 #[test]
-fn web_search_error_body_redacts_json_escaped_credential() {
-    let escaped = ascii_json_unicode_escape(SYNTHETIC_KEY);
-    let body = format!(r#"{{"error":{{"detail":"{escaped}"}}}}"#).into_bytes();
+fn web_search_rejects_populated_failure_result_suffix_collision() {
+    let detail = ToolExecutionErrorDetail::try_new(String::from(FIXTURE_POPULATED_FAILURE_DETAIL))
+        .expect("fixture failure detail is valid");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_FAILURE_RESULT_SUFFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        known_failure_evidence(detail, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: typed error parsing retains only the detail component and exact
+/// credential scrubbing runs before provider detail enters durable evidence.
+#[test]
+fn web_search_error_body_redacts_exact_credential() {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": {"detail": SYNTHETIC_KEY},
+    }))
+    .expect("synthetic provider body serializes");
     let error = WebSearchProviderError::new(PROVIDER_REJECTION_STATUS, body)
         .expect("fixture error body is bounded");
     let detail = provider_error_detail(error, &scrubber())

@@ -23,13 +23,7 @@ pub(super) fn success_evidence(
         .into_iter()
         .take(MAX_RETURNED_RESULTS)
         .map(|result| {
-            let removal_facts = result.url.removal_facts();
-            if scrubber.url_contains_encoded_credential(result.url.as_str())
-                || scrubber.url_contains_credential_after_removed_url_components(
-                    result.url.as_str(),
-                    removal_facts,
-                )
-            {
+            if scrubber.url_contains_encoded_credential(result.url.as_str()) {
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
 
@@ -88,18 +82,17 @@ pub(super) fn redact_entity_escaped_component(
 }
 
 pub(super) fn decode_html_character_references_to_closure(component: &str) -> Option<String> {
-    let initial = decode_html_character_references(component)?;
-    let raw_provider_text = initial.text;
+    let raw_provider_text = html_escape::decode_html_entities(component).into_owned();
     let mut decoded = raw_provider_text.clone();
     for _ in 0..MAX_REVERSIBLE_DECODE_PASSES {
-        let next = decode_html_character_references(&decoded)?;
-        match next.change {
-            ReversibleTextChange::Unchanged => return Some(raw_provider_text),
-            ReversibleTextChange::Changed => decoded = next.text,
+        let next = html_escape::decode_html_entities(&decoded).into_owned();
+        if next == decoded {
+            return Some(raw_provider_text);
         }
+        decoded = next;
     }
-    let final_pass = decode_html_character_references(&decoded)?;
-    (final_pass.change == ReversibleTextChange::Unchanged).then_some(raw_provider_text)
+    let final_pass = html_escape::decode_html_entities(&decoded);
+    (final_pass.as_ref() == decoded).then_some(raw_provider_text)
 }
 
 pub(super) fn completed_text_evidence(
@@ -115,7 +108,15 @@ pub(super) fn known_failure_evidence(
     scrubber: &CredentialScrubber,
 ) -> Result<ToolExecutorEvidence, WebSearchExecutorError> {
     let detail = (!scrubber.contains_credential(detail.as_str())).then_some(detail);
-    Ok(ToolExecutorEvidence::KnownFailed { detail })
+    let evidence = ToolExecutorEvidence::KnownFailed { detail };
+    let rendered_result = format!(
+        "{:?}",
+        Ok::<&ToolExecutorEvidence, WebSearchExecutorError>(&evidence)
+    );
+    if scrubber.contains_credential(&rendered_result) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
+    }
+    Ok(evidence)
 }
 
 pub(super) fn provider_error_detail(
