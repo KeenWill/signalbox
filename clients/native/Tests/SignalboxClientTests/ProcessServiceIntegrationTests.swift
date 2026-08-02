@@ -1301,6 +1301,23 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testDuplicateTurnInSideSnapshotDegradesWithoutTrapping() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithDuplicateTurnRecords(),
+        trigger: try ProcessProjectionFixture.activatedEvent()
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertFalse(viewModel.canSend)
+  }
+
+  @MainActor
   func testProposedToolWaitsOnlyWhenSideSnapshotShowsApproval() async throws {
     let service = makeService(scenario: .pendingApproval)
     let sessions = try await service.listSessions(includeArchived: false)
@@ -5014,6 +5031,15 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func snapshotWithDuplicateTurnRecords() throws -> SignalboxSynchronizationSnapshot {
+    let snapshot = try snapshotWithKnownActiveTurn(cursor: sideSnapshotCursor)
+    return SignalboxSynchronizationSnapshot(
+      sessionID: snapshot.sessionID,
+      cursor: snapshot.cursor,
+      records: snapshot.records + snapshot.records
     )
   }
 

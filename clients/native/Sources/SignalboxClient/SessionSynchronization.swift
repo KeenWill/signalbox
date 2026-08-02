@@ -144,7 +144,7 @@ public struct SignalboxSynchronizationSnapshot: Equatable, Sendable {
   public let cursor: SignalboxCanonicalUInt64
   public let records: [Record]
 
-  fileprivate init(
+  init(
     sessionID: SignalboxCanonicalUUID,
     cursor: SignalboxCanonicalUInt64,
     records: [Record]

@@ -9,6 +9,8 @@ public enum SignalboxProcessPresentation {
     retainedLabel(label, maximumUTF8Bytes: maximumLabelUTF8Bytes)
   }
 
+  /// Bounds protocol-derived labels while preserving a diagnostic suffix so retained
+  /// tokens cannot exhaust memory or stall SwiftUI layout.
   public static func retainedLabel(_ label: String, preserving suffix: String) -> String {
     let retainedSuffix = retainedLabel(suffix)
     let maximumPrefixUTF8Bytes = maximumLabelUTF8Bytes - retainedSuffix.utf8.count

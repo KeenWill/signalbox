@@ -1718,12 +1718,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = Dictionary(
-          uniqueKeysWithValues: snapshot.records.compactMap { record in
+          snapshot.records.compactMap { record in
             guard case .turn(let turn) = record else {
               return nil
             }
             return (turn.turnID, snapshot.cursor.rawValue)
-          })
+          }, uniquingKeysWith: { _, latest in latest })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
         if let snapshotActiveTurnID {
           activeTurnID = snapshotActiveTurnID
