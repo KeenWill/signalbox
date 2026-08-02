@@ -1084,6 +1084,16 @@ mod tests {
         ));
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+            TerminalFieldShape::CurrentVersion,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
+            Some(SessionPlacementRejectionStorageKind::SessionNotFound),
+            TerminalFieldShape::Both,
+        ));
+        assert_terminal_field_corruption(validate_terminal_field_shape(
+            SessionPlacementResultStorageKind::Rejected,
             Some(SessionPlacementRejectionStorageKind::CurrentVersionMismatch),
             TerminalFieldShape::Both,
         ));
