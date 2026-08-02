@@ -126,6 +126,13 @@ impl CredentialScrubber {
         let Ok(url) = Url::parse(text) else {
             return true;
         };
+        if url.port().is_some()
+            && self
+                .reversible_variants()
+                .any(is_discardable_port_zero_prefix)
+        {
+            return true;
+        }
         if self
             .reversible_variants()
             .any(|variant| url.scheme().eq_ignore_ascii_case(variant))

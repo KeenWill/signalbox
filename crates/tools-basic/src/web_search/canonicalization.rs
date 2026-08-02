@@ -40,6 +40,11 @@ pub(super) fn canonicalized_url_port_fragment(value: &str) -> Option<String> {
     Some(format!("{retained_prefix}{port}"))
 }
 
+pub(super) fn is_discardable_port_zero_prefix(value: &str) -> bool {
+    let digits = value.strip_prefix(':').unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte == b'0')
+}
+
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
     let candidate = format!("http://{value}/");
     let url = Url::parse(&candidate).ok()?;
@@ -124,19 +129,45 @@ pub(super) fn legacy_ipv4_component_contains(value: &str, address: std::net::Ipv
         u32::from(octets[2]),
         u32::from(octets[3]),
     ];
-    normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
-        component_values
-            .iter()
-            .any(|component| component.to_string().contains(&fragment))
-    }) || normalized_radix_fragment(value, 8, None).is_some_and(|fragment| {
-        component_values
-            .iter()
-            .any(|component| format!("{component:o}").contains(&fragment))
-    }) || normalized_radix_fragment(value, 16, Some("0x")).is_some_and(|fragment| {
-        component_values
-            .iter()
-            .any(|component| format!("{component:x}").contains(&fragment))
-    })
+    let lowercase = value.to_ascii_lowercase();
+    component_values.iter().any(|component| {
+        component.to_string().contains(&lowercase)
+            || format!("0{component:o}").contains(&lowercase)
+            || format!("0x{component:x}").contains(&lowercase)
+    }) || ipv4_radix_padding_may_contain(value)
+        || normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
+            component_values
+                .iter()
+                .any(|component| component.to_string().contains(&fragment))
+        })
+        || normalized_radix_fragment(value, 8, None).is_some_and(|fragment| {
+            component_values
+                .iter()
+                .any(|component| format!("{component:o}").contains(&fragment))
+        })
+        || normalized_radix_fragment(value, 16, Some("0x")).is_some_and(|fragment| {
+            component_values
+                .iter()
+                .any(|component| format!("{component:x}").contains(&fragment))
+        })
+        || value
+            .strip_prefix('x')
+            .or_else(|| value.strip_prefix('X'))
+            .and_then(|digits| normalized_radix_fragment(digits, 16, None))
+            .is_some_and(|fragment| {
+                component_values
+                    .iter()
+                    .any(|component| format!("{component:x}").contains(&fragment))
+            })
+}
+
+pub(super) fn ipv4_radix_padding_may_contain(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    let digits = lowercase
+        .strip_prefix("0x")
+        .or_else(|| lowercase.strip_prefix('x'))
+        .unwrap_or(&lowercase);
+    !digits.is_empty() && digits.bytes().all(|byte| byte == b'0')
 }
 
 pub(super) fn normalized_radix_fragment(

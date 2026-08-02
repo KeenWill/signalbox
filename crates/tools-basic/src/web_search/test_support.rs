@@ -27,6 +27,8 @@ pub(super) const FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL: &str = "http://0x7f00000
 
 pub(super) const FIXTURE_OCTAL_SUBSTRING_IPV4_RESULT_URL: &str = "http://017700000001/";
 
+pub(super) const FIXTURE_LEADING_ZERO_PORT_RESULT_URL: &str = "https://example.com:0800/";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
 pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
@@ -133,6 +135,10 @@ pub(super) const URL_EMBEDDED_OCTAL_IPV4_COLLISION_KEY: &str = "177";
 pub(super) const URL_HEX_DIGIT_SUBSTRING_COLLISION_KEY: &str = "f00";
 
 pub(super) const URL_OCTAL_DIGIT_SUBSTRING_COLLISION_KEY: &str = "700";
+
+pub(super) const URL_HEX_PREFIX_SPANNING_COLLISION_KEY: &str = "x7";
+
+pub(super) const URL_DISCARDED_PORT_ZERO_COLLISION_KEY: &str = ":0";
 
 pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
 

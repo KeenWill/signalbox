@@ -764,6 +764,29 @@ fn web_search_rejects_credential_substring_inside_octal_ipv4_digits() {
     );
 }
 
+/// INV-035: a credential spanning a hexadecimal radix marker and its first
+/// digit cannot survive canonical host serialization.
+#[test]
+fn web_search_rejects_credential_spanning_hexadecimal_ipv4_prefix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_HEX_AFFIX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("hexadecimal-prefix IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_HEX_PREFIX_SPANNING_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-octet final IPv4 component is preserved as one
 /// credential-derived fragment when compared with a canonical result host.
 #[test]
@@ -849,6 +872,29 @@ fn web_search_rejects_default_port_credential_fragment_in_result_url() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_DEFAULT_PORT_FRAGMENT_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential spanning the port delimiter and a discarded leading
+/// zero cannot survive numeric port canonicalization.
+#[test]
+fn web_search_rejects_discarded_leading_zero_port_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_LEADING_ZERO_PORT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("leading-zero port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_DISCARDED_PORT_ZERO_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 
