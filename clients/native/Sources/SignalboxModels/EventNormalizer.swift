@@ -425,11 +425,16 @@ public enum SignalboxEventNormalizer {
             planTruncated = try container.decode(Bool.self, forKey: .planTruncated)
             history = try container.decodeIfPresent([PlanEvent].self, forKey: .history)
             historyTruncated = try container.decode(Bool.self, forKey: .historyTruncated)
-            guard nextAfterEntryID.map({ $0 > 0 }) ?? true else {
+            let cursorMatchesTruncation = planTruncated
+                ? entries.last.map { nextAfterEntryID == $0.entryID } ?? false
+                : nextAfterEntryID == nil
+            guard nextAfterEntryID.map({ $0 > 0 }) ?? true,
+                cursorMatchesTruncation
+            else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .nextAfterEntryID,
                     in: container,
-                    debugDescription: "Next plan entry identity must be positive."
+                    debugDescription: "Plan truncation and its continuation cursor disagree."
                 )
             }
         }
@@ -538,7 +543,9 @@ public enum SignalboxEventNormalizer {
                 text = try container.decode(String.self, forKey: .text)
                 status = nil
                 dependencyID = nil
-                guard text.map(SignalboxEventNormalizer.validPlanText) == true else {
+                guard entryID < ordinal,
+                    text.map(SignalboxEventNormalizer.validPlanText) == true
+                else {
                     throw DecodingError.dataCorruptedError(
                         forKey: .text,
                         in: container,
@@ -553,7 +560,9 @@ public enum SignalboxEventNormalizer {
                 text = nil
                 status = try container.decode(String.self, forKey: .status)
                 dependencyID = nil
-                guard status.map(SignalboxEventNormalizer.validPlanStatus) == true else {
+                guard entryID < ordinal,
+                    status.map(SignalboxEventNormalizer.validPlanStatus) == true
+                else {
                     throw DecodingError.dataCorruptedError(
                         forKey: .status,
                         in: container,
@@ -568,7 +577,9 @@ public enum SignalboxEventNormalizer {
                 text = nil
                 status = nil
                 dependencyID = try container.decode(UInt64.self, forKey: .dependencyID)
-                guard dependencyID.map({ $0 > 0 }) == true else {
+                guard entryID < ordinal,
+                    dependencyID.map({ $0 > 0 && $0 < ordinal && $0 != entryID }) == true
+                else {
                     throw DecodingError.dataCorruptedError(
                         forKey: .dependencyID,
                         in: container,
@@ -643,6 +654,20 @@ public enum SignalboxEventNormalizer {
 
     private struct PlanWriteOutput: Decodable {
         let event: PlanEvent
+
+        private enum CodingKeys: String, CodingKey {
+            case event
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            try payload.rejectUnadmittedFields(["event"], decoder: decoder)
+            try payload.requireFields(["event"], decoder: decoder)
+            event = try decoder.container(keyedBy: CodingKeys.self).decode(
+                PlanEvent.self,
+                forKey: .event
+            )
+        }
     }
 
     private static func planPresentation(

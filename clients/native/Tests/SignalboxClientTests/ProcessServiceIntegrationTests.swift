@@ -511,6 +511,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.noticeDetailValues(in: normalizer.timelineItems),
       ProcessProjectionFixture.modelNoticeDetailValues
     )
+    XCTAssertEqual(
+      projection.records.map(\.event.kind),
+      ProcessProjectionFixture.modelPresentationEventKinds
+    )
   }
 
   func testModelUsagePresentationIDsSurviveEarlierInsertion() throws {
@@ -681,6 +685,39 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       tool.outputPreview,
       ProcessProjectionFixture.malformedPlanReadOutput
+    )
+  }
+
+  func testExpandedPlanWriteOutputKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.expandedPlanWriteOutputToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.expandedPlanWriteOutput
+    )
+  }
+
+  func testContradictoryPlanReadCursorKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.contradictoryPlanReadCursorToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.contradictoryPlanReadCursorOutput
+    )
+  }
+
+  func testFuturePlanEntryReferenceKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.futurePlanEntryReferenceToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.futurePlanEntryReferenceOutput
     )
   }
 
@@ -5109,6 +5146,10 @@ private enum ProcessProjectionFixture {
   static let importedUserRoleLabel = "User role"
   static let importedUserRoleAttribution = SignalboxProcessMessageSourceAttribution.importedUserRole
   static let modelNoticeTitles = ["Model changed", "Model usage"]
+  static let modelPresentationEventKinds = [
+    "process_model_identity", "process_message", "process_message",
+    "process_model_call_usage",
+  ]
   static let modelIdentityDefaultsVersion = UInt64(7)
   static let modelInputTokens = UInt64(12)
   static let modelOutputTokens = UInt64(3)
@@ -5179,6 +5220,9 @@ private enum ProcessProjectionFixture {
   static let malformedPlanArguments = #"{"kind":"set_status","entry_id":0,"status":"completed"}"#
   static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
   static let malformedPlanReadOutput = #"{"entries":[{"entry_id":0,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
+  static let expandedPlanWriteOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planProvenance)},"future_field":"retained"}"#
+  static let contradictoryPlanReadCursorOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[],"readiness":"ready"}],"next_after_entry_id":1,"plan_truncated":false,"history":null,"history_truncated":false}"#
+  static let futurePlanEntryReferenceOutput = #"{"event":{"ordinal":2,"kind":"status_changed","entry_id":3,"status":"completed",\#(planProvenance)}}"#
   static let planReadDisplayName = "Plan read"
   static let planWriteDisplayName = "Plan update"
   static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
@@ -6437,11 +6481,33 @@ private enum ProcessProjectionFixture {
         """,
         """
         {
+          "type":"transcript_text_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"2",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"2",
-          "entry_count":"2"
+          "entry_count":"3"
         }
         """,
       ]
@@ -6723,6 +6789,36 @@ private enum ProcessProjectionFixture {
       toolName: "plan_read",
       arguments: planReadArguments,
       output: malformedPlanReadOutput,
+      status: .completed
+    )
+  }
+
+  static func expandedPlanWriteOutputToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: expandedPlanWriteOutput,
+      status: .completed
+    )
+  }
+
+  static func contradictoryPlanReadCursorToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: contradictoryPlanReadCursorOutput,
+      status: .completed
+    )
+  }
+
+  static func futurePlanEntryReferenceToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planStatusRequestID,
+      toolName: "plan_write",
+      arguments: planStatusArguments,
+      output: futurePlanEntryReferenceOutput,
       status: .completed
     )
   }

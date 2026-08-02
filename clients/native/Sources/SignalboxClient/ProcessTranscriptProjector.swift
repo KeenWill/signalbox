@@ -166,8 +166,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var unknownTurnActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
+    let modelCallAnchorIndices = modelCallAnchorRecordIndices(in: snapshot.records)
+    var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
+    var unanchoredUsage: [SignalboxStoredEvent] = []
 
-    for record in snapshot.records {
+    for (recordIndex, record) in snapshot.records.enumerated() {
       switch record {
       case .turn(let turn):
         latestActivity = activity(for: turn.state)
@@ -200,13 +203,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
       case .modelCallUsage(let evidence):
         if usageIsSelected(evidence, selection: selection) {
-          let record = SignalboxStoredEvent(
+          let usageRecord = SignalboxStoredEvent(
             eventID: try claimModelCallUsagePresentationID(evidence),
             event: .processModelCallUsage(
               SignalboxProcessModelCallUsageEvent(evidence: evidence)
             )
           )
-          store(record, in: &projectedByID, order: &projectedOrder)
+          if let anchorIndex = modelCallAnchorIndices[evidence.modelCallID.rawValue] {
+            anchoredUsageByRecordIndex[anchorIndex, default: []].append(usageRecord)
+          } else {
+            unanchoredUsage.append(usageRecord)
+          }
         }
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
@@ -241,17 +248,74 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           store(projected, in: &projectedByID, order: &projectedOrder)
         }
       }
+      for usageRecord in anchoredUsageByRecordIndex.removeValue(forKey: recordIndex) ?? [] {
+        store(usageRecord, in: &projectedByID, order: &projectedOrder)
+      }
     }
     guard textAssembly == nil else {
       throw SignalboxProcessTranscriptProjectionError.missingTextContent
     }
     pendingInputs.removeAll { materializedAcceptedInputIDs.contains($0.id) }
+    for anchorIndex in anchoredUsageByRecordIndex.keys.sorted() {
+      for usageRecord in anchoredUsageByRecordIndex[anchorIndex] ?? [] {
+        store(usageRecord, in: &projectedByID, order: &projectedOrder)
+      }
+    }
+    for usageRecord in unanchoredUsage {
+      store(usageRecord, in: &projectedByID, order: &projectedOrder)
+    }
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
       activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
       materializedAcceptedInputIDs: materializedAcceptedInputIDs
     )
+  }
+
+  private func modelCallAnchorRecordIndices(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> [String: Int] {
+    var anchors: [String: Int] = [:]
+    var modelCallIDsByToolRequestID: [String: String] = [:]
+    var textModelCallID: String?
+    for (index, record) in records.enumerated() {
+      switch record {
+      case .textEntry(let message):
+        switch message.entry {
+        case .assistant(_, let modelCallID),
+          .contextSummary(let modelCallID, _, _, _, _):
+          textModelCallID = modelCallID.rawValue
+        case .user, .imported, .unknown:
+          textModelCallID = nil
+        }
+      case .content(let content):
+        guard content.finalFragment else {
+          continue
+        }
+        if let textModelCallID {
+          anchors[textModelCallID] = index
+        }
+        textModelCallID = nil
+      case .entry(let message):
+        switch message.entry {
+        case .assistantToolUse(_, let modelCallID, let requestID, _, _):
+          let rawModelCallID = modelCallID.rawValue
+          modelCallIDsByToolRequestID[requestID.rawValue] = rawModelCallID
+          anchors[rawModelCallID] = index
+        case .toolExecutionResult(let requestID, _, _),
+          .toolDenied(let requestID, _), .toolClosed(let requestID, _):
+          if let modelCallID = modelCallIDsByToolRequestID[requestID.rawValue] {
+            anchors[modelCallID] = index
+          }
+        case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled,
+          .imported, .unknown:
+          break
+        }
+      case .turn, .modelCallUsage:
+        break
+      }
+    }
+    return anchors
   }
 
   private mutating func projectText(

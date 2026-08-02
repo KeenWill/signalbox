@@ -2918,7 +2918,7 @@ extension Decoder {
 
 private struct SignalboxJSONDuplicateMemberScanner {
   private let bytes: [UInt8]
-  private let stringDecoder = SignalboxJSONCoding.decoder()
+  private let stringDecoder = JSONDecoder()
   private var index = 0
   private var duplicateObjectPaths: Set<[String]> = []
 
@@ -3159,4 +3159,20 @@ extension Decoder {
 
 extension SignalboxProcessProtocol {
   public static let maximumPlanTextUnicodeScalars = 4_096
+}
+
+final class SignalboxDuplicateAwareJSONDecoder: JSONDecoder, @unchecked Sendable {
+  override func decode<Value: Decodable>(
+    _ type: Value.Type,
+    from data: Data
+  ) throws -> Value {
+    if userInfo[.signalboxDuplicateObjectPaths] == nil {
+      var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
+      userInfo[.signalboxDuplicateObjectPaths] = try scanner.scan()
+    }
+    defer {
+      userInfo[.signalboxDuplicateObjectPaths] = nil
+    }
+    return try super.decode(type, from: data)
+  }
 }

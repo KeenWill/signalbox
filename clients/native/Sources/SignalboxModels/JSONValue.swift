@@ -66,7 +66,7 @@ public enum SignalboxJSONValue: Codable, Equatable, Sendable {
 
 public enum SignalboxJSONCoding {
     public static func decoder() -> JSONDecoder {
-        let decoder = JSONDecoder()
+        let decoder = SignalboxDuplicateAwareJSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
             let rawValue = try container.decode(String.self)

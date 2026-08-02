@@ -295,6 +295,20 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testDuplicateStoredProcessMembersDegradeToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_identity","turn_id":"\#(Self.storedTurnID)","defaults_version":"1","defaults_version":"2","selected_model_id":"\#(Self.storedModelCallID)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["selected_model_id"],
+            .string(Self.storedModelCallID)
+        )
+    }
+
     private static let expandedProcessEventFieldValue = "retained"
     private static let partialUsageCostAmount = "0.01"
     private static let invalidUsageCostAmount = "01"
