@@ -186,6 +186,11 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
    AND dependency.event_kind = 'created'
  ORDER BY edge.entry_ordinal, edge.first_event_ordinal";
 
+const COMPLETE_DEPENDENCY_GRAPH_SQL: &str = "SELECT entry_ordinal, dependency_ordinal
+  FROM session_plan_current_dependency
+ WHERE session_id = $1
+ ORDER BY first_event_ordinal";
+
 const APPEND_TARGET_SQL: &str = "SELECT target.event_kind,
        (
            session_plan_event_has_valid_shape(target)
@@ -245,16 +250,6 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
            count(*) FILTER (WHERE prior_first_event_ordinal IS NULL) AS root_count
       FROM session_plan_current_dependency
      WHERE session_id = $1
-), dependency_reach(origin, node) AS (
-    SELECT edge.entry_ordinal, edge.dependency_ordinal
-      FROM session_plan_current_dependency AS edge
-     WHERE edge.session_id = $1
-    UNION
-    SELECT reach.origin, edge.dependency_ordinal
-      FROM dependency_reach AS reach
-      JOIN session_plan_current_dependency AS edge
-        ON edge.session_id = $1
-       AND edge.entry_ordinal = reach.node
 ), dependency_certification AS (
     SELECT (
         (SELECT count(*) FROM dependency_chain) =
@@ -267,11 +262,6 @@ const INVALID_APPEND_EVENT_SEQUENCE_SQL: &str = "WITH RECURSIVE dependency_chain
             CASE dependency_inventory.edge_count
                 WHEN 0 THEN 0 ELSE 1
             END
-        AND NOT EXISTS (
-            SELECT 1
-              FROM dependency_reach
-             WHERE origin = node
-        )
         AND NOT EXISTS (
             SELECT 1
               FROM session_plan_current_dependency AS edge
@@ -671,6 +661,8 @@ impl SessionPlanRepository {
             transaction.rollback().await?;
             return Err(SessionPlanCorruption::InvalidEventSequence.into());
         }
+        let graph = load_complete_dependency_graph(&mut transaction, request.session()).await?;
+        validate_dependency_graph_acyclic(&graph)?;
         let encoded = EncodedDraft::new(next, request.draft());
         let correlation = request.provenance().correlation();
         let authorized: Option<Uuid> = sqlx::query_scalar(lock_inventory::PLAN_APPEND_ATTEMPT)
@@ -1076,6 +1068,29 @@ fn validate_dependency_graph_acyclic(
         return Err(SessionPlanCorruption::InvalidEventSequence.into());
     }
     Ok(())
+}
+
+async fn load_complete_dependency_graph(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<HashMap<PlanEntryId, Vec<PlanEntryId>>, SessionPlanRepositoryError> {
+    let rows = sqlx::query(COMPLETE_DEPENDENCY_GRAPH_SQL)
+        .bind(session.into_uuid())
+        .fetch_all(&mut **transaction)
+        .await?;
+    let mut graph = HashMap::<PlanEntryId, Vec<PlanEntryId>>::new();
+    for row in &rows {
+        let entry = dependency_path_entry(required(row, "entry_ordinal")?)?;
+        let dependency = dependency_path_entry(required(row, "dependency_ordinal")?)?;
+        let dependencies = graph.entry(entry).or_default();
+        if dependencies.len() >= MAX_PLAN_DEPENDENCIES_PER_ENTRY
+            || dependencies.contains(&dependency)
+        {
+            return Err(SessionPlanCorruption::InvalidEventSequence.into());
+        }
+        dependencies.push(dependency);
+    }
+    Ok(graph)
 }
 
 async fn load_relevant_dependency_graph(
@@ -1659,8 +1674,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        APPEND_TARGET_SQL, CURRENT_DEPENDENCIES_SQL, CURRENT_PLAN_SQL,
-        INVALID_APPEND_EVENT_SEQUENCE_SQL, INVALID_EVENT_SEQUENCE_SQL,
+        APPEND_TARGET_SQL, COMPLETE_DEPENDENCY_GRAPH_SQL, CURRENT_DEPENDENCIES_SQL,
+        CURRENT_PLAN_SQL, INVALID_APPEND_EVENT_SEQUENCE_SQL, INVALID_EVENT_SEQUENCE_SQL,
         MAX_PLAN_DEPENDENCIES_PER_ENTRY, RELEVANT_DEPENDENCY_GRAPH_SQL, SessionPlanCorruption,
         validate_dependency_graph_acyclic,
     };
@@ -1701,8 +1716,6 @@ mod tests {
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_first_event_count"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("distinct_edge_count"));
         assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("root_count"));
-        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("dependency_reach(origin, node)"));
-        assert!(INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("WHERE origin = node"));
         assert!(
             INVALID_APPEND_EVENT_SEQUENCE_SQL.contains("expected_predecessor.first_event_ordinal")
         );
@@ -1717,6 +1730,14 @@ mod tests {
             INVALID_APPEND_EVENT_SEQUENCE_SQL
                 .contains("session_plan_event_has_authority(dependency)")
         );
+    }
+
+    #[test]
+    fn append_acyclicity_uses_one_linear_projection_inventory() {
+        assert!(COMPLETE_DEPENDENCY_GRAPH_SQL.contains("session_plan_current_dependency"));
+        assert!(COMPLETE_DEPENDENCY_GRAPH_SQL.contains("ORDER BY first_event_ordinal"));
+        assert!(!COMPLETE_DEPENDENCY_GRAPH_SQL.contains("WITH"));
+        assert!(!COMPLETE_DEPENDENCY_GRAPH_SQL.contains("RECURSIVE"));
     }
 
     #[test]
