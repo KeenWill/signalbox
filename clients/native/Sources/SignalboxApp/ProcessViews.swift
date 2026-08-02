@@ -1725,6 +1725,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         if let snapshotActiveTurnID {
           activeTurnID = snapshotActiveTurnID
           activity = projection.activity
+        } else if isTerminalActivity(projection.activity) {
+          activity = projection.activity
         } else if case .turnActivated(let turnID, _) = trigger.event,
           snapshotTerminalTurnIDs.contains(turnID)
         {
@@ -2131,6 +2133,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .running, .waitingForToolDecision, .recoveryRequired:
       return true
     case .unavailable, .queued, .failed, .completed, .refused, .cancelled:
+      return false
+    }
+  }
+
+  private func isTerminalActivity(_ activity: SignalboxProcessActivity) -> Bool {
+    switch activity.state {
+    case .failed, .completed, .refused, .cancelled:
+      return true
+    case .unavailable, .queued, .running, .waitingForToolDecision, .recoveryRequired:
       return false
     }
   }

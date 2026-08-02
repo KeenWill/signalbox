@@ -1200,6 +1200,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     return retainedDiagnostic
   }
 
+  /// Bounds protocol-derived text to prevent retained-history memory exhaustion
+  /// and UI layout stalls from an oversized diagnostic.
   public static func retainedDiagnosticMessage(_ message: String) -> String {
     let scalars = message.unicodeScalars
     var retainedEnd = scalars.startIndex
@@ -1543,6 +1545,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       entriesStarted = true
       guard
         modelCallsEnded,
+        pendingModelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
         !entry.entry.hasMalformedStoredProjection && consumesModelIdentityTurnOrigin(entry.entry),
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
