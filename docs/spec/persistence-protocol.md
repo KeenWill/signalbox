@@ -952,7 +952,8 @@ predicate is authoritative after restart.
 
 Committed client-observable transitions become update events only through the
 transactional-outbox family (INV-032 mechanism; observation semantics are
-protocol scope). Implemented storage:
+protocol scope). The authoritative typed-record inventory is the implemented
+storage below plus the delegation-stack extension identified inline:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
@@ -962,11 +963,12 @@ protocol scope). Implemented storage:
   `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
   `turn_completed_outbox_event`, `turn_refused_outbox_event`,
   `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
-  and `runner_state_transition_outbox_event` — with a deferred trigger requiring
-  exactly one typed record per header. A runner-transition record carries the
-  affected runner, the positive placement revision, the sandbox profile, one
-  closed transition state, and the relocation facts that state requires, so a
-  follower learns of loss, suspicion, recovery, replacement, working-directory
+  `runner_state_transition_outbox_event`, and the delegation stack's
+  `delegation_update_outbox_event` — with a deferred trigger requiring exactly
+  one typed record per header. A runner-transition record carries the affected
+  runner, the positive placement revision, the sandbox profile, one closed
+  transition state, and the relocation facts that state requires, so a follower
+  learns of loss, suspicion, recovery, replacement, working-directory
   relocation, and abandonment from the same family. The family is deliberately
   shaped for extension: a later runner fact — another relocation shape, or
   runner metadata and attributes — adds a state and its columns to this one
@@ -994,8 +996,9 @@ shape-specific columns carry `child_session_id` and relationship for
 `child_spawned`, `await_request_id`, child, and mode for `child_waiting`, child,
 outcome, reason, and provenance for `child_lifecycle_disposition`, those fields
 plus nullable result content for `child_result`, or message identity, endpoints,
-ordinal, and content for `session_message`. `delegation_wake` instead carries
-one closed wake subject: `result` requires an equal
+ordinal, and content for `session_message`. `delegation_wake` is another
+`update_kind` in that table, not a separate event kind or typed record table. It
+carries one closed wake subject: `result` requires an equal
 `result_spawning_request_id`, while `message` requires a `DelegationMessageId`
 belonging to that relationship. The header's `session_id` is the stream
 receiving the update. Per-kind checks require exactly that shape's columns and

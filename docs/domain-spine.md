@@ -579,7 +579,6 @@ impl SessionTemplateProvenance {
 ```rust
 pub enum SessionCreationCause {
     UserInitiated,
-    Delegated { spawning_request: ToolRequestId },
 }
 
 pub struct TranscriptFrontier { /* private */ }
@@ -606,7 +605,6 @@ pub enum TranscriptAncestry {
 pub struct SessionCreationProvenance { /* private */ }
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
-    pub const fn delegated(spawning_request: ToolRequestId) -> Self;
     // accessors: cause(), ancestry()
 }
 
@@ -720,7 +718,6 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
     ImportedSessionSeedUnavailable,
-    DelegatedAncestryMismatch,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -746,7 +743,6 @@ impl PreparedCreateSession {
 
 pub enum CreateSessionPreparationFailure {
     TranscriptAncestryUnavailable,
-    DelegatedCreationRequiresSpawn,
 }
 
 pub struct CreateSessionPreparationError { /* private */ }
@@ -789,7 +785,6 @@ pub enum CreateSessionReconstitutionFailure {
     TemplateProvenanceMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
-    DelegatedCreationRequiresSpawn,
     DefaultsVersionIsNotFirst,
     DefaultsMismatch,
 }
@@ -1038,7 +1033,6 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
-    DelegatedAncestryMismatch,
     AncestryNotImported,
     MissingSeedRecord,
     DuplicateSeedRecord,
@@ -1115,7 +1109,6 @@ pub enum ImportedSessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
-    DelegatedAncestryMismatch,
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
