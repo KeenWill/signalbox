@@ -40,7 +40,8 @@ where
     {
         return Err(LocalGitFailure::Operation);
     }
-    let commit = resolve_bounded_commit(repository, authority, &arguments.start)?;
+    let (commit, revision_snapshot) =
+        resolve_bounded_commit(repository, authority, &arguments.start)?;
     let head = commit.id().to_string();
     let absent_objects =
         Odb::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
@@ -54,6 +55,7 @@ where
     if packed_reference_exists(authority, &reference_name)? {
         return Err(LocalGitFailure::Operation);
     }
+    revision_snapshot.validate(authority)?;
     create_loose_branch_reference(
         authority,
         &arguments.name,

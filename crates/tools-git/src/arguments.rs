@@ -27,9 +27,11 @@ pub enum GitDiffArguments {
     /// Compares the trees named by two revisions.
     Revisions {
         /// Older revision expression.
+        #[serde(deserialize_with = "deserialize_revision")]
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         base: String,
         /// Newer revision expression.
+        #[serde(deserialize_with = "deserialize_revision")]
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         head: String,
     },
@@ -48,7 +50,10 @@ pub(super) fn default_log_entries() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct GitLogArguments {
     /// Revision expression at which traversal starts.
-    #[serde(default = "default_log_revision")]
+    #[serde(
+        default = "default_log_revision",
+        deserialize_with = "deserialize_revision"
+    )]
     #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
     pub(super) revision: String,
     /// Maximum commits returned.
@@ -121,9 +126,11 @@ where
 #[serde(deny_unknown_fields)]
 pub struct GitBranchCreateArguments {
     /// New local branch shorthand.
+    #[serde(deserialize_with = "deserialize_branch_name")]
     #[schemars(length(min = 1, max = MAX_BRANCH_BYTES))]
     pub(super) name: String,
     /// Revision resolving to the branch's initial commit.
+    #[serde(deserialize_with = "deserialize_revision")]
     #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
     pub(super) start: String,
 }
@@ -133,8 +140,42 @@ pub struct GitBranchCreateArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitBranchSwitchArguments {
     /// Existing local branch shorthand.
+    #[serde(deserialize_with = "deserialize_branch_name")]
     #[schemars(length(min = 1, max = MAX_BRANCH_BYTES))]
     pub(super) name: String,
+}
+
+fn deserialize_revision<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_string(deserializer, MAX_REVISION_BYTES, "invalid bounded revision")
+}
+
+fn deserialize_branch_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_string(
+        deserializer,
+        MAX_BRANCH_BYTES,
+        "invalid bounded branch name",
+    )
+}
+
+fn deserialize_bounded_string<'de, D>(
+    deserializer: D,
+    max_bytes: usize,
+    error: &'static str,
+) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || value.len() > max_bytes || value.as_bytes().contains(&0) {
+        return Err(D::Error::custom(error));
+    }
+    Ok(value)
 }
 
 #[derive(Debug)]
@@ -166,8 +207,11 @@ pub(super) fn checked_relative_path(value: &str) -> Result<PathBuf, InvalidGitAr
             }
         }
     }
-    let first = normalized.components().next().ok_or(InvalidGitArguments)?;
-    if is_repository_administration_component(first) {
+    if normalized.as_os_str().is_empty()
+        || normalized
+            .components()
+            .any(is_repository_administration_component)
+    {
         return Err(InvalidGitArguments);
     }
     Ok(normalized)

@@ -42,14 +42,17 @@ pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
     };
     let mut options = DiffOptions::new();
     options.ignore_submodules(false);
-    let base_tree = resolve_bounded_tree(repository, authority, &base)?;
-    let head_tree = resolve_bounded_tree(repository, authority, &head)?;
+    let (base_tree, base_snapshot) = resolve_bounded_tree(repository, authority, &base)?;
+    let (head_tree, head_snapshot) = resolve_bounded_tree(repository, authority, &head)?;
     validate_tree_discovery(repository, &base_tree)?;
     validate_tree_discovery(repository, &head_tree)?;
     let diff = repository
         .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut options))
         .map_err(|_| LocalGitFailure::Operation)?;
-    render_diff(&diff)
+    let result = render_diff(&diff)?;
+    base_snapshot.validate(authority)?;
+    head_snapshot.validate(authority)?;
+    Ok(result)
 }
 
 pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(

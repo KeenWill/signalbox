@@ -13,8 +13,12 @@ use crate::arguments::{
     GitBranchCreateArguments, GitBranchSwitchArguments, GitCommitArguments, GitDiffArguments,
     GitLogArguments, GitStageArguments, LocalOperation,
 };
+use crate::bounded::RevisionSnapshot;
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_STAGE_PATHS};
+use crate::limits::{
+    MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REVISION_BYTES,
+    MAX_STAGE_PATHS,
+};
 use crate::pinning::parse_pack_index;
 use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
@@ -84,6 +88,48 @@ fn stage_arguments_reject_a_path_list_above_the_bound_during_decode() {
     }));
 
     assert!(result.is_err());
+}
+
+#[test]
+fn branch_arguments_reject_a_name_above_the_byte_bound_during_decode() {
+    let name = "a".repeat(MAX_BRANCH_BYTES + 1);
+    let result = serde_json::from_value::<GitBranchSwitchArguments>(serde_json::json!({
+        "name": name,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn revision_arguments_reject_a_value_above_the_byte_bound_during_decode() {
+    let revision = "a".repeat(MAX_REVISION_BYTES + 1);
+    let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
+        "revision": revision,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn stage_rejects_a_nested_repository_administration_path() {
+    let fixture = Fixture::new();
+    let nested_administration_path = "vendor/repository/.git/config";
+    fs::create_dir_all(fixture.root().join("vendor/repository/.git"))
+        .expect("nested administration directory creates");
+    fs::write(
+        fixture.root().join(nested_administration_path),
+        INITIAL_CONTENT,
+    )
+    .expect("nested administration fixture writes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Stage(GitStageArguments {
+            paths: vec![nested_administration_path.to_owned()],
+        }))
+        .expect_err("nested administration path rejects");
+
+    assert_eq!(failure, LocalGitFailure::Path);
 }
 
 #[test]
@@ -187,6 +233,23 @@ fn status_head_snapshot_rejects_a_branch_tip_changed_during_the_operation() {
     let failure = snapshot
         .validate(&executor.repository_authority)
         .expect_err("changed branch tip rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn revision_snapshot_rejects_a_branch_tip_changed_during_the_operation() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let snapshot = RevisionSnapshot::capture(&executor.repository_authority, "refs/heads/main")
+        .expect("revision snapshot captures");
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+
+    let failure = snapshot
+        .validate(&executor.repository_authority)
+        .expect_err("changed revision rejects");
 
     assert_eq!(failure, LocalGitFailure::Operation);
 }

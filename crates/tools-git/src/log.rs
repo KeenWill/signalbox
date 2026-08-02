@@ -21,7 +21,9 @@ pub(super) fn log(
     authority: &PinnedRepository,
     arguments: GitLogArguments,
 ) -> Result<LogResult, LocalGitFailure> {
-    let start = resolve_bounded_commit(repository, authority, &arguments.revision)?.id();
+    let (start, revision_snapshot) =
+        resolve_bounded_commit(repository, authority, &arguments.revision)?;
+    let start = start.id();
     let shallow = read_shallow_boundaries(authority)?;
     let (ordered, truncated) =
         bounded_topological_page(repository, start, arguments.max_entries, &shallow)?;
@@ -45,7 +47,9 @@ pub(super) fn log(
             message_truncated,
         });
     }
-    Ok(LogResult { commits, truncated })
+    let result = LogResult { commits, truncated };
+    revision_snapshot.validate(authority)?;
+    Ok(result)
 }
 
 pub(super) fn read_shallow_boundaries(
