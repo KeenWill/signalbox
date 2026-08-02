@@ -1911,16 +1911,10 @@ async fn load_terminal_model_call_count(
     session: SessionId,
 ) -> Result<u64, ProcessReadError> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT
-            (SELECT count(*)
-               FROM model_call
-              WHERE session_id = $1
-                AND state_kind = 'terminal')
-            +
-            (SELECT count(*)
-               FROM tool_approval_judge_model_call
-              WHERE session_id = $1
-                AND state_kind = 'terminal')",
+        "SELECT count(*)
+           FROM model_call
+          WHERE session_id = $1
+            AND state_kind = 'terminal'",
     )
     .bind(session_id_to_uuid(session))
     .fetch_one(&mut **transaction)
@@ -1935,25 +1929,7 @@ async fn load_next_model_call_usage(
     after: Option<(u64, ModelCallId)>,
 ) -> Result<Option<PgRow>, ProcessReadError> {
     sqlx::query(
-        "WITH terminal_call AS (
-            SELECT turn_id, session_id, model_call_id,
-                   resolved_provider_model_identity_id, credential_reference,
-                   usage_provenance_kind, usage_input_includes_cache_tokens,
-                   usage_input_tokens, usage_output_tokens,
-                   usage_cache_creation_input_tokens,
-                   usage_cache_read_input_tokens
-              FROM model_call
-             WHERE session_id = $1 AND state_kind = 'terminal'
-            UNION ALL
-            SELECT turn_id, session_id, model_call_id,
-                   resolved_provider_model_identity_id, credential_reference,
-                   usage_provenance_kind, usage_input_includes_cache_tokens,
-                   input_tokens, output_tokens,
-                   cache_creation_input_tokens, cache_read_input_tokens
-              FROM tool_approval_judge_model_call
-             WHERE session_id = $1 AND state_kind = 'terminal'
-         )
-         SELECT
+        "SELECT
             turn.acceptance_position,
             call.turn_id,
             call.model_call_id,
@@ -1965,16 +1941,20 @@ async fn load_next_model_call_usage(
             call.usage_output_tokens,
             call.usage_cache_creation_input_tokens,
             call.usage_cache_read_input_tokens
-           FROM terminal_call AS call
+           FROM model_call AS call
            JOIN turn_lifecycle AS turn
              ON turn.turn_id = call.turn_id
             AND turn.session_id = call.session_id
-          WHERE $2::numeric IS NULL
-             OR turn.acceptance_position > $2
-             OR (
-                 turn.acceptance_position = $2
-                 AND call.model_call_id > $3
-             )
+          WHERE call.session_id = $1
+            AND call.state_kind = 'terminal'
+            AND (
+                $2::numeric IS NULL
+                OR turn.acceptance_position > $2
+                OR (
+                    turn.acceptance_position = $2
+                    AND call.model_call_id > $3
+                )
+            )
           ORDER BY turn.acceptance_position, call.model_call_id
           LIMIT 1",
     )

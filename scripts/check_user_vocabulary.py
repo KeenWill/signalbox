@@ -19,7 +19,7 @@ OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 REVIEWED_ALLOWLIST_SHA256 = (
-    "eb475f08f787d6b36a5ff55d42b78cbe9ecaf2a406c1e54f97aefb9dca3802aa"
+    "239fe679e73e3adc94c86aaf2628658a3db22b06524479d626af9b43afe12e8f"
 )
 
 
@@ -282,8 +282,7 @@ ALLOWLIST = (
             r"202607280401_runner_protocol|"
             r"202608020001_review_orchestration|"
             r"202608020002_review_orchestration_command_recovery|"
-            r"202608020003_runner_wire_contract|"
-            r"202608020015_llm_delegated_tool_approval"
+            r"202608020003_runner_wire_contract"
             r")[.]sql$"
         ),
         re.compile(
