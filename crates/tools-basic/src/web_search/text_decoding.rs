@@ -245,6 +245,9 @@ pub(super) fn decode_json_unicode_escape(escape: &str) -> Option<(char, usize)> 
 
 pub(super) fn decode_json_code_unit(escape: &str) -> Option<u16> {
     let digits = escape.strip_prefix("\\u")?.get(..4)?;
+    if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     u16::from_str_radix(digits, 16).ok()
 }
 
@@ -285,6 +288,14 @@ pub(super) fn decode_html_character_reference(entity: &str) -> Option<String> {
     } else {
         (entity.strip_prefix('#')?, 10)
     };
+    let valid_digits = match radix {
+        16 => digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        10 => digits.bytes().all(|byte| byte.is_ascii_digit()),
+        _ => false,
+    };
+    if digits.is_empty() || !valid_digits {
+        return None;
+    }
     let scalar = u32::from_str_radix(digits, radix).ok()?;
     let scalar = html_numeric_reference_scalar(scalar);
     char::from_u32(scalar).map(|character| character.to_string())

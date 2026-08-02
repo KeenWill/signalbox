@@ -132,6 +132,7 @@ pub(super) fn property_runner() -> TestRunner {
     })
 }
 
+#[track_caller]
 pub(super) fn assert_structural_url_property() {
     property_runner()
         .run(&structural_url_strategy(), |case| {
@@ -148,6 +149,7 @@ pub(super) fn assert_structural_url_property() {
         .expect("structural URL grammar satisfies the output property");
 }
 
+#[track_caller]
 pub(super) fn assert_credential_bearing_url_property() {
     property_runner()
         .run(&credential_bearing_url_strategy(), |case| {
@@ -171,6 +173,7 @@ pub(super) fn assert_credential_bearing_url_property() {
         .expect("credential-bearing URL grammar satisfies the output property");
 }
 
+#[track_caller]
 pub(super) fn assert_provider_text_property() {
     property_runner()
         .run(&provider_text_strategy(), |case| {
