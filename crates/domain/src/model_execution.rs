@@ -4488,7 +4488,7 @@ fn close_cancelled_turn(
 }
 
 #[cfg(test)]
-pub(crate) use tests::completed_turn_fixture;
+pub(crate) use tests::{cancelled_turn_fixture, completed_turn_fixture, failed_turn_fixture};
 
 #[cfg(test)]
 mod tests {
@@ -4897,6 +4897,51 @@ mod tests {
             panic!("completed fixture evidence selects completed outcome");
         };
         completed
+    }
+
+    /// Canonical sealed failure fixture for the existing session-1, turn-3
+    /// active execution.
+    pub(crate) fn failed_turn_fixture() -> FailedModelCallTurn {
+        let mut execution = active_execution();
+        execution.targets =
+            ModelTargetCatalog::try_from_definitions([]).expect("empty fixture catalog is valid");
+        let preparation = execution
+            .prepare_initial_call(model_call_id(9))
+            .expect_err("empty fixture catalog cannot resolve a target");
+        let proof = preparation
+            .target_resolution_error()
+            .expect("fixture failure retains target-resolution evidence");
+        preparation
+            .execution()
+            .clone()
+            .fail_target_resolution(
+                proof,
+                FailedModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(10),
+                    context_frontier_id(11),
+                ),
+            )
+            .expect("matching fixture proof closes the turn as failed")
+    }
+
+    /// Canonical sealed cancellation fixture for the existing session-1,
+    /// turn-3 active execution.
+    pub(crate) fn cancelled_turn_fixture() -> CancelledModelCallTurn {
+        let execution = active_execution();
+        let interrupt = applied_interrupt(&execution);
+        let outcome = execution
+            .apply_interrupt(
+                interrupt,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(33),
+                    context_frontier_id(34),
+                ),
+            )
+            .expect("matching fixture interrupt cancels unsent work");
+        let ModelCallInterruptOutcome::Cancelled(cancelled) = outcome else {
+            panic!("unsent fixture work closes as cancelled");
+        };
+        cancelled
     }
 
     fn tool_proposal(name: &str, arguments: &str) -> crate::ToolCallProposal {

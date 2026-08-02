@@ -38,14 +38,14 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     ActivatedAcceptedInputTurn, ActiveTurnPhase, AmbiguousModelCallTurnIdentities,
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, AuthorizedToolAttempt,
-    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
-    CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
-    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval,
-    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
-    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
+    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
+    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
+    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
+    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
@@ -57,10 +57,10 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
     ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
+    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -22010,7 +22010,7 @@ struct AuthorizedPlanWriteBatch {
 }
 
 impl AuthorizedPlanWriteBatch {
-    async fn authorize_next(&mut self) -> Result<AuthorizedToolAttempt, Box<dyn Error>> {
+    async fn authorize_next(&mut self) -> Result<ToolDispatchAuthority, Box<dyn Error>> {
         let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(self.next_attempt_seed));
         self.next_attempt_seed += 1;
         self.repository
@@ -22028,7 +22028,7 @@ impl AuthorizedPlanWriteBatch {
             .await?)
     }
 
-    async fn finish(&self, authorized: AuthorizedToolAttempt) -> Result<(), Box<dyn Error>> {
+    async fn finish(&self, authorized: ToolDispatchAuthority) -> Result<(), Box<dyn Error>> {
         self.repository
             .commit_observation(
                 authorized
@@ -22273,7 +22273,7 @@ async fn dependency_plan_fixture(
 async fn insert_direct_dependency_event(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
-    authorized: &AuthorizedToolAttempt,
+    authorized: &ToolDispatchAuthority,
 ) -> Result<(), sqlx::Error> {
     insert_direct_dependency_event_between(
         pool,
@@ -22288,7 +22288,7 @@ async fn insert_direct_dependency_event(
 async fn insert_direct_dependency_event_between(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
-    authorized: &AuthorizedToolAttempt,
+    authorized: &ToolDispatchAuthority,
     entry: PlanEntryId,
     dependency: PlanEntryId,
 ) -> Result<(), sqlx::Error> {
@@ -22298,7 +22298,7 @@ async fn insert_direct_dependency_event_between(
 async fn insert_direct_dependency_event_at(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
-    authorized: &AuthorizedToolAttempt,
+    authorized: &ToolDispatchAuthority,
     prior_event_ordinal: u64,
     event_ordinal: u64,
     entry: PlanEntryId,
@@ -22711,7 +22711,7 @@ async fn insert_orphan_dependency_projection(
 async fn insert_direct_malformed_status_event(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
-    authorized: &AuthorizedToolAttempt,
+    authorized: &ToolDispatchAuthority,
 ) -> Result<(), sqlx::Error> {
     const PRIOR_EVENT_ORDINAL: u64 = 3;
     const EVENT_ORDINAL: u64 = 4;
@@ -22745,7 +22745,7 @@ async fn insert_direct_malformed_status_event(
 async fn insert_dependency_without_target(
     pool: &PgPool,
     fixture: &DependencyPlanFixture,
-    authorized: &AuthorizedToolAttempt,
+    authorized: &ToolDispatchAuthority,
 ) -> Result<(), sqlx::Error> {
     const PRIOR_EVENT_ORDINAL: u64 = 3;
     const EVENT_ORDINAL: u64 = 4;
