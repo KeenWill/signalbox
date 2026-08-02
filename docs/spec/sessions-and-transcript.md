@@ -957,7 +957,8 @@ placement and this stack implements no placement logic.
   closure are the committed `TurnFailed` sources today.
 - Assistant text, tool-use/result references, completed-turn, steering,
   cancelled-turn, delegation-message, and delegation-result semantic entries are
-  implemented; refusal, reconciliation, and approval-event variants remain open.
+  implemented; refusal, reconciliation, mismatch, accepted-risk, and
+  approval-event variants remain open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

@@ -308,7 +308,8 @@ INV-tagged test names and attached doc comments.
 - **Required invariants:** INV-007–INV-009, INV-012, INV-025, INV-028, INV-029.
 - **Remaining questions:** Provider/tool-specific cancellation evidence remains
   open. Delegated-child propagation follows the explicit relationship policy and
-  user-selected scope owned by S19.
+  user-selected scope owned by
+  [S19](#s19--cancel-a-parent-while-child-work-is-active).
 
 ## S08 — Submit safe-point steering
 
@@ -570,19 +571,24 @@ INV-tagged test names and attached doc comments.
 - **Durable commands:** `spawn_session` creates one child whose delegated cause
   names the exact parent tool request, with ancestry `None`, task input, and a
   background or bound relationship. `await_session` records foreground or
-  background delivery; `send_session_message` records either direction.
+  background delivery; `send_session_message` records either direction, as owned
+  by the
+  [delegation tool contract](spec/tool-loop.md#session-delegation-tool-family).
 - **State transitions:** A foreground wait retains the parent's only active turn
   slot until an explicit child result arrives. A background wait registers
   delivery without retaining that slot; result commit creates a durable parent
   wake. The returned value or typed failure becomes delivered parent content,
-  never child transcript content.
+  never child transcript content, under the
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
 - **Transient updates:** Best-effort nudges reduce result/message wake latency;
   the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
   retains independent history.
 - **Failure behavior:** Restart restores the relationship, exact wait, messages,
   and undelivered result. Child failure, stop, or cancellation is delivered as a
-  typed outcome. A detached result remains durable after parent termination.
+  typed outcome. A detached result remains durable after parent termination, as
+  owned by
+  [session delegation](spec/sessions-and-transcript.md#session-delegation).
 - **Required invariants:** INV-003, INV-010, INV-034.
 - **Remaining questions:** Multi-source or merged transcript ancestry remains
   separate and unchanged.
@@ -593,7 +599,8 @@ INV-tagged test names and attached doc comments.
   to the child.
 - **Durable commands:** Parent stop/cancel carries `ParentAlone` or
   `ParentAndDescendants`. The latter atomically records a disposition for each
-  evaluated relationship from the durable descendant walk.
+  evaluated relationship from the durable descendant walk defined by
+  [session delegation](spec/sessions-and-transcript.md#session-delegation).
 - **State transitions:** Background children continue. Bound children apply
   their separately recorded stop/cancel action; `KeepRunning` is itself a typed
   disposition. A child is never deleted and may finish after the parent.
@@ -603,7 +610,8 @@ INV-tagged test names and attached doc comments.
   scope; executors respond only to typed stop/cancel authority.
 - **Failure behavior:** Every evaluated child has an explicit reason and exact
   spawn, parent-event, and command provenance. Already-issued effects are not
-  undone and ambiguous effects remain reconcilable.
+  undone and ambiguous effects remain reconcilable under the
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
 - **Remaining questions:** Ordinary archive remains independently non-cascading;
   destructive retention remains separate later scope.

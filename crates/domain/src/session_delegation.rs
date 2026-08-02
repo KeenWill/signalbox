@@ -10,6 +10,10 @@ use crate::{
 /// Shared admission bound for delegated messages and returned results.
 pub const MAX_DELEGATION_CONTENT_UTF8_BYTES: usize = 1_048_576;
 
+const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
+const AWAIT_SESSION_TOOL_NAME: &str = "await_session";
+const SEND_SESSION_MESSAGE_TOOL_NAME: &str = "send_session_message";
+
 /// Action applied to a bound child when its parent terminalizes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BoundChildAction {
@@ -76,6 +80,7 @@ enum DelegationProvenanceKind {
         source_session: SessionId,
         source_turn: TurnId,
         request: ToolRequestId,
+        purpose: DelegationToolRequestPurpose,
     },
     ChildTurn {
         child: SessionId,
@@ -88,6 +93,13 @@ enum DelegationProvenanceKind {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum DelegationToolRequestPurpose {
+    Spawn,
+    SendMessage,
+    Other,
+}
+
 /// Exact typed authority for a delegation event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DelegationProvenance {
@@ -97,11 +109,17 @@ pub struct DelegationProvenance {
 impl DelegationProvenance {
     /// Seals request identity together with its canonical owning session/turn.
     pub fn from_tool_request(request: &ToolRequest) -> Self {
+        let purpose = match request.name().as_str() {
+            SPAWN_SESSION_TOOL_NAME => DelegationToolRequestPurpose::Spawn,
+            SEND_SESSION_MESSAGE_TOOL_NAME => DelegationToolRequestPurpose::SendMessage,
+            _ => DelegationToolRequestPurpose::Other,
+        };
         Self {
             kind: DelegationProvenanceKind::ToolRequest {
                 source_session: request.session(),
                 source_turn: request.turn(),
                 request: request.id(),
+                purpose,
             },
         }
     }
@@ -132,6 +150,7 @@ impl DelegationProvenance {
                 source_session,
                 source_turn,
                 request,
+                ..
             } => Some((source_session, source_turn, request)),
             DelegationProvenanceKind::ChildTurn { .. }
             | DelegationProvenanceKind::ParentCommand { .. } => None,
@@ -367,6 +386,11 @@ impl SessionDelegation {
         policy: ChildRelationshipPolicy,
     ) -> Result<Self, DelegationTransitionError> {
         let parent = spawning_request.session();
+        if spawning_request.name().as_str() != SPAWN_SESSION_TOOL_NAME {
+            return Err(DelegationTransitionError {
+                failure: DelegationTransitionFailure::InvalidToolRequestPurpose,
+            });
+        }
         if parent == child {
             return Err(DelegationTransitionError {
                 failure: DelegationTransitionFailure::SameSession,
@@ -412,9 +436,9 @@ impl SessionDelegation {
         awaiting_request: &ToolRequest,
         mode: DelegationWaitMode,
     ) -> Result<DelegationWait, DelegationTransitionError> {
-        self.require_active()?;
         if awaiting_request.session() != self.parent
             || awaiting_request.id() == self.spawning_request
+            || awaiting_request.name().as_str() != AWAIT_SESSION_TOOL_NAME
         {
             return Err(self.fail(DelegationTransitionFailure::InvalidProvenance));
         }
@@ -441,16 +465,16 @@ impl SessionDelegation {
             return Err(self.fail(DelegationTransitionFailure::DuplicateMessageIdentity));
         }
         let direction = match provenance.kind {
-            DelegationProvenanceKind::ToolRequest { source_session, .. }
-                if source_session == self.parent =>
-            {
-                DelegationMessageDirection::ParentToChild
-            }
-            DelegationProvenanceKind::ToolRequest { source_session, .. }
-                if source_session == self.child =>
-            {
-                DelegationMessageDirection::ChildToParent
-            }
+            DelegationProvenanceKind::ToolRequest {
+                source_session,
+                purpose: DelegationToolRequestPurpose::SendMessage,
+                ..
+            } if source_session == self.parent => DelegationMessageDirection::ParentToChild,
+            DelegationProvenanceKind::ToolRequest {
+                source_session,
+                purpose: DelegationToolRequestPurpose::SendMessage,
+                ..
+            } if source_session == self.child => DelegationMessageDirection::ChildToParent,
             DelegationProvenanceKind::ToolRequest { .. }
             | DelegationProvenanceKind::ChildTurn { .. }
             | DelegationProvenanceKind::ParentCommand { .. } => {
@@ -474,6 +498,18 @@ impl SessionDelegation {
         mut self,
         outcome: DelegationOutcome,
     ) -> Result<Self, DelegationTransitionError> {
+        let provenance = outcome_provenance(&outcome);
+        if let Some(existing) = self
+            .events
+            .iter()
+            .filter_map(DelegationEvent::outcome)
+            .find(|existing| outcome_provenance(existing) == provenance)
+        {
+            if existing == &outcome {
+                return Ok(self);
+            }
+            return Err(self.fail(DelegationTransitionFailure::DuplicateOutcomeAuthority));
+        }
         self.require_active()?;
         validate_outcome(&self, &outcome).map_err(|failure| self.fail(failure))?;
         let remains_active = matches!(outcome, DelegationOutcome::ContinueRunning { .. });
@@ -511,6 +547,16 @@ const fn event_ordinal(event: &DelegationEvent) -> DelegationEventOrdinal {
         DelegationEvent::Spawned { ordinal, .. }
         | DelegationEvent::MessageDelivered { ordinal, .. }
         | DelegationEvent::OutcomeRecorded { ordinal, .. } => *ordinal,
+    }
+}
+
+const fn outcome_provenance(outcome: &DelegationOutcome) -> DelegationProvenance {
+    match outcome {
+        DelegationOutcome::ResultReturned { provenance, .. }
+        | DelegationOutcome::ChildFailed { provenance, .. }
+        | DelegationOutcome::ChildStopped { provenance, .. }
+        | DelegationOutcome::ChildCancelled { provenance, .. }
+        | DelegationOutcome::ContinueRunning { provenance, .. } => *provenance,
     }
 }
 
@@ -641,7 +687,9 @@ pub enum DelegationTransitionFailure {
     AlreadyTerminal,
     MissingSpawnEvent,
     InvalidProvenance,
+    InvalidToolRequestPurpose,
     DuplicateMessageIdentity,
+    DuplicateOutcomeAuthority,
     OutcomeReasonMismatch,
     EventOrdinalExhausted,
 }
@@ -668,14 +716,23 @@ mod tests {
 
     /// One canonical logical request; the session seed derives every identity.
     fn request(session: u128) -> ToolRequest {
+        named_request(session, TEST_TOOL_NAME, 100, 10, 20)
+    }
+    fn named_request(
+        session: u128,
+        name: &str,
+        identity_offset: u128,
+        turn_offset: u128,
+        call_offset: u128,
+    ) -> ToolRequest {
         ToolRequest::from_model_proposal(
-            tool_request_id(session + 100),
+            tool_request_id(session + identity_offset),
             session_id(session),
-            turn_id(session + 10),
-            model_call_id(session + 20),
+            turn_id(session + turn_offset),
+            model_call_id(session + call_offset),
             ToolRequestOrdinal::from_u32(0),
             ToolCallProposal::new(
-                ToolName::try_new(TEST_TOOL_NAME.into()).expect("valid name"),
+                ToolName::try_new(name.into()).expect("valid name"),
                 NormalizedToolArguments::try_from_provider_text("{}".into())
                     .expect("valid arguments"),
             ),
@@ -683,18 +740,10 @@ mod tests {
     }
     /// A later await request in the same session, with identities distinct from spawn.
     fn await_request(session: u128) -> ToolRequest {
-        ToolRequest::from_model_proposal(
-            tool_request_id(session + 200),
-            session_id(session),
-            turn_id(session + 11),
-            model_call_id(session + 21),
-            ToolRequestOrdinal::from_u32(0),
-            ToolCallProposal::new(
-                ToolName::try_new("await_session".into()).expect("valid name"),
-                NormalizedToolArguments::try_from_provider_text("{}".into())
-                    .expect("valid arguments"),
-            ),
-        )
+        named_request(session, AWAIT_SESSION_TOOL_NAME, 200, 11, 21)
+    }
+    fn message_request(session: u128) -> ToolRequest {
+        named_request(session, SEND_SESSION_MESSAGE_TOOL_NAME, 300, 12, 22)
     }
     fn content(value: &str) -> DelegationContent {
         DelegationContent::try_new(value.into()).expect("nonempty bounded content")
@@ -717,6 +766,22 @@ mod tests {
             }
         );
         assert_eq!(provenance.ancestry(), crate::TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-010: only an exact spawn tool request may authorize a relationship.
+    #[test]
+    fn s18_inv010_spawn_rejects_a_non_spawn_tool_request() {
+        let error = SessionDelegation::spawn(
+            &await_request(2),
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect_err("await request cannot authorize a spawn");
+
+        assert_eq!(
+            error.failure(),
+            DelegationTransitionFailure::InvalidToolRequestPurpose
+        );
     }
 
     /// S18 / INV-010: a foreground delivery registration yields the exact slot-retaining wait.
@@ -777,8 +842,9 @@ mod tests {
     #[test]
     fn s18_inv010_messages_are_relation_directed_and_request_provenanced() {
         let parent_request = request(2);
-        let child_request = request(3);
-        let unrelated_request = request(6);
+        let parent_message_request = message_request(2);
+        let child_request = message_request(3);
+        let unrelated_request = message_request(6);
         let relation = SessionDelegation::spawn(
             &parent_request,
             session_id(3),
@@ -789,7 +855,7 @@ mod tests {
             .deliver_message(
                 DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7)),
                 content("parent message"),
-                DelegationProvenance::from_tool_request(&parent_request),
+                DelegationProvenance::from_tool_request(&parent_message_request),
             )
             .expect("parent sends to child");
         let relation = relation
@@ -831,6 +897,7 @@ mod tests {
     #[test]
     fn s18_inv012_duplicate_message_identity_is_rejected() {
         let parent_request = request(2);
+        let parent_message_request = message_request(2);
         let message_id = DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7));
         let relation = SessionDelegation::spawn(
             &parent_request,
@@ -842,7 +909,7 @@ mod tests {
             .deliver_message(
                 message_id,
                 content("first content"),
-                DelegationProvenance::from_tool_request(&parent_request),
+                DelegationProvenance::from_tool_request(&parent_message_request),
             )
             .expect("first identity is admitted");
 
@@ -850,7 +917,7 @@ mod tests {
             .deliver_message(
                 message_id,
                 content("conflicting content"),
-                DelegationProvenance::from_tool_request(&parent_request),
+                DelegationProvenance::from_tool_request(&parent_message_request),
             )
             .expect_err("message identity cannot name conflicting content");
 
@@ -889,6 +956,37 @@ mod tests {
         assert_eq!(relation.events().len(), 2);
     }
 
+    /// S19 / INV-012: equal replay of one evaluated edge records no second disposition.
+    #[test]
+    fn s19_inv012_continue_running_replay_is_idempotent() {
+        let parent_request = request(2);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let outcome = DelegationOutcome::ContinueRunning {
+            reason: DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+            provenance: DelegationProvenance::from_parent_command(
+                session_id(2),
+                parent_request.turn(),
+                command_id(5),
+            ),
+        };
+        let relation = relation
+            .record_outcome(outcome.clone())
+            .expect("first disposition records");
+        let replayed = relation
+            .clone()
+            .record_outcome(outcome)
+            .expect("equal replay returns the relation");
+
+        assert_eq!(replayed.events(), relation.events());
+    }
+
     /// S18 / INV-010: returned content with exact child provenance terminalizes once.
     #[test]
     fn s18_inv010_returned_result_terminalizes_exactly_once() {
@@ -924,11 +1022,41 @@ mod tests {
         );
     }
 
+    /// S18 / INV-010: a parent may register delivery after the child has already completed.
+    #[test]
+    fn s18_inv010_terminal_result_still_accepts_a_late_wait() {
+        let parent_request = request(2);
+        let child_request = request(3);
+        let relation = SessionDelegation::spawn(
+            &parent_request,
+            session_id(3),
+            ChildRelationshipPolicy::Background,
+        )
+        .expect("distinct child");
+        let relation = relation
+            .record_outcome(DelegationOutcome::ResultReturned {
+                content: content("already delivered"),
+                reason: DelegationOutcomeReason::ChildCompleted,
+                provenance: DelegationProvenance::from_child_turn(
+                    session_id(3),
+                    child_request.turn(),
+                ),
+            })
+            .expect("child result terminalizes");
+        let registration = relation
+            .register_wait(&await_request(2), DelegationWaitMode::Foreground)
+            .expect("late wait registers against the existing result");
+
+        assert_eq!(registration.child(), relation.child());
+        assert_eq!(registration.mode(), DelegationWaitMode::Foreground);
+    }
+
     /// S18 / INV-010: terminal child disposition does not close either messaging direction.
     #[test]
     fn s18_inv010_messages_remain_available_after_child_terminalizes() {
         let parent_request = request(2);
-        let child_request = request(3);
+        let parent_message_request = message_request(2);
+        let child_request = message_request(3);
         let relation = SessionDelegation::spawn(
             &parent_request,
             session_id(3),
@@ -948,7 +1076,7 @@ mod tests {
             .deliver_message(
                 DelegationMessageId::from_uuid(uuid::Uuid::from_u128(7)),
                 content("parent follow-up"),
-                DelegationProvenance::from_tool_request(&parent_request),
+                DelegationProvenance::from_tool_request(&parent_message_request),
             )
             .expect("terminal relation remains messageable");
         let relation = relation

@@ -907,7 +907,9 @@ pub enum DelegationTransitionFailure {
     AlreadyTerminal,
     MissingSpawnEvent,
     InvalidProvenance,
+    InvalidToolRequestPurpose,
     DuplicateMessageIdentity,
+    DuplicateOutcomeAuthority,
     OutcomeReasonMismatch,
     EventOrdinalExhausted,
 }
