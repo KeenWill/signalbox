@@ -546,9 +546,10 @@ pub(crate) mod test_support {
 mod tests {
     use super::{
         AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RunnerAuthenticationId,
-        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceManifestId,
+        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId,
+        RepoWatchEventId, RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -587,5 +588,7 @@ mod tests {
         assert_uuid_contract!(RunnerAuthenticationId);
         assert_uuid_contract!(RunnerLeaseId);
         assert_uuid_contract!(WorkspaceManifestId);
+        assert_uuid_contract!(RepoWatchEventId);
+        assert_uuid_contract!(RepoWatchDispatchId);
     }
 }

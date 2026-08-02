@@ -14,12 +14,10 @@ sessions retain the approval posture of their named session templates, without
 authority inherited from the watcher.
 
 This bottom specification diff owns the four-pull-request repository-watch
-stack. The version-one domain vocabulary and validation shapes are implemented
-in its first pull request. Persistence, polling, and rule dispatch become
-implemented only in the child pull requests named by their verification
-references. This page is not yet verified against a merged implementation; its
-in-flight verification reference is added after the bottom pull request is
-opened.
+stack. The version-one domain vocabulary and validation shapes were verified
+against PR #430 (`agent/repo-watch-spec`). Persistence, polling, and rule
+dispatch become implemented only in the child pull requests named by their
+verification references.
 
 ## Configuration and credential boundary
 
