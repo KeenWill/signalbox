@@ -379,11 +379,43 @@ async fn append_raw_delegation_update(
          )
          INSERT INTO delegation_update_outbox_event
             (event_sequence, event_kind, storage_version, session_id,
-             update_kind, spawning_tool_request_id, awaiting_tool_request_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             policy_kind, on_parent_stopped, on_parent_cancelled,
+             awaiting_tool_request_id, wait_mode,
              delegation_event_ordinal, delegation_event_kind,
-             result_spawning_request_id, message_id)
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id, provenance_command_id,
+             result_spawning_request_id, message_id,
+             sender_session_id, recipient_session_id, message_ordinal,
+             content_text)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                $2, $3, $4, $5, $6, $7, $8 FROM header",
+                $2, $3,
+                CASE WHEN $2 = 'session_message' THEN NULL ELSE $9 END,
+                CASE WHEN $2 = 'child_spawned' THEN 'background' END,
+                NULL, NULL, $4,
+                CASE WHEN $2 = 'child_waiting' THEN 'foreground' END,
+                $5, $6,
+                CASE WHEN $2 IN (
+                    'child_lifecycle_disposition', 'child_result'
+                ) THEN 'child_failed' END,
+                CASE WHEN $2 IN (
+                    'child_lifecycle_disposition', 'child_result'
+                ) THEN 'child_execution_failed' END,
+                CASE WHEN $2 IN (
+                    'child_lifecycle_disposition', 'child_result'
+                ) THEN 'child_turn' END,
+                CASE WHEN $2 IN (
+                    'child_lifecycle_disposition', 'child_result'
+                ) THEN $9 END,
+                CASE WHEN $2 IN (
+                    'child_lifecycle_disposition', 'child_result'
+                ) THEN $10 END,
+                NULL, $7, $8,
+                CASE WHEN $2 = 'session_message' THEN $11 END,
+                CASE WHEN $2 = 'session_message' THEN $9 END,
+                CASE WHEN $2 = 'session_message' THEN 2 END,
+                CASE WHEN $2 = 'session_message' THEN $12 END
+           FROM header",
     )
     .bind(update.session.into_uuid())
     .bind(update.kind)
@@ -393,6 +425,10 @@ async fn append_raw_delegation_update(
     .bind(update.event_kind)
     .bind(update.result_request)
     .bind(update.message_id)
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.initial_turn.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .bind(RAW_DELEGATED_MESSAGE)
     .execute(connection)
     .await?;
     Ok(())

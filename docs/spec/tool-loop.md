@@ -774,13 +774,18 @@ cannot duplicate an external effect. The delivered tool result is copied from
 the child's terminal result record. The executor never reads or returns the
 child transcript.
 
-The child's normal terminal completion transaction materializes its definitive
-returned text as `DelegationContent`; `await_session` adapts it to
-`ToolResultContent`, while failed or child-cancelled terminal paths and
-proof-bearing parent-policy stopped or cancelled outcomes materialize their
-closed result instead. This copy is part of the child transition, not a later
-transcript projection. Duplicate observation is idempotent by spawning request
-and cannot attach a late result to another parent tool call.
+The child's normal terminal completion transaction concatenates the definitive
+ordered `AssistantText` entries from its proof-bearing completed call without a
+separator and admits those exact bytes as `DelegationContent`; `await_session`
+adapts that value to `ToolResultContent`. Zero entries or a concatenation beyond
+the 1 MiB returned-result ceiling records `ChildFailed` with
+`ChildResultUnavailable`. Task and message strings additionally must fit their
+complete normalized JSON argument envelope, so that ceiling is not their exact
+maximum. Execution failure, child cancellation, and proof-bearing parent-policy
+outcomes materialize their closed results instead. This copy is part of the
+child transition, not a later transcript projection. Duplicate observation is
+idempotent by spawning request and cannot attach a late result to another parent
+tool call.
 
 ## Provider bridge and daemon catalog
 

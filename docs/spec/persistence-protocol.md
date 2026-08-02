@@ -930,10 +930,10 @@ append-only, uniquely orders messages per relationship, and requires exact
 parent/child sender and recipient plus the sending tool request.
 `session_child_result` has at most one row per spawning request and carries
 exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, and child-originated terminal outcomes, or
-exact parent session/turn/command provenance for a policy-driven stop or
-cancellation. Delivery satellites bind messages/results to their exact semantic
-entries; no transcript query supplies result content.
+provenance for returned, failed, result-unavailable, and child-originated
+terminal outcomes, or exact parent session/turn/command provenance for a
+policy-driven stop or cancellation. Delivery satellites bind messages/results to
+their exact semantic entries; no transcript query supplies result content.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated
@@ -986,19 +986,33 @@ protocol scope). Implemented storage:
   dedicated call, exact positive through position, appended summary, and result
   frontier.
 
-**Session-delegation foundation proposal.** The full delegation stack adds
-version-one `delegation_update_outbox_event` and `delegation_wake_outbox_event`
-typed records. An update names its affected parent or child stream and exactly
-one closed subject: `child_spawned`, `child_waiting`,
-`child_lifecycle_disposition`, `child_result`, or `session_message`; each
-subject points to its typed delegation record, and one durable fact may be
-recorded once on each affected stream. A wake remains distinct and internal: it
-names the exact spawning request and either an equal result identity or a
-message belonging to that relationship, with the header naming the recipient.
-The schema requires each selected subject shape, correlation, and recipient;
-dispatch rejects every other storage version. Header completeness covers both
-kinds, and both records are append-only and reject `TRUNCATE` with the rest of
-the family.
+**Session-delegation foundation proposal.** Migration `202608020018` in the full
+delegation stack adds separate version-one `delegation_update_outbox_event` and
+`delegation_wake_outbox_event` typed tables. The update table is keyed by its
+`event_sequence` header foreign key and closed `update_kind`. Its common subject
+is the exact `spawning_request_id`; the shape-specific columns carry
+`child_session_id` and relationship for `child_spawned`, `await_request_id`,
+child, and mode for `child_waiting`, child, outcome, reason, and provenance for
+`child_lifecycle_disposition`, those fields plus nullable result content for
+`child_result`, or message identity, endpoints, ordinal, and content for
+`session_message`. `delegation_wake` instead carries one closed wake subject:
+`result` requires an equal `result_spawning_request_id`, while `message`
+requires a `DelegationMessageId` belonging to that relationship. The header's
+`session_id` is the stream receiving the update. Per-kind checks require exactly
+that shape's columns and reject all others; foreign keys correlate every
+supplied identity to the same relationship. Dispatch decodes the same closed
+union and rejects every other storage version. The header completeness trigger
+includes both record kinds, and both typed records are append-only and reject
+`TRUNCATE` with the rest of the family.
+
+Every client-observable delegation transition appends its corresponding typed
+update record in the transaction that commits the relationship, wait,
+disposition, result, or message. A result or message that makes dormant work
+runnable appends a distinct `delegation_wake` record in that same transaction;
+the internal wake subject does not stand in for the client-visible result or
+message update. A guarded transition that changes no durable state appends no
+update. State without its promised update, or an update without its state, is
+therefore unrepresentable.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by

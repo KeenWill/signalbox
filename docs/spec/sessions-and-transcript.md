@@ -34,9 +34,10 @@ A session is one durable, independently browsable conversation with its own
 records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
-- **Creation cause** — why the session exists. The only constructible variant is
-  `UserInitiated`. Reserved causes (application, schedule, delegation) are not
-  represented as placeholder variants.
+- **Creation cause** — why the session exists. The constructible variants are
+  `UserInitiated` and `Delegated { spawning_request }`. The delegated variant is
+  produced only by the spawning-request path and fixes ancestry to `None`;
+  application and schedule causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
@@ -491,11 +492,11 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because `UserInitiated` is the only constructible creation cause and every
-current session-creation boundary lacks actor attribution, the implemented
-default view is exactly all non-archived sessions. No visibility taxonomy,
-creation-time override, or inference from missing attribution is stored. The
-dependency for future creation-derived visibility is recorded in
+Because both `UserInitiated` and `Delegated` creation lack actor attribution,
+and neither cause grants or implies visibility, the implemented default view is
+exactly all non-archived sessions. No visibility taxonomy, creation-time
+override, or inference from creation provenance or missing attribution is
+stored. The dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 ## The session aggregate
@@ -903,6 +904,16 @@ one parent-chosen policy:
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
   each exactly `KeepRunning`, `Stop`, or `Cancel`.
 
+The `SessionDelegation` aggregate admits creation only from a sealed
+`DelegatedSpawnRequest` and records that request's parent, bounded task, policy,
+child, and spawn provenance as the first event in one contiguous history. Typed
+await and message requests may act only on their exact relationship; consuming
+transition failures return the unchanged aggregate and attempted input. Message
+delivery remains available after a terminal outcome. Outcome authority is
+checked against the relationship before recording: an equal
+authority-and-outcome replay is idempotent, `ContinueRunning` preserves the
+active lifecycle, and every other outcome terminalizes it.
+
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the
 durable relationship tree: background edges and bound `KeepRunning` edges
@@ -932,15 +943,22 @@ A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
 `DelegationContent` or a typed failed, stopped, or cancelled outcome together
 with exact provenance. Returned content, failure, and a child's own cancellation
-carry the exact terminal child turn. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. A parent-policy stop or
-cancellation instead carries opaque authority from the exact applied parent
-termination result, exposing its parent session, turn, durable user command,
-command kind, and descendant scope. Raw identities cannot construct that
-authority, and the recorded outcome reason must match its command kind and
-scope. `ChildStopped` is produced only by a parent-policy stop; the existing
-child scheduling projection proves cancellation but does not fabricate a
-distinct stopped outcome from that evidence. Delivery appends a
+carry the exact terminal child turn. Returned content is derived only from the
+proof-bearing completed call; independently supplied text cannot authorize a
+result. A completed turn with empty or oversized returned text records the
+distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
+terminal delegation evidence and produces no outcome. **Committed unimplemented
+functionality.** Durable terminal-result reconstitution is not exposed by this
+foundation slice; the persistence slice must consume a sealed reconstituted
+ended-call/turn projection rather than accepting parallel raw identities or
+semantic entries. A parent-policy stop or cancellation instead carries opaque
+authority from the exact applied parent termination result, exposing its parent
+session, turn, durable user command, command kind, and descendant scope. Raw
+identities cannot construct that authority, `parent_alone` authority cannot
+produce a child disposition, and the recorded outcome reason must match its
+command kind and scope. `ChildStopped` is produced only by a parent-policy stop;
+the existing child scheduling projection proves cancellation but does not
+fabricate a distinct stopped outcome from that evidence. Delivery appends a
 `DelegationResult` semantic entry only to the target parent and is idempotent by
 the spawning request. A detached child may return after the parent has stopped
 or cancelled; the result remains durable and independently inspectable even when
