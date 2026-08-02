@@ -197,7 +197,7 @@ PR_TOKEN = re.compile(
 CARRIED_PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
     rf"`([^\s`]+)`;{SCOPED_DETAIL_SCAFFOLD}"
-    rf"via[\s>]+PR[ \t]*#([1-9][0-9]*)[\s>]+`([^\s`]+)`"
+    rf"via[\s>]+PR #([1-9][0-9]*)[\s>]+`([^\s`]+)`"
     r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
