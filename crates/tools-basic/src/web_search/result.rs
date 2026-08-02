@@ -39,6 +39,7 @@ pub(super) struct ParsedResultUrl {
 pub(super) struct ParsedResultUrlRemovalFacts {
     pub(super) user_information: bool,
     pub(super) empty_port: bool,
+    pub(super) host_trailing_dot: bool,
     pub(super) query: bool,
     pub(super) fragment: bool,
 }
@@ -159,6 +160,8 @@ impl ParsedResultUrl {
                 || !parsed.username().is_empty()
                 || parsed.password().is_some(),
             empty_port: source_authority_facts.empty_port,
+            host_trailing_dot: source_authority_facts.host_trailing_dot
+                && parsed.host_str().is_some_and(|host| !host.ends_with('.')),
             query: parsed.query().is_some(),
             fragment: parsed.fragment().is_some(),
         };
@@ -195,6 +198,7 @@ impl ParsedResultUrl {
 struct SourceAuthorityRemovalFacts {
     user_information: bool,
     empty_port: bool,
+    host_trailing_dot: bool,
 }
 
 fn source_authority_removal_facts(source: &str) -> SourceAuthorityRemovalFacts {
@@ -216,6 +220,7 @@ fn source_authority_removal_facts(source: &str) -> SourceAuthorityRemovalFacts {
         return SourceAuthorityRemovalFacts {
             user_information: false,
             empty_port: false,
+            host_trailing_dot: false,
         };
     };
     let host_and_port = authority
@@ -224,7 +229,18 @@ fn source_authority_removal_facts(source: &str) -> SourceAuthorityRemovalFacts {
     SourceAuthorityRemovalFacts {
         user_information: authority.contains('@'),
         empty_port: host_and_port.ends_with(':'),
+        host_trailing_dot: authority_host(host_and_port).ends_with('.'),
     }
+}
+
+fn authority_host(host_and_port: &str) -> &str {
+    if host_and_port.starts_with('[') {
+        return host_and_port;
+    }
+    host_and_port
+        .rsplit_once(':')
+        .filter(|(_, port)| port.is_empty() || port.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(host_and_port, |(host, _)| host)
 }
 
 impl EscapedSnippet {
@@ -349,7 +365,7 @@ impl fmt::Display for WebSearchProviderError {
 
 impl Error for WebSearchProviderError {}
 
-pub(super) fn fixed_result_diagnostic_outputs() -> [String; 7] {
+pub(super) fn fixed_result_diagnostic_outputs() -> [String; 8] {
     let fields = WebSearchResultFields {
         title: String::new(),
         url: String::new(),
@@ -362,6 +378,7 @@ pub(super) fn fixed_result_diagnostic_outputs() -> [String; 7] {
             removal_facts: ParsedResultUrlRemovalFacts {
                 user_information: false,
                 empty_port: false,
+                host_trailing_dot: false,
                 query: false,
                 fragment: false,
             },
@@ -387,6 +404,7 @@ pub(super) fn fixed_result_diagnostic_outputs() -> [String; 7] {
         format!("{:?}", Some(complete_response.clone())),
         format!("{complete_response:?}"),
         format!("{partial_response:?}"),
+        format!("{:?}", Some(&provider_error)),
         format!("{provider_error:?}"),
         provider_error.to_string(),
     ]

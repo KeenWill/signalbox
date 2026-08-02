@@ -32,6 +32,8 @@ pub(super) const FIXTURE_PADDED_MULTI_COMPONENT_HEX_IPV4_RESULT_URL: &str = "htt
 
 pub(super) const FIXTURE_TRAILING_DOT_IPV4_RESULT_URL: &str = "http://127.0.0.1./";
 
+pub(super) const FIXTURE_TRAILING_DOT_IPV4_PATH_RESULT_URL: &str = "http://127.0.0.1./path";
+
 pub(super) const FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL: &str = "http://0177.0.0.1/";
 
 pub(super) const FIXTURE_HEX_SUBSTRING_IPV4_RESULT_URL: &str = "http://0x7f000001/";
@@ -213,6 +215,8 @@ pub(super) const URL_IPV4_PADDED_MULTI_COMPONENT_COLLISION_KEY: &str = "007f.00"
 
 pub(super) const URL_IPV4_TRAILING_DOT_COLLISION_KEY: &str = ".1.";
 
+pub(super) const URL_IPV4_TRAILING_DOT_PATH_COLLISION_KEY: &str = "1./p";
+
 pub(super) const URL_DISCARDED_PORT_ZERO_COLLISION_KEY: &str = ":0";
 
 pub(super) const URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY: &str = "]:0";
@@ -230,6 +234,8 @@ pub(super) const URL_BARE_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "80/p"
 pub(super) const URL_REMOVED_DEFAULT_PORT_COLLISION_KEY: &str = "m:80";
 
 pub(super) const URL_AUTHORITY_DEFAULT_PORT_PREFIX_COLLISION_KEY: &str = "m:8";
+
+pub(super) const URL_AUTHORITY_DEFAULT_PORT_SUFFIX_COLLISION_KEY: &str = "m:0";
 
 pub(super) const URL_AUTHORITY_DEFAULT_PORT_COLLISION_KEY: &str = "example.com:443";
 
@@ -418,6 +424,8 @@ pub(super) const ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Err(E";
 pub(super) const KNOWN_FAILURE_RESULT_BOUNDARY_DEBUG_COLLISION_KEY: &str = "Ok(K";
 
 pub(super) const POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY: &str = "Some(W";
+
+pub(super) const POPULATED_PROVIDER_ERROR_OPTION_DEBUG_COLLISION_KEY: &str = "Some(WebSearchP";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 
