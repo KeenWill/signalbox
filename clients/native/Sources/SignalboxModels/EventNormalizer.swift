@@ -572,7 +572,7 @@ public enum SignalboxEventNormalizer {
         _ type: Value.Type,
         from json: String
     ) -> Value? {
-        try? JSONDecoder().decode(type, from: Data(json.utf8))
+        try? SignalboxJSONCoding.decoder().decode(type, from: Data(json.utf8))
     }
 
     private static func yesNo(_ value: Bool) -> String {
