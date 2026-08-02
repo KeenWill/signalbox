@@ -5,6 +5,7 @@ use signalbox_model_runtime::{CredentialValue, redact_text};
 
 use super::{
     canonicalization::*,
+    diagnostic::WebSearchExecutorError,
     egress::fixed_egress_diagnostic_outputs,
     result::{ParsedResultUrlRemovalFacts, fixed_result_diagnostic_outputs},
     text_decoding::*,
@@ -303,6 +304,9 @@ fn extend_url_collision_variants(
         if let Some(normalized) = canonicalized_complete_url(&variant) {
             retain_url_collision_variant(variants, &normalized);
         }
+        if let Some(normalized) = inserted_special_scheme_authority_slash_fragment(&variant) {
+            retain_url_collision_variant(variants, &normalized);
+        }
         if let Some(normalized) = removed_default_port_fragment(&variant, default_port) {
             retain_url_collision_variant(variants, &normalized);
         }
@@ -388,7 +392,7 @@ pub(super) fn fixed_diagnostic_output_may_contain(credential: &str) -> bool {
         })
 }
 
-fn fixed_evidence_diagnostic_outputs() -> Option<[String; 6]> {
+fn fixed_evidence_diagnostic_outputs() -> Option<[String; 7]> {
     const DETAIL_SHAPE_PROBE: &str = "diagnostic probe";
     let populated_detail =
         ToolExecutionErrorDetail::try_new(String::from(DETAIL_SHAPE_PROBE)).ok()?;
@@ -413,6 +417,12 @@ fn fixed_evidence_diagnostic_outputs() -> Option<[String; 6]> {
         format!(
             "{:?}",
             Ok::<ToolExecutorEvidence, ()>(ToolExecutorEvidence::CompletedText(String::new()))
+        ),
+        format!(
+            "{:?}",
+            Err::<ToolExecutorEvidence, WebSearchExecutorError>(
+                WebSearchExecutorError::EvidenceEncoding
+            )
         ),
         format!("{:?}", ToolExecutorEvidence::KnownFailed { detail: None }),
         populated_failure_shape,
