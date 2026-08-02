@@ -840,7 +840,8 @@ BEGIN
      WHERE session_id = NEW.session_id;
 
     IF NEW.event_kind = 'depends_on' THEN
-        IF NEW.entry_ordinal >= NEW.event_ordinal
+        IF NOT session_plan_event_has_valid_shape(NEW)
+            OR NEW.entry_ordinal >= NEW.event_ordinal
             OR NEW.dependency_ordinal IS NULL
             OR NEW.dependency_ordinal >= NEW.event_ordinal
             OR NEW.dependency_ordinal = NEW.entry_ordinal

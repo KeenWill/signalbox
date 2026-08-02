@@ -1386,7 +1386,8 @@ fn dependency_cycle_matches_request(draft: &PlanEventDraft, cycle: &PlanDependen
 fn dependency_limit_matches_request(draft: &PlanEventDraft, rejected_entry: PlanEntryId) -> bool {
     matches!(
         draft,
-        PlanEventDraft::DependsOn { entry, .. } if *entry == rejected_entry
+        PlanEventDraft::DependsOn { entry, dependency }
+            if *entry == rejected_entry && entry != dependency
     )
 }
 

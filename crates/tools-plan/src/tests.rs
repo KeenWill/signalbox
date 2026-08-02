@@ -756,6 +756,28 @@ fn write_returns_a_known_failure_for_the_dependency_limit() {
 }
 
 #[test]
+fn write_rejects_dependency_limit_evidence_for_a_self_link() {
+    let dispatch = correlation(10);
+    let dependent = entry(1);
+    let port =
+        FakePort::rejecting(PlanAppendRejection::DependencyLimitReached { entry: dependent });
+    let (_catalog, mut executor) = PlanTools::try_new(port)
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_write_operation(&arguments(json!({
+        "kind": "depends_on",
+        "entry_id": dependent.as_u64(),
+        "dependency_id": dependent.as_u64()
+    })))
+    .expect("fixture self-link arguments are valid");
+
+    let error = run_ready(executor.execute_operation(dispatch, operation))
+        .expect_err("dependency-limit evidence cannot authenticate a self-link");
+
+    assert!(is_port_contract(&error));
+}
+
+#[test]
 fn read_rejects_a_dependency_set_above_the_port_bound() {
     let dispatch = correlation(10);
     let dependent = entry(1);
