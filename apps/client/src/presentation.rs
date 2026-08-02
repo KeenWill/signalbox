@@ -1,19 +1,23 @@
 use std::{
     collections::HashSet,
-    io::{self, Write},
+    fs::File,
+    io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
+    str::FromStr,
 };
 
+use rust_decimal::Decimal;
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
     GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent, GoalLifecycleState,
     ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    MetadataActor, MetadataLastWriter, ModelCallDisposition, ModelCallState, ReviewDiffSide,
-    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
-    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState,
+    MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+    ModelCallDisposition, ModelCallState, ReviewDiffSide, ReviewFindingSnapshot,
+    ReviewFindingStatus, ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot,
+    ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
+    ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
+    SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    UsageProvenance,
 };
 
 use crate::{
@@ -26,12 +30,12 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct ReportedTokenTotal {
+struct PresentTokenTotal {
     tokens: u128,
-    reported_calls: u64,
+    present_calls: u64,
 }
 
-impl ReportedTokenTotal {
+impl PresentTokenTotal {
     fn add(
         &mut self,
         value: Option<signalbox_process_protocol::CanonicalU64>,
@@ -43,15 +47,15 @@ impl ReportedTokenTotal {
             .tokens
             .checked_add(u128::from(value.value()))
             .ok_or(ClientError::Protocol("token usage total overflowed"))?;
-        self.reported_calls = self
-            .reported_calls
+        self.present_calls = self
+            .present_calls
             .checked_add(1)
             .ok_or(ClientError::Protocol("token usage coverage overflowed"))?;
         Ok(())
     }
 
     fn label(self) -> String {
-        if self.reported_calls == 0 {
+        if self.present_calls == 0 {
             String::from("unreported")
         } else {
             self.tokens.to_string()
@@ -62,10 +66,10 @@ impl ReportedTokenTotal {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct TokenUsageTotal {
     terminal_calls: u64,
-    input: ReportedTokenTotal,
-    output: ReportedTokenTotal,
-    cache_creation_input: ReportedTokenTotal,
-    cache_read_input: ReportedTokenTotal,
+    input: PresentTokenTotal,
+    output: PresentTokenTotal,
+    cache_creation_input: PresentTokenTotal,
+    cache_read_input: PresentTokenTotal,
 }
 
 impl TokenUsageTotal {
@@ -84,6 +88,300 @@ impl TokenUsageTotal {
         self.cache_creation_input
             .add(usage.cache_creation_input_tokens)?;
         self.cache_read_input.add(usage.cache_read_input_tokens)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CostAggregateKey {
+    provenance: UsageProvenance,
+    label: ModelCallCostLabel,
+    rate_version: String,
+}
+
+const COST_KEY_WIDTH: usize = 2 + MAX_RATE_VERSION_UTF8_BYTES;
+const COST_TOTAL_WIDTH: usize = 16 + 8;
+const COST_SLOT_WIDTH: usize = 1 + COST_KEY_WIDTH + COST_TOTAL_WIDTH;
+
+struct DiskCostTotals {
+    file: File,
+    len: u64,
+    capacity: u64,
+}
+
+impl DiskCostTotals {
+    fn new() -> io::Result<Self> {
+        Self::with_capacity(16)
+    }
+
+    fn with_capacity(capacity: u64) -> io::Result<Self> {
+        let file = tempfile::tempfile()?;
+        file.set_len(cost_slot_offset(capacity)?)?;
+        Ok(Self {
+            file,
+            len: 0,
+            capacity,
+        })
+    }
+
+    fn add(&mut self, key: &CostAggregateKey, amount: Decimal) -> Result<(), ClientError> {
+        let next_len = self
+            .len
+            .checked_add(1)
+            .ok_or(ClientError::Protocol("cost aggregate count overflowed"))?;
+        if next_len
+            .checked_mul(10)
+            .is_none_or(|scaled| scaled >= self.capacity.saturating_mul(7))
+        {
+            self.grow()?;
+        }
+        let encoded = encode_cost_key(key);
+        let start = stable_cost_hash(&encoded) % self.capacity;
+        let mut candidate = [0_u8; COST_KEY_WIDTH];
+        for displacement in 0..self.capacity {
+            let index = (start + displacement) % self.capacity;
+            let Some(mut total) = self.read_slot(index, &mut candidate)? else {
+                self.write_slot(
+                    index,
+                    &encoded,
+                    CostTotal {
+                        amount_usd: amount,
+                        calls: 1,
+                    },
+                )?;
+                self.len = next_len;
+                return Ok(());
+            };
+            if candidate == encoded {
+                let next_amount = total
+                    .amount_usd
+                    .checked_add(amount)
+                    .ok_or(ClientError::Protocol("dollar cost total overflowed"))?;
+                if next_amount.checked_sub(total.amount_usd) != Some(amount)
+                    || next_amount.checked_sub(amount) != Some(total.amount_usd)
+                {
+                    return Err(ClientError::Protocol("dollar cost total was inexact"));
+                }
+                total.amount_usd = next_amount;
+                total.calls = total
+                    .calls
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("dollar cost coverage overflowed"))?;
+                self.write_slot(index, &encoded, total)?;
+                return Ok(());
+            }
+        }
+        Err(ClientError::Io(io::Error::other(
+            "disk cost aggregate was unexpectedly full",
+        )))
+    }
+
+    fn grow(&mut self) -> io::Result<()> {
+        let new_capacity = self
+            .capacity
+            .checked_mul(2)
+            .ok_or_else(|| io::Error::other("disk cost capacity overflowed"))?;
+        let mut replacement = Self::with_capacity(new_capacity)?;
+        let mut key = [0_u8; COST_KEY_WIDTH];
+        for index in 0..self.capacity {
+            if let Some(total) = self.read_slot(index, &mut key)? {
+                replacement.insert_stored(key, total)?;
+            }
+        }
+        *self = replacement;
+        Ok(())
+    }
+
+    fn insert_stored(&mut self, key: [u8; COST_KEY_WIDTH], total: CostTotal) -> io::Result<()> {
+        let start = stable_cost_hash(&key) % self.capacity;
+        let mut candidate = [0_u8; COST_KEY_WIDTH];
+        for displacement in 0..self.capacity {
+            let index = (start + displacement) % self.capacity;
+            if self.read_slot(index, &mut candidate)?.is_none() {
+                self.write_slot(index, &key, total)?;
+                self.len = self
+                    .len
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("disk cost count overflowed"))?;
+                return Ok(());
+            }
+        }
+        Err(io::Error::other(
+            "replacement disk cost aggregate was unexpectedly full",
+        ))
+    }
+
+    #[cfg(test)]
+    fn get(&mut self, key: &CostAggregateKey) -> io::Result<Option<CostTotal>> {
+        let encoded = encode_cost_key(key);
+        let start = stable_cost_hash(&encoded) % self.capacity;
+        let mut candidate = [0_u8; COST_KEY_WIDTH];
+        for displacement in 0..self.capacity {
+            let index = (start + displacement) % self.capacity;
+            let Some(total) = self.read_slot(index, &mut candidate)? else {
+                return Ok(None);
+            };
+            if candidate == encoded {
+                return Ok(Some(total));
+            }
+        }
+        Ok(None)
+    }
+
+    fn entry_at(&mut self, index: u64) -> io::Result<Option<(CostAggregateKey, CostTotal)>> {
+        let mut encoded = [0_u8; COST_KEY_WIDTH];
+        self.read_slot(index, &mut encoded)?
+            .map(|total| Ok((decode_cost_key(&encoded)?, total)))
+            .transpose()
+    }
+
+    fn read_slot(
+        &mut self,
+        index: u64,
+        key: &mut [u8; COST_KEY_WIDTH],
+    ) -> io::Result<Option<CostTotal>> {
+        self.file.seek(SeekFrom::Start(cost_slot_offset(index)?))?;
+        let mut occupied = [0_u8; 1];
+        self.file.read_exact(&mut occupied)?;
+        if occupied[0] == 0 {
+            return Ok(None);
+        }
+        self.file.read_exact(key)?;
+        let mut amount = [0_u8; 16];
+        self.file.read_exact(&mut amount)?;
+        let mut calls = [0_u8; 8];
+        self.file.read_exact(&mut calls)?;
+        Ok(Some(CostTotal {
+            amount_usd: Decimal::deserialize(amount),
+            calls: u64::from_le_bytes(calls),
+        }))
+    }
+
+    fn write_slot(
+        &mut self,
+        index: u64,
+        key: &[u8; COST_KEY_WIDTH],
+        total: CostTotal,
+    ) -> io::Result<()> {
+        self.file.seek(SeekFrom::Start(cost_slot_offset(index)?))?;
+        self.file.write_all(&[1])?;
+        self.file.write_all(key)?;
+        self.file.write_all(&total.amount_usd.serialize())?;
+        self.file.write_all(&total.calls.to_le_bytes())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CostTotal {
+    amount_usd: Decimal,
+    calls: u64,
+}
+
+struct UsageAggregate {
+    reported: TokenUsageTotal,
+    estimated: TokenUsageTotal,
+    costs: DiskCostTotals,
+}
+
+impl UsageAggregate {
+    fn new() -> Result<Self, ClientError> {
+        Ok(Self {
+            reported: TokenUsageTotal::default(),
+            estimated: TokenUsageTotal::default(),
+            costs: DiskCostTotals::new()?,
+        })
+    }
+
+    fn add(
+        &mut self,
+        evidence: &crate::transcript::SnapshotModelCallUsage,
+    ) -> Result<(), ClientError> {
+        match evidence.usage_provenance {
+            UsageProvenance::Reported => self.reported.add(evidence.usage)?,
+            UsageProvenance::Estimated => self.estimated.add(evidence.usage)?,
+        }
+        let Some(cost) = evidence.cost.as_ref() else {
+            return Ok(());
+        };
+        let amount = Decimal::from_str(cost.amount_usd.as_str())
+            .map_err(|_| ClientError::Protocol("dollar cost was not representable"))?;
+        let key = CostAggregateKey {
+            provenance: evidence.usage_provenance,
+            label: cost.label,
+            rate_version: cost.rate_version.as_str().to_owned(),
+        };
+        self.costs.add(&key, amount)
+    }
+}
+
+fn encode_cost_key(key: &CostAggregateKey) -> [u8; COST_KEY_WIDTH] {
+    let mut encoded = [0_u8; COST_KEY_WIDTH];
+    encoded[0] = match key.provenance {
+        UsageProvenance::Reported => 0,
+        UsageProvenance::Estimated => 1,
+    };
+    encoded[1] = match key.label {
+        ModelCallCostLabel::Real => 0,
+        ModelCallCostLabel::MeteredEquivalent => 1,
+    };
+    let version = key.rate_version.as_bytes();
+    debug_assert!(version.len() <= MAX_RATE_VERSION_UTF8_BYTES);
+    encoded[2..2 + version.len()].copy_from_slice(version);
+    encoded
+}
+
+fn decode_cost_key(encoded: &[u8; COST_KEY_WIDTH]) -> io::Result<CostAggregateKey> {
+    let provenance = match encoded[0] {
+        0 => UsageProvenance::Reported,
+        1 => UsageProvenance::Estimated,
+        _ => return Err(io::Error::other("disk cost provenance was invalid")),
+    };
+    let label = match encoded[1] {
+        0 => ModelCallCostLabel::Real,
+        1 => ModelCallCostLabel::MeteredEquivalent,
+        _ => return Err(io::Error::other("disk cost label was invalid")),
+    };
+    let version_end = encoded[2..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(MAX_RATE_VERSION_UTF8_BYTES);
+    let rate_version = String::from_utf8(encoded[2..2 + version_end].to_vec())
+        .map_err(|_| io::Error::other("disk rate version was not UTF-8"))?;
+    Ok(CostAggregateKey {
+        provenance,
+        label,
+        rate_version,
+    })
+}
+
+fn cost_slot_offset(index: u64) -> io::Result<u64> {
+    index
+        .checked_mul(
+            u64::try_from(COST_SLOT_WIDTH)
+                .map_err(|_| io::Error::other("disk cost slot width overflowed"))?,
+        )
+        .ok_or_else(|| io::Error::other("disk cost slot offset overflowed"))
+}
+
+fn stable_cost_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+const fn usage_provenance_label(provenance: UsageProvenance) -> &'static str {
+    match provenance {
+        UsageProvenance::Reported => "reported",
+        UsageProvenance::Estimated => "estimated",
+    }
+}
+
+const fn cost_label(label: ModelCallCostLabel) -> &'static str {
+    match label {
+        ModelCallCostLabel::Real => "real",
+        ModelCallCostLabel::MeteredEquivalent => "metered_equivalent",
     }
 }
 
@@ -920,8 +1218,15 @@ impl<'a> Output<'a> {
         &mut self,
         snapshot: &mut TranscriptSnapshot,
     ) -> Result<(), ClientError> {
-        self.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
-        self.render_usage(snapshot)
+        let mut rendered_snapshot = tempfile::tempfile()?;
+        {
+            let mut staged = Output::new(&mut rendered_snapshot, &mut *self.stderr, self.raw);
+            staged.render_snapshot(snapshot, None, SnapshotSelection::All, true)?;
+            staged.render_usage(snapshot)?;
+        }
+        rendered_snapshot.seek(SeekFrom::Start(0))?;
+        io::copy(&mut rendered_snapshot, &mut self.stdout)?;
+        Ok(())
     }
 
     pub(crate) fn followed_snapshot(
@@ -991,8 +1296,9 @@ impl<'a> Output<'a> {
     }
 
     fn render_usage(&mut self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
-        let mut current_turn: Option<(CanonicalUuid, TokenUsageTotal)> = None;
-        let mut session_total = TokenUsageTotal::default();
+        let mut rendered_usage = tempfile::tempfile()?;
+        let mut current_turn: Option<(CanonicalUuid, UsageAggregate)> = None;
+        let mut session_total = UsageAggregate::new()?;
         for record in snapshot.replay()? {
             let SnapshotRecord::ModelCallUsage(evidence) = record? else {
                 continue;
@@ -1001,26 +1307,63 @@ impl<'a> Output<'a> {
                 .as_ref()
                 .is_some_and(|(turn, _)| *turn != evidence.turn_id)
             {
-                let (turn, total) = current_turn.take().ok_or(ClientError::Protocol(
+                let (turn, mut total) = current_turn.take().ok_or(ClientError::Protocol(
                     "token usage turn grouping was invalid",
                 ))?;
-                self.usage_line(Some(turn), total)?;
+                self.usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
             }
-            let (_, turn_total) =
-                current_turn.get_or_insert((evidence.turn_id, TokenUsageTotal::default()));
-            turn_total.add(evidence.usage)?;
-            session_total.add(evidence.usage)?;
+            if current_turn.is_none() {
+                current_turn = Some((evidence.turn_id, UsageAggregate::new()?));
+            }
+            let (_, turn_total) = current_turn.as_mut().ok_or(ClientError::Protocol(
+                "token usage turn grouping was invalid",
+            ))?;
+            turn_total.add(&evidence)?;
+            session_total.add(&evidence)?;
         }
-        if let Some((turn, total)) = current_turn {
-            self.usage_line(Some(turn), total)?;
+        if let Some((turn, mut total)) = current_turn {
+            self.usage_lines(&mut rendered_usage, Some(turn), &mut total)?;
         }
-        self.usage_line(None, session_total)?;
+        self.usage_lines(&mut rendered_usage, None, &mut session_total)?;
+        rendered_usage.seek(SeekFrom::Start(0))?;
+        io::copy(&mut rendered_usage, &mut self.stdout)?;
         Ok(())
     }
 
-    fn usage_line(
-        &mut self,
+    fn usage_lines<OutputWriter: Write>(
+        &self,
+        stdout: &mut OutputWriter,
         turn: Option<CanonicalUuid>,
+        total: &mut UsageAggregate,
+    ) -> Result<(), ClientError> {
+        Self::usage_line(stdout, turn, UsageProvenance::Reported, total.reported)?;
+        Self::usage_line(stdout, turn, UsageProvenance::Estimated, total.estimated)?;
+        for index in 0..total.costs.capacity {
+            let Some((key, cost)) = total.costs.entry_at(index)? else {
+                continue;
+            };
+            let prefix = turn.map_or_else(
+                || String::from("cost_total scope=session"),
+                |turn| format!("cost turn={turn}"),
+            );
+            let rate_version = self.render_field(&key.rate_version, TextField::DelimitedOnLine);
+            writeln!(
+                stdout,
+                "{prefix} usage_provenance={} label={} rate_version={} usd={} costed_calls={}",
+                usage_provenance_label(key.provenance),
+                cost_label(key.label),
+                rate_version,
+                cost.amount_usd.normalize(),
+                cost.calls,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn usage_line<OutputWriter: Write>(
+        stdout: &mut OutputWriter,
+        turn: Option<CanonicalUuid>,
+        provenance: UsageProvenance,
         total: TokenUsageTotal,
     ) -> io::Result<()> {
         let prefix = turn.map_or_else(
@@ -1028,24 +1371,26 @@ impl<'a> Output<'a> {
             |turn| format!("usage turn={turn}"),
         );
         writeln!(
-            self.stdout,
-            "{prefix} terminal_calls={} input_tokens={} input_tokens_reported_calls={}/{} \
-             output_tokens={} output_tokens_reported_calls={}/{} \
+            stdout,
+            "{prefix} usage_provenance={} terminal_calls={} input_tokens={} \
+             input_tokens_present_calls={}/{} \
+             output_tokens={} output_tokens_present_calls={}/{} \
              cache_creation_input_tokens={} \
-             cache_creation_input_tokens_reported_calls={}/{} cache_read_input_tokens={} \
-             cache_read_input_tokens_reported_calls={}/{}",
+             cache_creation_input_tokens_present_calls={}/{} cache_read_input_tokens={} \
+             cache_read_input_tokens_present_calls={}/{}",
+            usage_provenance_label(provenance),
             total.terminal_calls,
             total.input.label(),
-            total.input.reported_calls,
+            total.input.present_calls,
             total.terminal_calls,
             total.output.label(),
-            total.output.reported_calls,
+            total.output.present_calls,
             total.terminal_calls,
             total.cache_creation_input.label(),
-            total.cache_creation_input.reported_calls,
+            total.cache_creation_input.present_calls,
             total.terminal_calls,
             total.cache_read_input.label(),
-            total.cache_read_input.reported_calls,
+            total.cache_read_input.present_calls,
             total.terminal_calls,
         )
     }
@@ -2062,23 +2407,27 @@ mod tests {
     use std::{
         io::{self, Write},
         path::Path,
+        str::FromStr,
     };
 
     use expect_test::expect;
+    use rust_decimal::Decimal;
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
-        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, MetadataActor, MetadataLastWriter, ModelCallState, ModelCallTokenUsage,
-        ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState,
+        BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ContentFragment,
+        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
+        FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, MetadataActor,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost, ModelCallState,
+        ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject,
+        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        UsageProvenance,
     };
     use uuid::Uuid;
 
     use super::{
-        ConversationRow, ImportedEntryRow, Output, SessionMetadataRow, SnapshotSelection,
-        TextField, control_safe,
+        ConversationRow, CostAggregateKey, DiskCostTotals, ImportedEntryRow, Output,
+        SessionMetadataRow, SnapshotSelection, TextField, control_safe,
     };
     use crate::{
         error::ClientError,
@@ -2616,7 +2965,8 @@ mod tests {
         expect![[r#"
             imported_user imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000004 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002
             exact imported text
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2648,7 +2998,8 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
             imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -2923,7 +3274,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2941,7 +3293,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=failed frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004 call_disposition=cancelled call_cause=none
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2956,7 +3309,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=cancelled frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=none
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2971,7 +3325,8 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 operation=model_call operation_id=00000000-0000-0000-0000-000000000004
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
     }
@@ -2989,7 +3344,8 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            usage_total scope=session terminal_calls=0 input_tokens=unreported input_tokens_reported_calls=0/0 output_tokens=unreported output_tokens_reported_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
         assert!(stderr.is_empty());
@@ -3006,34 +3362,40 @@ mod tests {
                     model_call_index: CanonicalU64::new(0),
                     turn_id: first_turn,
                     model_call_id: wire_uuid(11),
+                    usage_provenance: UsageProvenance::Reported,
                     usage: ModelCallTokenUsage {
                         input_tokens: Some(CanonicalU64::new(10)),
                         output_tokens: Some(CanonicalU64::new(0)),
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: Some(CanonicalU64::new(4)),
                     },
+                    cost: None,
                 },
                 ServerMessage::TranscriptModelCallUsage {
                     model_call_index: CanonicalU64::new(1),
                     turn_id: first_turn,
                     model_call_id: wire_uuid(12),
+                    usage_provenance: UsageProvenance::Reported,
                     usage: ModelCallTokenUsage {
                         input_tokens: None,
                         output_tokens: None,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                     },
+                    cost: None,
                 },
                 ServerMessage::TranscriptModelCallUsage {
                     model_call_index: CanonicalU64::new(2),
                     turn_id: second_turn,
                     model_call_id: wire_uuid(13),
+                    usage_provenance: UsageProvenance::Reported,
                     usage: ModelCallTokenUsage {
                         input_tokens: None,
                         output_tokens: None,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
                     },
+                    cost: None,
                 },
             ],
         )
@@ -3046,11 +3408,266 @@ mod tests {
 
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
-            usage turn=00000000-0000-0000-0000-000000000001 terminal_calls=2 input_tokens=10 input_tokens_reported_calls=1/2 output_tokens=0 output_tokens_reported_calls=1/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/2 cache_read_input_tokens=4 cache_read_input_tokens_reported_calls=1/2
-            usage turn=00000000-0000-0000-0000-000000000002 terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 output_tokens=unreported output_tokens_reported_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1
-            usage_total scope=session terminal_calls=3 input_tokens=10 input_tokens_reported_calls=1/3 output_tokens=0 output_tokens_reported_calls=1/3 cache_creation_input_tokens=unreported cache_creation_input_tokens_reported_calls=0/3 cache_read_input_tokens=4 cache_read_input_tokens_reported_calls=1/3
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported terminal_calls=2 input_tokens=10 input_tokens_present_calls=1/2 output_tokens=0 output_tokens_present_calls=1/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=4 cache_read_input_tokens_present_calls=1/2
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage turn=00000000-0000-0000-0000-000000000002 usage_provenance=reported terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            usage turn=00000000-0000-0000-0000-000000000002 usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=reported terminal_calls=3 input_tokens=10 input_tokens_present_calls=1/3 output_tokens=0 output_tokens_present_calls=1/3 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/3 cache_read_input_tokens=4 cache_read_input_tokens_present_calls=1/3
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn transcript_costs_aggregate_only_with_matching_provenance_and_labels() {
+        let turn = wire_uuid(1);
+        let usage = ModelCallTokenUsage {
+            input_tokens: Some(CanonicalU64::new(0)),
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(0),
+                    turn_id: turn,
+                    model_call_id: wire_uuid(11),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(String::from("0.1"))
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: BillingRateVersion::try_new(String::from("rates-v1"))
+                            .expect("fixture rate version is valid"),
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(1),
+                    turn_id: turn,
+                    model_call_id: wire_uuid(12),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(String::from("0.2"))
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: BillingRateVersion::try_new(String::from("rates-v1"))
+                            .expect("fixture rate version is valid"),
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(2),
+                    turn_id: turn,
+                    model_call_id: wire_uuid(13),
+                    usage_provenance: UsageProvenance::Estimated,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(String::from("0.4"))
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: BillingRateVersion::try_new(String::from("rates-v1"))
+                            .expect("fixture rate version is valid"),
+                        label: ModelCallCostLabel::MeteredEquivalent,
+                    }),
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("cost snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported terminal_calls=2 input_tokens=0 input_tokens_present_calls=2/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
+            usage turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated terminal_calls=1 input_tokens=0 input_tokens_present_calls=1/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            cost turn=00000000-0000-0000-0000-000000000001 usage_provenance=reported label=real rate_version=rates-v1 usd=0.3 costed_calls=2
+            cost turn=00000000-0000-0000-0000-000000000001 usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
+            usage_total scope=session usage_provenance=reported terminal_calls=2 input_tokens=0 input_tokens_present_calls=2/2 output_tokens=unreported output_tokens_present_calls=0/2 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/2 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/2
+            usage_total scope=session usage_provenance=estimated terminal_calls=1 input_tokens=0 input_tokens_present_calls=1/1 output_tokens=unreported output_tokens_present_calls=0/1 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/1 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1
+            cost_total scope=session usage_provenance=reported label=real rate_version=rates-v1 usd=0.3 costed_calls=2
+            cost_total scope=session usage_provenance=estimated label=metered_equivalent rate_version=rates-v1 usd=0.4 costed_calls=1
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn raw_transcript_cost_rate_version_is_unchanged() {
+        let rate_version = String::from("rates v1");
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [ServerMessage::TranscriptModelCallUsage {
+                model_call_index: CanonicalU64::new(0),
+                turn_id: wire_uuid(1),
+                model_call_id: wire_uuid(11),
+                usage_provenance: UsageProvenance::Reported,
+                usage: ModelCallTokenUsage {
+                    input_tokens: Some(CanonicalU64::new(0)),
+                    output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
+                },
+                cost: Some(ModelCallDollarCost {
+                    amount_usd: CanonicalDollarAmount::try_new(String::from("0.1"))
+                        .expect("fixture dollar amount is canonical"),
+                    rate_version: BillingRateVersion::try_new(rate_version.clone())
+                        .expect("fixture rate version is valid"),
+                    label: ModelCallCostLabel::Real,
+                }),
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, true)
+            .snapshot(&mut snapshot)
+            .expect("raw cost snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains(&format!("rate_version={rate_version} ")));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn transcript_cost_totals_grow_on_disk_and_retain_values() {
+        let later = CostAggregateKey {
+            provenance: UsageProvenance::Reported,
+            label: ModelCallCostLabel::Real,
+            rate_version: String::from("rates-z"),
+        };
+        let earlier = CostAggregateKey {
+            provenance: UsageProvenance::Reported,
+            label: ModelCallCostLabel::Real,
+            rate_version: String::from("rates-a"),
+        };
+        let mut totals = DiskCostTotals::with_capacity(2).expect("the test cost spool must open");
+        totals
+            .add(&later, Decimal::new(2, 1))
+            .expect("the later key must spool");
+        totals
+            .add(&earlier, Decimal::new(1, 1))
+            .expect("the earlier key must grow and spool");
+
+        let later_total = totals
+            .get(&later)
+            .expect("the cost spool must read")
+            .expect("the later key must exist");
+        let earlier_total = totals
+            .get(&earlier)
+            .expect("the cost spool must read")
+            .expect("the earlier key must exist");
+
+        assert_eq!(totals.capacity, 4);
+        assert_eq!(later_total.amount_usd, Decimal::new(2, 1));
+        assert_eq!(later_total.calls, 1);
+        assert_eq!(earlier_total.amount_usd, Decimal::new(1, 1));
+        assert_eq!(earlier_total.calls, 1);
+    }
+
+    #[test]
+    fn transcript_cost_totals_reject_inexact_decimal_addition() {
+        let key = CostAggregateKey {
+            provenance: UsageProvenance::Reported,
+            label: ModelCallCostLabel::Real,
+            rate_version: String::from("rates-v1"),
+        };
+        let large = Decimal::from_str("10000000000000000000000000000")
+            .expect("fixture dollar amount is representable");
+        let tiny = Decimal::from_str("0.0000000000000000000000000001")
+            .expect("fixture dollar amount is representable");
+        let mut totals = DiskCostTotals::with_capacity(2).expect("the test cost spool must open");
+        totals
+            .add(&key, large)
+            .expect("the first exact amount must spool");
+
+        let error = totals
+            .add(&key, tiny)
+            .expect_err("an inexact aggregate must be rejected");
+        let retained = totals
+            .get(&key)
+            .expect("the cost spool must read")
+            .expect("the original total must remain");
+
+        assert!(matches!(
+            error,
+            ClientError::Protocol("dollar cost total was inexact")
+        ));
+        assert_eq!(retained.amount_usd, large);
+        assert_eq!(retained.calls, 1);
+    }
+
+    #[test]
+    fn transcript_is_not_partially_published_when_a_later_total_is_inexact() {
+        let large = Decimal::from_str("10000000000000000000000000000")
+            .expect("fixture dollar amount is representable");
+        let tiny = Decimal::from_str("0.0000000000000000000000000001")
+            .expect("fixture dollar amount is representable");
+        let rate_version = BillingRateVersion::try_new(String::from("rates-v1"))
+            .expect("fixture rate version is valid");
+        let usage = ModelCallTokenUsage {
+            input_tokens: Some(CanonicalU64::new(0)),
+            output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            1,
+            [
+                ServerMessage::TranscriptTurn {
+                    turn_id: wire_uuid(1),
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::Queued {
+                        accepted_input_id: wire_uuid(10),
+                        content: InputContent::new("transcript content".to_owned()),
+                    },
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(0),
+                    turn_id: wire_uuid(1),
+                    model_call_id: wire_uuid(11),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(large.to_string())
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version: rate_version.clone(),
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+                ServerMessage::TranscriptModelCallUsage {
+                    model_call_index: CanonicalU64::new(1),
+                    turn_id: wire_uuid(2),
+                    model_call_id: wire_uuid(12),
+                    usage_provenance: UsageProvenance::Reported,
+                    usage,
+                    cost: Some(ModelCallDollarCost {
+                        amount_usd: CanonicalDollarAmount::try_new(tiny.to_string())
+                            .expect("fixture dollar amount is canonical"),
+                        rate_version,
+                        label: ModelCallCostLabel::Real,
+                    }),
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let error = Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect_err("the inexact session total must be rejected");
+
+        assert!(matches!(
+            error,
+            ClientError::Protocol("dollar cost total was inexact")
+        ));
+        assert!(stdout.is_empty());
         assert!(stderr.is_empty());
     }
 
