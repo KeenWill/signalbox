@@ -30,10 +30,15 @@ The check is deterministic and offline. It verifies:
    ``PR #N (`branch-ref`; via PR #M `carrier-branch`)``. A present carrier
    tail always governs: the token is accepted only when ``#N`` has no
    first-parent merge commit of its own and the carrier's number and branch
-   match one, and it is a violation otherwise — including when ``#N`` has its
-   own merge commit. Any other tail containing carrier-like prose is ordinary
-   unvalidated scope text, and the carrier components may wrap across
-   block-quote continuation markers like any scope tail.
+   match one — or the carrier is the single in-flight PR (the event identity,
+   or the checked-out branch locally), since the carrying merge cannot precede
+   the carrier's own pull request. It is a violation otherwise, including when
+   ``#N`` has its own merge commit. Inherited identities preserve carrier
+   state, so a base page's carried reference cannot shed its tail under
+   inheritance. The carrier components may wrap across block-quote
+   continuation lines; quote markers count as scaffolding only at line
+   prefixes, at least one gap character must follow the semicolon, and any
+   tail not matching the exact form is ordinary unvalidated scope text.
 
 External links and semantic freshness beyond reachability are outside this
 check. Run from any directory; exits nonzero with one stable line per
@@ -194,10 +199,11 @@ PR_TOKEN = re.compile(
     rf"(?:{SCOPED_DETAIL_TAIL})?"
     r"\)"
 )
+CARRIER_GAP = r"(?:[ \t]+|\r?\n(?:[ \t]*>[ \t]?)*)+"
 CARRIED_PR_TOKEN = re.compile(
     r"\bPR #([1-9][0-9]*)[ \t\r\n]+\("
-    rf"`([^\s`]+)`;{SCOPED_DETAIL_SCAFFOLD}"
-    rf"via[\s>]+PR #([1-9][0-9]*)[\s>]+`([^\s`]+)`"
+    rf"`([^\s`]+)`;{CARRIER_GAP}"
+    rf"via{CARRIER_GAP}PR #([1-9][0-9]*){CARRIER_GAP}`([^\s`]+)`"
     r"\)"
 )
 INLINE_MARKUP_OPENERS = r"[\[(<*_~`\"'“‘]*"
@@ -3420,11 +3426,19 @@ def github_pull_request_event(
     return (number, branch), base_sha, None
 
 
-def verification_reference_identities(text: str) -> set[tuple[int, str]]:
-    """Return positive verification identities from one specification page."""
+def verification_reference_identities(
+    text: str,
+) -> set[tuple[int, str, tuple[int, str] | None]]:
+    """Return positive verification identities from one specification page.
+
+    Each identity records its carrier — ``(number, branch, (M, carrier-branch))``
+    for the carried form, ``(number, branch, None)`` otherwise — so a carried
+    reference inherits only as the carried form and the tail cannot be dropped
+    under inheritance.
+    """
     text = mask_block_content(text)
     code_ranges = inline_code_ranges(text)
-    identities: set[tuple[int, str]] = set()
+    identities: set[tuple[int, str, tuple[int, str] | None]] = set()
     for reference in VERIFICATION_LEAD.finditer(text):
         candidate_start = reference.start("pr")
         if offset_in_ranges(reference.start(), code_ranges) or offset_in_ranges(
@@ -3435,7 +3449,13 @@ def verification_reference_identities(text: str) -> set[tuple[int, str]]:
             continue
         token = PR_TOKEN.match(text, candidate_start)
         if token is not None:
-            identities.add((int(token.group(1)), token.group(2)))
+            carried = CARRIED_PR_TOKEN.match(text, candidate_start)
+            carrier_identity = (
+                (int(carried.group(3)), carried.group(4)) if carried else None
+            )
+            identities.add(
+                (int(token.group(1)), token.group(2), carrier_identity)
+            )
     return identities
 
 
@@ -3523,19 +3543,35 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                 local_match = (
                     not github_event_present and branch == checkout_branch
                 )
-                inherited_match = (number, branch) in inherited_identities
                 carrier = CARRIED_PR_TOKEN.match(text, candidate_start)
-                carrier_ok = (
-                    carrier is not None
-                    and int(carrier.group(3)) in integration_branches
-                    and carrier.group(4)
-                    in integration_branches[int(carrier.group(3))]
+                carrier_identity = (
+                    (int(carrier.group(3)), carrier.group(4))
+                    if carrier
+                    else None
                 )
+                inherited_match = (
+                    number,
+                    branch,
+                    carrier_identity,
+                ) in inherited_identities
                 in_flight_match = (
                     number not in integration_branches
                     and (event_match or local_match)
                 )
                 if carrier is not None:
+                    if inherited_match:
+                        continue
+                    if history_error is not None:
+                        violations.append(
+                            Violation(
+                                source_label,
+                                line,
+                                "spec-verification-history",
+                                f"cannot inspect the `{INTEGRATION_BRANCH}` "
+                                f"integration history: {history_error}",
+                            )
+                        )
+                        continue
                     if number in integration_branches:
                         violations.append(
                             Violation(
@@ -3549,20 +3585,48 @@ def check_spec_verification_references(root: Path) -> list[Violation]:
                             )
                         )
                         continue
-                    if not carrier_ok:
+                    carrier_number, carrier_branch = carrier_identity
+                    carrier_in_history = (
+                        carrier_number in integration_branches
+                        and carrier_branch
+                        in integration_branches[carrier_number]
+                    )
+                    if carrier_in_history:
+                        continue
+                    carrier_event_match = event_pull_request == carrier_identity
+                    carrier_local_match = (
+                        not github_event_present
+                        and carrier_branch == checkout_branch
+                    )
+                    if carrier_number not in integration_branches and (
+                        carrier_event_match or carrier_local_match
+                    ):
+                        if in_flight_identity is None:
+                            in_flight_identity = carrier_identity
+                        if in_flight_identity == carrier_identity:
+                            continue
                         violations.append(
                             Violation(
                                 source_label,
                                 line,
                                 "spec-verification-history",
-                                f"PR #{number} cites carrier "
-                                f"PR #{carrier.group(3)} "
-                                f"(`{carrier.group(4)}`), which has no "
-                                "matching merge commit in the "
-                                f"`{INTEGRATION_BRANCH}` integration history",
+                                "only one unmerged verification PR identity "
+                                "is permitted",
                             )
                         )
                         continue
+                    violations.append(
+                        Violation(
+                            source_label,
+                            line,
+                            "spec-verification-history",
+                            f"PR #{number} cites carrier "
+                            f"PR #{carrier_number} "
+                            f"(`{carrier_branch}`), which has no "
+                            "matching merge commit in the "
+                            f"`{INTEGRATION_BRANCH}` integration history",
+                        )
+                    )
                     continue
                 if historical_match or inherited_match:
                     continue
