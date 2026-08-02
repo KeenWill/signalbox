@@ -17,7 +17,8 @@ use rustix::{
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
-    RepositoryIdentity, file_identity, file_snapshot_identity, unsupported_control_files_are_absent,
+    FileSnapshotIdentity, RepositoryIdentity, file_identity, file_snapshot_identity,
+    unsupported_control_files_are_absent,
 };
 use crate::limits::{
     MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
@@ -27,6 +28,7 @@ use crate::limits::{
 pub(super) struct RepositoryConfig {
     pub(super) source: fs::File,
     pub(super) snapshot: fs::File,
+    pub(super) identity: FileSnapshotIdentity,
     pub(super) object_format: ObjectFormat,
 }
 
@@ -183,17 +185,22 @@ pub(super) fn validate_shallow_file(
     if bytes.len() > MAX_SHALLOW_BYTES {
         return Err(LocalGitToolsConstructionError::Repository);
     }
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let records = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+    if records.is_empty() {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
     let mut entries = 0_usize;
     let object_id_bytes = match object_format {
         ObjectFormat::Sha1 => 40,
         ObjectFormat::Sha256 => 64,
     };
-    for line in bytes.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
+    for line in records.split(|byte| *byte == b'\n') {
         entries = entries.saturating_add(1);
         if entries > MAX_SHALLOW_ENTRIES
+            || line.is_empty()
             || line.len() != object_id_bytes
             || !line.iter().all(u8::is_ascii_hexdigit)
         {
@@ -380,6 +387,7 @@ fn validate_repository_config_descriptor(
     Ok(RepositoryConfig {
         source: file,
         snapshot,
+        identity: file_snapshot_identity(&metadata),
         object_format,
     })
 }

@@ -13,6 +13,7 @@ use crate::index_lock::IndexLock;
 use crate::layout::{reject_administrative_symlinks, validate_repository_layout};
 use crate::limits::MAX_OBJECT_BYTES;
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
+use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::tests::support::{
     Fixture, Sha256Fixture, plant_loose_blob, plant_loose_blob_with_claimed_id, plant_packed_blob,
@@ -230,6 +231,84 @@ fn repository_config_rejects_duplicate_bare_declarations() {
 }
 
 #[test]
+fn authority_operation_rejects_live_config_bytes_changed_after_open() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    fs::write(&config_path, "[core]\nfilemode = false\nbare = false\n")
+        .expect("live config rewrites in place");
+
+    let failure = ReferenceLock::acquire(&authority, "refs/heads/topic")
+        .err()
+        .expect("changed live config rejects authority operation");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn authority_operation_rejects_identical_replacement_config_after_open() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    let retired_config_path = fixture.root().join(".git/config.retired");
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let original_config = fs::read(&config_path).expect("fixture config reads");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    fs::rename(&config_path, retired_config_path).expect("fixture config retires");
+    fs::write(&config_path, &original_config).expect("identical replacement config writes");
+
+    let failure = ReferenceLock::acquire(&authority, "refs/heads/topic")
+        .err()
+        .expect("replacement live config rejects authority operation");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn repository_layout_accepts_an_empty_shallow_file() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root().join(".git/shallow"), b"").expect("empty shallow file writes");
+
+    validate_repository_layout(fixture.root()).expect("empty shallow file validates");
+}
+
+#[test]
+fn repository_layout_rejects_a_leading_blank_shallow_record() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".git/shallow"),
+        format!("\n{}\n", fixture.initial),
+    )
+    .expect("leading blank shallow record writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("leading blank shallow record rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_layout_rejects_a_doubled_trailing_shallow_newline() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".git/shallow"),
+        format!("{}\n\n", fixture.initial),
+    )
+    .expect("doubled trailing shallow newline writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("doubled trailing shallow newline rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
 fn repository_open_rejects_commondir_created_after_layout_validation() {
     let fixture = Fixture::new();
     let commondir_path = fixture.root().join(".git/commondir");
@@ -269,16 +348,8 @@ fn repository_open_parses_the_validated_config_snapshot() {
         .expect("validated fixture config writes");
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
 
-    let authority = PinnedRepository::open_with_hooks(
-        fixture.root(),
-        expected,
-        || {},
-        || {
-            fs::write(&config_path, "[core]\nfilemode = false\nbare = false\n")
-                .expect("live fixture config mutates in place");
-        },
-    )
-    .expect("repository opens from the validated config snapshot");
+    let authority = PinnedRepository::open(fixture.root(), expected)
+        .expect("repository opens from the validated config snapshot");
     let repository = authority.repository().expect("fixture repository locks");
     let filemode = repository_filemode(&repository).expect("snapshot filemode reads");
 
@@ -369,7 +440,7 @@ fn object_capture_rejects_a_packed_object_above_the_decoded_limit() {
 }
 
 #[test]
-fn repository_shell_never_parses_mutated_live_object_format() {
+fn repository_open_rejects_live_object_format_changed_after_snapshot() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");
     fs::write(
@@ -379,7 +450,7 @@ fn repository_shell_never_parses_mutated_live_object_format() {
     .expect("validated SHA-1 fixture config writes");
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
 
-    let authority = PinnedRepository::open_with_hooks(
+    let failure = PinnedRepository::open_with_hooks(
         fixture.root(),
         expected,
         || {},
@@ -391,11 +462,9 @@ fn repository_shell_never_parses_mutated_live_object_format() {
             .expect("live fixture object format mutates");
         },
     )
-    .expect("repository shell opens from the SHA-1 snapshot");
-    let repository = authority.repository().expect("fixture repository locks");
+    .expect_err("mutated live object format rejects repository open");
 
-    assert_eq!(authority.object_format, ObjectFormat::Sha1);
-    assert_eq!(repository.object_format(), ObjectFormat::Sha1);
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
 }
 
 #[test]

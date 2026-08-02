@@ -90,8 +90,22 @@ pub(super) fn read_packed_references(
     }
     let mut references = Vec::new();
     let mut names = HashSet::new();
+    let mut previous_was_reference = false;
     for line in bytes.split(|byte| *byte == b'\n') {
-        if line.is_empty() || matches!(line.first(), Some(b'#' | b'^')) {
+        if line.is_empty() || matches!(line.first(), Some(b'#')) {
+            previous_was_reference = false;
+            continue;
+        }
+        if let Some(peeled) = line.strip_prefix(b"^") {
+            if !previous_was_reference
+                || std::str::from_utf8(peeled)
+                    .ok()
+                    .and_then(|oid| git2::Oid::from_str_ext(oid, authority.object_format).ok())
+                    .is_none()
+            {
+                return Err(LocalGitFailure::Operation);
+            }
+            previous_was_reference = false;
             continue;
         }
         let separator = line
@@ -114,6 +128,7 @@ pub(super) fn read_packed_references(
             return Err(LocalGitFailure::Operation);
         }
         references.push((oid, existing.to_vec()));
+        previous_was_reference = true;
     }
     authority.validate_supported_layout()?;
     Ok(references)

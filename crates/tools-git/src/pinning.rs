@@ -6,6 +6,7 @@ use std::{
     os::{
         fd::{AsFd, OwnedFd},
         unix::ffi::OsStrExt,
+        unix::fs::FileExt,
     },
     path::{Path, PathBuf},
     sync::Mutex,
@@ -17,22 +18,23 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
-    RepositoryIdentity, descriptor_path, descriptor_path_from_fd, file_identity,
-    file_snapshot_identity, unsupported_common_directory_is_absent,
+    FileSnapshotIdentity, RepositoryIdentity, descriptor_path, descriptor_path_from_fd,
+    file_identity, file_snapshot_identity, unsupported_common_directory_is_absent,
     unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::open_repository_config_at;
 use crate::limits::{
     MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
-    MAX_PACK_FILE_BYTES, MAX_REPOSITORY_INSPECTIONS,
+    MAX_PACK_FILE_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
 };
 
 pub(super) struct PinnedRepository {
     pub(super) root: fs::File,
     pub(super) git_directory: fs::File,
-    pub(super) _config: fs::File,
-    pub(super) _config_snapshot: fs::File,
+    _config: fs::File,
+    config_snapshot: fs::File,
+    config_identity: FileSnapshotIdentity,
     pub(super) object_format: ObjectFormat,
     repository: Mutex<RepositoryShell>,
 }
@@ -173,14 +175,19 @@ impl PinnedRepository {
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        Ok(Self {
+        let authority = Self {
             root,
             git_directory,
             _config: config.source,
-            _config_snapshot: config.snapshot,
+            config_snapshot: config.snapshot,
+            config_identity: config.identity,
             object_format: config.object_format,
             repository: Mutex::new(repository),
-        })
+        };
+        authority
+            .validate_supported_layout()
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+        Ok(authority)
     }
 
     pub(super) fn repository(
@@ -204,12 +211,59 @@ impl PinnedRepository {
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
-        unsupported_common_directory_is_absent(self.git_directory.as_fd())
+        unsupported_common_directory_is_absent(self.git_directory.as_fd())?;
+        self.validate_config()
     }
 
     pub(super) fn validate_object_layout(&self) -> Result<(), LocalGitFailure> {
-        unsupported_control_files_are_absent(self.git_directory.as_fd())
+        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
+        self.validate_config()
     }
+
+    fn validate_config(&self) -> Result<(), LocalGitFailure> {
+        let current = open_repository_config_at(&self.git_directory)
+            .map_err(|_| LocalGitFailure::Repository)?;
+        if current.identity != self.config_identity
+            || config_snapshot_bytes(&current.snapshot)?
+                != config_snapshot_bytes(&self.config_snapshot)?
+        {
+            return Err(LocalGitFailure::Repository);
+        }
+        let path_descriptor = openat(
+            &self.git_directory,
+            "config",
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?;
+        let current_identity = file_snapshot_identity(
+            &current
+                .source
+                .metadata()
+                .map_err(|_| LocalGitFailure::Repository)?,
+        );
+        let path_identity = file_snapshot_identity(
+            &fs::File::from(path_descriptor)
+                .metadata()
+                .map_err(|_| LocalGitFailure::Repository)?,
+        );
+        if current_identity != self.config_identity || path_identity != self.config_identity {
+            return Err(LocalGitFailure::Repository);
+        }
+        Ok(())
+    }
+}
+
+fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
+    let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+    let length = usize::try_from(metadata.len())
+        .ok()
+        .filter(|length| *length <= MAX_REPOSITORY_CONFIG_BYTES)
+        .ok_or(LocalGitFailure::Repository)?;
+    let mut bytes = vec![0_u8; length];
+    file.read_exact_at(&mut bytes, 0)
+        .map_err(|_| LocalGitFailure::Repository)?;
+    Ok(bytes)
 }
 
 impl PinnedObjectDatabase {
