@@ -180,13 +180,68 @@ fn encode_request(
     request_id: RequestId,
     request: ClientRequest,
 ) -> Result<Vec<u8>, ClientError> {
-    let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
+    let import_request = oversized_frame_is_import_source(&request);
     let frame = ClientFrame::try_new_for_version(version, request_id, request)
         .map_err(FrameEncodeError::Validation)?;
     encode_client_line(&frame).map_err(|error| match error {
         FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
         error => ClientError::Encode(error),
     })
+}
+
+fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
+    match request {
+        ClientRequest::ImportConversation { .. } => true,
+        ClientRequest::CreateSession { .. }
+        | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::ListTemplates {}
+        | ClientRequest::ListSessions {}
+        | ClientRequest::AttachGoal { .. }
+        | ClientRequest::ReadGoal { .. }
+        | ClientRequest::ResumeGoal { .. }
+        | ClientRequest::StopGoal { .. }
+        | ClientRequest::SupersedeGoal { .. }
+        | ClientRequest::SubmitInput { .. }
+        | ClientRequest::CompactSession { .. }
+        | ClientRequest::ReadTranscript { .. }
+        | ClientRequest::FollowSession { .. }
+        | ClientRequest::ListSessionMetadata { .. }
+        | ClientRequest::ListConversations { .. }
+        | ClientRequest::ListModelAliases {}
+        | ClientRequest::ReadSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionDefaults { .. }
+        | ClientRequest::ReadSessionDefaults { .. }
+        | ClientRequest::BeginConversationImport { .. }
+        | ClientRequest::AppendConversationImport { .. }
+        | ClientRequest::CommitConversationImport {}
+        | ClientRequest::AbortConversationImport {}
+        | ClientRequest::ReadImportedConversation { .. }
+        | ClientRequest::CreateSessionFromImportedFrontier { .. }
+        | ClientRequest::ReconcileTurn { .. }
+        | ClientRequest::CreateReviewTarget { .. }
+        | ClientRequest::StartReviewRun { .. }
+        | ClientRequest::ActivateReviewPass { .. }
+        | ClientRequest::CompleteReviewPass { .. }
+        | ClientRequest::RecordReviewFindings { .. }
+        | ClientRequest::RecordReviewFindingEvent { .. }
+        | ClientRequest::ReserveReviewExternalLink { .. }
+        | ClientRequest::AttachReviewExternalLink { .. }
+        | ClientRequest::ReadReviewTarget { .. }
+        | ClientRequest::ReadReviewRun { .. }
+        | ClientRequest::ReadReviewFinding { .. }
+        | ClientRequest::ListReviewFindings { .. }
+        | ClientRequest::StartReviewOrchestration { .. }
+        | ClientRequest::RecordReviewImportOutcome { .. }
+        | ClientRequest::RecordReviewConcernOutcome { .. }
+        | ClientRequest::RecordReviewJudgmentPlan { .. }
+        | ClientRequest::RecordReviewJudgmentEffect { .. }
+        | ClientRequest::RecordReviewRepairOutcomes { .. }
+        | ClientRequest::RecordReviewPublicationOutcomes { .. }
+        | ClientRequest::ReadReviewOrchestration { .. }
+        | ClientRequest::StopTurn { .. }
+        | ClientRequest::DecideToolRequest { .. } => false,
+    }
 }
 
 fn response_version_is_admitted(expected: ProtocolVersion, frame: &ServerFrame) -> bool {
