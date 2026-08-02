@@ -100,3 +100,12 @@ impl WebSearchEgressPolicy {
             && url.port_or_known_default() == origin.port_or_known_default()
     }
 }
+
+pub(super) fn fixed_egress_diagnostic_outputs() -> [String; 3] {
+    let configuration = WebSearchConfiguration::new(WebSearchProvider::Brave);
+    [
+        format!("{:?}", WebSearchProvider::Brave),
+        format!("{:?}", configuration.egress_policy()),
+        format!("{configuration:?}"),
+    ]
+}

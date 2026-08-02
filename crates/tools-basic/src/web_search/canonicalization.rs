@@ -84,7 +84,7 @@ pub(super) fn canonicalized_port_path_zero_fragments(value: &str) -> Vec<String>
 }
 
 pub(super) fn removed_default_port_path_fragment(value: &str, default_port: u16) -> Option<String> {
-    let (authority_context, port_and_path) = value.rsplit_once(':')?;
+    let (authority_context, port_and_path) = value.rsplit_once(':').unwrap_or(("", value));
     let (port_fragment, path_suffix) = port_and_path.split_once('/')?;
     if port_fragment.is_empty()
         || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
@@ -409,16 +409,21 @@ pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragments(value: &s
     if !leading_separator && !trailing_separator {
         return Vec::new();
     }
-    let Some(hextet) = canonicalized_ipv6_hextet_text_fragment(value) else {
+    let hextets = value
+        .split(':')
+        .map(canonicalized_ipv6_hextet_text_fragment)
+        .collect::<Option<Vec<_>>>();
+    let Some(hextets) = hextets.filter(|hextets| !hextets.is_empty()) else {
         return Vec::new();
     };
+    let canonical = hextets.join(":");
     let separator_bound = format!(
         "{}{}{}",
         if leading_separator { ":" } else { "" },
-        hextet,
+        canonical,
         if trailing_separator { ":" } else { "" }
     );
-    if leading_separator && trailing_separator && hextet == "0" {
+    if leading_separator && trailing_separator && hextets.iter().all(|hextet| hextet == "0") {
         vec![separator_bound, String::from("::")]
     } else {
         vec![separator_bound]
@@ -491,29 +496,42 @@ pub(super) fn canonicalized_ipv4_tail_fragments(value: &str) -> Vec<Vec<u8>> {
 }
 
 pub(super) fn ipv4_tail_component_contains(value: &str, octets: &[u8]) -> bool {
+    let source_spelling_contains = <[u8; 4]>::try_from(octets)
+        .ok()
+        .map(std::net::Ipv4Addr::from)
+        .is_some_and(|address| {
+            let lowercase = value.to_ascii_lowercase();
+            legacy_ipv4_address_spellings(address)
+                .iter()
+                .any(|spelling| spelling.contains(&lowercase))
+        });
     let value = value.strip_prefix('.').unwrap_or(value);
     let value = value.strip_suffix('.').unwrap_or(value);
-    normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
-        octets
-            .iter()
-            .any(|component| component.to_string().contains(&fragment))
-    }) || normalized_radix_fragment(value, 8, Some("0")).is_some_and(|fragment| {
-        octets
-            .iter()
-            .any(|component| format!("{component:o}").contains(&fragment))
-    }) || normalized_radix_fragment(value, 16, Some("0x")).is_some_and(|fragment| {
-        octets
-            .iter()
-            .any(|component| format!("{component:x}").contains(&fragment))
-    }) || value
-        .strip_prefix('x')
-        .or_else(|| value.strip_prefix('X'))
-        .and_then(|digits| normalized_radix_fragment(digits, 16, None))
-        .is_some_and(|fragment| {
+    source_spelling_contains
+        || normalized_radix_fragment(value, 10, None).is_some_and(|fragment| {
+            octets
+                .iter()
+                .any(|component| component.to_string().contains(&fragment))
+        })
+        || normalized_radix_fragment(value, 8, Some("0")).is_some_and(|fragment| {
+            octets
+                .iter()
+                .any(|component| format!("{component:o}").contains(&fragment))
+        })
+        || normalized_radix_fragment(value, 16, Some("0x")).is_some_and(|fragment| {
             octets
                 .iter()
                 .any(|component| format!("{component:x}").contains(&fragment))
         })
+        || value
+            .strip_prefix('x')
+            .or_else(|| value.strip_prefix('X'))
+            .and_then(|digits| normalized_radix_fragment(digits, 16, None))
+            .is_some_and(|fragment| {
+                octets
+                    .iter()
+                    .any(|component| format!("{component:x}").contains(&fragment))
+            })
 }
 
 pub(super) fn canonicalized_mixed_ipv6_ipv4_tail_fragments(
