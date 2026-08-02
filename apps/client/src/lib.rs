@@ -1342,9 +1342,14 @@ where
 
     let mut assembled_size_bytes = 0_u64;
     loop {
+        let read_limit =
+            conversation_import_chunk_read_limit(declared_size_bytes, assembled_size_bytes);
+        if read_limit == 0 {
+            break;
+        }
         let mut chunk = Vec::with_capacity(MAX_CONVERSATION_IMPORT_CHUNK_BYTES);
         (&mut source)
-            .take(u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES).unwrap_or(u64::MAX))
+            .take(read_limit)
             .read_to_end(&mut chunk)
             .await
             .map_err(ClientError::source_file)?;
@@ -1408,6 +1413,17 @@ where
         )
         .mutation()),
     }
+}
+
+fn conversation_import_chunk_read_limit(
+    declared_size_bytes: CanonicalU64,
+    assembled_size_bytes: u64,
+) -> u64 {
+    declared_size_bytes
+        .value()
+        .saturating_add(1)
+        .saturating_sub(assembled_size_bytes)
+        .min(u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES).unwrap_or(u64::MAX))
 }
 
 async fn import_conversation(
@@ -4268,8 +4284,9 @@ mod tests {
         MAX_REVIEW_JSON_INPUT_BYTES, MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ProcessClient,
         ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
         SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
-        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, decode_goal_mutation_receipt, import_conversation_file, imported,
+        await_turn_terminal, collect_import_paths, continue_imported,
+        conversation_import_chunk_read_limit, conversations, create, decide,
+        decode_goal_mutation_receipt, import_conversation_file, imported,
         model_call_recovery_transition, open_scanned_import_source, read_goal_text_file,
         read_import_file, read_input, read_review_json_file, read_system_prompt_file,
         reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
@@ -5243,6 +5260,28 @@ mod tests {
             request_id,
         )?);
         Ok(())
+    }
+
+    #[test]
+    fn chunked_import_reads_at_most_one_byte_past_the_declared_size() {
+        let declared_size_bytes = CanonicalU64::new(1);
+
+        assert_eq!(
+            conversation_import_chunk_read_limit(declared_size_bytes, 0),
+            2
+        );
+        assert_eq!(
+            conversation_import_chunk_read_limit(declared_size_bytes, 1),
+            1
+        );
+        assert_eq!(
+            conversation_import_chunk_read_limit(declared_size_bytes, 2),
+            0
+        );
+        assert_eq!(
+            conversation_import_chunk_read_limit(CanonicalU64::new(u64::MAX), u64::MAX),
+            0
+        );
     }
 
     #[tokio::test]
