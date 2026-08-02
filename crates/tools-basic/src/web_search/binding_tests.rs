@@ -13,8 +13,8 @@ use super::{
     test_telemetry_support::*, text_decoding::*, tool::*,
 };
 
-/// INV-035: the actual `ToolExecutor::execute` result fails closed before
-/// its bound evidence diagnostic can reproduce the request credential.
+/// INV-035: the actual `ToolExecutor::execute` result rejects a fixed evidence
+/// label before dispatch and never reproduces the request credential.
 #[tokio::test]
 async fn web_search_bound_executor_result_omits_credential_collision() {
     let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -50,13 +50,13 @@ async fn web_search_bound_executor_result_omits_credential_collision() {
         .expect("captured executor diagnostic lock is available")
         .clone();
 
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert!(!rendered.contains(EXECUTOR_OUTCOME_COLLISION_KEY));
     assert_eq!(searches.load(Ordering::Relaxed), 0);
 }
 
-/// INV-035: case normalization of fixed bound-evidence Debug tokens cannot
-/// reproduce a request credential in the public executor result.
+/// INV-035: case normalization of fixed bound-evidence Debug tokens rejects a
+/// request credential before dispatch without reproducing it.
 #[tokio::test]
 async fn web_search_bound_executor_result_omits_case_normalized_credential_collision() {
     let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -92,7 +92,7 @@ async fn web_search_bound_executor_result_omits_case_normalized_credential_colli
         .expect("captured executor diagnostic lock is available")
         .clone();
 
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert!(!unicode_case_insensitive_contains(
         &rendered,
         EXECUTOR_CASE_NORMALIZED_OUTCOME_COLLISION_KEY
@@ -351,7 +351,7 @@ async fn web_search_bound_known_failure_omits_outer_ok_wrapper_collision() {
 }
 
 /// INV-035: punctuation does not conceal a case-normalized fixed Debug
-/// spelling in the public bound executor result.
+/// spelling during pre-dispatch credential validation.
 #[tokio::test]
 async fn web_search_bound_executor_result_omits_punctuated_case_collision() {
     let diagnostic = Arc::new(Mutex::new(String::new()));
@@ -387,7 +387,7 @@ async fn web_search_bound_executor_result_omits_punctuated_case_collision() {
         .expect("captured executor diagnostic lock is available")
         .clone();
 
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert!(!unicode_case_insensitive_contains(
         &rendered,
         EXECUTOR_PUNCTUATED_OUTCOME_COLLISION_KEY

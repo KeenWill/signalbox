@@ -78,7 +78,7 @@ pub(super) const BOUND_WRAPPER_DYNAMIC_PREFIX_COLLISION_VALUE: &str = "Synthetic
 
 pub(super) const RESULT_DEBUG_COLLISION_KEY: &str = "[provider-controlled]";
 
-pub(super) const REQUEST_DETAIL_COLLISION_KEY: &str = "failed";
+pub(super) const REQUEST_DETAIL_COLLISION_KEY: &str = "web search request failed";
 
 pub(super) const QUERY_CASE_NORMALIZED_COLLISION_KEY: &str = "ABCDEF";
 
@@ -126,7 +126,7 @@ pub(super) const EXECUTOR_BOUND_WRAPPER_FIELD_COLLISION_KEY: &str = "{ fence:";
 
 pub(super) const EXECUTOR_POPULATED_SUCCESS_WRAPPER_COLLISION_KEY: &str = "CompletedText(\"{";
 
-pub(super) const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "FAILED";
+pub(super) const CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY: &str = "WEB SEARCH REQUEST FAILED";
 
 pub(super) const DYNAMIC_PROVIDER_REJECTION_WRAPPER_COLLISION_KEY: &str = r#"Some(ToolExecutionErrorDetail("web search provider rejected the request with HTTP status 429"#;
 

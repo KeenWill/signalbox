@@ -119,25 +119,26 @@ fn credential_collision_omits_known_failure_detail() {
 }
 
 /// INV-035: a colliding definitive request-failure detail commits through
-/// the public service path rather than invoking crash classification.
+/// the public service path before dispatch rather than invoking crash
+/// classification.
 #[tokio::test]
 async fn credential_collision_commits_request_failure_without_crash() {
     let (outcome, searches) =
         execute_request_failure_through_service(REQUEST_DETAIL_COLLISION_KEY).await;
 
     assert!(is_committed_known_failure(&outcome));
-    assert_eq!(searches, 1);
+    assert_eq!(searches, 0);
 }
 
 /// INV-035: a case-normalized definitive detail collision is omitted while
-/// the public service still commits the completed request failure.
+/// the public service commits a pre-dispatch known failure.
 #[tokio::test]
 async fn case_normalized_detail_collision_commits_request_failure() {
     let (outcome, searches) =
         execute_request_failure_through_service(CASE_NORMALIZED_REQUEST_DETAIL_COLLISION_KEY).await;
 
     assert!(is_committed_known_failure_without_detail(&outcome));
-    assert_eq!(searches, 1);
+    assert_eq!(searches, 0);
 }
 
 /// INV-035: a dynamic provider-rejection detail that collides with the
