@@ -16,8 +16,8 @@ use signalbox_process_protocol::{
     ReviewFindingStatus, ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot,
     ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
     ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
-    SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    UsageProvenance,
+    SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -981,7 +981,7 @@ impl<'a> Output<'a> {
             snapshot.counts.repair_fixed_count.value(),
             snapshot.counts.publication_published_count.value(),
         )?;
-        self.review_text_field("concern_set_version", &snapshot.concern_set_version)?;
+        self.text_field("concern_set_version", &snapshot.concern_set_version)?;
         writeln!(
             self.stdout,
             "template_import_digest={} template_judgment_digest={} template_repair_digest={} \
@@ -1001,7 +1001,7 @@ impl<'a> Output<'a> {
                     .map_or_else(|| String::from("-"), |id| id.to_string()),
                 concern.template_digest.as_str(),
             )?;
-            self.review_text_field("concern_key", &concern.key)?;
+            self.text_field("concern_key", &concern.key)?;
         }
         Ok(())
     }
@@ -1022,13 +1022,13 @@ impl<'a> Output<'a> {
                 .stack_parent_target_id
                 .map_or_else(|| String::from("-"), |id| id.to_string()),
         )?;
-        self.review_text_field("provider", &target.provider)?;
-        self.review_text_field("repository", &target.repository)?;
-        self.review_text_field("head_revision", &target.head_revision)?;
+        self.text_field("provider", &target.provider)?;
+        self.text_field("repository", &target.repository)?;
+        self.text_field("head_revision", &target.head_revision)?;
         match target.base_revision.as_deref() {
             Some(base_revision) => {
                 writeln!(self.stdout, "base_revision_present=true")?;
-                self.review_text_field("base_revision", base_revision)
+                self.text_field("base_revision", base_revision)
             }
             None => writeln!(self.stdout, "base_revision_present=false"),
         }
@@ -1099,20 +1099,20 @@ impl<'a> Output<'a> {
             finding.finding.is_real_confidence.value(),
             finding.finding.severity_label_confidence.value(),
         )?;
-        self.review_text_field("file_path", &finding.finding.file_path)?;
-        self.review_text_field("title", &finding.finding.title)?;
-        self.review_text_field("body", &finding.finding.body)?;
-        self.review_text_field("category", &finding.finding.category)?;
+        self.text_field("file_path", &finding.finding.file_path)?;
+        self.text_field("title", &finding.finding.title)?;
+        self.text_field("body", &finding.finding.body)?;
+        self.text_field("category", &finding.finding.category)?;
         match finding.finding.recommended_fix.as_deref() {
             Some(recommended_fix) => {
                 writeln!(self.stdout, "recommended_fix_present=true")?;
-                self.review_text_field("recommended_fix", recommended_fix)
+                self.text_field("recommended_fix", recommended_fix)
             }
             None => writeln!(self.stdout, "recommended_fix_present=false"),
         }
     }
 
-    fn review_text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
+    fn text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
         write!(self.stdout, "{name}=")?;
         self.stdout.write_all(
             self.render_field(value, TextField::TrailingOnLine)
@@ -1476,6 +1476,43 @@ impl<'a> Output<'a> {
                      tool_attempt={tool_attempt_id}"
                 ),
             },
+            SessionEvent::ToolApprovalDecided {
+                turn_id,
+                tool_request_id,
+                decision,
+                decider,
+                rationale,
+            } => {
+                let (decision, denial_reason) = match decision {
+                    ToolApprovalEventDecision::Approve {} => ("approve", None),
+                    ToolApprovalEventDecision::Deny { reason } => ("deny", reason.as_deref()),
+                };
+                match decider {
+                    ToolApprovalEventDecider::User { command_id } => writeln!(
+                        self.stdout,
+                        "event={cursor} session={session_id} tool_approval_decided \
+                         turn={turn_id} request={tool_request_id} decision={decision} \
+                         decider=user command={command_id}"
+                    )?,
+                    ToolApprovalEventDecider::Delegate {
+                        model_selection_id,
+                        model_call_id,
+                    } => writeln!(
+                        self.stdout,
+                        "event={cursor} session={session_id} tool_approval_decided \
+                         turn={turn_id} request={tool_request_id} decision={decision} \
+                         decider=delegate model_selection={model_selection_id} \
+                         call={model_call_id}"
+                    )?,
+                }
+                if let Some(reason) = denial_reason {
+                    self.text_field("denial_reason", reason)?;
+                }
+                if let Some(rationale) = rationale {
+                    self.text_field("rationale", rationale)?;
+                }
+                Ok(())
+            }
             SessionEvent::ContextCompacted {
                 context_compaction_id,
                 model_call_id,
@@ -2420,8 +2457,8 @@ mod tests {
         MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost, ModelCallState,
         ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot,
         ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject,
-        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
-        UsageProvenance,
+        ServerMessage, SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision,
+        TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3681,6 +3718,28 @@ mod tests {
 
         expect![[r#"
             event=1 session=00000000-0000-0000-0000-000000000001 model_call_transition turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 state=cancellation_requested
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_delegate_tool_decision_and_rationale() {
+        let rendered = render_event(SessionEvent::ToolApprovalDecided {
+            turn_id: wire_uuid(2),
+            tool_request_id: wire_uuid(3),
+            decision: ToolApprovalEventDecision::Deny { reason: None },
+            decider: ToolApprovalEventDecider::Delegate {
+                model_selection_id: wire_uuid(4),
+                model_call_id: wire_uuid(5),
+            },
+            rationale: Some(String::from(
+                "request exceeds configured authority\nreview manually",
+            )),
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 tool_approval_decided turn=00000000-0000-0000-0000-000000000002 request=00000000-0000-0000-0000-000000000003 decision=deny decider=delegate model_selection=00000000-0000-0000-0000-000000000004 call=00000000-0000-0000-0000-000000000005
+            rationale=request exceeds configured authority\u{a}review manually
         "#]]
         .assert_eq(&rendered);
     }

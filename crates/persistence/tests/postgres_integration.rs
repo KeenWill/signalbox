@@ -55,12 +55,12 @@ use signalbox_domain::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent,
+    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
+    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
+    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -892,6 +892,23 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
     Ok((container, pool, database_url))
 }
 
+async fn postgres_before_approval_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608020015)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
 async fn insert_pending_compact_command(
     pool: &PgPool,
     command: Uuid,
@@ -1276,6 +1293,22 @@ where
             }
         }
     }
+}
+
+async fn dispatched_tool_approval_decision(
+    pool: &PgPool,
+    expected_request: ToolRequestId,
+) -> Result<Option<(TurnId, ToolApprovalResolution)>, OutboxDispatchError> {
+    let mut found = None;
+    drain_outbox(pool, |event| {
+        if let DispatchedOutboxEventKind::ToolApprovalDecided { turn, approval, .. } = event.kind()
+            && approval.request() == expected_request
+        {
+            found = Some((*turn, approval.clone()));
+        }
+    })
+    .await?;
+    Ok(found)
 }
 
 async fn corrupt_ended_attempt_disposition(
@@ -2111,6 +2144,23 @@ async fn checkpoint_confirmed_tool_batch(
     ),
     Box<dyn Error>,
 > {
+    checkpoint_tool_batch_with_approval(pool, seed, proposals, InitialToolApproval::Confirm).await
+}
+
+async fn checkpoint_tool_batch_with_approval(
+    pool: &PgPool,
+    seed: u128,
+    proposals: &[(&str, &str)],
+    initial_approval: InitialToolApproval,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
     let (fixture, model_repository, authorized) =
         authorize_checkpointed_model_call(pool, seed).await?;
     let requests = proposals
@@ -2147,7 +2197,7 @@ async fn checkpoint_confirmed_tool_batch(
                     seed + 0x80 + u128::try_from(index).expect("the bounded batch index fits u128"),
                 )),
                 *request,
-                InitialToolApproval::Confirm,
+                initial_approval,
             )
         })
         .collect();
@@ -2158,21 +2208,76 @@ async fn checkpoint_confirmed_tool_batch(
             ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
                 identities,
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xc0)),
-                None,
+                (!initial_approval.requires_decision())
+                    .then(|| TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xc1))),
             )),
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        outcome,
-        ModelCallTerminalOutcome::ToolRound(ref round)
-            if matches!(
-                round.next_phase(),
-                ActiveTurnPhase::AwaitingApproval { request: waiting }
-                    if Some(waiting) == requests.first()
-            )
-    ));
+    if initial_approval.requires_decision() {
+        assert!(matches!(
+            outcome,
+            ModelCallTerminalOutcome::ToolRound(ref round)
+                if matches!(
+                    round.next_phase(),
+                    ActiveTurnPhase::AwaitingApproval { request: waiting }
+                        if Some(waiting) == requests.first()
+                )
+        ));
+    }
     Ok((fixture, model_repository, observation, requests))
+}
+async fn insert_completed_judge(
+    connection: &mut PgConnection,
+    fixture: &RestartModelCallFixture,
+    request: ToolRequestId,
+    seed: u128,
+    recommendation: &str,
+    input_tokens: Option<Decimal>,
+) -> Result<(Uuid, Uuid), sqlx::Error> {
+    let selection = Uuid::from_u128(seed + 1);
+    let call = Uuid::from_u128(seed + 2);
+    sqlx::query(
+        "INSERT INTO tool_approval_judge_model_call
+            (model_call_id, request_id, session_id, turn_id,
+             direct_model_selection_id, resolved_provider_model_identity_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, 'fixture-credential', 'prepared')",
+    )
+    .bind(call)
+    .bind(request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(selection)
+    .bind(Uuid::from_u128(seed + 3))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_approval_judge_model_call SET state_kind = 'in_flight'
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_approval_judge_model_call
+            SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+                recommendation_kind = $1, rationale = 'fixture rationale',
+                input_tokens = $2
+          WHERE model_call_id = $3",
+    )
+    .bind(recommendation)
+    .bind(input_tokens)
+    .bind(call)
+    .execute(&mut *connection)
+    .await?;
+    Ok((selection, call))
+}
+
+fn database_constraint(error: &sqlx::Error) -> Option<&str> {
+    error
+        .as_database_error()
+        .and_then(|error| error.constraint())
 }
 
 /// S10 / INV-005: stored tool arguments use the same exact canonical JSON or
@@ -3161,6 +3266,446 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     })
     .await?;
     assert!(proposed_event && results_event);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn explicit_tool_decision_dispatches_full_user_provenance() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7e00;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21));
+    PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            decide_tool_request(command, request, ToolApprovalDecision::Approve),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22)),
+        )
+        .await?;
+
+    let (event_turn, approval) = dispatched_tool_approval_decision(&pool, request)
+        .await?
+        .expect("the explicit decision appends its typed outbox event");
+    assert_eq!(event_turn, fixture.turn);
+    assert_eq!(approval.request(), request);
+    assert_eq!(approval.decision(), &ToolApprovalDecision::Approve);
+    assert_eq!(
+        approval.decider(),
+        Some(&ToolApprovalDecider::User { command })
+    );
+    assert_eq!(approval.rationale(), None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_automatic_decision_cannot_widen_a_human_request()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, 0x7e20, "current_time", "{}").await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source)
+         VALUES ($1, 'approve', 'policy_auto')",
+    )
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("human posture rejects auto authority");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_automatic_requires_auto_posture")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_posture_migration_backfills_append_only_requests() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = postgres_before_approval_migration().await?;
+    let request = Uuid::from_u128(0x7e31);
+    let mut connection = pool.acquire().await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 0, 'current_time', 'json', '{}')",
+    )
+    .bind(request)
+    .bind(Uuid::from_u128(0x7e32))
+    .bind(Uuid::from_u128(0x7e33))
+    .bind(Uuid::from_u128(0x7e34))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    migrate(&pool).await?;
+    let posture: String =
+        sqlx::query_scalar("SELECT approval_posture FROM tool_request WHERE request_id = $1")
+            .bind(request)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(posture, "human");
+    let error = sqlx::query("UPDATE tool_request SET tool_name = tool_name WHERE request_id = $1")
+        .bind(request)
+        .execute(&pool)
+        .await
+        .expect_err("the migration restores append-only enforcement");
+    assert!(error.to_string().contains("tool_request is append-only"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_judge_completion_respects_posture() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (human, _, _, human_request) =
+        checkpoint_confirmed_tool_round(&pool, 0x7e40, "current_time", "{}").await?;
+    let mut connection = pool.acquire().await?;
+    let posture_error = insert_completed_judge(
+        &mut connection,
+        &human,
+        human_request,
+        0x7e50,
+        "approve",
+        None,
+    )
+    .await
+    .expect_err("a judge cannot approve human-only authority");
+    assert_eq!(
+        database_constraint(&posture_error),
+        Some("tool_approval_judge_recommendation_within_posture")
+    );
+
+    drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_completed_judge_requires_atomic_decision_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e54,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut transaction = pool.begin().await?;
+    insert_completed_judge(
+        &mut transaction,
+        &fixture,
+        *request,
+        0x7e55,
+        "approve",
+        None,
+    )
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("completed approve requires its decision, event, and lifecycle effect");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_completed_requires_decision_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_delegate_decision_requires_event_and_lifecycle_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e56,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut transaction = pool.begin().await?;
+    let (selection, call) = insert_completed_judge(
+        &mut transaction,
+        &fixture,
+        *request,
+        0x7e57,
+        "approve",
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             delegate_model_selection_id, delegate_model_call_id, rationale)
+         VALUES ($1, 'approve', 'delegate', $2, $3, 'fixture rationale')",
+    )
+    .bind(request.into_uuid())
+    .bind(selection)
+    .bind(call)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("delegate approval requires its event and advanced lifecycle");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_explicit_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, 0x7e57, "current_time", "{}").await?;
+    let command = Uuid::from_u128(0x7e58);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, owner_command_id)
+         VALUES ($1, 'approve', 'owner_command', $2)",
+    )
+    .bind(request.into_uuid())
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("user approval requires its event and advanced lifecycle");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_explicit_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_unsent_judge_call_rejects_usage() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e58,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let call = Uuid::from_u128(0x7e59);
+    let mut connection = pool.acquire().await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_judge_model_call
+            (model_call_id, request_id, session_id, turn_id,
+             direct_model_selection_id, resolved_provider_model_identity_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, 'fixture-credential', 'prepared')",
+    )
+    .bind(call)
+    .bind(request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(0x7e5a))
+    .bind(Uuid::from_u128(0x7e5b))
+    .execute(&mut *connection)
+    .await?;
+    let error = sqlx::query(
+        "UPDATE tool_approval_judge_model_call
+            SET state_kind = 'terminal', terminal_disposition_kind = 'known_failed',
+                input_tokens = 1
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&mut *connection)
+    .await
+    .expect_err("an unsent judge call cannot report provider usage");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_unsent_has_no_usage")
+    );
+
+    drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_judge_usage_respects_u64_bounds() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (delegated, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e60,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [delegated_request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut connection = pool.acquire().await?;
+    let too_large = Decimal::from(u64::MAX) + Decimal::ONE;
+    let usage_error = insert_completed_judge(
+        &mut connection,
+        &delegated,
+        *delegated_request,
+        0x7e70,
+        "approve",
+        Some(too_large),
+    )
+    .await
+    .expect_err("judge usage above u64 cannot commit");
+    assert_eq!(
+        database_constraint(&usage_error),
+        Some("tool_approval_judge_call_usage_u64_range")
+    );
+
+    drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_judge_usage_rejects_fractional_counts() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (delegated, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e74,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [delegated_request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut connection = pool.acquire().await?;
+    let usage_error = insert_completed_judge(
+        &mut connection,
+        &delegated,
+        *delegated_request,
+        0x7e75,
+        "approve",
+        Some(Decimal::new(15, 1)),
+    )
+    .await
+    .expect_err("fractional judge usage cannot be rounded into storage");
+    assert_eq!(
+        database_constraint(&usage_error),
+        Some("tool_approval_judge_call_usage_u64_range")
+    );
+
+    drop(connection);
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_user_cannot_decide_delegated_request_before_escalation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        0x7e80,
+        &[("current_time", "{}")],
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let error = PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x9e81)),
+                *request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(0x9e82)),
+        )
+        .await
+        .expect_err("delegated authority requires recorded escalation");
+    let ToolLoopRepositoryError::Database { source, .. } = error else {
+        panic!("the authority guard returns its database constraint")
+    };
+    assert_eq!(
+        database_constraint(&source),
+        Some("tool_approval_user_requires_human_authority")
+    );
 
     pool.close().await;
     drop(container);

@@ -10,8 +10,8 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextCompactionId, ContextFrontierId, ModelCallDisposition, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, SessionInputPosition, ToolAttemptId, TurnAttemptId,
-    TurnId,
+    SemanticTranscriptEntryId, SessionId, SessionInputPosition, ToolApprovalResolution,
+    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -30,6 +30,7 @@ const TURN_ACTIVATED: &str = "turn_activated";
 const TURN_FAILED: &str = "turn_failed";
 const MODEL_CALL_TRANSITION: &str = "model_call_transition";
 const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
+const TOOL_APPROVAL_DECIDED: &str = "tool_approval_decided";
 const CONTEXT_COMPACTED: &str = "context_compacted";
 const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
@@ -130,6 +131,15 @@ pub enum DispatchedOutboxEventKind {
         producing_call: ModelCallId,
         /// Exact durable batch state.
         state: DispatchedToolBatchState,
+    },
+    /// One tool approval decision committed with complete provenance.
+    ToolApprovalDecided {
+        /// Owning turn.
+        turn: TurnId,
+        /// Exact durable approval resolution.
+        approval: ToolApprovalResolution,
+        /// Exact explicit actor provenance.
+        decider: signalbox_domain::ToolApprovalDecider,
     },
     /// One append-only context compaction committed.
     ContextCompacted {
@@ -1043,6 +1053,49 @@ async fn load_event(
                 state,
             }
         }
+        TOOL_APPROVAL_DECIDED => {
+            let row = sqlx::query(
+                "SELECT event.turn_id, event.request_id
+                   FROM tool_approval_decided_outbox_event AS event
+                   JOIN tool_request AS request
+                     ON request.request_id = event.request_id
+                    AND request.turn_id = event.turn_id
+                    AND request.session_id = event.session_id
+                   JOIN tool_approval_decision AS approval
+                     ON approval.request_id = event.request_id
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let turn: Uuid = row.try_get("turn_id")?;
+            let request: Uuid = row.try_get("request_id")?;
+            let request = ToolRequestId::from_uuid(request);
+            let mut approvals =
+                match crate::tool_loop::load_approvals_by_request(transaction, &[request]).await {
+                    Ok(approvals) => approvals,
+                    Err(crate::tool_loop::ToolLoopRepositoryError::Database { source, .. }) => {
+                        return Err(source.into());
+                    }
+                    Err(_) => {
+                        return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+                    }
+                };
+            let approval = approvals
+                .remove(&request)
+                .ok_or(OutboxCorruption::InvalidLifecycleEventCorrelation)?;
+            let Some(decider) = approval.decider().copied() else {
+                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+            };
+            DispatchedOutboxEventKind::ToolApprovalDecided {
+                turn: TurnId::from_uuid(turn),
+                approval,
+                decider,
+            }
+        }
         CONTEXT_COMPACTED => {
             let row: (Uuid, Uuid, Decimal, Uuid, Uuid) = sqlx::query_as(
                 "SELECT event.context_compaction_id, event.model_call_id,
@@ -1539,6 +1592,11 @@ pub(crate) enum OutboxEvent {
         producing_call: ModelCallId,
         state: ToolBatchOutboxState,
     },
+    ToolApprovalDecided {
+        session: SessionId,
+        turn: TurnId,
+        request: ToolRequestId,
+    },
     ContextCompacted {
         session: SessionId,
         compaction: ContextCompactionId,
@@ -1642,6 +1700,11 @@ pub(crate) async fn append(
             producing_call,
             state,
         } => append_tool_batch_transition(connection, session, turn, producing_call, state).await,
+        OutboxEvent::ToolApprovalDecided {
+            session,
+            turn,
+            request,
+        } => append_tool_approval_decided(connection, session, turn, request).await,
         OutboxEvent::ContextCompacted {
             session,
             compaction,
@@ -1724,6 +1787,36 @@ pub(crate) async fn append(
             .await
         }
     }
+}
+
+async fn append_tool_approval_decided(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    request: ToolRequestId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_approval_decided_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5
+           FROM header",
+    )
+    .bind(TOOL_APPROVAL_DECIDED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(request.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn append_context_compacted(

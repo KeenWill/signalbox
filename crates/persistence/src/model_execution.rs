@@ -46,7 +46,8 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        session_id_from_uuid, session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
+        session_id_from_uuid, session_id_to_uuid, tool_approval_posture_to_str,
+        tool_request_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -4109,11 +4110,12 @@ async fn persist_tool_round_authority(
             signalbox_domain::ToolArgumentsKind::Json => "json",
             signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
         };
+        let approval_posture = tool_approval_posture_to_str(request.approval_posture());
         sqlx::query(
             "INSERT INTO tool_request
                 (request_id, session_id, turn_id, producing_model_call_id,
-                 request_ordinal, tool_name, arguments_kind, arguments_text)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(tool_request_id_to_uuid(request.id()))
         .bind(session_id_to_uuid(request.session()))
@@ -4123,6 +4125,7 @@ async fn persist_tool_round_authority(
         .bind(request.name().as_str())
         .bind(arguments_kind)
         .bind(request.arguments().as_str())
+        .bind(approval_posture)
         .execute(&mut *connection)
         .await?;
     }
