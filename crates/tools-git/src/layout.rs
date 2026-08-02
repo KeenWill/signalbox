@@ -6,7 +6,7 @@ use std::{
         fd::{AsFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use git2::ObjectFormat;
@@ -86,9 +86,9 @@ fn reject_administrative_symlinks_for_format(
     object_format: ObjectFormat,
 ) -> Result<(), LocalGitToolsConstructionError> {
     let root = dup(git_directory).map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    let mut pending = vec![(root, PathBuf::new())];
+    let mut pending = vec![(root, AdministrativeDirectoryKind::Root)];
     let mut inspected = 0_usize;
-    while let Some((current, relative_directory)) = pending.pop() {
+    while let Some((current, directory_kind)) = pending.pop() {
         let mut entries =
             Dir::read_from(&current).map_err(|_| LocalGitToolsConstructionError::Repository)?;
         while let Some(entry) = entries.read() {
@@ -101,8 +101,6 @@ fn reject_administrative_symlinks_for_format(
             if inspected > MAX_REPOSITORY_INSPECTIONS {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
-            let mut relative = relative_directory.clone();
-            relative.push(name);
             match openat(
                 &current,
                 name,
@@ -110,7 +108,16 @@ fn reject_administrative_symlinks_for_format(
                 Mode::empty(),
             ) {
                 Ok(directory) => {
-                    pending.push((directory, relative));
+                    let child_kind = match (directory_kind, name) {
+                        (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("refs") => {
+                            AdministrativeDirectoryKind::References
+                        }
+                        (AdministrativeDirectoryKind::References, _) => {
+                            AdministrativeDirectoryKind::References
+                        }
+                        _ => AdministrativeDirectoryKind::Other,
+                    };
+                    pending.push((directory, child_kind));
                     continue;
                 }
                 Err(error) if error == rustix::io::Errno::NOTDIR => {}
@@ -130,24 +137,38 @@ fn reject_administrative_symlinks_for_format(
             if !metadata.is_file() {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
-            let limit = if relative == Path::new("HEAD") || relative.starts_with("refs") {
-                Some(MAX_REVISION_BYTES)
-            } else if relative == Path::new("packed-refs") {
-                Some(MAX_PACKED_REFS_BYTES)
-            } else if relative == Path::new("shallow") {
-                Some(MAX_SHALLOW_BYTES)
-            } else {
-                None
+            let limit = match (directory_kind, name) {
+                (AdministrativeDirectoryKind::Root, name)
+                    if name == OsStr::new("HEAD") || name == OsStr::new("refs") =>
+                {
+                    Some(MAX_REVISION_BYTES)
+                }
+                (AdministrativeDirectoryKind::References, _) => Some(MAX_REVISION_BYTES),
+                (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("packed-refs") => {
+                    Some(MAX_PACKED_REFS_BYTES)
+                }
+                (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("shallow") => {
+                    Some(MAX_SHALLOW_BYTES)
+                }
+                _ => None,
             };
             if limit.is_some_and(|limit| metadata.len() > limit as u64) {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
-            if relative == Path::new("shallow") {
+            if directory_kind == AdministrativeDirectoryKind::Root && name == OsStr::new("shallow")
+            {
                 validate_shallow_file(&mut file, object_format)?;
             }
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AdministrativeDirectoryKind {
+    Root,
+    References,
+    Other,
 }
 
 pub(super) fn validate_shallow_file(

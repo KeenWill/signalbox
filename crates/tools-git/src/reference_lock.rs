@@ -63,6 +63,12 @@ pub(super) struct ReferenceParent {
     creation_file_mode: Option<Mode>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ReferenceParentMode {
+    CreateMissing,
+    ExistingOnly,
+}
+
 #[derive(Debug)]
 pub(super) struct CreatedReferenceDirectory {
     parent: OwnedFd,
@@ -79,7 +85,7 @@ impl ReferenceLock {
         name: &str,
     ) -> Result<Self, LocalGitFailure> {
         authority.validate_supported_layout()?;
-        let bound = open_reference_parent(authority, name, true)?;
+        let bound = open_reference_parent(authority, name, ReferenceParentMode::CreateMissing)?;
         let creation_file_mode = bound.creation_file_mode;
         let parent = bound.directory;
         let leaf = bound.leaf;
@@ -270,7 +276,7 @@ impl ReferenceLock {
                 if publication_is_current {
                     let prepared = self.prepared.ok_or(LocalGitFailure::Operation)?;
                     let _ =
-                        remove_displaced_reference_if_current(&self.parent, &self.leaf, prepared);
+                        remove_published_reference_if_current(&self.parent, &self.leaf, prepared);
                 }
                 return Err(LocalGitFailure::Operation);
             }
@@ -320,19 +326,29 @@ impl ReferenceLock {
             return Err(LocalGitFailure::Operation);
         }
         before_cleanup();
-        if remove_displaced_reference_if_current(
+        let final_postconditions_hold = packed_reference_target(authority, &self.name)
+            .is_ok_and(|current| current == expected_packed)
+            && packed_reference_namespace_conflicts(authority, &self.name)
+                .is_ok_and(|conflicts| !conflicts)
+            && authority.validate_supported_layout().is_ok()
+            && self.hierarchy_is_current(authority);
+        if !final_postconditions_hold {
+            let _ = rollback_reference_exchange_if_current(
+                &self.parent,
+                &self.leaf,
+                &self.lock_name,
+                expected_leaf_snapshot,
+                self.prepared.ok_or(LocalGitFailure::Operation)?,
+            );
+            return Err(LocalGitFailure::Operation);
+        }
+        finalize_reference_exchange_if_current(
             &self.parent,
+            &self.leaf,
             &self.lock_name,
             expected_leaf_snapshot,
-        )
-        .is_err()
-        {
-            return Err(LocalGitFailure::Operation);
-        }
-        if !self.prepared_publication_is_current() {
-            return Err(LocalGitFailure::Operation);
-        }
-        authority.validate_supported_layout()?;
+            self.prepared.ok_or(LocalGitFailure::Operation)?,
+        )?;
         self.committed = true;
         Ok(())
     }
@@ -447,13 +463,130 @@ impl ReferenceLock {
     }
 }
 
-fn remove_displaced_reference_if_current(
+fn finalize_reference_exchange_if_current(
+    parent: &OwnedFd,
+    leaf: &OsStr,
+    lock_name: &OsStr,
+    displaced: ReferenceSnapshotIdentity,
+    publication: ReferenceSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let quarantine = QuarantineDirectory::create(parent)?;
+    let quarantined_displaced = OsStr::new("displaced");
+    let quarantined_publication = OsStr::new("publication");
+    renameat_with(
+        parent,
+        lock_name,
+        quarantine.descriptor(),
+        quarantined_displaced,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_displaced)
+        != Ok(Some(displaced))
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
+        parent,
+        leaf,
+        quarantine.descriptor(),
+        quarantined_publication,
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_publication)
+        != Ok(Some(publication))
+    {
+        restore_quarantined_exchange(
+            parent,
+            leaf,
+            lock_name,
+            &quarantine,
+            quarantined_displaced,
+            quarantined_publication,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
+        quarantine.descriptor(),
+        quarantined_publication,
+        parent,
+        leaf,
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if reference_snapshot_identity_at(parent, leaf) != Ok(Some(publication)) {
+        if renameat_with(
+            parent,
+            leaf,
+            quarantine.descriptor(),
+            quarantined_publication,
+            RenameFlags::NOREPLACE,
+        )
+        .is_ok()
+        {
+            restore_quarantined_exchange(
+                parent,
+                leaf,
+                lock_name,
+                &quarantine,
+                quarantined_displaced,
+                quarantined_publication,
+            );
+        } else {
+            let _ = renameat_with(
+                quarantine.descriptor(),
+                quarantined_displaced,
+                parent,
+                lock_name,
+                RenameFlags::NOREPLACE,
+            );
+        }
+        return Err(LocalGitFailure::Operation);
+    }
+    unlinkat(
+        quarantine.descriptor(),
+        quarantined_displaced,
+        AtFlags::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    Ok(())
+}
+
+fn remove_published_reference_if_current(
     parent: &OwnedFd,
     name: &OsStr,
     expected: ReferenceSnapshotIdentity,
 ) -> Result<(), LocalGitFailure> {
     let quarantine = QuarantineDirectory::create(parent)?;
-    let quarantined_name = OsStr::new("displaced");
+    let quarantined_name = OsStr::new("publication");
     renameat_with(
         parent,
         name,
@@ -462,10 +595,9 @@ fn remove_displaced_reference_if_current(
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| LocalGitFailure::Operation)?;
-    let quarantined_is_expected =
-        reference_snapshot_identity_at(quarantine.descriptor(), quarantined_name)
-            == Ok(Some(expected));
-    if !quarantined_is_expected {
+    if reference_snapshot_identity_at(quarantine.descriptor(), quarantined_name)
+        != Ok(Some(expected))
+    {
         let _ = renameat_with(
             quarantine.descriptor(),
             quarantined_name,
@@ -481,6 +613,30 @@ fn remove_displaced_reference_if_current(
         return Err(LocalGitFailure::Operation);
     }
     Ok(())
+}
+
+fn restore_quarantined_exchange(
+    parent: &OwnedFd,
+    leaf: &OsStr,
+    lock_name: &OsStr,
+    quarantine: &QuarantineDirectory,
+    quarantined_displaced: &OsStr,
+    quarantined_publication: &OsStr,
+) {
+    let _ = renameat_with(
+        quarantine.descriptor(),
+        quarantined_displaced,
+        parent,
+        leaf,
+        RenameFlags::NOREPLACE,
+    );
+    let _ = renameat_with(
+        quarantine.descriptor(),
+        quarantined_publication,
+        parent,
+        lock_name,
+        RenameFlags::NOREPLACE,
+    );
 }
 
 fn rollback_reference_exchange_if_current(
@@ -683,7 +839,7 @@ impl CreatedReferenceDirectories {
 pub(super) fn open_reference_parent(
     authority: &PinnedRepository,
     name: &str,
-    create: bool,
+    mode: ReferenceParentMode,
 ) -> Result<ReferenceParent, LocalGitFailure> {
     if name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)) {
         return Err(LocalGitFailure::Operation);
@@ -695,10 +851,11 @@ pub(super) fn open_reference_parent(
         .ok_or(LocalGitFailure::Operation)?
         .to_owned();
     let parent_path = path.parent().unwrap_or_else(|| Path::new(""));
-    let creation_modes = if create && name.starts_with("refs/") {
-        Some(reference_creation_modes(authority)?)
-    } else {
-        None
+    let creation_modes = match mode {
+        ReferenceParentMode::CreateMissing if name.starts_with("refs/") => {
+            Some(reference_creation_modes(authority)?)
+        }
+        ReferenceParentMode::CreateMissing | ReferenceParentMode::ExistingOnly => None,
     };
     let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
     let mut relative = PathBuf::new();
@@ -715,21 +872,20 @@ pub(super) fn open_reference_parent(
         let Component::Normal(component) = component else {
             return Err(LocalGitFailure::Operation);
         };
-        let next_directory = if create {
-            match creation_modes {
+        let next_directory = match mode {
+            ReferenceParentMode::CreateMissing => match creation_modes {
                 Some((directory_mode, _)) => {
                     created_directories.open_or_create(&directory, component, directory_mode)?
                 }
                 None => open_or_create_ref_directory(&directory, component)?,
-            }
-        } else {
-            openat(
+            },
+            ReferenceParentMode::ExistingOnly => openat(
                 &directory,
                 component,
                 OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
             )
-            .map_err(|_| LocalGitFailure::Operation)?
+            .map_err(|_| LocalGitFailure::Operation)?,
         };
         directory = next_directory;
         relative.push(component);

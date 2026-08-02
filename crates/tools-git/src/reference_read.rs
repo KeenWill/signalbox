@@ -16,7 +16,9 @@ use crate::failure::LocalGitFailure;
 use crate::limits::MAX_REVISION_BYTES;
 use crate::packed_reference::packed_reference_target;
 use crate::pinning::PinnedRepository;
-use crate::reference_lock::{PinnedReferenceValue, ReferenceLock, open_reference_parent};
+use crate::reference_lock::{
+    PinnedReferenceValue, ReferenceLock, ReferenceParentMode, open_reference_parent,
+};
 
 pub(super) fn open_git_directory_path(
     authority: &PinnedRepository,
@@ -42,7 +44,7 @@ pub(super) fn read_pinned_reference(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-    let bound = match open_reference_parent(authority, name, false) {
+    let bound = match open_reference_parent(authority, name, ReferenceParentMode::ExistingOnly) {
         Ok(bound) => bound,
         Err(error) if name.starts_with("refs/") => {
             if loose_reference_parent_is_missing(authority, name)? {

@@ -1,9 +1,12 @@
 //! Repository-layout scan properties.
 
-use std::{fs, os::unix::fs::symlink};
+use std::{
+    fs,
+    os::{fd::OwnedFd, unix::fs::symlink},
+};
 
 use git2::{ObjectFormat, ObjectType};
-use rustix::fs::{CWD, Mode, OFlags, openat};
+use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat, symlinkat};
 
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
@@ -40,6 +43,42 @@ fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
 
     assert!(outside.path().join("escape").is_symlink());
+}
+
+#[test]
+fn administrative_scan_rejects_a_symlink_without_retaining_a_deep_path() {
+    let fixture = Fixture::new();
+    let git_directory = openat(
+        CWD,
+        fixture.root().join(".git"),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("fixture administrative directory pins");
+    plant_deep_administrative_symlink(git_directory, 256);
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("deep administrative symlink rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+fn plant_deep_administrative_symlink(parent: OwnedFd, remaining: usize) {
+    if remaining == 0 {
+        symlinkat("/outside", &parent, "escape").expect("deep administrative symlink constructs");
+        return;
+    }
+    let component = format!("d{remaining:03}-{}", "x".repeat(200));
+    mkdirat(&parent, &component, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+        .expect("deep administrative directory constructs");
+    let child = openat(
+        &parent,
+        &component,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("deep administrative directory pins");
+    plant_deep_administrative_symlink(child, remaining - 1);
 }
 
 #[test]

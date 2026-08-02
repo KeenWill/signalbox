@@ -9,7 +9,8 @@ use crate::layout::validate_repository_layout;
 use crate::limits::MAX_REVISION_BYTES;
 use crate::pinning::PinnedRepository;
 use crate::reference_lock::{
-    ReferenceLock, open_or_create_ref_directory_with_mode_tracked_and_hook, open_reference_parent,
+    ReferenceLock, ReferenceParentMode, open_or_create_ref_directory_with_mode_tracked_and_hook,
+    open_reference_parent,
 };
 use crate::reference_read::read_reference_leaf_with_test_hook;
 use crate::tests::support::{Fixture, Sha256Fixture};
@@ -374,6 +375,42 @@ fn reference_publication_preserves_a_file_replacing_the_cleanup_path() {
 }
 
 #[test]
+fn reference_publication_restores_the_old_reference_when_new_bytes_race_cleanup() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let original = format!("{}\n", fixture.initial);
+    let actor_target = format!(
+        "{}\n",
+        git2::Oid::hash_object(git2::ObjectType::Blob, b"actor target")
+            .expect("actor target hashes")
+    );
+    fs::write(&reference_path, &original).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("existing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_cleanup_test_hook(&authority, &expected, || {
+            fs::write(&reference_path, &actor_target).expect("published reference rewrites")
+        })
+        .expect_err("racing publication rewrite rejects cleanup");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("restored original reference reads"),
+        original
+    );
+    assert!(!lock_path.exists());
+}
+
+#[test]
 fn loose_reference_rejects_growth_after_metadata_capture() {
     let fixture = Fixture::new();
     let name = "refs/heads/growing";
@@ -382,8 +419,8 @@ fn loose_reference_rejects_growth_after_metadata_capture() {
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
-    let bound =
-        open_reference_parent(&authority, name, false).expect("fixture reference parent opens");
+    let bound = open_reference_parent(&authority, name, ReferenceParentMode::ExistingOnly)
+        .expect("fixture reference parent opens");
     let mut oversized = b"ref: refs/heads/".to_vec();
     oversized.extend(vec![b'a'; MAX_REVISION_BYTES]);
 
@@ -405,8 +442,8 @@ fn loose_reference_rejects_same_length_rewrite_after_metadata_capture() {
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
-    let bound =
-        open_reference_parent(&authority, name, false).expect("fixture reference parent opens");
+    let bound = open_reference_parent(&authority, name, ReferenceParentMode::ExistingOnly)
+        .expect("fixture reference parent opens");
 
     let failure =
         read_reference_leaf_with_test_hook(&bound.directory, &bound.leaf, &authority, name, || {
