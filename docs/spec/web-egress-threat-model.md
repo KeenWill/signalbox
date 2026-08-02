@@ -2,7 +2,7 @@
 
 This page specifies the implemented security boundary for web-tool output,
 verified against PR #365 (`agent/web-search`). It covers provider response
-parsing and evidence construction in `crates/tools-basic`; provider selection,
+parsing and evidence construction in `crates/tools-web`; provider selection,
 transport behavior, and daemon composition are owned by their implementing
 slices.
 
