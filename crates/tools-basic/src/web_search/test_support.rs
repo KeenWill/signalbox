@@ -48,6 +48,9 @@ pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8:
 
 pub(super) const FIXTURE_SEPARATOR_SPANNING_IPV6_HEXTET_RESULT_URL: &str = "https://[1:0db8::1]/";
 
+pub(super) const FIXTURE_COMPRESSED_ZERO_HEXTET_RESULT_URL: &str =
+    "https://[1:0000:0000:2:3:4:5:6]/";
+
 pub(super) const FIXTURE_TAB_NORMALIZED_RESULT_URL: &str = "http://example.com/abcd";
 
 pub(super) const FIXTURE_UPPERCASE_SCHEME_RESULT_URL: &str = "HTTPS://example.com/result";
@@ -123,6 +126,8 @@ pub(super) const URL_PREPROCESSED_DOT_SEGMENT_COLLISION_KEY: &str = "x\t/a/../b"
 
 pub(super) const URL_PREPROCESSED_AUTHORITY_PORT_COLLISION_KEY: &str = "m:\t04";
 
+pub(super) const URL_PREPROCESSED_DECODED_DOT_COLLISION_KEY: &str = "%\t2e%2e/secret";
+
 pub(super) const URL_EMPTY_SEGMENT_DOT_COLLISION_KEY: &str = "a//../b";
 
 pub(super) const URL_SCHEME_CASE_COLLISION_KEY: &str = "HTTPS";
@@ -180,6 +185,8 @@ pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
 pub(super) const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
 
 pub(super) const URL_IPV6_SEPARATOR_SPANNING_COLLISION_KEY: &str = ":0db";
+
+pub(super) const URL_IPV6_COMPRESSED_ZERO_SEPARATOR_COLLISION_KEY: &str = ":0000:";
 
 pub(super) const URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY: &str = "0db";
 
@@ -304,6 +311,12 @@ pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 
 pub(super) const POPULATED_EVIDENCE_DETAIL_DEBUG_COLLISION_KEY: &str = "ToolExecutionErrorDetail";
+
+pub(super) const POPULATED_SUCCESS_DEBUG_ESCAPE_COLLISION_KEY: &str = "\\";
+
+pub(super) const REMOVED_DIAGNOSTIC_PROBE_WORD: &str = "diagnostic";
+
+pub(super) const REMOVED_DETAIL_PROBE_WORD: &str = "probe";
 
 pub(super) const DEBUG_RESULT_COUNT_COLLISION_COUNT: usize = 1;
 
