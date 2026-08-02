@@ -44,11 +44,15 @@ pub(super) const FIXTURE_PORT_PATH_ZERO_RESULT_URL: &str = "https://example.com:
 
 pub(super) const FIXTURE_DEFAULT_PORT_PATH_RESULT_URL: &str = "http://example.com:80/path";
 
+pub(super) const FIXTURE_DEFAULT_PORT_ONLY_RESULT_URL: &str = "http://example.com:80/";
+
 pub(super) const FIXTURE_EMPTY_QUERY_RESULT_URL: &str = "https://example.com/xyzabc?";
 
 pub(super) const FIXTURE_EMPTY_FRAGMENT_RESULT_URL: &str = "https://example.com/xyzabc#";
 
 pub(super) const FIXTURE_USER_INFORMATION_BOUNDARY_RESULT_URL: &str = "http://usernam@example.com/";
+
+pub(super) const FIXTURE_USER_INFORMATION_LEGACY_IPV4_RESULT_URL: &str = "http://nam@0x7f.0.0.1/";
 
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
@@ -192,11 +196,15 @@ pub(super) const URL_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "m:80/p";
 
 pub(super) const URL_BARE_REMOVED_DEFAULT_PORT_PATH_COLLISION_KEY: &str = "80/p";
 
+pub(super) const URL_REMOVED_DEFAULT_PORT_COLLISION_KEY: &str = "m:80";
+
 pub(super) const URL_EMPTY_QUERY_DELIMITER_COLLISION_KEY: &str = "xyzabc?";
 
 pub(super) const URL_EMPTY_FRAGMENT_DELIMITER_COLLISION_KEY: &str = "xyzabc#";
 
 pub(super) const URL_USER_INFORMATION_BOUNDARY_COLLISION_KEY: &str = "m@example";
+
+pub(super) const URL_USER_INFORMATION_LEGACY_IPV4_COLLISION_KEY: &str = "m@0x7";
 
 pub(super) const URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY: &str = "com:1";
 
@@ -209,6 +217,8 @@ pub(super) const URL_IPV6_SEPARATOR_SPANNING_COLLISION_KEY: &str = ":0db";
 pub(super) const URL_IPV6_COMPRESSED_ZERO_SEPARATOR_COLLISION_KEY: &str = ":0000:";
 
 pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_COLLISION_KEY: &str = ":0000:0000:";
+
+pub(super) const URL_IPV6_COMPRESSED_ZERO_RUN_SUFFIX_COLLISION_KEY: &str = ":0000:0000:2:";
 
 pub(super) const URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY: &str = "0db";
 
@@ -337,6 +347,8 @@ pub(super) const PROVIDER_PLACEHOLDER_DEBUG_COLLISION_KEY: &str = "[provider-con
 pub(super) const COMPLETED_EVIDENCE_DEBUG_COLLISION_KEY: &str = "CompletedText";
 
 pub(super) const KNOWN_FAILURE_EVIDENCE_DEBUG_COLLISION_KEY: &str = "KnownFailed";
+
+pub(super) const SUCCESS_RESULT_DEBUG_COLLISION_KEY: &str = "Ok";
 
 pub(super) const POPULATED_EVIDENCE_OPTION_DEBUG_COLLISION_KEY: &str = "Some";
 

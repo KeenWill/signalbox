@@ -83,16 +83,21 @@ pub(super) fn canonicalized_port_path_zero_fragments(value: &str) -> Vec<String>
         .collect()
 }
 
-pub(super) fn removed_default_port_path_fragment(value: &str, default_port: u16) -> Option<String> {
+pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> Option<String> {
     let (authority_context, port_and_path) = value.rsplit_once(':').unwrap_or(("", value));
-    let (port_fragment, path_suffix) = port_and_path.split_once('/')?;
+    let (port_fragment, path_suffix) = port_and_path
+        .split_once('/')
+        .map_or((port_and_path, None), |(port, path)| (port, Some(path)));
     if port_fragment.is_empty()
         || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
         || port_fragment.parse::<u16>().ok()? != default_port
     {
         return None;
     }
-    Some(format!("{authority_context}/{path_suffix}"))
+    path_suffix.map_or_else(
+        || (!authority_context.is_empty()).then(|| authority_context.to_owned()),
+        |path| Some(format!("{authority_context}/{path}")),
+    )
 }
 
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
@@ -423,11 +428,42 @@ pub(super) fn canonicalized_ipv6_separator_bound_hextet_text_fragments(value: &s
         canonical,
         if trailing_separator { ":" } else { "" }
     );
-    if leading_separator && trailing_separator && hextets.iter().all(|hextet| hextet == "0") {
-        vec![separator_bound, String::from("::")]
-    } else {
-        vec![separator_bound]
+    let mut variants = vec![separator_bound];
+    let mut run_start = 0;
+    while run_start < hextets.len() {
+        if hextets[run_start] != "0" {
+            run_start += 1;
+            continue;
+        }
+        let mut run_end = run_start + 1;
+        while run_end < hextets.len() && hextets[run_end] == "0" {
+            run_end += 1;
+        }
+        if (run_start > 0 || leading_separator) && (run_end < hextets.len() || trailing_separator) {
+            let prefix = hextets[..run_start].join(":");
+            let suffix = hextets[run_end..].join(":");
+            let compressed = format!(
+                "{}{}::{}{}",
+                if leading_separator && run_start > 0 {
+                    ":"
+                } else {
+                    ""
+                },
+                prefix,
+                suffix,
+                if trailing_separator && run_end < hextets.len() {
+                    ":"
+                } else {
+                    ""
+                }
+            );
+            if !variants.contains(&compressed) {
+                variants.push(compressed);
+            }
+        }
+        run_start = run_end;
     }
+    variants
 }
 
 pub(super) fn embedded_ipv6_fragment_candidate(
