@@ -68,6 +68,7 @@ pub(super) fn validate_repository_layout(
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let config = open_repository_config_at(&git_directory)?;
     let head = open_repository_head_at(&git_directory, config.object_format)?;
+    let refs = open_repository_refs_at(&git_directory)?;
     reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
     let config_metadata = config
         .source
@@ -76,9 +77,27 @@ pub(super) fn validate_repository_layout(
     Ok(RepositoryIdentity {
         root: root_identity,
         git_directory: git_directory_identity,
+        refs: file_identity(
+            &refs
+                .metadata()
+                .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+        ),
         config: file_identity(&config_metadata),
         head: head.identity.file,
     })
+}
+
+pub(super) fn open_repository_refs_at(
+    git_directory: &fs::File,
+) -> Result<fs::File, LocalGitToolsConstructionError> {
+    openat(
+        git_directory,
+        "refs",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(|_| LocalGitToolsConstructionError::Repository)
 }
 
 pub(super) fn open_repository_head_at(
@@ -203,6 +222,13 @@ fn reject_administrative_symlinks_for_format(
                     pending.push((directory, child_kind));
                     continue;
                 }
+                Err(error)
+                    if error == rustix::io::Errno::NOTDIR
+                        && directory_kind == AdministrativeDirectoryKind::Root
+                        && name == OsStr::new("refs") =>
+                {
+                    return Err(LocalGitToolsConstructionError::Repository);
+                }
                 Err(error) if error == rustix::io::Errno::NOTDIR => {}
                 Err(_) => return Err(LocalGitToolsConstructionError::Repository),
             }
@@ -221,9 +247,7 @@ fn reject_administrative_symlinks_for_format(
                 return Err(LocalGitToolsConstructionError::Repository);
             }
             let limit = match (directory_kind, name) {
-                (AdministrativeDirectoryKind::Root, name)
-                    if name == OsStr::new("HEAD") || name == OsStr::new("refs") =>
-                {
+                (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("HEAD") => {
                     Some(MAX_REVISION_BYTES)
                 }
                 (AdministrativeDirectoryKind::References, _) => Some(MAX_REVISION_BYTES),

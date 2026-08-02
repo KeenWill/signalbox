@@ -125,6 +125,34 @@ fn index_lock_rejects_an_index_replaced_during_publication() {
 }
 
 #[test]
+fn absent_index_publication_rejects_a_replacement_during_layout_validation() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let actor_index = b"actor index remains live".to_vec();
+    fs::remove_file(&index_path).expect("fixture index removes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (index_lock, _index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+
+    let failure = index_lock
+        .commit_with_cleanup_test_hook(|| {
+            fs::remove_file(&index_path).expect("published index removes during validation");
+            fs::write(&index_path, &actor_index).expect("actor index replacement writes");
+        })
+        .expect_err("replacement during layout validation rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("actor index replacement reads"),
+        actor_index
+    );
+    assert!(!lock_path.exists());
+}
+
+#[test]
 fn index_lock_rejects_an_in_place_rewrite_of_prepared_bytes() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
@@ -478,6 +506,37 @@ fn index_lock_preserves_a_file_replacing_the_displaced_cleanup_path() {
     assert_eq!(
         fs::read(lock_path).expect("actor cleanup replacement reads"),
         actor_replacement
+    );
+}
+
+#[test]
+fn index_final_verification_preserves_the_original_when_publication_changes() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let prepared_index = b"prepared index bytes".to_vec();
+    let actor_index = b"actor index remains live".to_vec();
+    let (mut index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+    index_lock
+        .write_raw(&prepared_index)
+        .expect("prepared index writes");
+
+    let failure = index_lock
+        .commit_with_cleanup_test_hook(|| {
+            fs::write(&index_path, &actor_index).expect("actor publication rewrite writes");
+        })
+        .expect_err("publication rewrite rejects final verification");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("actor live index reads"),
+        actor_index
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("displaced original index reads"),
+        original_index
     );
 }
 

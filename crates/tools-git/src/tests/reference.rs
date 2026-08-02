@@ -888,3 +888,32 @@ fn absent_reference_publication_rolls_back_a_racing_commondir() {
         actor_commondir
     );
 }
+
+#[test]
+fn absent_reference_final_verification_preserves_a_racing_replacement() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let actor_target = format!("{}\n", fixture.initial);
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_cleanup_test_hook(&authority, &expected, || {
+            fs::remove_file(&reference_path).expect("prepared publication removes");
+            fs::write(&reference_path, &actor_target).expect("actor reference replacement writes");
+        })
+        .expect_err("late absent-reference replacement rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("actor reference replacement reads"),
+        actor_target
+    );
+}

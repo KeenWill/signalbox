@@ -478,12 +478,11 @@ impl IndexLock {
                     return Err(LocalGitFailure::Operation);
                 }
                 before_cleanup();
-                let final_preconditions_hold =
-                    index_snapshot_identity_at(&self.parent, &self.index_name)
-                        == Ok(Some(prepared_index))
-                        && index_snapshot_identity_at(&self.parent, &self.lock_name)
-                            == Ok(Some(original_index))
-                        && self.validate_supported_layout().is_ok();
+                let final_preconditions_hold = self.validate_supported_layout().is_ok()
+                    && index_snapshot_identity_at(&self.parent, &self.lock_name)
+                        == Ok(Some(original_index))
+                    && index_snapshot_identity_at(&self.parent, &self.index_name)
+                        == Ok(Some(prepared_index));
                 if !final_preconditions_hold {
                     let publication_is_owned =
                         index_snapshot_identity_at(&self.parent, &self.index_name)
@@ -504,11 +503,6 @@ impl IndexLock {
                 {
                     return Err(LocalGitFailure::Operation);
                 }
-                if index_snapshot_identity_at(&self.parent, &self.index_name)
-                    != Ok(Some(prepared_index))
-                {
-                    return Err(LocalGitFailure::Operation);
-                }
             }
             None => {
                 if entry_identity(&self.parent, &self.index_name)?.is_some() {
@@ -524,10 +518,15 @@ impl IndexLock {
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
                 after_exchange();
+                let publication_was_owned =
+                    index_snapshot_identity_at(&self.parent, &self.index_name)
+                        == Ok(Some(prepared_index));
+                before_cleanup();
+                let layout_is_current = self.validate_supported_layout().is_ok();
                 let publication_is_owned =
                     index_snapshot_identity_at(&self.parent, &self.index_name)
                         == Ok(Some(prepared_index));
-                if !publication_is_owned || self.validate_supported_layout().is_err() {
+                if !publication_was_owned || !layout_is_current || !publication_is_owned {
                     if publication_is_owned {
                         let _ = remove_displaced_index_if_current(
                             &self.parent,

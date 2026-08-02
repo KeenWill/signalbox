@@ -305,13 +305,15 @@ impl ReferenceLock {
             let packed_namespace_is_clear =
                 packed_reference_namespace_conflicts(authority, &self.name)
                     .is_ok_and(|conflicts| !conflicts);
-            let publication_is_current = self.prepared_publication_is_current();
             let layout_is_current = authority.validate_supported_layout().is_ok();
-            if !publication_is_current
-                || !packed_is_current
+            let hierarchy_is_current = self.hierarchy_is_current(authority);
+            before_cleanup();
+            let publication_is_current = self.prepared_publication_is_current();
+            if !packed_is_current
                 || !packed_namespace_is_clear
                 || !layout_is_current
-                || !self.hierarchy_is_current(authority)
+                || !hierarchy_is_current
+                || !publication_is_current
             {
                 before_rollback.take().ok_or(LocalGitFailure::Operation)?();
                 if publication_is_current {

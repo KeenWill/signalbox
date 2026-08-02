@@ -46,6 +46,56 @@ fn repository_layout_rejects_a_malformed_head() {
 }
 
 #[test]
+fn repository_layout_rejects_a_missing_refs_directory() {
+    let fixture = Fixture::new();
+    fs::remove_dir_all(fixture.root().join(".git/refs")).expect("fixture refs directory removes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("missing refs directory rejects admission");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_layout_rejects_a_regular_refs_file() {
+    let fixture = Fixture::new();
+    let refs_path = fixture.root().join(".git/refs");
+    fs::remove_dir_all(&refs_path).expect("fixture refs directory removes");
+    fs::write(&refs_path, b"not a reference directory").expect("regular refs file writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("regular refs file rejects admission");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn operation_guard_rejects_a_replaced_administrative_directory() {
+    let fixture = Fixture::new();
+    let git_path = fixture.root().join(".git");
+    let retired_git_path = fixture.root().join(".git.retired");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let guard = authority
+        .operation_guard()
+        .expect("repository operation guard constructs");
+    fs::rename(&git_path, &retired_git_path).expect("pinned administrative directory retires");
+    let mut options = git2::RepositoryInitOptions::new();
+    options.external_template(false).initial_head("main");
+    git2::Repository::init_opts(fixture.root(), &options)
+        .expect("replacement repository initializes");
+
+    let failure = guard
+        .validate_supported_layout()
+        .expect_err("replacement administrative directory rejects operation");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(retired_git_path.exists());
+    assert!(git_path.exists());
+}
+
+#[test]
 fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
     let fixture = Fixture::new();
     let git_path = fixture.root().join(".git");
@@ -109,14 +159,14 @@ fn plant_deep_administrative_symlink(parent: OwnedFd, remaining: usize) {
 }
 
 #[test]
-fn repository_open_reads_config_from_the_pinned_administrative_directory() {
+fn repository_open_rejects_an_administrative_directory_replaced_after_open() {
     let fixture = Fixture::new();
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
     let git_path = fixture.root().join(".git");
     let retired_git = fixture.root().join(".git.retired");
     let replacement_git = git_path.clone();
 
-    let authority = PinnedRepository::open_with_hook(fixture.root(), expected, || {
+    let failure = PinnedRepository::open_with_hook(fixture.root(), expected, || {
         fs::rename(&git_path, &retired_git).expect("fixture administrative directory retires");
         fs::create_dir(&replacement_git).expect("replacement administrative directory constructs");
         fs::write(
@@ -125,9 +175,9 @@ fn repository_open_reads_config_from_the_pinned_administrative_directory() {
         )
         .expect("escaping replacement config writes");
     })
-    .expect("config opens through the pinned administrative descriptor");
+    .expect_err("replaced administrative directory rejects repository open");
 
-    drop(authority);
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
     fs::remove_dir_all(&replacement_git).expect("replacement administrative directory removes");
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
 }

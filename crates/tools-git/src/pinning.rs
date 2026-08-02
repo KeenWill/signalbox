@@ -22,7 +22,10 @@ use crate::descriptor::{
     file_identity, file_snapshot_identity, unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
-use crate::layout::{open_repository_config_at, open_repository_head_at, validate_live_shallow};
+use crate::layout::{
+    open_repository_config_at, open_repository_head_at, open_repository_refs_at,
+    validate_live_shallow,
+};
 use crate::limits::{
     MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
     MAX_PACK_FILE_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
@@ -31,6 +34,7 @@ use crate::limits::{
 pub(super) struct PinnedRepository {
     pub(super) root: fs::File,
     pub(super) git_directory: fs::File,
+    _refs: fs::File,
     _config: fs::File,
     config_snapshot: fs::File,
     config_identity: FileSnapshotIdentity,
@@ -42,7 +46,9 @@ pub(super) struct PinnedRepository {
 }
 
 pub(super) struct RepositoryOperationGuard {
+    root: fs::File,
     git_directory: fs::File,
+    _refs: fs::File,
     _config: fs::File,
     config_snapshot: fs::File,
     config_identity: FileSnapshotIdentity,
@@ -175,6 +181,7 @@ impl PinnedRepository {
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let config = open_repository_config_at(&git_directory)?;
         let head = open_repository_head_at(&git_directory, config.object_format)?;
+        let refs = open_repository_refs_at(&git_directory)?;
         after_config_snapshot();
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
@@ -189,6 +196,11 @@ impl PinnedRepository {
                     .metadata()
                     .map_err(|_| LocalGitToolsConstructionError::Repository)?,
             ),
+            refs: file_identity(
+                &refs
+                    .metadata()
+                    .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+            ),
             config: file_identity(
                 &config
                     .source
@@ -200,6 +212,10 @@ impl PinnedRepository {
         if observed != expected {
             return Err(LocalGitToolsConstructionError::Repository);
         }
+        validate_directory_binding(&root, OsStr::new(".git"), &git_directory)
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+        validate_directory_binding(&git_directory, OsStr::new("refs"), &refs)
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let repository = open_pinned_repository(&root, &config.snapshot, config.object_format)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         unsupported_control_files_are_absent(git_directory.as_fd())
@@ -207,6 +223,7 @@ impl PinnedRepository {
         let authority = Self {
             root,
             git_directory,
+            _refs: refs,
             _config: config.source,
             config_snapshot: config.snapshot,
             config_identity: config.identity,
@@ -243,6 +260,8 @@ impl PinnedRepository {
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)?;
+        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
         validate_head_at(
             &self.git_directory,
             self.object_format,
@@ -269,7 +288,9 @@ impl PinnedRepository {
             self.object_format,
             self.head_identity,
             &self.head_bytes,
-        )
+        )?;
+        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
+        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)
     }
 
     pub(super) fn validate_object_layout(&self) -> Result<(), LocalGitFailure> {
@@ -277,9 +298,18 @@ impl PinnedRepository {
     }
 
     pub(super) fn operation_guard(&self) -> Result<RepositoryOperationGuard, LocalGitFailure> {
-        Ok(RepositoryOperationGuard {
+        self.validate_supported_layout()?;
+        let guard = RepositoryOperationGuard {
+            root: self
+                .root
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
             git_directory: self
                 .git_directory
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
+            _refs: self
+                ._refs
                 .try_clone()
                 .map_err(|_| LocalGitFailure::Operation)?,
             _config: self
@@ -298,12 +328,16 @@ impl PinnedRepository {
             head_identity: self.head_identity,
             head_bytes: self.head_bytes.clone(),
             object_format: self.object_format,
-        })
+        };
+        guard.validate_supported_layout()?;
+        Ok(guard)
     }
 }
 
 impl RepositoryOperationGuard {
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)?;
+        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
         validate_head_at(
             &self.git_directory,
             self.object_format,
@@ -330,8 +364,36 @@ impl RepositoryOperationGuard {
             self.object_format,
             self.head_identity,
             &self.head_bytes,
-        )
+        )?;
+        validate_directory_binding(&self.git_directory, OsStr::new("refs"), &self._refs)?;
+        validate_directory_binding(&self.root, OsStr::new(".git"), &self.git_directory)
     }
+}
+
+fn validate_directory_binding(
+    parent: &fs::File,
+    name: &OsStr,
+    pinned: &fs::File,
+) -> Result<(), LocalGitFailure> {
+    let expected = file_identity(&pinned.metadata().map_err(|_| LocalGitFailure::Repository)?);
+    let current = fs::File::from(
+        openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalGitFailure::Repository)?,
+    );
+    if file_identity(
+        &current
+            .metadata()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    ) != expected
+    {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(())
 }
 
 fn validate_head_at(

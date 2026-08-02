@@ -25,6 +25,7 @@ pub(super) struct FileIdentity {
 pub(super) struct RepositoryIdentity {
     pub(super) root: FileIdentity,
     pub(super) git_directory: FileIdentity,
+    pub(super) refs: FileIdentity,
     pub(super) config: FileIdentity,
     pub(super) head: FileIdentity,
 }
