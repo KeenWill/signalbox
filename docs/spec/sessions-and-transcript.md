@@ -950,7 +950,7 @@ construction remains sealed in the foundation slice; the persistence slice in
 this stack admits a spawn only from the complete parent relationship inventory
 held under the spawn transaction's lock, together with the child-session
 uniqueness check. The relationship records the exact parent session and turn,
-child session, and one parent-chosen policy:
+child session and delegated-task turn, and one parent-chosen policy:
 
 - `Background` never derives a child stop or cancellation from a parent state;
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
@@ -965,9 +965,9 @@ identities cannot substitute a different producing call, ordinal, tool name,
 arguments, or approval posture. Consuming transition failures return the
 unchanged aggregate and attempted input. Message delivery remains available
 after a terminal outcome. Outcome authority is checked against the relationship
-before recording: an equal authority-and-outcome replay is idempotent,
-`ContinueRunning` preserves the active lifecycle, and every other outcome
-terminalizes it.
+before recording, including an exact match to this spawn's delegated-task turn:
+an equal authority-and-outcome replay is idempotent, `ContinueRunning` preserves
+the active lifecycle, and every other outcome terminalizes it.
 
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the
