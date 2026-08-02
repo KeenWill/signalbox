@@ -2,7 +2,10 @@ use std::{
     ffi::OsStr,
     fs,
     io::{Read, Seek, Write},
-    os::{fd::OwnedFd, unix::ffi::OsStrExt},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    },
     path::{Path, PathBuf},
 };
 
@@ -13,7 +16,9 @@ use rustix::{
 };
 
 use crate::construction::LocalGitToolsConstructionError;
-use crate::descriptor::{RepositoryIdentity, file_identity, file_snapshot_identity};
+use crate::descriptor::{
+    RepositoryIdentity, file_identity, file_snapshot_identity, unsupported_control_files_are_absent,
+};
 use crate::limits::{
     MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
     MAX_REVISION_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
@@ -50,9 +55,8 @@ pub(super) fn validate_repository_layout(
         )
         .map_err(|_| LocalGitToolsConstructionError::Repository)?,
     );
-    if dot_git.join("commondir").exists() || dot_git.join("objects/info/alternates").exists() {
-        return Err(LocalGitToolsConstructionError::Repository);
-    }
+    unsupported_control_files_are_absent(git_directory.as_fd())
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let config = open_repository_config_at(&git_directory)?;
     reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
     let config_metadata = config
@@ -243,6 +247,7 @@ fn validate_repository_config_descriptor(
     let mut object_format = ObjectFormat::Sha1;
     let mut object_format_seen = false;
     let mut repository_format_version = None;
+    let mut bare_seen = false;
     for line in config.lines() {
         let mut normalized = line.trim().to_ascii_lowercase();
         if normalized.is_empty() || normalized.starts_with('#') || normalized.starts_with(';') {
@@ -274,6 +279,14 @@ fn validate_repository_config_descriptor(
         }
         if section == "core" {
             let key_value = normalized.split_once('=');
+            let bare_without_value = key_value.is_none()
+                && normalized
+                    .split_ascii_whitespace()
+                    .next()
+                    .is_some_and(|key| key == "bare");
+            if bare_without_value {
+                return Err(LocalGitToolsConstructionError::Repository);
+            }
             if key_value.is_none()
                 && normalized
                     .split_ascii_whitespace()
@@ -303,6 +316,14 @@ fn validate_repository_config_descriptor(
                         .parse::<u32>()
                         .map_err(|_| LocalGitToolsConstructionError::Repository)?,
                 );
+            }
+            if let Some((key, value)) = key_value
+                && key.trim() == "bare"
+            {
+                if bare_seen || !matches!(value.trim(), "false" | "no" | "off" | "0") {
+                    return Err(LocalGitToolsConstructionError::Repository);
+                }
+                bare_seen = true;
             }
         }
         if section == "extensions" {

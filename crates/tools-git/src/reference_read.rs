@@ -100,6 +100,7 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     name: &str,
     after_metadata: Hook,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    authority.validate_supported_layout()?;
     let descriptor = match openat(
         parent,
         leaf,
@@ -113,6 +114,7 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
             });
         }
         Err(error) if error == rustix::io::Errno::NOENT => {
+            authority.validate_supported_layout()?;
             return Ok(PinnedReferenceValue::Missing);
         }
         Err(_) => return Err(LocalGitFailure::Operation),
@@ -135,6 +137,7 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     {
         return Err(LocalGitFailure::Operation);
     }
+    authority.validate_supported_layout()?;
     let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     if let Some(symbolic) = bytes.strip_prefix(b"ref: ") {
         let symbolic = std::str::from_utf8(symbolic).map_err(|_| LocalGitFailure::Operation)?;

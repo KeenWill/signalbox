@@ -3,7 +3,10 @@ use std::{
     fmt, fs,
     io::{Read, Seek},
     ops::{Deref, DerefMut},
-    os::{fd::OwnedFd, unix::ffi::OsStrExt},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    },
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -15,7 +18,8 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
     RepositoryIdentity, descriptor_path, descriptor_path_from_fd, file_identity,
-    file_snapshot_identity,
+    file_snapshot_identity, unsupported_common_directory_is_absent,
+    unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::layout::open_repository_config_at;
@@ -138,8 +142,12 @@ impl PinnedRepository {
         let git_directory = fs::File::open(root_path.join(".git"))
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         after_git_directory_open();
+        unsupported_control_files_are_absent(git_directory.as_fd())
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let config = open_repository_config_at(&git_directory)?;
         after_config_snapshot();
+        unsupported_control_files_are_absent(git_directory.as_fd())
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let observed = RepositoryIdentity {
             root: file_identity(
                 &root
@@ -163,6 +171,8 @@ impl PinnedRepository {
         }
         let repository = open_pinned_repository(&root, &config.snapshot, config.object_format)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+        unsupported_control_files_are_absent(git_directory.as_fd())
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         Ok(Self {
             root,
             git_directory,
@@ -176,6 +186,7 @@ impl PinnedRepository {
     pub(super) fn repository(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, RepositoryShell>, LocalGitFailure> {
+        self.validate_supported_layout()?;
         self.repository
             .lock()
             .map_err(|_| LocalGitFailure::Repository)
@@ -191,10 +202,19 @@ impl PinnedRepository {
             ObjectFormat::Sha256 => 32,
         }
     }
+
+    pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        unsupported_common_directory_is_absent(self.git_directory.as_fd())
+    }
+
+    pub(super) fn validate_object_layout(&self) -> Result<(), LocalGitFailure> {
+        unsupported_control_files_are_absent(self.git_directory.as_fd())
+    }
 }
 
 impl PinnedObjectDatabase {
     pub(super) fn capture(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
+        authority.validate_object_layout()?;
         let objects = openat(
             &authority.git_directory,
             "objects",
@@ -268,6 +288,7 @@ impl PinnedObjectDatabase {
         }
         let snapshot = Self { directory };
         snapshot.validate_object_sizes(authority.object_format)?;
+        authority.validate_object_layout()?;
         Ok(snapshot)
     }
 
@@ -381,6 +402,7 @@ pub(super) fn pin_object_directory(
 pub(super) fn live_object_database_bytes(
     authority: &PinnedRepository,
 ) -> Result<u64, LocalGitFailure> {
+    authority.validate_object_layout()?;
     let objects = openat(
         &authority.git_directory,
         "objects",
@@ -438,6 +460,7 @@ pub(super) fn live_object_database_bytes(
         .map_err(|_| LocalGitFailure::Repository)?;
         measure_object_directory(&loose, &mut inspected, &mut bytes, loose_kind)?;
     }
+    authority.validate_object_layout()?;
     Ok(bytes)
 }
 

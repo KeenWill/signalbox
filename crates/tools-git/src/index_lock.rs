@@ -2,7 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{Read, Seek, Write},
-    os::fd::OwnedFd,
+    os::fd::{AsFd, OwnedFd},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -17,7 +17,7 @@ use sha2::Sha256;
 
 use crate::descriptor::{
     FileIdentity, QuarantineDirectory, descriptor_path, file_identity, file_snapshot_identity,
-    remove_entry_if_identity,
+    remove_entry_if_identity, unsupported_common_directory_is_absent,
 };
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
@@ -65,7 +65,8 @@ impl IndexLock {
     pub(super) fn acquire_for_repository(
         authority: &PinnedRepository,
     ) -> Result<(Self, Index), LocalGitFailure> {
-        Self::acquire_at_with_private_directory_and_mode(
+        authority.validate_supported_layout()?;
+        let acquired = Self::acquire_at_with_private_directory_and_mode(
             dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?,
             OsString::from("index"),
             OsString::from("index.lock"),
@@ -73,7 +74,9 @@ impl IndexLock {
             authority.object_format,
             tempfile::tempdir,
             || {},
-        )
+        )?;
+        authority.validate_supported_layout()?;
+        Ok(acquired)
     }
 
     #[cfg(test)]
@@ -384,8 +387,10 @@ impl IndexLock {
         after_exchange: AfterExchange,
         before_cleanup: BeforeCleanup,
     ) -> Result<FileIdentity, LocalGitFailure> {
+        unsupported_common_directory_is_absent(self.parent.as_fd())?;
         let prepared_index = self.prepared_index.ok_or(LocalGitFailure::Operation)?;
         before_publish();
+        unsupported_common_directory_is_absent(self.parent.as_fd())?;
         if self.lock_snapshot_identity()? != prepared_index
             || index_snapshot_identity_at(&self.parent, &self.lock_name)? != Some(prepared_index)
         {

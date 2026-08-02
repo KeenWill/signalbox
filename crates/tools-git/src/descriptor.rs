@@ -2,7 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     os::{
-        fd::{AsRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
         unix::fs::MetadataExt,
     },
     path::PathBuf,
@@ -146,6 +146,49 @@ pub(super) fn descriptor_entry_exists(
         Ok(_) => Ok(true),
         Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
         Err(_) => Err(LocalGitFailure::Operation),
+    }
+}
+
+pub(super) fn unsupported_control_files_are_absent(
+    git_directory: BorrowedFd<'_>,
+) -> Result<(), LocalGitFailure> {
+    unsupported_common_directory_is_absent(git_directory)?;
+    unsupported_object_alternates_are_absent(git_directory)
+}
+
+pub(super) fn unsupported_common_directory_is_absent(
+    git_directory: BorrowedFd<'_>,
+) -> Result<(), LocalGitFailure> {
+    require_entry_absent(git_directory, OsStr::new("commondir"))
+}
+
+pub(super) fn unsupported_object_alternates_are_absent(
+    git_directory: BorrowedFd<'_>,
+) -> Result<(), LocalGitFailure> {
+    let objects = openat(
+        git_directory,
+        "objects",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Repository)?;
+    let info = match openat(
+        &objects,
+        "info",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(info) => info,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
+        Err(_) => return Err(LocalGitFailure::Repository),
+    };
+    require_entry_absent(info.as_fd(), OsStr::new("alternates"))
+}
+
+fn require_entry_absent(parent: BorrowedFd<'_>, name: &OsStr) -> Result<(), LocalGitFailure> {
+    match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(()),
+        _ => Err(LocalGitFailure::Repository),
     }
 }
 

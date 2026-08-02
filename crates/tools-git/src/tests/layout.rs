@@ -160,6 +160,69 @@ fn repository_config_rejects_duplicate_format_versions() {
 }
 
 #[test]
+fn repository_config_rejects_a_bare_repository() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 0\nbare = true\n",
+    )
+    .expect("bare repository config writes");
+
+    let failure = validate_repository_layout(fixture.root()).expect_err("bare repository rejects");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_config_rejects_duplicate_bare_declarations() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 0\nbare = false\nbare = false\n",
+    )
+    .expect("duplicate bare config writes");
+
+    let failure =
+        validate_repository_layout(fixture.root()).expect_err("duplicate bare declarations reject");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_open_rejects_commondir_created_after_layout_validation() {
+    let fixture = Fixture::new();
+    let commondir_path = fixture.root().join(".git/commondir");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+
+    let failure = PinnedRepository::open_with_hook(fixture.root(), expected, || {
+        fs::write(&commondir_path, "../outside\n").expect("late commondir writes");
+    })
+    .expect_err("late commondir rejects repository open");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn object_capture_rejects_alternates_created_after_authority_open() {
+    let fixture = Fixture::new();
+    let alternates_path = fixture.root().join(".git/objects/info/alternates");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    fs::create_dir_all(alternates_path.parent().expect("alternates parent exists"))
+        .expect("object info directory constructs");
+    fs::write(&alternates_path, "/outside/objects\n").expect("late alternates writes");
+
+    let failure = PinnedObjectDatabase::capture(&authority)
+        .err()
+        .expect("late alternates reject object capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
 fn repository_open_parses_the_validated_config_snapshot() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");

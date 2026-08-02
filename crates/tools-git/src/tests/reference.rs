@@ -12,7 +12,7 @@ use crate::reference_lock::{
     ReferenceLock, open_or_create_ref_directory_with_mode_tracked_and_hook, open_reference_parent,
 };
 use crate::reference_read::read_reference_leaf_with_test_hook;
-use crate::tests::support::Fixture;
+use crate::tests::support::{Fixture, Sha256Fixture};
 
 #[test]
 fn created_reference_directory_preserves_post_create_failure_and_removes_owned_path() {
@@ -284,6 +284,30 @@ fn symbolic_reference_preparation_rejects_a_newline_target_without_mutation() {
 }
 
 #[test]
+fn direct_reference_preparation_rejects_an_oid_from_another_object_format() {
+    let fixture = Sha256Fixture::new();
+    let name = "refs/heads/topic";
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_payload = b"actor payload remains unchanged".to_vec();
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("SHA-256 repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    fs::write(&lock_path, &actor_payload).expect("actor payload enters reference lock");
+
+    let failure = lock
+        .prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect_err("SHA-1 target rejects under SHA-256 authority");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(lock_path).expect("unmodified reference lock reads"),
+        actor_payload
+    );
+}
+
+#[test]
 fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";
@@ -542,5 +566,38 @@ fn exchange_rollback_preserves_a_displaced_replacement_after_validation() {
     assert_eq!(
         fs::read(lock_path).expect("actor displaced replacement reads"),
         actor_replacement
+    );
+}
+
+#[test]
+fn absent_reference_publication_rolls_back_a_racing_commondir() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let actor_commondir = "../outside\n";
+    let reference_path = fixture.root().join(".git").join(name);
+    let commondir_path = fixture.root().join(".git/commondir");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("missing reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_test_hooks(
+            &authority,
+            &expected,
+            || {},
+            || fs::write(&commondir_path, actor_commondir).expect("racing commondir writes"),
+        )
+        .expect_err("racing commondir rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!reference_path.exists());
+    assert_eq!(
+        fs::read_to_string(commondir_path).expect("racing commondir reads"),
+        actor_commondir
     );
 }

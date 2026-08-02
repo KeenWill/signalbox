@@ -57,6 +57,7 @@ pub(super) fn packed_reference_target(
 pub(super) fn read_packed_references(
     authority: &PinnedRepository,
 ) -> Result<Vec<(git2::Oid, Vec<u8>)>, LocalGitFailure> {
+    authority.validate_supported_layout()?;
     let descriptor = match openat(
         &authority.git_directory,
         "packed-refs",
@@ -64,7 +65,10 @@ pub(super) fn read_packed_references(
         Mode::empty(),
     ) {
         Ok(descriptor) => descriptor,
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(Vec::new()),
+        Err(error) if error == rustix::io::Errno::NOENT => {
+            authority.validate_supported_layout()?;
+            return Ok(Vec::new());
+        }
         Err(_) => return Err(LocalGitFailure::Operation),
     };
     let mut file = fs::File::from(descriptor);
@@ -111,5 +115,6 @@ pub(super) fn read_packed_references(
         }
         references.push((oid, existing.to_vec()));
     }
+    authority.validate_supported_layout()?;
     Ok(references)
 }

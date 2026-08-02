@@ -78,6 +78,7 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         name: &str,
     ) -> Result<Self, LocalGitFailure> {
+        authority.validate_supported_layout()?;
         let bound = open_reference_parent(authority, name, true)?;
         let creation_file_mode = bound.creation_file_mode;
         let parent = bound.directory;
@@ -113,6 +114,7 @@ impl ReferenceLock {
                 .set_permissions(permissions)
                 .map_err(|_| LocalGitFailure::Operation)?;
         }
+        authority.validate_supported_layout()?;
         Ok(guard)
     }
 
@@ -141,6 +143,10 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         target: git2::Oid,
     ) -> Result<(), LocalGitFailure> {
+        authority.validate_supported_layout()?;
+        if target.object_format() != authority.object_format {
+            return Err(LocalGitFailure::Operation);
+        }
         self.lock
             .set_len(0)
             .and_then(|()| self.lock.rewind())
@@ -161,6 +167,7 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         target: &str,
     ) -> Result<(), LocalGitFailure> {
+        authority.validate_supported_layout()?;
         if !target.starts_with("refs/") || !git2::Reference::is_valid_name(target) {
             return Err(LocalGitFailure::Operation);
         }
@@ -218,6 +225,7 @@ impl ReferenceLock {
         before_rollback: BeforeRollback,
     ) -> Result<(), LocalGitFailure> {
         let mut before_rollback = Some(before_rollback);
+        authority.validate_supported_layout()?;
         if !self.path_still_owned()
             || !self.prepared_lock_is_current()
             || !self.hierarchy_is_current(authority)
@@ -251,9 +259,11 @@ impl ReferenceLock {
                 packed_reference_namespace_conflicts(authority, &self.name)
                     .is_ok_and(|conflicts| !conflicts);
             let publication_is_current = self.prepared_publication_is_current();
+            let layout_is_current = authority.validate_supported_layout().is_ok();
             if !publication_is_current
                 || !packed_is_current
                 || !packed_namespace_is_clear
+                || !layout_is_current
                 || !self.hierarchy_is_current(authority)
             {
                 before_rollback.take().ok_or(LocalGitFailure::Operation)?();
@@ -288,11 +298,13 @@ impl ReferenceLock {
             reference_snapshot_identity_at(&self.parent, &self.lock_name)
                 == Ok(Some(expected_leaf_snapshot));
         let publication_is_current = self.prepared_publication_is_current();
+        let layout_is_current = authority.validate_supported_layout().is_ok();
         if !displaced_value_is_expected
             || !displaced_snapshot_is_current
             || !publication_is_current
             || !packed_is_current
             || !packed_namespace_is_clear
+            || !layout_is_current
             || !self.hierarchy_is_current(authority)
         {
             before_rollback.take().ok_or(LocalGitFailure::Operation)?();
@@ -320,6 +332,7 @@ impl ReferenceLock {
         if !self.prepared_publication_is_current() {
             return Err(LocalGitFailure::Operation);
         }
+        authority.validate_supported_layout()?;
         self.committed = true;
         Ok(())
     }
