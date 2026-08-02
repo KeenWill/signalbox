@@ -21883,6 +21883,36 @@ fn dependency_edge(event: &PlanEvent) -> (PlanEntryId, PlanEntryId) {
     }
 }
 
+/// Appending a dependency reads only the invoking session's graph even when a
+/// different session uses the same entry ordinals.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_dependency_append_ignores_other_session_edges() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first = dependency_plan_fixture(&pool, Vec::new()).await?;
+    let second = dependency_plan_fixture(&pool, Vec::new()).await?;
+    let second_page = second
+        .repository
+        .read(PlanReadRequest::new(second.session, None, None))
+        .await?;
+    let second_dependent = second_page
+        .entries()
+        .get(1)
+        .expect("the second session's dependent entry is projected");
+    let expected_dependencies = vec![second.prerequisite];
+
+    assert_ne!(first.session, second.session);
+    assert_eq!(
+        second_dependent.dependencies(),
+        expected_dependencies.as_slice()
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A prerequisite status change recomputes the dependent entry from waiting to
 /// ready without changing its closed plan status.
 #[tokio::test(flavor = "multi_thread")]

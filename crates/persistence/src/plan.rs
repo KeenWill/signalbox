@@ -172,7 +172,8 @@ SELECT edge.entry_ordinal, edge.dependency_ordinal,
        session_plan_event_has_authority(dependency) AS dependency_authorized
   FROM session_plan_current_dependency AS edge
   JOIN reachable_node
-    ON reachable_node.node = edge.entry_ordinal
+    ON edge.session_id = $1
+   AND reachable_node.node = edge.entry_ordinal
   LEFT JOIN session_plan_event AS first_event
     ON first_event.session_id = $1
    AND first_event.event_ordinal = edge.first_event_ordinal
