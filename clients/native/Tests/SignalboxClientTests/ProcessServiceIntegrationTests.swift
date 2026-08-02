@@ -688,7 +688,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     let projection = try projector.projectAuthoritativeSnapshot(snapshot)
 
-    XCTAssertEqual(projection.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(projection.activity, ProcessProjectionFixture.recoveryActivity)
   }
 
   func testUnknownCurrentModelCallStateRequiresRecovery() throws {
@@ -1219,7 +1219,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
     XCTAssertFalse(viewModel.canSend)
   }
 
@@ -1242,7 +1242,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     viewModel.apply(.event(terminal))
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
     XCTAssertFalse(viewModel.canSend)
   }
 
@@ -1269,7 +1269,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
     XCTAssertFalse(viewModel.canSend)
   }
 
@@ -1296,7 +1296,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       )
     )
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
     XCTAssertFalse(viewModel.canSend)
   }
 
@@ -1422,7 +1422,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     viewModel.apply(.event(terminal))
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.unavailableActivity)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
     XCTAssertFalse(viewModel.canSend)
   }
 
@@ -2345,7 +2345,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testFutureMutationErrorRetriesTheSameDurableCommand() async throws {
+  func testFutureMutationErrorIsSurfacedWithoutRetry() async throws {
     let submission = try ProcessSubmissionFixture.preparedSubmission()
     let requester = SequencedProcessRequester(
       pages: [
@@ -2358,13 +2358,15 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       policy: ProcessDriverFixture.oneImmediateMutationRetryPolicy
     )
 
-    let receipt = try await service.submit(submission)
+    let error = await capturedServiceError {
+      _ = try await service.submit(submission)
+    }
     let openedRequests = await requester.openedRequests
 
-    XCTAssertEqual(receipt, try ProcessSubmissionFixture.submittedReceipt())
+    XCTAssertEqual(error, ProcessDriverFixture.futureMutationRemoteError)
     XCTAssertEqual(
       openedRequests,
-      ProcessSubmissionFixture.retriedRequests(for: submission)
+      ProcessSubmissionFixture.singleRequest(for: submission)
     )
   }
 
@@ -3058,6 +3060,19 @@ private enum ProcessSubmissionFixture {
       expectedDefaultsVersion: submission.expectedDefaultsVersion
     )
     return [request, request]
+  }
+
+  static func singleRequest(
+    for submission: SignalboxPreparedInputSubmission
+  ) -> [SignalboxProcessClientRequest] {
+    [
+      .submitInput(
+        commandID: submission.commandID,
+        sessionID: submission.sessionID,
+        content: submission.content,
+        expectedDefaultsVersion: submission.expectedDefaultsVersion
+      )
+    ]
   }
 
   static func usesReplacementCommand(for content: String) -> Bool {
@@ -4700,6 +4715,12 @@ private enum ProcessDriverFixture {
       """
     )
   }
+
+  static let futureMutationRemoteError = SignalboxProcessServiceError.remote(
+    code: .unknown("fixture_future_mutation_error"),
+    message: "Fixture future mutation outcome.",
+    detail: nil
+  )
 
   static func malformedMetadataSummary() throws -> SignalboxProcessServerFrame {
     try frame(

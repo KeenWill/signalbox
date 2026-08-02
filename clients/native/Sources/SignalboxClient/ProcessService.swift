@@ -1555,10 +1555,10 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
         )
       }
       switch error.code {
-      case .commitAmbiguous, .unknown:
+      case .commitAmbiguous:
         break
       case .malformedFrame, .unsupportedVersion, .invalidRequest, .notFound,
-        .conflictingReuse, .rejected, .resyncRequired, .unavailable, .internal:
+        .conflictingReuse, .rejected, .resyncRequired, .unavailable, .internal, .unknown:
         throw remote(error)
       }
       let delay = try ambiguousMutationRetryDelay(

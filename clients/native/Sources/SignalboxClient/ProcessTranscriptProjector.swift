@@ -748,7 +748,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .cancelled:
       return .init(state: .cancelled, label: "Cancelled")
     case .unknown:
-      return .unavailable
+      return .init(state: .recoveryRequired, label: "Recovery required")
     }
   }
 
