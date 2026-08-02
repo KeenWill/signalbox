@@ -899,6 +899,35 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testTerminalSideSnapshotRejectsBufferedActivationLifecycle() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.activatedEvent(
+      cursor: ProcessProjectionFixture.bufferedTransitionCursor
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithCompletedTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(.event(trigger))
+
+    XCTAssertNil(viewModel.activeTurnID)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.completedActivity)
+    XCTAssertTrue(viewModel.canSend)
+    XCTAssertFalse(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testSideSnapshotFenceKeepsRecoveryAcrossBufferedActivation() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -4680,6 +4709,66 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func snapshotWithCompletedTurn(
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"\(cursor)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          },
+          "cost":null
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"\(cursor)",
+          "turn_count":"1",
+          "entry_count":"0"
+        }
+        """,
+      ]
     )
   }
 

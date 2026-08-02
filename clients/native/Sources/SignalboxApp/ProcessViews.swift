@@ -1706,6 +1706,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
+        let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
+        terminalTurnIDs.formUnion(snapshotTerminalTurnIDs)
+        if let activeTurnID, snapshotTerminalTurnIDs.contains(activeTurnID) {
+          self.activeTurnID = nil
+        }
         let wasMutationBlocked = !mutationBlocksByTurnID.isEmpty
         mutationBlocksByTurnID = mutationBlocksByTurnID(in: snapshot)
         sideSnapshotCursorsByTurnID = Dictionary(
@@ -1716,7 +1721,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
             return (turn.turnID, snapshot.cursor.rawValue)
           })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if !mutationBlocksByTurnID.isEmpty
+        if case .turnActivated(let turnID, _) = trigger.event,
+          snapshotTerminalTurnIDs.contains(turnID)
+        {
+          activeTurnID = activeTurnID(in: snapshot)
+          activity = projection.activity
+        } else if !mutationBlocksByTurnID.isEmpty
           || projection.activity.state == .recoveryRequired
           || (wasMutationBlocked && projection.activity.state == .running)
         {
@@ -1918,8 +1928,11 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
       }
     case .turnActivated(let turnID, _):
-      activeTurnID = turnID
-      guard admitsStateTransition(for: turnID, at: followed.cursor) else {
+      let admitsActivation = admitsStateTransition(for: turnID, at: followed.cursor)
+      if admitsActivation || !terminalTurnIDs.contains(turnID) {
+        activeTurnID = turnID
+      }
+      guard admitsActivation else {
         return
       }
       mutationBlocksByTurnID.removeValue(forKey: turnID)
