@@ -22210,16 +22210,18 @@ async fn session_plan_read_rejects_malformed_current_creation_payload() -> Resul
     Ok(())
 }
 
-/// Relevant current-edge validation rejects forbidden text on a dependency
-/// event without requiring the optional history projection.
+/// Head certification rejects forbidden dependency payload before either a
+/// later append or a current-plan read can extend or expose malformed history.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn session_plan_read_rejects_malformed_dependency_edge_payload() -> Result<(), Box<dyn Error>>
-{
+async fn session_plan_append_and_read_reject_malformed_dependency_head()
+-> Result<(), Box<dyn Error>> {
+    const LATER_ENTRY_TEXT: &str = "must not append after malformed history";
     const DEPENDENCY_EVENT_ORDINAL: u64 = 3;
     const MALFORMED_EDGE_TEXT: &str = "dependency event must not carry text";
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture = dependency_plan_fixture(&pool, Vec::new()).await?;
+    let mut fixture =
+        dependency_plan_fixture(&pool, vec![create_plan_arguments(LATER_ENTRY_TEXT)]).await?;
     sqlx::query(
         "ALTER TABLE session_plan_event
          DROP CONSTRAINT session_plan_event_shape",
@@ -22251,14 +22253,29 @@ async fn session_plan_read_rejects_malformed_dependency_edge_payload() -> Result
     .execute(&pool)
     .await?;
 
-    let error = fixture
+    let append_attempt = fixture.batch.authorize_next().await?;
+    let append_error = fixture
+        .repository
+        .append(PlanAppendRequest::new(
+            PlanEventProvenance::from_invocation(append_attempt.correlation()),
+            PlanEventDraft::Create {
+                text: plan_text(LATER_ENTRY_TEXT),
+            },
+        ))
+        .await
+        .expect_err("a later append cannot extend the malformed dependency head");
+    let read_error = fixture
         .repository
         .read(PlanReadRequest::new(fixture.session, None, None))
         .await
         .expect_err("a dependency edge carrying text is corruption");
 
     assert_eq!(
-        plan_repository_error_kind(error),
+        plan_repository_error_kind(append_error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+    assert_eq!(
+        plan_repository_error_kind(read_error),
         PlanRepositoryErrorKind::EventSequence
     );
 

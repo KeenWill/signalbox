@@ -276,6 +276,57 @@ AS $$
        AND candidate.entry_status IS NULL;
 $$;
 
+CREATE FUNCTION session_plan_event_has_valid_shape(candidate session_plan_event)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT coalesce(
+        (
+            (
+                candidate.event_ordinal = 1
+                AND candidate.prior_event_ordinal IS NULL
+            )
+            OR (
+                candidate.event_ordinal > 1
+                AND candidate.prior_event_ordinal =
+                    candidate.event_ordinal - 1
+            )
+        )
+        AND CASE candidate.event_kind
+            WHEN 'created' THEN
+                candidate.entry_ordinal = candidate.event_ordinal
+                AND candidate.dependency_ordinal IS NULL
+                AND candidate.entry_text IS NOT NULL
+                AND char_length(candidate.entry_text) BETWEEN 1 AND 4096
+                AND candidate.entry_status IS NULL
+            WHEN 'text_revised' THEN
+                candidate.entry_ordinal < candidate.event_ordinal
+                AND candidate.dependency_ordinal IS NULL
+                AND candidate.entry_text IS NOT NULL
+                AND char_length(candidate.entry_text) BETWEEN 1 AND 4096
+                AND candidate.entry_status IS NULL
+            WHEN 'status_changed' THEN
+                candidate.entry_ordinal < candidate.event_ordinal
+                AND candidate.dependency_ordinal IS NULL
+                AND candidate.entry_text IS NULL
+                AND candidate.entry_status IN (
+                    'pending', 'in_progress', 'completed', 'abandoned'
+                )
+            WHEN 'depends_on' THEN
+                candidate.entry_ordinal < candidate.event_ordinal
+                AND candidate.dependency_ordinal IS NOT NULL
+                AND candidate.dependency_ordinal < candidate.event_ordinal
+                AND candidate.dependency_ordinal <>
+                    candidate.entry_ordinal
+                AND candidate.entry_text IS NULL
+                AND candidate.entry_status IS NULL
+            ELSE FALSE
+        END,
+        FALSE
+    );
+$$;
+
 CREATE FUNCTION next_session_plan_event_ordinal(target_session_id uuid)
 RETURNS numeric(20, 0)
 LANGUAGE plpgsql

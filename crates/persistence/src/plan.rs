@@ -216,6 +216,7 @@ const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
                 OR latest_dependency.first_event_ordinal IS DISTINCT FROM
                     head.dependency_event_ordinal
                 OR certified.event_ordinal IS NULL
+                OR NOT session_plan_event_has_valid_shape(certified)
                 OR NOT session_plan_event_has_authority(certified)
        END
   FROM (VALUES (1)) AS singleton(marker)
@@ -1460,6 +1461,7 @@ mod tests {
     fn event_head_certifies_the_latest_projected_dependency() {
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("head.dependency_event_ordinal"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("latest_dependency.first_event_ordinal"));
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_valid_shape"));
     }
 
     #[test]
