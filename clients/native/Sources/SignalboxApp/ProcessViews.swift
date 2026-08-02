@@ -2115,6 +2115,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     refreshTimeline()
   }
 
+  /// Evicts the oldest unknown-event cards so a future-event stream cannot exhaust
+  /// presentation memory, while retaining a visible truncation boundary.
   private func makeRoomForUnrecognizedLiveTimelineItem(utf8Bytes: UInt) -> Bool {
     let capacity = SignalboxProcessApplicationPolicy.nativeDefault.synchronization
       .eventBufferCapacity
