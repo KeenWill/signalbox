@@ -2852,6 +2852,414 @@ class DocsConsistencyTests(unittest.TestCase):
             f"names `{self.merged_pr_branch}`", failures[0].message
         )
 
+    def test_verification_ref_accepts_carrier_merged_on_first_parent(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_verification_ref_rejects_unmerged_carrier(self) -> None:
+        carrier_number = 88
+        carrier_branch = "agent/also-missing"
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            f"Verified through PR #99 (`agent/missing`; via PR #{carrier_number} "
+            f"`{carrier_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            f"cites carrier PR #{carrier_number} (`{carrier_branch}`)",
+            failures[0].message,
+        )
+
+    def test_verification_ref_rejects_carrier_with_wrong_branch(self) -> None:
+        carrier_number = 12
+        carrier_branch = "agent/not-the-merged-branch"
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            f"Verified through PR #99 (`agent/missing`; via PR #{carrier_number} "
+            f"`{carrier_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            f"cites carrier PR #{carrier_number} (`{carrier_branch}`)",
+            failures[0].message,
+        )
+
+    def test_verification_ref_ignores_carrier_prose_outside_the_exact_form(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; not via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_verification_ref_carrier_cannot_bypass_exact_branch_check(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/not-example`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "a `via` carrier tail is not permitted", failures[0].message
+        )
+
+    def test_verification_ref_rejects_carrier_tail_on_a_merged_primary(self) -> None:
+        carrier_number = 88
+        carrier_branch = "agent/missing"
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            f"Verified through PR #12 (`{self.merged_pr_branch}`; via "
+            f"PR #{carrier_number} `{carrier_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "a `via` carrier tail is not permitted", failures[0].message
+        )
+
+    def test_verification_ref_accepts_carrier_wrapped_in_a_block_quote(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "> Verified through PR #99 (`agent/missing`; via PR #12\n"
+            f"> `{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_verification_ref_rejects_carrier_without_gap_after_semicolon(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            f"Verified through PR #99 (`agent/missing`;via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_verification_ref_ignores_midline_quote_marker_in_carrier_gap(
+        self,
+    ) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            f"Verified through PR #99 (`agent/missing`; via > PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_verification_ref_accepts_in_flight_carrier_locally(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-top")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/inner`; via PR #77 "
+            "`agent/stack-top`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_historical_carrier_passes_on_a_push_event(self) -> None:
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/missing`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        event = self.root / "event.json"
+        event.write_text('{"ref": "refs/heads/main"}', encoding="utf-8")
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_verification_ref_rejects_a_pr_naming_itself_as_carrier(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-top")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #77 (`agent/typo`; via PR #77 "
+            "`agent/stack-top`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+
+        failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "names itself as its own `via` carrier", failures[0].message
+        )
+
+    def test_inherited_unintegrated_carrier_is_preserved_through_child_ci(
+        self,
+    ) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        carried_page = (
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/inner`; via PR #77 "
+            "`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n"
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            carried_page, encoding="utf-8"
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(failure_categories(failures), [])
+
+    def test_inherited_carrier_on_a_merged_primary_still_rejects(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        carried_page = (
+            "# Example\n\n"
+            "Verified through PR #12 (`agent/inner`; via PR #77 "
+            "`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n"
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            carried_page, encoding="utf-8"
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried merged-primary fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "a `via` carrier tail is not permitted", failures[0].message
+        )
+
+    def test_inherited_carrier_reference_cannot_shed_its_tail(self) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/inner`; via PR #12 "
+            f"`{self.merged_pr_branch}`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #99 (`agent/inner`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
+    def test_inherited_carrier_cannot_shed_its_tail_via_self_citation(
+        self,
+    ) -> None:
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-base")
+        carried_page = (
+            "# Example\n\n"
+            "Verified through PR #100 (`agent/stack-child`; via PR #77 "
+            "`agent/stack-base`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n"
+        )
+        (self.root / "docs/spec/example.md").write_text(
+            carried_page, encoding="utf-8"
+        )
+        run_git(self.root, "add", "docs/spec/example.md")
+        run_git(self.root, "commit", "-q", "-m", "carried base fixture")
+        base_sha = git_output(self.root, "rev-parse", "HEAD")
+        run_git(self.root, "checkout", "-q", "-b", "agent/stack-child")
+        (self.root / "docs/spec/example.md").write_text(
+            "# Example\n\n"
+            "Verified through PR #100 (`agent/stack-child`).\n\n"
+            "## Provider bridge and `current_time`\n\n"
+            "## Repeat\n\n"
+            "## Repeat\n",
+            encoding="utf-8",
+        )
+        event = self.root / "event.json"
+        event.write_text(
+            '{"number": 100, "pull_request": {'
+            '"head": {"ref": "agent/stack-child"}, '
+            f'"base": {{"sha": "{base_sha}"}}}}}}',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}):
+            failures = run_checks(self.root)
+
+        self.assertEqual(
+            failure_categories(failures),
+            ["spec-verification-history"],
+        )
+        self.assertIn(
+            "no merge commit in the `main` integration history",
+            failures[0].message,
+        )
+
     def test_verification_ref_rejects_one_parent_merge_subject_spoof(self) -> None:
         run_git(
             self.root,
