@@ -24,6 +24,28 @@ use crate::tests::support::{
 };
 
 #[test]
+fn repository_layout_rejects_a_missing_head() {
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.root().join(".git/HEAD")).expect("fixture HEAD removes");
+
+    let failure =
+        validate_repository_layout(fixture.root()).expect_err("missing HEAD rejects admission");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_layout_rejects_a_malformed_head() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root().join(".git/HEAD"), b"not a head\n").expect("malformed HEAD writes");
+
+    let failure =
+        validate_repository_layout(fixture.root()).expect_err("malformed HEAD rejects admission");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
 fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
     let fixture = Fixture::new();
     let git_path = fixture.root().join(".git");

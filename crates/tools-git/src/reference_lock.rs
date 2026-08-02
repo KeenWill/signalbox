@@ -44,7 +44,6 @@ pub(super) struct ReferenceLock {
     identity: FileIdentity,
     prepared: Option<ReferenceSnapshotIdentity>,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
-    created_directories: CreatedReferenceDirectories,
     committed: bool,
 }
 
@@ -59,7 +58,6 @@ pub(super) struct ReferenceParent {
     pub(super) directory: OwnedFd,
     pub(super) leaf: OsString,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
-    created_directories: CreatedReferenceDirectories,
     creation_file_mode: Option<Mode>,
 }
 
@@ -69,15 +67,19 @@ pub(super) enum ReferenceParentMode {
     ExistingOnly,
 }
 
-#[derive(Debug)]
-pub(super) struct CreatedReferenceDirectory {
-    parent: OwnedFd,
-    name: OsString,
-    identity: FileIdentity,
+struct ReferencePublicationHooks<
+    BeforeAbsent,
+    BeforeExchange,
+    AfterPublish,
+    BeforeCleanup,
+    BeforeRollback,
+> {
+    before_absent: BeforeAbsent,
+    before_exchange: BeforeExchange,
+    after_publish: AfterPublish,
+    before_cleanup: BeforeCleanup,
+    before_rollback: BeforeRollback,
 }
-
-#[derive(Default)]
-pub(super) struct CreatedReferenceDirectories(Vec<CreatedReferenceDirectory>);
 
 impl ReferenceLock {
     pub(super) fn acquire(
@@ -109,7 +111,6 @@ impl ReferenceLock {
             identity,
             prepared: None,
             hierarchy: bound.hierarchy,
-            created_directories: bound.created_directories,
             committed: false,
         };
         let permissions = reference_permissions(&guard.parent, &guard.leaf)?
@@ -128,7 +129,11 @@ impl ReferenceLock {
         &self,
         authority: &PinnedRepository,
     ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-        read_reference_leaf(&self.parent, &self.leaf, authority, &self.name)
+        let value = read_reference_leaf(&self.parent, &self.leaf, authority, &self.name)?;
+        if !self.hierarchy_is_current(authority) {
+            return Err(LocalGitFailure::Operation);
+        }
+        Ok(value)
     }
 
     pub(super) fn hierarchy_is_current(&self, authority: &PinnedRepository) -> bool {
@@ -231,15 +236,19 @@ impl ReferenceLock {
         self.publish_with_hooks(
             authority,
             expected,
-            before_absent_publish,
-            || {},
-            || {},
-            || {},
+            ReferencePublicationHooks {
+                before_absent: before_absent_publish,
+                before_exchange: || {},
+                after_publish: || {},
+                before_cleanup: || {},
+                before_rollback: || {},
+            },
         )
     }
 
     fn publish_with_hooks<
         BeforeAbsent: FnOnce(),
+        BeforeExchange: FnOnce(),
         AfterPublish: FnOnce(),
         BeforeCleanup: FnOnce(),
         BeforeRollback: FnOnce(),
@@ -247,11 +256,21 @@ impl ReferenceLock {
         mut self,
         authority: &PinnedRepository,
         expected: &PinnedReferenceValue,
-        before_absent_publish: BeforeAbsent,
-        after_publish: AfterPublish,
-        before_cleanup: BeforeCleanup,
-        before_rollback: BeforeRollback,
+        hooks: ReferencePublicationHooks<
+            BeforeAbsent,
+            BeforeExchange,
+            AfterPublish,
+            BeforeCleanup,
+            BeforeRollback,
+        >,
     ) -> Result<(), LocalGitFailure> {
+        let ReferencePublicationHooks {
+            before_absent,
+            before_exchange,
+            after_publish,
+            before_cleanup,
+            before_rollback,
+        } = hooks;
         let mut before_rollback = Some(before_rollback);
         authority.validate_supported_layout()?;
         if !self.path_still_owned()
@@ -268,7 +287,7 @@ impl ReferenceLock {
             if self.read(authority)? != *expected {
                 return Err(LocalGitFailure::Operation);
             }
-            before_absent_publish();
+            before_absent();
             if !self.prepared_lock_is_current() {
                 return Err(LocalGitFailure::Operation);
             }
@@ -302,12 +321,12 @@ impl ReferenceLock {
                 }
                 return Err(LocalGitFailure::Operation);
             }
-            self.created_directories.disarm();
             self.committed = true;
             return Ok(());
         }
         let expected_leaf_snapshot = reference_snapshot_identity_at(&self.parent, &self.leaf)?
             .ok_or(LocalGitFailure::Operation)?;
+        before_exchange();
         renameat_with(
             &self.parent,
             &self.lock_name,
@@ -316,6 +335,9 @@ impl ReferenceLock {
             RenameFlags::EXCHANGE,
         )
         .map_err(|_| LocalGitFailure::Operation)?;
+        let displaced_after_exchange =
+            reference_snapshot_identity_at(&self.parent, &self.lock_name)?
+                .ok_or(LocalGitFailure::Operation)?;
         after_publish();
         let displaced = read_reference_leaf(&self.parent, &self.lock_name, authority, &self.name);
         let packed_is_current = packed_reference_target(authority, &self.name)
@@ -337,12 +359,12 @@ impl ReferenceLock {
             || !self.hierarchy_is_current(authority)
         {
             before_rollback.take().ok_or(LocalGitFailure::Operation)?();
-            if displaced_snapshot_is_current && publication_is_current {
+            if publication_is_current {
                 let _ = rollback_reference_exchange_if_current(
                     &self.parent,
                     &self.leaf,
                     &self.lock_name,
-                    expected_leaf_snapshot,
+                    displaced_after_exchange,
                     self.prepared.ok_or(LocalGitFailure::Operation)?,
                 );
             }
@@ -360,7 +382,7 @@ impl ReferenceLock {
                 &self.parent,
                 &self.leaf,
                 &self.lock_name,
-                expected_leaf_snapshot,
+                displaced_after_exchange,
                 self.prepared.ok_or(LocalGitFailure::Operation)?,
             );
             return Err(LocalGitFailure::Operation);
@@ -372,7 +394,6 @@ impl ReferenceLock {
             expected_leaf_snapshot,
             self.prepared.ok_or(LocalGitFailure::Operation)?,
         )?;
-        self.created_directories.disarm();
         self.committed = true;
         Ok(())
     }
@@ -388,10 +409,13 @@ impl ReferenceLock {
         self.publish_with_hooks(
             authority,
             expected,
-            before_absent_publish,
-            after_publish,
-            || {},
-            || {},
+            ReferencePublicationHooks {
+                before_absent: before_absent_publish,
+                before_exchange: || {},
+                after_publish,
+                before_cleanup: || {},
+                before_rollback: || {},
+            },
         )
     }
 
@@ -402,7 +426,37 @@ impl ReferenceLock {
         expected: &PinnedReferenceValue,
         before_cleanup: BeforeCleanup,
     ) -> Result<(), LocalGitFailure> {
-        self.publish_with_hooks(authority, expected, || {}, || {}, before_cleanup, || {})
+        self.publish_with_hooks(
+            authority,
+            expected,
+            ReferencePublicationHooks {
+                before_absent: || {},
+                before_exchange: || {},
+                after_publish: || {},
+                before_cleanup,
+                before_rollback: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn publish_with_pre_exchange_test_hook<BeforeExchange: FnOnce()>(
+        self,
+        authority: &PinnedRepository,
+        expected: &PinnedReferenceValue,
+        before_exchange: BeforeExchange,
+    ) -> Result<(), LocalGitFailure> {
+        self.publish_with_hooks(
+            authority,
+            expected,
+            ReferencePublicationHooks {
+                before_absent: || {},
+                before_exchange,
+                after_publish: || {},
+                before_cleanup: || {},
+                before_rollback: || {},
+            },
+        )
     }
 
     #[cfg(test)]
@@ -419,10 +473,13 @@ impl ReferenceLock {
         self.publish_with_hooks(
             authority,
             expected,
-            || {},
-            after_publish,
-            || {},
-            before_rollback,
+            ReferencePublicationHooks {
+                before_absent: || {},
+                before_exchange: || {},
+                after_publish,
+                before_cleanup: || {},
+                before_rollback,
+            },
         )
     }
 
@@ -490,6 +547,21 @@ impl ReferenceLock {
                 .ok()
                 .flatten()
                 == Some(prepared)
+    }
+}
+
+impl ReferenceParent {
+    pub(super) fn hierarchy_is_current(&self, authority: &PinnedRepository) -> bool {
+        self.hierarchy.iter().all(|(relative, expected)| {
+            open_git_directory_path(authority, relative)
+                .and_then(|directory| {
+                    let metadata = fs::File::from(directory)
+                        .metadata()
+                        .map_err(|_| LocalGitFailure::Operation)?;
+                    Ok(file_identity(&metadata) == *expected)
+                })
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -835,41 +907,6 @@ impl Drop for ReferenceLock {
     }
 }
 
-impl Drop for CreatedReferenceDirectories {
-    fn drop(&mut self) {
-        for directory in self.0.iter().rev() {
-            directory.remove_if_owned();
-        }
-    }
-}
-
-impl CreatedReferenceDirectory {
-    fn remove_if_owned(&self) {
-        let _ =
-            remove_entry_if_identity(&self.parent, &self.name, self.identity, AtFlags::REMOVEDIR);
-    }
-}
-
-impl CreatedReferenceDirectories {
-    fn disarm(&mut self) {
-        self.0.clear();
-    }
-
-    pub(super) fn open_or_create(
-        &mut self,
-        parent: &OwnedFd,
-        name: &OsStr,
-        mode: Mode,
-    ) -> Result<OwnedFd, LocalGitFailure> {
-        let (directory, created) =
-            open_or_create_ref_directory_with_mode_tracked(parent, name, mode)?;
-        if let Some(created) = created {
-            self.0.push(created);
-        }
-        Ok(directory)
-    }
-}
-
 pub(super) fn open_reference_parent(
     authority: &PinnedRepository,
     name: &str,
@@ -901,16 +938,17 @@ pub(super) fn open_reference_parent(
                 .map_err(|_| LocalGitFailure::Operation)?,
         ),
     )];
-    let mut created_directories = CreatedReferenceDirectories::default();
     for component in parent_path.components() {
         let Component::Normal(component) = component else {
             return Err(LocalGitFailure::Operation);
         };
         let next_directory = match mode {
             ReferenceParentMode::CreateMissing => match creation_modes {
-                Some((directory_mode, _)) => {
-                    created_directories.open_or_create(&directory, component, directory_mode)?
-                }
+                Some((directory_mode, _)) => open_or_create_ref_directory_with_mode_tracked(
+                    &directory,
+                    component,
+                    directory_mode,
+                )?,
                 None => open_or_create_ref_directory(&directory, component)?,
             },
             ReferenceParentMode::ExistingOnly => openat(
@@ -934,7 +972,6 @@ pub(super) fn open_reference_parent(
         directory,
         leaf,
         hierarchy,
-        created_directories,
         creation_file_mode: creation_modes.map(|(_, file_mode)| file_mode),
     })
 }
@@ -979,14 +1016,13 @@ pub(super) fn open_or_create_ref_directory_with_mode(
     mode: Mode,
 ) -> Result<OwnedFd, LocalGitFailure> {
     open_or_create_ref_directory_with_mode_tracked(parent, name, mode)
-        .map(|(directory, _)| directory)
 }
 
 pub(super) fn open_or_create_ref_directory_with_mode_tracked(
     parent: &OwnedFd,
     name: &OsStr,
     mode: Mode,
-) -> Result<(OwnedFd, Option<CreatedReferenceDirectory>), LocalGitFailure> {
+) -> Result<OwnedFd, LocalGitFailure> {
     open_or_create_ref_directory_with_mode_tracked_and_hook(parent, name, mode, || Ok(()))
 }
 
@@ -995,59 +1031,36 @@ pub(super) fn open_or_create_ref_directory_with_mode_tracked_and_hook<PostCreate
     name: &OsStr,
     mode: Mode,
     post_create: PostCreate,
-) -> Result<(OwnedFd, Option<CreatedReferenceDirectory>), LocalGitFailure>
+) -> Result<OwnedFd, LocalGitFailure>
 where
     PostCreate: FnOnce() -> Result<(), LocalGitFailure>,
 {
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     match openat(parent, name, flags, Mode::empty()) {
-        Ok(directory) => Ok((directory, None)),
+        Ok(directory) => Ok(directory),
         Err(error) if error == rustix::io::Errno::NOENT => {
-            let pinned_parent = dup(parent).map_err(|_| LocalGitFailure::Operation)?;
             mkdirat(parent, name, mode).map_err(|_| LocalGitFailure::Operation)?;
-            let status = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(status) if FileType::from_raw_mode(status.st_mode) == FileType::Directory => {
-                    status
-                }
-                Ok(_) | Err(_) => {
-                    let _ = unlinkat(parent, name, AtFlags::REMOVEDIR);
-                    return Err(LocalGitFailure::Operation);
-                }
-            };
-            let created = CreatedReferenceDirectory {
-                parent: pinned_parent,
-                name: name.to_owned(),
-                identity: FileIdentity {
-                    device: status.st_dev,
-                    inode: status.st_ino,
-                },
-            };
-            if let Err(failure) = post_create() {
-                created.remove_if_owned();
-                return Err(failure);
-            }
+            post_create()?;
             let directory = match openat(parent, name, flags, Mode::empty()) {
                 Ok(directory) => directory,
-                Err(_) => {
-                    created.remove_if_owned();
-                    return Err(LocalGitFailure::Operation);
-                }
+                Err(_) => return Err(LocalGitFailure::Operation),
             };
-            let permission_file = match dup(&directory) {
-                Ok(descriptor) => fs::File::from(descriptor),
-                Err(_) => {
-                    created.remove_if_owned();
-                    return Err(LocalGitFailure::Operation);
-                }
-            };
-            if permission_file
-                .set_permissions(fs::Permissions::from_mode(mode.bits()))
-                .is_err()
-            {
-                created.remove_if_owned();
+            let descriptor_identity = file_identity(
+                &fs::File::from(dup(&directory).map_err(|_| LocalGitFailure::Operation)?)
+                    .metadata()
+                    .map_err(|_| LocalGitFailure::Operation)?,
+            );
+            let path_identity = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+                .ok()
+                .filter(|status| FileType::from_raw_mode(status.st_mode) == FileType::Directory)
+                .map(|status| FileIdentity {
+                    device: status.st_dev,
+                    inode: status.st_ino,
+                });
+            if path_identity != Some(descriptor_identity) {
                 return Err(LocalGitFailure::Operation);
             }
-            Ok((directory, Some(created)))
+            Ok(directory)
         }
         Err(_) => Err(LocalGitFailure::Operation),
     }

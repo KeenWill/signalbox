@@ -22,7 +22,7 @@ use crate::descriptor::{
     file_identity, file_snapshot_identity, unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
-use crate::layout::{open_repository_config_at, validate_live_shallow};
+use crate::layout::{open_repository_config_at, open_repository_head_at, validate_live_shallow};
 use crate::limits::{
     MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
     MAX_PACK_FILE_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
@@ -34,6 +34,9 @@ pub(super) struct PinnedRepository {
     _config: fs::File,
     config_snapshot: fs::File,
     config_identity: FileSnapshotIdentity,
+    _head: fs::File,
+    head_identity: FileSnapshotIdentity,
+    head_bytes: Vec<u8>,
     pub(super) object_format: ObjectFormat,
     repository: Mutex<RepositoryShell>,
 }
@@ -43,6 +46,9 @@ pub(super) struct RepositoryOperationGuard {
     _config: fs::File,
     config_snapshot: fs::File,
     config_identity: FileSnapshotIdentity,
+    _head: fs::File,
+    head_identity: FileSnapshotIdentity,
+    head_bytes: Vec<u8>,
     object_format: ObjectFormat,
 }
 
@@ -168,6 +174,7 @@ impl PinnedRepository {
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
         let config = open_repository_config_at(&git_directory)?;
+        let head = open_repository_head_at(&git_directory, config.object_format)?;
         after_config_snapshot();
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
@@ -188,6 +195,7 @@ impl PinnedRepository {
                     .metadata()
                     .map_err(|_| LocalGitToolsConstructionError::Repository)?,
             ),
+            head: head.identity.file,
         };
         if observed != expected {
             return Err(LocalGitToolsConstructionError::Repository);
@@ -202,6 +210,9 @@ impl PinnedRepository {
             _config: config.source,
             config_snapshot: config.snapshot,
             config_identity: config.identity,
+            _head: head.source,
+            head_identity: head.identity,
+            head_bytes: head.bytes,
             object_format: config.object_format,
             repository: Mutex::new(repository),
         };
@@ -232,6 +243,12 @@ impl PinnedRepository {
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        validate_head_at(
+            &self.git_directory,
+            self.object_format,
+            self.head_identity,
+            &self.head_bytes,
+        )?;
         unsupported_control_files_are_absent(self.git_directory.as_fd())?;
         validate_live_shallow(&self.git_directory, self.object_format)?;
         validate_config_at(
@@ -239,8 +256,20 @@ impl PinnedRepository {
             &self.config_snapshot,
             self.config_identity,
         )?;
+        validate_head_at(
+            &self.git_directory,
+            self.object_format,
+            self.head_identity,
+            &self.head_bytes,
+        )?;
         validate_live_shallow(&self.git_directory, self.object_format)?;
-        unsupported_control_files_are_absent(self.git_directory.as_fd())
+        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
+        validate_head_at(
+            &self.git_directory,
+            self.object_format,
+            self.head_identity,
+            &self.head_bytes,
+        )
     }
 
     pub(super) fn validate_object_layout(&self) -> Result<(), LocalGitFailure> {
@@ -262,6 +291,12 @@ impl PinnedRepository {
                 .try_clone()
                 .map_err(|_| LocalGitFailure::Operation)?,
             config_identity: self.config_identity,
+            _head: self
+                ._head
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
+            head_identity: self.head_identity,
+            head_bytes: self.head_bytes.clone(),
             object_format: self.object_format,
         })
     }
@@ -269,6 +304,12 @@ impl PinnedRepository {
 
 impl RepositoryOperationGuard {
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        validate_head_at(
+            &self.git_directory,
+            self.object_format,
+            self.head_identity,
+            &self.head_bytes,
+        )?;
         unsupported_control_files_are_absent(self.git_directory.as_fd())?;
         validate_live_shallow(&self.git_directory, self.object_format)?;
         validate_config_at(
@@ -276,9 +317,35 @@ impl RepositoryOperationGuard {
             &self.config_snapshot,
             self.config_identity,
         )?;
+        validate_head_at(
+            &self.git_directory,
+            self.object_format,
+            self.head_identity,
+            &self.head_bytes,
+        )?;
         validate_live_shallow(&self.git_directory, self.object_format)?;
-        unsupported_control_files_are_absent(self.git_directory.as_fd())
+        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
+        validate_head_at(
+            &self.git_directory,
+            self.object_format,
+            self.head_identity,
+            &self.head_bytes,
+        )
     }
+}
+
+fn validate_head_at(
+    git_directory: &fs::File,
+    object_format: ObjectFormat,
+    expected_identity: FileSnapshotIdentity,
+    expected_bytes: &[u8],
+) -> Result<(), LocalGitFailure> {
+    let current = open_repository_head_at(git_directory, object_format)
+        .map_err(|_| LocalGitFailure::Repository)?;
+    if current.identity != expected_identity || current.bytes != expected_bytes {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(())
 }
 
 fn validate_config_at(

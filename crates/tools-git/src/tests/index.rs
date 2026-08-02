@@ -2,14 +2,14 @@
 
 use std::{fs, os::unix::fs::FileTypeExt};
 
-use git2::ObjectFormat;
+use git2::{Index, IndexEntry, IndexTime, ObjectFormat};
 use rustix::fs::{CWD, Mode, mkfifoat};
 use sha1::{Digest, Sha1};
 
 use crate::failure::LocalGitFailure;
 use crate::index_lock::{IndexLock, copy_index_snapshot_with_test_hook, write_index_entries};
 use crate::layout::validate_repository_layout;
-use crate::limits::MAX_INDEX_BYTES;
+use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::PinnedRepository;
 use crate::tests::support::{Fixture, Sha256Fixture};
 
@@ -237,6 +237,32 @@ fn repository_index_commit_rolls_back_config_changed_after_exchange() {
 }
 
 #[test]
+fn repository_index_commit_rejects_head_changed_before_publication() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let head_path = fixture.root().join(".git/HEAD");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (mut lock, mut index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+    lock.write(&mut index).expect("repository index prepares");
+
+    let failure = lock
+        .commit_with_test_hook(|| {
+            fs::write(&head_path, b"not a head\n").expect("malformed live HEAD writes")
+        })
+        .expect_err("changed HEAD rejects index publication");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        fs::read(index_path).expect("original index reads"),
+        original_index
+    );
+}
+
+#[test]
 fn repository_index_commit_rejects_alternates_created_after_acquisition() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
@@ -334,6 +360,36 @@ fn index_snapshot_rejects_same_length_rewrite_after_metadata_capture() {
             .len(),
         0
     );
+}
+
+#[test]
+fn index_commit_restores_the_exact_entry_displaced_by_exchange() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let actor_index = b"actor index replacement".to_vec();
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let (mut index_lock, mut index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+    index_lock
+        .write(&mut index)
+        .expect("prepared repository index writes");
+
+    let failure = index_lock
+        .commit_with_pre_exchange_test_hook(|| {
+            fs::write(&index_path, &actor_index).expect("actor index replaces expected")
+        })
+        .expect_err("exchange precondition race rejects index publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("actor index reads after rollback"),
+        actor_index
+    );
+    assert!(!lock_path.exists());
 }
 
 #[test]
@@ -488,4 +544,45 @@ fn manual_index_serialization_rejects_entries_from_another_object_format() {
             .len(),
         0
     );
+}
+
+#[test]
+fn manual_index_serialization_rejects_too_many_entries_before_writing() {
+    let index = index_with_entries(MAX_INDEX_ENTRIES + 1);
+    let mut serialized = tempfile::tempfile().expect("private index constructs");
+
+    let failure = write_index_entries(&mut serialized, &index, ObjectFormat::Sha1)
+        .expect_err("over-limit index rejects serialization");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        serialized
+            .metadata()
+            .expect("private index metadata reads")
+            .len(),
+        0
+    );
+}
+
+fn index_with_entries(entries: usize) -> Index {
+    let mut index = Index::new().expect("in-memory index constructs");
+    (0..entries).for_each(|entry_number| {
+        index
+            .add(&IndexEntry {
+                ctime: IndexTime::new(0, 0),
+                mtime: IndexTime::new(0, 0),
+                dev: 0,
+                ino: entry_number as u32,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: git2::Oid::ZERO_SHA1,
+                flags: 0,
+                flags_extended: 0,
+                path: format!("entry-{entry_number:04}").into_bytes(),
+            })
+            .expect("fixture index entry adds");
+    });
+    index
 }

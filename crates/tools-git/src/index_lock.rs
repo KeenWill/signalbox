@@ -382,7 +382,7 @@ impl IndexLock {
     }
 
     pub(super) fn commit(self) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, || {}, || {})
+        self.commit_with_hooks(|| {}, || {}, || {}, || {})
     }
 
     #[cfg(test)]
@@ -390,7 +390,15 @@ impl IndexLock {
         self,
         before_publish: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(before_publish, || {}, || {})
+        self.commit_with_hooks(before_publish, || {}, || {}, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn commit_with_pre_exchange_test_hook<Hook: FnOnce()>(
+        self,
+        before_exchange: Hook,
+    ) -> Result<FileIdentity, LocalGitFailure> {
+        self.commit_with_hooks(|| {}, before_exchange, || {}, || {})
     }
 
     #[cfg(test)]
@@ -398,7 +406,7 @@ impl IndexLock {
         self,
         after_exchange: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, after_exchange, || {})
+        self.commit_with_hooks(|| {}, || {}, after_exchange, || {})
     }
 
     #[cfg(test)]
@@ -406,16 +414,18 @@ impl IndexLock {
         self,
         before_cleanup: Hook,
     ) -> Result<FileIdentity, LocalGitFailure> {
-        self.commit_with_hooks(|| {}, || {}, before_cleanup)
+        self.commit_with_hooks(|| {}, || {}, || {}, before_cleanup)
     }
 
     fn commit_with_hooks<
         BeforePublish: FnOnce(),
+        BeforeExchange: FnOnce(),
         AfterExchange: FnOnce(),
         BeforeCleanup: FnOnce(),
     >(
         mut self,
         before_publish: BeforePublish,
+        before_exchange: BeforeExchange,
         after_exchange: AfterExchange,
         before_cleanup: BeforeCleanup,
     ) -> Result<FileIdentity, LocalGitFailure> {
@@ -435,6 +445,7 @@ impl IndexLock {
                 {
                     return Err(LocalGitFailure::Operation);
                 }
+                before_exchange();
                 renameat_with(
                     &self.parent,
                     &self.lock_name,
@@ -443,6 +454,9 @@ impl IndexLock {
                     RenameFlags::EXCHANGE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
+                let displaced_after_exchange =
+                    index_snapshot_identity_at(&self.parent, &self.lock_name)?
+                        .ok_or(LocalGitFailure::Operation)?;
                 after_exchange();
                 let publication_is_owned =
                     index_snapshot_identity_at(&self.parent, &self.index_name)
@@ -452,13 +466,13 @@ impl IndexLock {
                         == Ok(Some(original_index));
                 let layout_is_current = self.validate_supported_layout().is_ok();
                 if !publication_is_owned || !displaced_is_current || !layout_is_current {
-                    if publication_is_owned && displaced_is_current {
-                        let _ = renameat_with(
-                            &self.parent,
-                            &self.lock_name,
+                    if publication_is_owned {
+                        let _ = rollback_index_exchange_if_current(
                             &self.parent,
                             &self.index_name,
-                            RenameFlags::EXCHANGE,
+                            &self.lock_name,
+                            displaced_after_exchange,
+                            prepared_index,
                         );
                     }
                     return Err(LocalGitFailure::Operation);
@@ -474,16 +488,13 @@ impl IndexLock {
                     let publication_is_owned =
                         index_snapshot_identity_at(&self.parent, &self.index_name)
                             == Ok(Some(prepared_index));
-                    let displaced_is_current =
-                        index_snapshot_identity_at(&self.parent, &self.lock_name)
-                            == Ok(Some(original_index));
-                    if publication_is_owned && displaced_is_current {
-                        let _ = renameat_with(
-                            &self.parent,
-                            &self.lock_name,
+                    if publication_is_owned {
+                        let _ = rollback_index_exchange_if_current(
                             &self.parent,
                             &self.index_name,
-                            RenameFlags::EXCHANGE,
+                            &self.lock_name,
+                            displaced_after_exchange,
+                            prepared_index,
                         );
                     }
                     return Err(LocalGitFailure::Operation);
@@ -503,6 +514,7 @@ impl IndexLock {
                 if entry_identity(&self.parent, &self.index_name)?.is_some() {
                     return Err(LocalGitFailure::Operation);
                 }
+                before_exchange();
                 renameat_with(
                     &self.parent,
                     &self.lock_name,
@@ -594,6 +606,129 @@ fn remove_displaced_index_if_current(
     Ok(())
 }
 
+fn rollback_index_exchange_if_current(
+    parent: &OwnedFd,
+    index_name: &OsStr,
+    lock_name: &OsStr,
+    displaced: IndexSnapshotIdentity,
+    publication: IndexSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let quarantine = QuarantineDirectory::create(parent)?;
+    let quarantined_displaced = OsStr::new("displaced");
+    let quarantined_publication = OsStr::new("publication");
+    renameat_with(
+        parent,
+        lock_name,
+        quarantine.descriptor(),
+        quarantined_displaced,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    if index_snapshot_identity_at(quarantine.descriptor(), quarantined_displaced)
+        != Ok(Some(displaced))
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
+        parent,
+        index_name,
+        quarantine.descriptor(),
+        quarantined_publication,
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
+        let _ = renameat_with(
+            quarantine.descriptor(),
+            quarantined_displaced,
+            parent,
+            lock_name,
+            RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if index_snapshot_identity_at(quarantine.descriptor(), quarantined_publication)
+        != Ok(Some(publication))
+    {
+        restore_quarantined_index_exchange(
+            parent,
+            index_name,
+            lock_name,
+            &quarantine,
+            quarantined_displaced,
+            quarantined_publication,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
+        quarantine.descriptor(),
+        quarantined_displaced,
+        parent,
+        index_name,
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
+        restore_quarantined_index_exchange(
+            parent,
+            index_name,
+            lock_name,
+            &quarantine,
+            quarantined_displaced,
+            quarantined_publication,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
+    if renameat_with(
+        quarantine.descriptor(),
+        quarantined_publication,
+        parent,
+        lock_name,
+        RenameFlags::NOREPLACE,
+    )
+    .is_err()
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    if index_snapshot_identity_at(parent, index_name) != Ok(Some(displaced))
+        || index_snapshot_identity_at(parent, lock_name) != Ok(Some(publication))
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
+}
+
+fn restore_quarantined_index_exchange(
+    parent: &OwnedFd,
+    index_name: &OsStr,
+    lock_name: &OsStr,
+    quarantine: &QuarantineDirectory,
+    quarantined_displaced: &OsStr,
+    quarantined_publication: &OsStr,
+) {
+    let _ = renameat_with(
+        quarantine.descriptor(),
+        quarantined_publication,
+        parent,
+        index_name,
+        RenameFlags::NOREPLACE,
+    );
+    let _ = renameat_with(
+        quarantine.descriptor(),
+        quarantined_displaced,
+        parent,
+        lock_name,
+        RenameFlags::NOREPLACE,
+    );
+}
+
 pub(super) fn index_installation_mode(
     authority: &PinnedRepository,
 ) -> Result<Mode, LocalGitFailure> {
@@ -609,6 +744,9 @@ pub(super) fn write_index_entries(
     index: &Index,
     object_format: ObjectFormat,
 ) -> Result<IndexContentIdentity, LocalGitFailure> {
+    if index.len() > MAX_INDEX_ENTRIES {
+        return Err(LocalGitFailure::Operation);
+    }
     if index
         .iter()
         .any(|entry| entry.id.object_format() != object_format)

@@ -4,6 +4,7 @@ use std::{ffi::OsStr, fs};
 
 use rustix::fs::{CWD, Mode, OFlags, openat};
 
+use crate::descriptor::QuarantineDirectory;
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
 use crate::limits::MAX_REVISION_BYTES;
@@ -12,11 +13,13 @@ use crate::reference_lock::{
     ReferenceLock, ReferenceParentMode, open_or_create_ref_directory_with_mode_tracked_and_hook,
     open_reference_parent,
 };
-use crate::reference_read::read_reference_leaf_with_test_hook;
+use crate::reference_read::{
+    read_pinned_reference_with_test_hook, read_reference_leaf_with_test_hook,
+};
 use crate::tests::support::{Fixture, Sha256Fixture};
 
 #[test]
-fn created_reference_directory_preserves_post_create_failure_and_removes_owned_path() {
+fn created_reference_directory_replacement_is_never_treated_as_owned() {
     let parent = tempfile::tempdir().expect("reference parent constructs");
     let directory = openat(
         CWD,
@@ -26,17 +29,78 @@ fn created_reference_directory_preserves_post_create_failure_and_removes_owned_p
     )
     .expect("reference parent opens");
     let created_name = OsStr::new("created");
+    let retired_path = parent.path().join("retired");
+    let actor_marker = b"actor-owned directory";
 
-    let failure = open_or_create_ref_directory_with_mode_tracked_and_hook(
+    let opened = open_or_create_ref_directory_with_mode_tracked_and_hook(
         &directory,
         created_name,
         Mode::RUSR | Mode::WUSR | Mode::XUSR,
-        || Err(LocalGitFailure::Repository),
+        || {
+            fs::rename(parent.path().join(created_name), &retired_path)
+                .expect("created directory retires");
+            fs::create_dir(parent.path().join(created_name))
+                .expect("actor replacement directory constructs");
+            fs::write(
+                parent.path().join(created_name).join("marker"),
+                actor_marker,
+            )
+            .expect("actor marker writes");
+            Ok(())
+        },
     )
-    .expect_err("post-create capture failure rejects");
+    .expect("concurrent directory creation is adopted without ownership");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
-    assert!(!parent.path().join(created_name).exists());
+    drop(opened);
+    assert!(retired_path.exists());
+    assert_eq!(
+        fs::read(parent.path().join(created_name).join("marker")).expect("actor marker reads"),
+        actor_marker
+    );
+}
+
+#[test]
+fn quarantine_rejects_a_replacement_after_its_created_identity_is_captured() {
+    let parent = tempfile::tempdir().expect("quarantine parent constructs");
+    let directory = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("quarantine parent opens");
+    let retired_path = parent.path().join("retired");
+
+    let failure = QuarantineDirectory::create_with_test_hook(&directory, || {
+        let quarantine_path = fs::read_dir(parent.path())
+            .expect("quarantine parent reads")
+            .map(|entry| entry.expect("quarantine entry reads").path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".signalbox-cleanup-"))
+            })
+            .expect("created quarantine exists");
+        fs::rename(&quarantine_path, &retired_path).expect("created quarantine retires");
+        fs::create_dir(&quarantine_path).expect("replacement quarantine constructs");
+    })
+    .err()
+    .expect("replacement quarantine rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(retired_path.exists());
+    assert_eq!(
+        fs::read_dir(parent.path())
+            .expect("quarantine parent reopens")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".signalbox-cleanup-")
+            })
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -75,6 +139,38 @@ fn reference_publication_rolls_back_when_its_hierarchy_is_replaced() {
         format!("{}\n", fixture.initial)
     );
     assert!(!heads.join("topic").exists());
+}
+
+#[test]
+fn reference_publication_restores_the_exact_entry_displaced_by_exchange() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
+    let actor_bytes = format!("{actor_target}\n");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let expected = lock.read(&authority).expect("expected reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("replacement reference prepares");
+
+    let failure = lock
+        .publish_with_pre_exchange_test_hook(&authority, &expected, || {
+            fs::write(&reference_path, &actor_bytes).expect("actor reference replaces expected")
+        })
+        .expect_err("exchange precondition race rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("actor reference reads"),
+        actor_bytes
+    );
+    assert!(!lock_path.exists());
 }
 
 #[test]
@@ -507,6 +603,59 @@ fn loose_reference_rejects_same_length_rewrite_after_metadata_capture() {
         .expect_err("same-length rewrite rejects");
 
     assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn loose_reference_rejects_a_leaf_path_replacement_after_open() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/replaced";
+    let reference_path = fixture.root().join(".git").join(name);
+    let retired_path = fixture.root().join(".git/refs/heads/replaced.retired");
+    let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = read_pinned_reference_with_test_hook(&authority, name, || {
+        fs::rename(&reference_path, &retired_path).expect("opened reference retires");
+        fs::write(&reference_path, &actor_target).expect("replacement reference writes");
+    })
+    .expect_err("replaced live leaf rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("replacement reference reads"),
+        actor_target
+    );
+}
+
+#[test]
+fn loose_reference_rejects_a_parent_path_replacement_after_open() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/parent/topic";
+    let parent_path = fixture.root().join(".git/refs/heads/parent");
+    let retired_path = fixture.root().join(".git/refs/heads/parent.retired");
+    let reference_path = parent_path.join("topic");
+    let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
+    fs::create_dir(&parent_path).expect("fixture reference parent constructs");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = read_pinned_reference_with_test_hook(&authority, name, || {
+        fs::rename(&parent_path, &retired_path).expect("opened reference parent retires");
+        fs::create_dir(&parent_path).expect("replacement reference parent constructs");
+        fs::write(parent_path.join("topic"), &actor_target).expect("replacement reference writes");
+    })
+    .expect_err("replaced live hierarchy rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(parent_path.join("topic")).expect("replacement reference reads"),
+        actor_target
+    );
 }
 
 #[test]

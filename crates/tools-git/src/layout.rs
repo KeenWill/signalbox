@@ -33,6 +33,12 @@ pub(super) struct RepositoryConfig {
     pub(super) object_format: ObjectFormat,
 }
 
+pub(super) struct RepositoryHead {
+    pub(super) source: fs::File,
+    pub(super) identity: FileSnapshotIdentity,
+    pub(super) bytes: Vec<u8>,
+}
+
 pub(super) fn validate_repository_layout(
     root: &Path,
 ) -> Result<RepositoryIdentity, LocalGitToolsConstructionError> {
@@ -61,6 +67,7 @@ pub(super) fn validate_repository_layout(
     unsupported_control_files_are_absent(git_directory.as_fd())
         .map_err(|_| LocalGitToolsConstructionError::Repository)?;
     let config = open_repository_config_at(&git_directory)?;
+    let head = open_repository_head_at(&git_directory, config.object_format)?;
     reject_administrative_symlinks_for_format(&git_directory, config.object_format)?;
     let config_metadata = config
         .source
@@ -70,7 +77,80 @@ pub(super) fn validate_repository_layout(
         root: root_identity,
         git_directory: git_directory_identity,
         config: file_identity(&config_metadata),
+        head: head.identity.file,
     })
+}
+
+pub(super) fn open_repository_head_at(
+    git_directory: &fs::File,
+    object_format: ObjectFormat,
+) -> Result<RepositoryHead, LocalGitToolsConstructionError> {
+    let descriptor = openat(
+        git_directory,
+        "HEAD",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let mut source = fs::File::from(descriptor);
+    let before = source
+        .metadata()
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    if !before.is_file() || before.len() > MAX_REVISION_BYTES as u64 {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    Read::by_ref(&mut source)
+        .take((MAX_REVISION_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let after = source
+        .metadata()
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let identity = file_snapshot_identity(&after);
+    if bytes.len() > MAX_REVISION_BYTES
+        || bytes.len() as u64 != before.len()
+        || file_snapshot_identity(&before) != identity
+        || !valid_head_record(&bytes, object_format)
+    {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    let path_descriptor = openat(
+        git_directory,
+        "HEAD",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let path_identity = file_snapshot_identity(
+        &fs::File::from(path_descriptor)
+            .metadata()
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+    );
+    if path_identity != identity {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    Ok(RepositoryHead {
+        source,
+        identity,
+        bytes,
+    })
+}
+
+fn valid_head_record(bytes: &[u8], object_format: ObjectFormat) -> bool {
+    let record = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    if record.is_empty() || record.contains(&b'\n') || record.contains(&b'\r') {
+        return false;
+    }
+    if let Some(target) = record.strip_prefix(b"ref: ") {
+        return std::str::from_utf8(target).is_ok_and(|target| {
+            target.starts_with("refs/") && git2::Reference::is_valid_name(target)
+        });
+    }
+    std::str::from_utf8(record)
+        .ok()
+        .and_then(|value| git2::Oid::from_str_ext(value, object_format).ok())
+        .is_some()
 }
 
 pub(super) fn reject_administrative_symlinks(

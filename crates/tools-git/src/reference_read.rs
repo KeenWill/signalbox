@@ -44,6 +44,14 @@ pub(super) fn read_pinned_reference(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    read_pinned_reference_with_hook(authority, name, || {})
+}
+
+fn read_pinned_reference_with_hook<Hook: FnOnce()>(
+    authority: &PinnedRepository,
+    name: &str,
+    after_metadata: Hook,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
     let bound = match open_reference_parent(authority, name, ReferenceParentMode::ExistingOnly) {
         Ok(bound) => bound,
         Err(error) if name.starts_with("refs/") => {
@@ -56,7 +64,17 @@ pub(super) fn read_pinned_reference(
         }
         Err(error) => return Err(error),
     };
-    read_reference_leaf(&bound.directory, &bound.leaf, authority, name)
+    let value = read_reference_leaf_with_hook(
+        &bound.directory,
+        &bound.leaf,
+        authority,
+        name,
+        after_metadata,
+    )?;
+    if !bound.hierarchy_is_current(authority) {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(value)
 }
 
 pub(super) fn loose_reference_parent_is_missing(
@@ -139,6 +157,19 @@ fn read_reference_leaf_with_hook<Hook: FnOnce()>(
     {
         return Err(LocalGitFailure::Operation);
     }
+    let path_descriptor = openat(
+        parent,
+        leaf,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let path_metadata = fs::File::from(path_descriptor)
+        .metadata()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    if file_snapshot_identity(&after_read) != file_snapshot_identity(&path_metadata) {
+        return Err(LocalGitFailure::Operation);
+    }
     authority.validate_supported_layout()?;
     let bytes = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     if let Some(symbolic) = bytes.strip_prefix(b"ref: ") {
@@ -164,6 +195,15 @@ pub(super) fn read_reference_leaf_with_test_hook<Hook: FnOnce()>(
     after_metadata: Hook,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
     read_reference_leaf_with_hook(parent, leaf, authority, name, after_metadata)
+}
+
+#[cfg(test)]
+pub(super) fn read_pinned_reference_with_test_hook<Hook: FnOnce()>(
+    authority: &PinnedRepository,
+    name: &str,
+    after_metadata: Hook,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    read_pinned_reference_with_hook(authority, name, after_metadata)
 }
 
 pub(super) fn resolve_pinned_reference_chain(

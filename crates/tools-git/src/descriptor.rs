@@ -26,6 +26,7 @@ pub(super) struct RepositoryIdentity {
     pub(super) root: FileIdentity,
     pub(super) git_directory: FileIdentity,
     pub(super) config: FileIdentity,
+    pub(super) head: FileIdentity,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,17 +48,31 @@ pub(super) struct QuarantineDirectory {
 
 impl QuarantineDirectory {
     pub(super) fn create(parent: &OwnedFd) -> Result<Self, LocalGitFailure> {
+        Self::create_with_hook(parent, || {})
+    }
+
+    fn create_with_hook<AfterPersist: FnOnce()>(
+        parent: &OwnedFd,
+        after_persist: AfterPersist,
+    ) -> Result<Self, LocalGitFailure> {
         let pinned_parent = dup(parent).map_err(|_| LocalGitFailure::Operation)?;
         let temporary = tempfile::Builder::new()
             .prefix(".signalbox-cleanup-")
             .tempdir_in(descriptor_path_from_fd(parent))
             .map_err(|_| LocalGitFailure::Operation)?;
+        let created_metadata =
+            fs::symlink_metadata(temporary.path()).map_err(|_| LocalGitFailure::Operation)?;
+        if created_metadata.file_type().is_symlink() || !created_metadata.is_dir() {
+            return Err(LocalGitFailure::Operation);
+        }
+        let created_identity = file_identity(&created_metadata);
         let name = temporary
             .path()
             .file_name()
             .ok_or(LocalGitFailure::Operation)?
             .to_owned();
         let _persisted_path = temporary.keep();
+        after_persist();
         let directory = match openat(
             parent,
             &name,
@@ -65,10 +80,7 @@ impl QuarantineDirectory {
             Mode::empty(),
         ) {
             Ok(directory) => directory,
-            Err(_) => {
-                let _ = unlinkat(parent, &name, AtFlags::REMOVEDIR);
-                return Err(LocalGitFailure::Operation);
-            }
+            Err(_) => return Err(LocalGitFailure::Operation),
         };
         let identity = match dup(&directory)
             .ok()
@@ -76,11 +88,8 @@ impl QuarantineDirectory {
             .and_then(|file| file.metadata().ok())
             .map(|metadata| file_identity(&metadata))
         {
-            Some(identity) => identity,
-            None => {
-                let _ = unlinkat(parent, &name, AtFlags::REMOVEDIR);
-                return Err(LocalGitFailure::Operation);
-            }
+            Some(identity) if identity == created_identity => identity,
+            Some(_) | None => return Err(LocalGitFailure::Operation),
         };
         Ok(Self {
             parent: pinned_parent,
@@ -88,6 +97,14 @@ impl QuarantineDirectory {
             identity,
             directory,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_with_test_hook<AfterPersist: FnOnce()>(
+        parent: &OwnedFd,
+        after_persist: AfterPersist,
+    ) -> Result<Self, LocalGitFailure> {
+        Self::create_with_hook(parent, after_persist)
     }
 
     pub(super) fn descriptor(&self) -> &OwnedFd {
