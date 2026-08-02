@@ -9,8 +9,8 @@ aggregation are verified against PR #389 (`agent/cost-accounting`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
-The tool-approval decision event surface was re-verified through PR #396
-(`agent/approval-judge`).
+The tool-approval decision event surface was re-verified through this PR
+(`agent/approval-judge-storage`).
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
