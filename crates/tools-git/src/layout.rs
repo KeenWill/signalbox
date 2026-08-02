@@ -20,6 +20,7 @@ use crate::descriptor::{
     FileSnapshotIdentity, RepositoryIdentity, file_identity, file_snapshot_identity,
     unsupported_control_files_are_absent,
 };
+use crate::failure::LocalGitFailure;
 use crate::limits::{
     MAX_PACKED_REFS_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
     MAX_REVISION_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
@@ -159,7 +160,7 @@ fn reject_administrative_symlinks_for_format(
             }
             if directory_kind == AdministrativeDirectoryKind::Root && name == OsStr::new("shallow")
             {
-                validate_shallow_file(&mut file, object_format)?;
+                validate_shallow_file_at(&current, name, &mut file, object_format)?;
             }
         }
     }
@@ -206,6 +207,84 @@ pub(super) fn validate_shallow_file(
         {
             return Err(LocalGitToolsConstructionError::Repository);
         }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_live_shallow(
+    git_directory: &fs::File,
+    object_format: ObjectFormat,
+) -> Result<(), LocalGitFailure> {
+    let descriptor = match openat(
+        git_directory,
+        "shallow",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
+        Err(_) => return Err(LocalGitFailure::Repository),
+    };
+    let mut file = fs::File::from(descriptor);
+    validate_shallow_file_at(
+        &dup(git_directory).map_err(|_| LocalGitFailure::Repository)?,
+        OsStr::new("shallow"),
+        &mut file,
+        object_format,
+    )
+    .map_err(|_| LocalGitFailure::Repository)
+}
+
+fn validate_shallow_file_at(
+    parent: &OwnedFd,
+    name: &OsStr,
+    file: &mut fs::File,
+    object_format: ObjectFormat,
+) -> Result<(), LocalGitToolsConstructionError> {
+    validate_shallow_file_at_with_hook(parent, name, file, object_format, || {})
+}
+
+#[cfg(test)]
+pub(super) fn validate_shallow_file_at_with_test_hook<AfterRead: FnOnce()>(
+    parent: &OwnedFd,
+    name: &OsStr,
+    file: &mut fs::File,
+    object_format: ObjectFormat,
+    after_read: AfterRead,
+) -> Result<(), LocalGitToolsConstructionError> {
+    validate_shallow_file_at_with_hook(parent, name, file, object_format, after_read)
+}
+
+fn validate_shallow_file_at_with_hook<AfterRead: FnOnce()>(
+    parent: &OwnedFd,
+    name: &OsStr,
+    file: &mut fs::File,
+    object_format: ObjectFormat,
+    after_read: AfterRead,
+) -> Result<(), LocalGitToolsConstructionError> {
+    let before = file
+        .metadata()
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    validate_shallow_file(file, object_format)?;
+    let after = file
+        .metadata()
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    if file_snapshot_identity(&before) != file_snapshot_identity(&after) {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
+    after_read();
+    let path_descriptor = openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let path_metadata = fs::File::from(path_descriptor)
+        .metadata()
+        .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    if file_snapshot_identity(&after) != file_snapshot_identity(&path_metadata) {
+        return Err(LocalGitToolsConstructionError::Repository);
     }
     Ok(())
 }
@@ -307,29 +386,17 @@ fn validate_repository_config_descriptor(
         }
         if section == "core" {
             let key_value = normalized.split_once('=');
-            let bare_without_value = key_value.is_none()
-                && normalized
-                    .split_ascii_whitespace()
-                    .next()
-                    .is_some_and(|key| key == "bare");
-            if bare_without_value {
+            let key = key_value
+                .map(|(key, _)| key.trim())
+                .or_else(|| normalized.split_ascii_whitespace().next())
+                .unwrap_or("");
+            if key_value.is_none() && matches!(key, "bare" | "repositoryformatversion") {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
-            if key_value.is_none()
-                && normalized
-                    .split_ascii_whitespace()
-                    .next()
-                    .is_some_and(|key| key == "repositoryformatversion")
-            {
-                return Err(LocalGitToolsConstructionError::Repository);
-            }
-            let file_valued = key_value.is_some_and(|(key, _)| {
-                matches!(
-                    key.trim(),
-                    "worktree" | "excludesfile" | "attributesfile" | "hookspath" | "fsmonitor"
-                )
-            });
-            if file_valued {
+            if matches!(
+                key,
+                "worktree" | "excludesfile" | "attributesfile" | "hookspath" | "fsmonitor"
+            ) {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
             if let Some((key, value)) = key_value

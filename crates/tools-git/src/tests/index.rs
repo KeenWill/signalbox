@@ -8,7 +8,9 @@ use sha1::{Digest, Sha1};
 
 use crate::failure::LocalGitFailure;
 use crate::index_lock::{IndexLock, copy_index_snapshot_with_test_hook, write_index_entries};
+use crate::layout::validate_repository_layout;
 use crate::limits::MAX_INDEX_BYTES;
+use crate::pinning::PinnedRepository;
 use crate::tests::support::{Fixture, Sha256Fixture};
 
 #[test]
@@ -144,6 +146,122 @@ fn index_lock_rejects_an_in_place_rewrite_of_prepared_bytes() {
         fs::read(index_path).expect("original index reads after rejection"),
         original_index
     );
+}
+
+#[test]
+fn index_lock_rejects_bytes_rewritten_before_prepared_snapshot() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let (mut index_lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+
+    let failure = index_lock
+        .write_raw_with_test_hook(b"intended index bytes", || {
+            fs::write(&lock_path, b"actor index bytes")
+                .expect("actor rewrites index before prepared snapshot");
+        })
+        .expect_err("pre-snapshot index rewrite rejects preparation");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("original index reads after rejection"),
+        original_index
+    );
+}
+
+#[test]
+fn repository_index_commit_rejects_config_changed_after_acquisition() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let config_path = fixture.root().join(".git/config");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (index_lock, _index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+
+    let failure = index_lock
+        .commit_with_test_hook(|| {
+            fs::write(
+                &config_path,
+                "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectformat = sha256\n",
+            )
+            .expect("live config object format changes");
+        })
+        .expect_err("changed config rejects index publication");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        fs::read(index_path).expect("original index reads after rejection"),
+        original_index
+    );
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn repository_index_commit_rolls_back_config_changed_after_exchange() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let config_path = fixture.root().join(".git/config");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (mut index_lock, _index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+    index_lock
+        .write_raw(b"prepared replacement index")
+        .expect("replacement index prepares");
+
+    let failure = index_lock
+        .commit_with_exchange_test_hook(|| {
+            fs::write(
+                &config_path,
+                "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectformat = sha256\n",
+            )
+            .expect("live config object format changes after exchange");
+        })
+        .expect_err("post-exchange config change rejects index publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(index_path).expect("rolled-back index reads"),
+        original_index
+    );
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn repository_index_commit_rejects_alternates_created_after_acquisition() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let alternates_path = fixture.root().join(".git/objects/info/alternates");
+    let original_index = fs::read(&index_path).expect("fixture index reads");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (index_lock, _index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+    fs::create_dir_all(alternates_path.parent().expect("alternates parent exists"))
+        .expect("object info directory constructs");
+    fs::write(&alternates_path, "/outside/objects\n").expect("late alternates writes");
+
+    let failure = index_lock
+        .commit()
+        .expect_err("late alternates reject index publication");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        fs::read(index_path).expect("original index reads after rejection"),
+        original_index
+    );
+    assert!(!lock_path.exists());
 }
 
 #[test]
@@ -350,4 +468,24 @@ fn manual_index_serialization_uses_the_sha256_checksum_width() {
 
     assert_eq!(decoded.len(), index.len());
     assert_eq!(decoded.get(0).map(|entry| entry.id), expected_entry);
+}
+
+#[test]
+fn manual_index_serialization_rejects_entries_from_another_object_format() {
+    let fixture = Fixture::new();
+    let repository = git2::Repository::open(fixture.root()).expect("SHA-1 fixture opens");
+    let index = repository.index().expect("SHA-1 fixture index opens");
+    let mut serialized = tempfile::tempfile().expect("private index constructs");
+
+    let failure = write_index_entries(&mut serialized, &index, ObjectFormat::Sha256)
+        .expect_err("SHA-1 entries reject under SHA-256 serialization");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        serialized
+            .metadata()
+            .expect("private index metadata reads")
+            .len(),
+        0
+    );
 }

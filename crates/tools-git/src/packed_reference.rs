@@ -57,6 +57,21 @@ pub(super) fn packed_reference_target(
 pub(super) fn read_packed_references(
     authority: &PinnedRepository,
 ) -> Result<Vec<(git2::Oid, Vec<u8>)>, LocalGitFailure> {
+    read_packed_references_with_hook(authority, || {})
+}
+
+#[cfg(test)]
+pub(super) fn read_packed_references_with_test_hook<AfterRead: FnOnce()>(
+    authority: &PinnedRepository,
+    after_snapshot: AfterRead,
+) -> Result<Vec<(git2::Oid, Vec<u8>)>, LocalGitFailure> {
+    read_packed_references_with_hook(authority, after_snapshot)
+}
+
+fn read_packed_references_with_hook<AfterRead: FnOnce()>(
+    authority: &PinnedRepository,
+    after_snapshot: AfterRead,
+) -> Result<Vec<(git2::Oid, Vec<u8>)>, LocalGitFailure> {
     authority.validate_supported_layout()?;
     let descriptor = match openat(
         &authority.git_directory,
@@ -67,6 +82,15 @@ pub(super) fn read_packed_references(
         Ok(descriptor) => descriptor,
         Err(error) if error == rustix::io::Errno::NOENT => {
             authority.validate_supported_layout()?;
+            match openat(
+                &authority.git_directory,
+                "packed-refs",
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Err(error) if error == rustix::io::Errno::NOENT => {}
+                Ok(_) | Err(_) => return Err(LocalGitFailure::Operation),
+            }
             return Ok(Vec::new());
         }
         Err(_) => return Err(LocalGitFailure::Operation),
@@ -88,13 +112,35 @@ pub(super) fn read_packed_references(
     {
         return Err(LocalGitFailure::Operation);
     }
+    let snapshot = file_snapshot_identity(&after_read);
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(LocalGitFailure::Operation);
+    }
+    if bytes.is_empty() {
+        after_snapshot();
+        authority.validate_supported_layout()?;
+        validate_packed_reference_path(authority, &file, snapshot)?;
+        return Ok(Vec::new());
+    }
+    let records = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
     let mut references = Vec::new();
     let mut names = HashSet::new();
     let mut previous_was_reference = false;
-    for line in bytes.split(|byte| *byte == b'\n') {
-        if line.is_empty() || matches!(line.first(), Some(b'#')) {
+    let mut header_seen = false;
+    for line in records.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            return Err(LocalGitFailure::Operation);
+        }
+        if line == b"# pack-refs with:" || line.starts_with(b"# pack-refs with: ") {
+            if header_seen || !references.is_empty() || previous_was_reference {
+                return Err(LocalGitFailure::Operation);
+            }
+            header_seen = true;
             previous_was_reference = false;
             continue;
+        }
+        if matches!(line.first(), Some(b'#')) {
+            return Err(LocalGitFailure::Operation);
         }
         if let Some(peeled) = line.strip_prefix(b"^") {
             if !previous_was_reference
@@ -130,6 +176,32 @@ pub(super) fn read_packed_references(
         references.push((oid, existing.to_vec()));
         previous_was_reference = true;
     }
+    after_snapshot();
     authority.validate_supported_layout()?;
+    validate_packed_reference_path(authority, &file, snapshot)?;
     Ok(references)
+}
+
+fn validate_packed_reference_path(
+    authority: &PinnedRepository,
+    file: &fs::File,
+    expected: crate::descriptor::FileSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let descriptor_metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+    let path_descriptor = openat(
+        &authority.git_directory,
+        "packed-refs",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Operation)?;
+    let path_metadata = fs::File::from(path_descriptor)
+        .metadata()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    if file_snapshot_identity(&descriptor_metadata) != expected
+        || file_snapshot_identity(&path_metadata) != expected
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
 }

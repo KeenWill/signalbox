@@ -44,7 +44,7 @@ pub(super) struct ReferenceLock {
     identity: FileIdentity,
     prepared: Option<ReferenceSnapshotIdentity>,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
-    _created_directories: CreatedReferenceDirectories,
+    created_directories: CreatedReferenceDirectories,
     committed: bool,
 }
 
@@ -109,7 +109,7 @@ impl ReferenceLock {
             identity,
             prepared: None,
             hierarchy: bound.hierarchy,
-            _created_directories: bound.created_directories,
+            created_directories: bound.created_directories,
             committed: false,
         };
         let permissions = reference_permissions(&guard.parent, &guard.leaf)?
@@ -149,19 +149,40 @@ impl ReferenceLock {
         authority: &PinnedRepository,
         target: git2::Oid,
     ) -> Result<(), LocalGitFailure> {
+        self.prepare_with_hook(authority, target, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn prepare_with_test_hook<AfterWrite: FnOnce()>(
+        &mut self,
+        authority: &PinnedRepository,
+        target: git2::Oid,
+        after_write: AfterWrite,
+    ) -> Result<(), LocalGitFailure> {
+        self.prepare_with_hook(authority, target, after_write)
+    }
+
+    fn prepare_with_hook<AfterWrite: FnOnce()>(
+        &mut self,
+        authority: &PinnedRepository,
+        target: git2::Oid,
+        after_write: AfterWrite,
+    ) -> Result<(), LocalGitFailure> {
         authority.validate_supported_layout()?;
         if target.object_format() != authority.object_format {
             return Err(LocalGitFailure::Operation);
         }
+        let expected = format!("{target}\n");
         self.lock
             .set_len(0)
             .and_then(|()| self.lock.rewind())
+            .and_then(|()| self.lock.write_all(expected.as_bytes()))
             .map_err(|_| LocalGitFailure::Operation)?;
-        writeln!(self.lock, "{target}").map_err(|_| LocalGitFailure::Operation)?;
         self.lock
             .sync_all()
             .map_err(|_| LocalGitFailure::Operation)?;
-        self.record_prepared_reference()?;
+        after_write();
+        self.record_prepared_reference(expected.as_bytes())?;
         if !self.path_still_owned() || !self.hierarchy_is_current(authority) {
             return Err(LocalGitFailure::Operation);
         }
@@ -177,15 +198,16 @@ impl ReferenceLock {
         if !target.starts_with("refs/") || !git2::Reference::is_valid_name(target) {
             return Err(LocalGitFailure::Operation);
         }
+        let expected = format!("ref: {target}\n");
         self.lock
             .set_len(0)
             .and_then(|()| self.lock.rewind())
+            .and_then(|()| self.lock.write_all(expected.as_bytes()))
             .map_err(|_| LocalGitFailure::Operation)?;
-        writeln!(self.lock, "ref: {target}").map_err(|_| LocalGitFailure::Operation)?;
         self.lock
             .sync_all()
             .map_err(|_| LocalGitFailure::Operation)?;
-        self.record_prepared_reference()?;
+        self.record_prepared_reference(expected.as_bytes())?;
         if !self.path_still_owned() || !self.hierarchy_is_current(authority) {
             return Err(LocalGitFailure::Operation);
         }
@@ -280,6 +302,7 @@ impl ReferenceLock {
                 }
                 return Err(LocalGitFailure::Operation);
             }
+            self.created_directories.disarm();
             self.committed = true;
             return Ok(());
         }
@@ -349,6 +372,7 @@ impl ReferenceLock {
             expected_leaf_snapshot,
             self.prepared.ok_or(LocalGitFailure::Operation)?,
         )?;
+        self.created_directories.disarm();
         self.committed = true;
         Ok(())
     }
@@ -431,9 +455,15 @@ impl ReferenceLock {
         descriptor_identity == Some(self.identity) && path_identity == Some(self.identity)
     }
 
-    fn record_prepared_reference(&mut self) -> Result<(), LocalGitFailure> {
+    fn record_prepared_reference(&mut self, expected: &[u8]) -> Result<(), LocalGitFailure> {
         let snapshot = reference_snapshot_identity(&mut self.lock)?;
-        if snapshot.file != self.identity {
+        let expected_length =
+            u64::try_from(expected.len()).map_err(|_| LocalGitFailure::Operation)?;
+        let expected_digest: [u8; 32] = Sha256::digest(expected).into();
+        if snapshot.file != self.identity
+            || snapshot.length != expected_length
+            || snapshot.digest != expected_digest
+        {
             return Err(LocalGitFailure::Operation);
         }
         self.prepared = Some(snapshot);
@@ -821,6 +851,10 @@ impl CreatedReferenceDirectory {
 }
 
 impl CreatedReferenceDirectories {
+    fn disarm(&mut self) {
+        self.0.clear();
+    }
+
     pub(super) fn open_or_create(
         &mut self,
         parent: &OwnedFd,

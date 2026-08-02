@@ -179,6 +179,60 @@ fn reference_publication_rejects_an_in_place_rewrite_of_prepared_bytes() {
 }
 
 #[test]
+fn reference_preparation_rejects_bytes_rewritten_before_snapshot() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
+    fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+
+    let failure = lock
+        .prepare_with_test_hook(&authority, git2::Oid::ZERO_SHA1, || {
+            fs::write(&lock_path, format!("{actor_target}\n"))
+                .expect("actor rewrites reference before prepared snapshot");
+        })
+        .expect_err("pre-snapshot reference rewrite rejects preparation");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("original reference reads after rejection"),
+        format!("{}\n", fixture.initial)
+    );
+}
+
+#[test]
+fn nested_reference_publication_retains_created_parent_directories() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/feature/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let expected_identity =
+        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
+    let mut lock =
+        ReferenceLock::acquire(&authority, name).expect("nested reference lock acquires");
+    let expected = lock
+        .read(&authority)
+        .expect("missing nested reference reads");
+    lock.prepare(&authority, git2::Oid::ZERO_SHA1)
+        .expect("nested reference prepares");
+
+    lock.publish(&authority, &expected)
+        .expect("nested reference publishes");
+
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("nested reference reads"),
+        format!("{}\n", git2::Oid::ZERO_SHA1)
+    );
+}
+
+#[test]
 fn direct_reference_preparation_truncates_injected_trailing_bytes() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";

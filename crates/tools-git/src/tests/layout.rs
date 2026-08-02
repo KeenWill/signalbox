@@ -1,6 +1,7 @@
 //! Repository-layout scan properties.
 
 use std::{
+    ffi::OsStr,
     fs,
     os::{fd::OwnedFd, unix::fs::symlink},
 };
@@ -10,7 +11,10 @@ use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat, symlinkat};
 
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
-use crate::layout::{reject_administrative_symlinks, validate_repository_layout};
+use crate::layout::{
+    reject_administrative_symlinks, validate_repository_layout,
+    validate_shallow_file_at_with_test_hook,
+};
 use crate::limits::MAX_OBJECT_BYTES;
 use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
 use crate::reference_lock::ReferenceLock;
@@ -104,6 +108,45 @@ fn repository_open_reads_config_from_the_pinned_administrative_directory() {
     drop(authority);
     fs::remove_dir_all(&replacement_git).expect("replacement administrative directory removes");
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
+}
+
+#[test]
+fn repository_open_rejects_a_symlinked_root_path() {
+    let fixture = Fixture::new();
+    let root = fixture.root().to_path_buf();
+    let retired_root = root.parent().expect("fixture parent exists").join(format!(
+        "{}.retired",
+        root.file_name()
+            .expect("fixture root names")
+            .to_string_lossy()
+    ));
+    let expected = validate_repository_layout(&root).expect("fixture layout validates");
+    fs::rename(&root, &retired_root).expect("fixture root retires");
+    symlink(&retired_root, &root).expect("fixture root symlink constructs");
+
+    let failure = PinnedRepository::open(&root, expected)
+        .expect_err("symlinked repository root rejects authority open");
+
+    fs::remove_file(&root).expect("fixture root symlink removes");
+    fs::rename(&retired_root, &root).expect("fixture root restores");
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_open_rejects_a_symlinked_administrative_path() {
+    let fixture = Fixture::new();
+    let git_path = fixture.root().join(".git");
+    let retired_git_path = fixture.root().join(".git.retired");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    fs::rename(&git_path, &retired_git_path).expect("fixture administrative directory retires");
+    symlink(".git.retired", &git_path).expect("administrative symlink constructs");
+
+    let failure = PinnedRepository::open(fixture.root(), expected)
+        .expect_err("symlinked administrative directory rejects authority open");
+
+    fs::remove_file(&git_path).expect("administrative symlink removes");
+    fs::rename(&retired_git_path, &git_path).expect("administrative directory restores");
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
 }
 
 #[test]
@@ -231,6 +274,38 @@ fn repository_config_rejects_duplicate_bare_declarations() {
 }
 
 #[test]
+fn repository_config_rejects_a_valueless_hooks_path() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 0\nbare = false\nhooksPath\n",
+    )
+    .expect("valueless hooks path config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("valueless hooks path rejects repository");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
+fn repository_config_rejects_a_valueless_worktree() {
+    let fixture = Fixture::new();
+    let config_path = fixture.root().join(".git/config");
+    fs::write(
+        &config_path,
+        "[core]\nrepositoryformatversion = 0\nbare = false\nworktree\n",
+    )
+    .expect("valueless worktree config writes");
+
+    let failure = validate_repository_layout(fixture.root())
+        .expect_err("valueless worktree rejects repository");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+}
+
+#[test]
 fn authority_operation_rejects_live_config_bytes_changed_after_open() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");
@@ -341,6 +416,71 @@ fn object_capture_rejects_alternates_created_after_authority_open() {
 }
 
 #[test]
+fn reference_operation_rejects_alternates_created_after_authority_open() {
+    let fixture = Fixture::new();
+    let alternates_path = fixture.root().join(".git/objects/info/alternates");
+    let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    fs::create_dir_all(alternates_path.parent().expect("alternates parent exists"))
+        .expect("object info directory constructs");
+    fs::write(&alternates_path, "/outside/objects\n").expect("late alternates writes");
+
+    let failure = ReferenceLock::acquire(&authority, "refs/heads/topic")
+        .err()
+        .expect("late alternates reject reference operation");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(!lock_path.exists());
+}
+
+#[test]
+fn shallow_validation_rejects_a_path_replaced_after_snapshot() {
+    let fixture = Fixture::new();
+    let shallow_path = fixture.root().join(".git/shallow");
+    let retired_shallow_path = fixture.root().join(".git/shallow.retired");
+    let valid_shallow = format!("{}\n", fixture.initial);
+    let replacement_shallow = format!("\n{}\n", fixture.initial);
+    fs::write(&shallow_path, &valid_shallow).expect("valid shallow file writes");
+    let git_directory = openat(
+        CWD,
+        fixture.root().join(".git"),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("fixture administrative directory opens");
+    let shallow_descriptor = openat(
+        &git_directory,
+        "shallow",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("fixture shallow file opens");
+    let mut shallow_file = fs::File::from(shallow_descriptor);
+
+    let failure = validate_shallow_file_at_with_test_hook(
+        &git_directory,
+        OsStr::new("shallow"),
+        &mut shallow_file,
+        ObjectFormat::Sha1,
+        || {
+            fs::rename(&shallow_path, &retired_shallow_path)
+                .expect("validated shallow file retires");
+            fs::write(&shallow_path, &replacement_shallow)
+                .expect("malformed replacement shallow file writes");
+        },
+    )
+    .expect_err("replaced shallow pathname rejects validation");
+
+    assert_eq!(failure.to_string(), "local Git tool construction failed");
+    assert_eq!(
+        fs::read_to_string(shallow_path).expect("replacement shallow file reads"),
+        replacement_shallow
+    );
+}
+
+#[test]
 fn repository_open_parses_the_validated_config_snapshot() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");
@@ -369,16 +509,15 @@ fn repository_shell_and_object_capture_reject_descendant_replacement() {
     symlink(outside.root().join(".git/objects"), &objects)
         .expect("outside object database symlink constructs");
 
-    let repository = authority
+    let shell_failure = authority
         .repository()
-        .expect("private repository shell locks");
-    let outside_lookup_failed = repository.find_commit(outside.initial).is_err();
-    drop(repository);
+        .err()
+        .expect("replacement object database rejects repository shell");
     let capture_failure = PinnedObjectDatabase::capture(&authority)
         .err()
         .expect("replacement object database rejects capture");
 
-    assert!(outside_lookup_failed);
+    assert_eq!(shell_failure, LocalGitFailure::Repository);
     assert_eq!(capture_failure, LocalGitFailure::Repository);
 }
 

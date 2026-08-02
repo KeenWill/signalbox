@@ -228,8 +228,16 @@ pub(super) fn remove_entry_if_identity(
         );
         return Err(LocalGitFailure::Operation);
     }
-    unlinkat(quarantine.descriptor(), quarantined_name, removal_flags)
-        .map_err(|_| LocalGitFailure::Operation)?;
+    if unlinkat(quarantine.descriptor(), quarantined_name, removal_flags).is_err() {
+        let _ = rustix::fs::renameat_with(
+            quarantine.descriptor(),
+            quarantined_name,
+            parent,
+            name,
+            rustix::fs::RenameFlags::NOREPLACE,
+        );
+        return Err(LocalGitFailure::Operation);
+    }
     if descriptor_entry_exists(parent, name)? {
         return Err(LocalGitFailure::Operation);
     }

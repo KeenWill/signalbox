@@ -19,11 +19,10 @@ use rustix::fs::{CWD, Mode, OFlags, openat};
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
     FileSnapshotIdentity, RepositoryIdentity, descriptor_path, descriptor_path_from_fd,
-    file_identity, file_snapshot_identity, unsupported_common_directory_is_absent,
-    unsupported_control_files_are_absent,
+    file_identity, file_snapshot_identity, unsupported_control_files_are_absent,
 };
 use crate::failure::LocalGitFailure;
-use crate::layout::open_repository_config_at;
+use crate::layout::{open_repository_config_at, validate_live_shallow};
 use crate::limits::{
     MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
     MAX_PACK_FILE_BYTES, MAX_REPOSITORY_CONFIG_BYTES, MAX_REPOSITORY_INSPECTIONS,
@@ -37,6 +36,14 @@ pub(super) struct PinnedRepository {
     config_identity: FileSnapshotIdentity,
     pub(super) object_format: ObjectFormat,
     repository: Mutex<RepositoryShell>,
+}
+
+pub(super) struct RepositoryOperationGuard {
+    git_directory: fs::File,
+    _config: fs::File,
+    config_snapshot: fs::File,
+    config_identity: FileSnapshotIdentity,
+    object_format: ObjectFormat,
 }
 
 pub(super) struct RepositoryShell {
@@ -139,10 +146,24 @@ impl PinnedRepository {
         GitDirectoryHook: FnOnce(),
         ConfigHook: FnOnce(),
     {
-        let root =
-            fs::File::open(root_path).map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        let git_directory = fs::File::open(root_path.join(".git"))
-            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+        let root = fs::File::from(
+            openat(
+                CWD,
+                root_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+        );
+        let git_directory = fs::File::from(
+            openat(
+                &root,
+                ".git",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitToolsConstructionError::Repository)?,
+        );
         after_git_directory_open();
         unsupported_control_files_are_absent(git_directory.as_fd())
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
@@ -211,47 +232,89 @@ impl PinnedRepository {
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
-        unsupported_common_directory_is_absent(self.git_directory.as_fd())?;
-        self.validate_config()
+        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
+        validate_live_shallow(&self.git_directory, self.object_format)?;
+        validate_config_at(
+            &self.git_directory,
+            &self.config_snapshot,
+            self.config_identity,
+        )?;
+        validate_live_shallow(&self.git_directory, self.object_format)?;
+        unsupported_control_files_are_absent(self.git_directory.as_fd())
     }
 
     pub(super) fn validate_object_layout(&self) -> Result<(), LocalGitFailure> {
-        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
-        self.validate_config()
+        self.validate_supported_layout()
     }
 
-    fn validate_config(&self) -> Result<(), LocalGitFailure> {
-        let current = open_repository_config_at(&self.git_directory)
-            .map_err(|_| LocalGitFailure::Repository)?;
-        if current.identity != self.config_identity
-            || config_snapshot_bytes(&current.snapshot)?
-                != config_snapshot_bytes(&self.config_snapshot)?
-        {
-            return Err(LocalGitFailure::Repository);
-        }
-        let path_descriptor = openat(
-            &self.git_directory,
-            "config",
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
-        let current_identity = file_snapshot_identity(
-            &current
-                .source
-                .metadata()
-                .map_err(|_| LocalGitFailure::Repository)?,
-        );
-        let path_identity = file_snapshot_identity(
-            &fs::File::from(path_descriptor)
-                .metadata()
-                .map_err(|_| LocalGitFailure::Repository)?,
-        );
-        if current_identity != self.config_identity || path_identity != self.config_identity {
-            return Err(LocalGitFailure::Repository);
-        }
-        Ok(())
+    pub(super) fn operation_guard(&self) -> Result<RepositoryOperationGuard, LocalGitFailure> {
+        Ok(RepositoryOperationGuard {
+            git_directory: self
+                .git_directory
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
+            _config: self
+                ._config
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
+            config_snapshot: self
+                .config_snapshot
+                .try_clone()
+                .map_err(|_| LocalGitFailure::Operation)?,
+            config_identity: self.config_identity,
+            object_format: self.object_format,
+        })
     }
+}
+
+impl RepositoryOperationGuard {
+    pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        unsupported_control_files_are_absent(self.git_directory.as_fd())?;
+        validate_live_shallow(&self.git_directory, self.object_format)?;
+        validate_config_at(
+            &self.git_directory,
+            &self.config_snapshot,
+            self.config_identity,
+        )?;
+        validate_live_shallow(&self.git_directory, self.object_format)?;
+        unsupported_control_files_are_absent(self.git_directory.as_fd())
+    }
+}
+
+fn validate_config_at(
+    git_directory: &fs::File,
+    config_snapshot: &fs::File,
+    config_identity: FileSnapshotIdentity,
+) -> Result<(), LocalGitFailure> {
+    let current =
+        open_repository_config_at(git_directory).map_err(|_| LocalGitFailure::Repository)?;
+    if current.identity != config_identity
+        || config_snapshot_bytes(&current.snapshot)? != config_snapshot_bytes(config_snapshot)?
+    {
+        return Err(LocalGitFailure::Repository);
+    }
+    let path_descriptor = openat(
+        git_directory,
+        "config",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| LocalGitFailure::Repository)?;
+    let current_identity = file_snapshot_identity(
+        &current
+            .source
+            .metadata()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    );
+    let path_identity = file_snapshot_identity(
+        &fs::File::from(path_descriptor)
+            .metadata()
+            .map_err(|_| LocalGitFailure::Repository)?,
+    );
+    if current_identity != config_identity || path_identity != config_identity {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(())
 }
 
 fn config_snapshot_bytes(file: &fs::File) -> Result<Vec<u8>, LocalGitFailure> {
