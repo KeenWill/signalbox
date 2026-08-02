@@ -151,6 +151,26 @@ fn web_search_rejects_credentials_colliding_with_evidence_debug_labels() {
     assert!(rendered_result.contains(SUCCESS_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
 }
 
+/// INV-035: a credential spanning the populated error `Result` wrapper and
+/// its error variant is rejected before any error evidence can be rendered.
+#[test]
+fn web_search_rejects_credential_colliding_with_populated_error_result() {
+    let collision = CredentialScrubber::try_new(&CredentialValue::new(
+        ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let rendered = format!(
+        "{:?}",
+        Err::<ToolExecutorEvidence, WebSearchExecutorError>(
+            WebSearchExecutorError::EvidenceEncoding
+        )
+    );
+
+    assert!(collision.is_none());
+    assert!(rendered.contains(ERROR_RESULT_BOUNDARY_DEBUG_COLLISION_KEY));
+}
+
 /// Removing the arbitrary detail probe payload from the fixed Debug inventory
 /// does not reject otherwise usable credentials that match its words.
 #[test]
