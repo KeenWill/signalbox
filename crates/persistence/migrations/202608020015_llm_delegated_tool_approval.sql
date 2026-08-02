@@ -184,6 +184,11 @@ BEGIN
                 USING ERRCODE = '23514',
                       CONSTRAINT = 'tool_approval_judge_requires_active_wait';
         END IF;
+        IF NEW.usage_provenance_kind <> 'reported' THEN
+            RAISE EXCEPTION 'prepared approval judge usage must be reported'
+                USING ERRCODE = '23514',
+                      CONSTRAINT = 'tool_approval_judge_prepared_usage_is_reported';
+        END IF;
         IF NEW.state_kind <> 'prepared'
             OR NEW.terminal_disposition_kind IS NOT NULL
             OR NEW.recommendation_kind IS NOT NULL

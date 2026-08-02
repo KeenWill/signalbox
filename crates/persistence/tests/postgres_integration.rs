@@ -3496,6 +3496,50 @@ async fn approval_judge_terminal_transition_accepts_estimated_usage_provenance()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_prepared_insert_rejects_estimated_usage_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7eb0;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let error = sqlx::query(
+        "INSERT INTO tool_approval_judge_model_call
+            (model_call_id, request_id, session_id, turn_id,
+             direct_model_selection_id, resolved_provider_model_identity_id,
+             credential_reference, state_kind, usage_provenance_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared', $8)",
+    )
+    .bind(Uuid::from_u128(seed + 0xe1))
+    .bind(request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(seed + 0xe2))
+    .bind(Uuid::from_u128(seed + 0xe3))
+    .bind(APPROVAL_JUDGE_CREDENTIAL)
+    .bind(APPROVAL_JUDGE_ESTIMATED_PROVENANCE)
+    .execute(&pool)
+    .await
+    .expect_err("a prepared judge cannot be born with estimated usage provenance");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_judge_prepared_usage_is_reported")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_preparation_serializes_a_concurrent_user_decision()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
