@@ -372,7 +372,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           message,
           event: .processConservative(
             SignalboxProcessConservativeEvent(
-              kind: "imported_\(contentKind.rawValue)",
+              kind: SignalboxProcessPresentation.retainedLabel(
+                "imported_\(contentKind.rawValue)"
+              ),
               diagnostic: "The transcript contains an unrecognized imported content kind."
             )
           )

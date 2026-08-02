@@ -6140,8 +6140,21 @@ private enum ProcessProjectionFixture {
         """
         {
           "type":"transcript_turn",
-          "turn_id":"\(ProcessDriverFixture.turn)",
+          "turn_id":"\(crossTurn)",
           "acceptance_position":"1",
+          "state":{
+            "type":"cancelled",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"2",
           "state":{
             "type":"completed",
             "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
@@ -6217,7 +6230,7 @@ private enum ProcessProjectionFixture {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
-          "turn_count":"1",
+          "turn_count":"2",
           "entry_count":"2"
         }
         """,
