@@ -88,16 +88,55 @@ pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> O
     let (port_fragment, path_suffix) = port_and_path
         .split_once('/')
         .map_or((port_and_path, None), |(port, path)| (port, Some(path)));
-    if port_fragment.is_empty()
-        || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
-        || port_fragment.parse::<u16>().ok()? != default_port
-    {
+    if port_fragment.is_empty() || !port_fragment.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let default_port_text = default_port.to_string();
+    let complete_port = port_fragment.parse::<u16>().ok()? == default_port;
+    let trailing_port_digits = authority_context.is_empty()
+        && port_fragment.len() < default_port_text.len()
+        && default_port_text.ends_with(port_fragment);
+    if !complete_port && !trailing_port_digits {
         return None;
     }
     path_suffix.map_or_else(
-        || (!authority_context.is_empty()).then(|| authority_context.to_owned()),
-        |path| Some(format!("{authority_context}/{path}")),
+        || (complete_port && !authority_context.is_empty()).then(|| authority_context.to_owned()),
+        |path| {
+            Some(if complete_port {
+                format!("{authority_context}/{path}")
+            } else {
+                format!("/{path}")
+            })
+        },
     )
+}
+
+pub(super) fn removed_empty_port_delimiter_fragment(value: &str) -> Option<String> {
+    let boundary_colon = [":/", ":?", ":#"]
+        .into_iter()
+        .flat_map(|boundary| value.match_indices(boundary).map(|(index, _)| index))
+        .filter(|index| !is_scheme_colon(value, *index))
+        .chain(
+            value
+                .ends_with(':')
+                .then_some(value.len().saturating_sub(1)),
+        )
+        .max()?;
+    let mut retained = value.to_owned();
+    retained.remove(boundary_colon);
+    Some(retained)
+}
+
+fn is_scheme_colon(value: &str, colon: usize) -> bool {
+    let scheme = &value[..colon];
+    value[colon + 1..].starts_with("//")
+        && scheme
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {

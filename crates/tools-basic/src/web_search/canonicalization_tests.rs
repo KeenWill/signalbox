@@ -1376,6 +1376,54 @@ fn web_search_rejects_bare_removed_default_port_path_credential() {
 }
 
 /// INV-035: removal of a scheme-default port cannot conceal a credential
+/// beginning inside the removed port digits and extending into the path.
+#[test]
+fn web_search_rejects_removed_default_port_digit_suffix() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_DEFAULT_PORT_PATH_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("default-port digit-suffix fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_DEFAULT_PORT_DIGIT_SUFFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: port and dot-segment canonicalizers are closed under composition,
+/// so their combined transformation cannot conceal a credential.
+#[test]
+fn web_search_rejects_composed_port_and_dot_segment_normalization() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_COMPOSED_PORT_PATH_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("composed port and path fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_COMPOSED_PORT_PATH_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: removal of a scheme-default port cannot conceal a credential
 /// ending at the removed port when the retained authority has no path suffix.
 #[test]
 fn web_search_rejects_removed_default_port_credential_without_path_suffix() {
@@ -1437,6 +1485,52 @@ fn web_search_rejects_credential_spanning_removed_user_information() {
         URL_USER_INFORMATION_BOUNDARY_COLLISION_KEY
             .as_bytes()
             .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: dropping explicit empty user information records a typed collision
+/// fact for credentials spanning the removed delimiter and host boundary.
+#[test]
+fn web_search_rejects_credential_spanning_removed_empty_user_information() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_EMPTY_USER_INFORMATION_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("empty user-information fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMPTY_USER_INFORMATION_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: dropping an explicit empty port records a typed collision fact for
+/// credentials spanning the removed delimiter and retained result path.
+#[test]
+fn web_search_rejects_credential_spanning_removed_empty_port() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_EMPTY_PORT_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("empty-port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMPTY_PORT_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 
