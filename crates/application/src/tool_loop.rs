@@ -19,10 +19,11 @@ use signalbox_domain::{
     DangerousToolAutoApproval, DecideToolRequest, EndedToolAttempt, FailedModelCallTurn,
     FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence, ModelCallId,
     NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId,
-    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
-    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
-    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    ToolApprovalPosture, ToolArgumentsKind, ToolAttemptCrashOutcome,
+    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation, ToolBatch,
+    ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
+    ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -102,6 +103,7 @@ pub struct ToolDefinition {
     description: String,
     input_schema: ToolInputSchema,
     permission_default: ToolPermissionDefault,
+    approval_posture: Option<ToolApprovalPosture>,
     effect_class: ToolEffectClass,
 }
 
@@ -119,6 +121,7 @@ impl ToolDefinition {
             description,
             input_schema,
             permission_default,
+            approval_posture: None,
             effect_class,
         }
     }
@@ -141,6 +144,17 @@ impl ToolDefinition {
     /// Returns the registry approval default.
     pub const fn permission_default(&self) -> ToolPermissionDefault {
         self.permission_default
+    }
+
+    /// Overrides legacy blanket/registry policy for this exact tool.
+    pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
+        self.approval_posture = Some(posture);
+        self
+    }
+
+    /// Returns the configured per-tool posture, absent for legacy behavior.
+    pub const fn approval_posture(&self) -> Option<ToolApprovalPosture> {
+        self.approval_posture
     }
 
     /// Returns the crash-relevant effect class.
@@ -1565,6 +1579,13 @@ pub(crate) fn initial_tool_approval(
     }) {
         return InitialToolApproval::AlwaysConfirm;
     }
+    if let Some(posture) = definition.and_then(ToolDefinition::approval_posture) {
+        return match posture {
+            ToolApprovalPosture::Auto => InitialToolApproval::PolicyAuto,
+            ToolApprovalPosture::Delegated => InitialToolApproval::Delegated,
+            ToolApprovalPosture::Human => InitialToolApproval::Human,
+        };
+    }
     match posture {
         DangerousToolAutoApproval::ApproveAll => InitialToolApproval::SessionBlanket,
         DangerousToolAutoApproval::Disabled => match definition
@@ -1620,6 +1641,14 @@ mod tests {
             schema(),
             permission,
             effect,
+        )
+    }
+
+    fn confirmation_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
         )
     }
 
@@ -2017,6 +2046,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn absent_posture_preserves_legacy_confirmation() {
+        const SUBJECT_TOOL: &str = "subject";
+
+        assert_eq!(
+            initial_tool_approval(
+                DangerousToolAutoApproval::Disabled,
+                Some(&confirmation_definition(SUBJECT_TOOL)),
+            ),
+            InitialToolApproval::Confirm
+        );
+    }
+
+    #[test]
+    fn delegated_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let delegated = confirmation_definition(SUBJECT_TOOL)
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+    }
+
+    #[test]
+    fn human_posture_overrides_dangerous_session_blanket() {
+        const SUBJECT_TOOL: &str = "subject";
+        let human =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Human);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
+            InitialToolApproval::Human
+        );
+    }
+
+    #[test]
+    fn auto_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let automatic =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Auto);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
+            InitialToolApproval::PolicyAuto
+        );
+    }
+
     /// INV-020: registry automation records policy provenance, while blanket
     /// automation remains explicitly distinct from user agency.
     #[test]
@@ -2052,6 +2130,9 @@ mod tests {
             ToolPermissionDefault::AlwaysConfirm,
             ToolEffectClass::ExternalEffect,
         );
+        let configured_delegate = explicit
+            .clone()
+            .with_approval_posture(ToolApprovalPosture::Delegated);
 
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
@@ -2059,6 +2140,13 @@ mod tests {
         );
         assert_eq!(
             initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(
+                DangerousToolAutoApproval::ApproveAll,
+                Some(&configured_delegate)
+            ),
             InitialToolApproval::AlwaysConfirm
         );
     }

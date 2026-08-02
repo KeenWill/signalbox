@@ -7,7 +7,8 @@ use signalbox_domain::{
     AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    SessionPlacementEventKind, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
+    ToolRequestId, TurnId,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -304,6 +305,25 @@ pub(crate) fn tool_permission_default_from_str(value: &str) -> Option<ToolPermis
     }
 }
 
+/// Encodes a frozen per-tool approval posture as its closed PostgreSQL spelling.
+pub(crate) const fn tool_approval_posture_to_str(value: ToolApprovalPosture) -> &'static str {
+    match value {
+        ToolApprovalPosture::Auto => "auto",
+        ToolApprovalPosture::Delegated => "delegated",
+        ToolApprovalPosture::Human => "human",
+    }
+}
+
+/// Decodes a frozen per-tool approval posture from its closed PostgreSQL spelling.
+pub(crate) fn tool_approval_posture_from_str(value: &str) -> Option<ToolApprovalPosture> {
+    match value {
+        "auto" => Some(ToolApprovalPosture::Auto),
+        "delegated" => Some(ToolApprovalPosture::Delegated),
+        "human" => Some(ToolApprovalPosture::Human),
+        _ => None,
+    }
+}
+
 /// Closed plan-event kinds stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PlanEventStorageKind {
@@ -467,7 +487,8 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, ToolPermissionDefault, TurnId,
+        SessionInputPosition, SessionPlacementEventKind, ToolApprovalPosture,
+        ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -479,6 +500,7 @@ mod tests {
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
         plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+        tool_approval_posture_from_str, tool_approval_posture_to_str,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
@@ -545,6 +567,23 @@ mod tests {
         assert_eq!(encoded, "always_confirm");
         assert_eq!(decoded, ToolPermissionDefault::AlwaysConfirm);
         assert_eq!(tool_permission_default_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn tool_approval_posture_mapping_round_trips() {
+        assert_eq!(
+            tool_approval_posture_from_str(tool_approval_posture_to_str(
+                ToolApprovalPosture::Delegated,
+            )),
+            Some(ToolApprovalPosture::Delegated)
+        );
+    }
+
+    #[test]
+    fn unknown_tool_approval_posture_is_rejected() {
+        const UNKNOWN_POSTURE: &str = "unknown";
+
+        assert_eq!(tool_approval_posture_from_str(UNKNOWN_POSTURE), None);
     }
 
     /// INV-002: PostgreSQL numeric values are decoded and checked before a

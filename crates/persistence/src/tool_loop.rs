@@ -20,7 +20,8 @@ use signalbox_application::{
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
     CurrentToolAttemptState, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, DurableCommandId, EndedToolAttempt,
+    DecideToolRequestRejectedResult, DecideToolRequestResult, DelegateApprovalRecommendation,
+    DelegateToolApproval, DirectModelSelection, DurableCommandId, EndedToolAttempt,
     NormalizedToolArguments, PreparedDecideToolRequest, PreparedToolBatchDecision,
     PreparedToolResultProjection, ReconstitutedToolAttempt,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
@@ -42,8 +43,8 @@ use crate::{
     mapping::{
         dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_approval_posture_from_str, tool_attempt_id_from_uuid, tool_attempt_id_to_uuid,
+        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{insert_prepared_call, insert_snapshot},
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
@@ -1469,7 +1470,9 @@ async fn load_window_result_denials(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id
+                approval.owner_command_id,
+                approval.delegate_model_selection_id,
+                approval.delegate_model_call_id, approval.rationale
            FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
@@ -1548,7 +1551,7 @@ async fn load_requests(
 ) -> Result<Vec<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text
+                arguments_kind, arguments_text, approval_posture
            FROM tool_request
           WHERE producing_model_call_id = $1
           ORDER BY request_ordinal",
@@ -1586,6 +1589,17 @@ pub(crate) fn decode_request(
     let arguments =
         NormalizedToolArguments::try_from_stored(arguments_kind, required(&row, "arguments_text")?)
             .map_err(|_| ToolLoopCorruption::Inconsistent("normalized arguments"))?;
+    let stored_posture: String = required(&row, "approval_posture")?;
+    let posture = match tool_approval_posture_from_str(&stored_posture) {
+        Some(posture) => posture,
+        None => {
+            return Err(ToolLoopCorruption::Unsupported {
+                field: "approval_posture",
+                value: stored_posture,
+            }
+            .into());
+        }
+    };
     Ok(ToolRequestReconstitutionInput::new(
         tool_request_id_from_uuid(required(&row, "request_id")?),
         session,
@@ -1595,6 +1609,7 @@ pub(crate) fn decode_request(
         name,
         arguments,
     )
+    .with_approval_posture(posture)
     .into_request())
 }
 
@@ -1605,7 +1620,9 @@ async fn load_approvals(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id
+                approval.owner_command_id,
+                approval.delegate_model_selection_id,
+                approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
            JOIN tool_request AS request
              ON request.request_id = approval.request_id
@@ -1635,9 +1652,16 @@ pub(crate) async fn decode_approvals(
         })
         .collect::<Result<Vec<_>, ToolLoopRepositoryError>>()?;
     let receipts = load_user_decision_receipts(connection, &user_commands).await?;
+    let mut delegate_request_ids = Vec::new();
+    for row in &rows {
+        if required::<String>(row, "decision_source")? == "delegate" {
+            delegate_request_ids.push(tool_request_id_from_uuid(required(row, "request_id")?));
+        }
+    }
+    let delegate_requests = load_requests_by_id(connection, &delegate_request_ids).await?;
     let mut approvals = Vec::with_capacity(rows.len());
     for row in rows {
-        approvals.push(decode_approval(connection, row, &receipts).await?);
+        approvals.push(decode_approval(connection, row, &receipts, &delegate_requests).await?);
     }
     Ok(approvals)
 }
@@ -1646,6 +1670,7 @@ async fn decode_approval(
     connection: &mut PgConnection,
     row: PgRow,
     user_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
+    delegate_requests: &BTreeMap<ToolRequestId, signalbox_domain::ToolRequest>,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
     let reason: Option<String> = row.try_get("denial_reason")?;
@@ -1702,6 +1727,40 @@ async fn decode_approval(
                 load_frozen_dangerous_tool_auto_approval(connection, request).await?,
             )
         }
+        "delegate" if user_command.is_none() => {
+            let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
+            let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
+            let rationale: Option<String> = row.try_get("rationale")?;
+            let request_record = delegate_requests
+                .get(&request)
+                .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
+            let recommendation = match decision {
+                ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
+                ToolApprovalDecision::Deny { ref reason } if reason.is_none() => {
+                    DelegateApprovalRecommendation::Deny
+                }
+                ToolApprovalDecision::Deny { .. } => {
+                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
+                }
+            };
+            let rationale = signalbox_domain::ToolDecisionRationale::try_new(
+                rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
+            let approval = DelegateToolApproval::try_new(
+                request_record,
+                DirectModelSelection::from_uuid(
+                    delegate_model.ok_or(ToolLoopCorruption::Missing("delegate model"))?,
+                ),
+                signalbox_domain::ModelCallId::from_uuid(
+                    delegate_call.ok_or(ToolLoopCorruption::Missing("delegate call"))?,
+                ),
+                recommendation,
+                rationale,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
+            ToolApprovalResolutionReconstitutionInput::delegate(approval)
+        }
         "policy_auto" | "session_blanket" => {
             return Err(ToolLoopCorruption::Inconsistent("automatic approval evidence").into());
         }
@@ -1736,6 +1795,7 @@ async fn load_user_decision_receipts(
                 command.result_earliest_undecided_request_id,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
+                request.approval_posture,
                 request.producing_model_call_id, request.session_id,
                 request.turn_id
            FROM decide_tool_request_command AS command
@@ -1958,7 +2018,7 @@ pub(crate) async fn load_approvals_by_request(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, decision_kind, decision_source, denial_reason,
-                owner_command_id
+                owner_command_id, delegate_model_selection_id, delegate_model_call_id, rationale
            FROM tool_approval_decision
           WHERE request_id = ANY($1)",
     )
@@ -2554,7 +2614,7 @@ pub(crate) async fn load_request_by_id(
 ) -> Result<Option<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let row = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text,
+                arguments_kind, arguments_text, approval_posture,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = $1",
@@ -2585,7 +2645,7 @@ pub(crate) async fn load_requests_by_id(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text,
+                arguments_kind, arguments_text, approval_posture,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = ANY($1)",
