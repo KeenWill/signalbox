@@ -375,6 +375,7 @@ SELECT CASE
 
 const INVALID_EVENT_SEQUENCE_SQL: &str = "SELECT CASE
            WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL
+                OR latest_dependency.first_event_ordinal IS NOT NULL
            ELSE head.event_ordinal IS NULL
                 OR latest.event_ordinal IS DISTINCT FROM head.event_ordinal
                 OR latest_dependency.first_event_ordinal IS DISTINCT FROM
@@ -1702,6 +1703,9 @@ mod tests {
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("certified_dependency.dependency_ordinal"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_valid_shape"));
         assert!(INVALID_EVENT_SEQUENCE_SQL.contains("session_plan_event_has_authority"));
+        assert!(INVALID_EVENT_SEQUENCE_SQL.contains(
+            "WHEN head.row_present IS NULL THEN latest.row_present IS NOT NULL\n                OR latest_dependency.first_event_ordinal IS NOT NULL"
+        ));
     }
 
     #[test]

@@ -171,7 +171,7 @@ Implemented table families (across the forward-only migrations):
   complete commissioned-goal lineage and state-transition provenance, plus
   `goal_turn`, which correlates each pursuit-starting event or successful
   predecessor with its accepted input and turn;
-- `session_plan_event` retains every exact-provenance event. Before append, the
+- `session_plan_event` retains every exact-provenance event. On access, the
   trigger-only first-distinct-edge projection (max 32/entry) rejects headless,
   duplicate, nonchronological, over-limit, or cyclic state; `session_plan_head`
   certifies both tips; and

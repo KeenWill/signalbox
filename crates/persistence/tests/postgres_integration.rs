@@ -24079,6 +24079,34 @@ async fn session_plan_first_append_rejects_orphan_dependency_projection()
     Ok(())
 }
 
+/// A current-plan read fails closed when an orphan dependency projection
+/// exists without either durable events or a certifying plan head.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn session_plan_read_rejects_orphan_dependency_projection() -> Result<(), Box<dyn Error>> {
+    const UNUSED_CREATED_TEXT: &str = "authorize the orphan projection fixture";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _batch) =
+        authorize_plan_writes(&pool, &[create_plan_arguments(UNUSED_CREATED_TEXT)]).await?;
+    let repository = SessionPlanRepository::new(pool.clone());
+    let inserted = insert_orphan_dependency_projection(&pool, session).await?;
+
+    let error = repository
+        .read(PlanReadRequest::new(session, None, None))
+        .await
+        .expect_err("a read cannot accept an orphan dependency projection");
+
+    assert_eq!(inserted, EXPECTED_PLAN_MUTATED_ROW_COUNT);
+    assert_eq!(
+        plan_repository_error_kind(error),
+        PlanRepositoryErrorKind::EventSequence
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// The projection trigger independently rejects duplicate physical rows when
 /// its database uniqueness guard has been deliberately bypassed.
 #[tokio::test(flavor = "multi_thread")]
