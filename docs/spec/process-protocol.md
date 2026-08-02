@@ -1054,7 +1054,24 @@ A `decide_tool_request` rejection admits
 `tool_request_not_found { tool_request_id }`,
 `tool_request_already_resolved { tool_request_id }`,
 `tool_request_not_earliest_undecided { tool_request_id, earliest_tool_request_id }`,
-and `tool_request_not_in_session { session_id, tool_request_id }`. A
+and `tool_request_not_in_session { session_id, tool_request_id }`. A delegation
+request admits `session_not_found`, `tool_request_not_found`, and
+`tool_request_not_in_session` with those same shapes, plus
+`delegation_request_not_in_turn { session_id, turn_id, tool_request_id }` when
+the named request belongs to another turn. `spawn_session` additionally admits
+`delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
+`delegated_child_identity_collision { child_session_id }` when the generated
+child identity is already occupied. It has no fixed active-child-count
+rejection: admission checks the complete locked parent relationship inventory
+only for request and child uniqueness. `await_session` additionally admits
+`delegation_relation_not_found { session_id, peer_session_id }` and
+`delegation_await_conflict { tool_request_id }`; `send_session_message` admits
+that same relation detail and `delegation_message_conflict { tool_request_id }`.
+An exhausted relation event ordinal admits
+`delegation_event_ordinal_exhausted { spawning_request_id, last }`. These
+delegation details are closed; request-purpose, carried-argument, and bounded
+content failures occur while constructing the application input and therefore
+map to `invalid_request`, not `rejected`. A
 `create_session_from_imported_frontier` rejection admits
 `imported_conversation_not_found { imported_conversation_id }` and
 `imported_frontier_position_out_of_range { imported_conversation_id, requested_position, last_position }`.
@@ -1424,12 +1441,34 @@ Session-follow updates add these closed event shapes:
 - `child_spawned { spawning_request_id, child_session_id, relationship }`;
 - `child_waiting { await_request_id, spawning_request_id, child_session_id, mode }`;
 - `session_message { spawning_request_id, message_id, sender_session_id, recipient_session_id, ordinal, content }`;
-- `child_result { spawning_request_id, child_session_id, outcome, content, reason, provenance }`,
-  where content is present only for `returned` and the other outcomes are
-  `failed`, `stopped`, or `cancelled`, and provenance is either the exact child
-  turn or the exact parent session, parent turn, and durable command;
-- `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`,
-  including `continue_running` and the same closed provenance union.
+- `child_result { spawning_request_id, child_session_id, outcome, content, reason, provenance }`;
+- `child_lifecycle_disposition { spawning_request_id, child_session_id, outcome, reason, provenance }`.
+
+The two outcome events use one closed nested union. `outcome` is `returned`,
+`failed`, `stopped`, `cancelled`, or `continue_running`; `reason` is
+`child_completed`, `child_execution_failed`, `child_result_unavailable`,
+`child_cancelled`, `parent_stopped`, or `parent_cancelled`. `provenance` is
+either `child_turn { child_session_id, child_turn_id }` or
+`parent_command { parent_session_id, parent_turn_id, command_id, descendant_scope }`,
+where `descendant_scope` uses the request spelling above. The admitted
+correlations are exhaustive:
+
+| Outcome            | Reason                                                 | Provenance       | Content      |
+| ------------------ | ------------------------------------------------------ | ---------------- | ------------ |
+| `returned`         | `child_completed`                                      | `child_turn`     | exact string |
+| `failed`           | `child_execution_failed` or `child_result_unavailable` | `child_turn`     | null         |
+| `cancelled`        | `child_cancelled`                                      | `child_turn`     | null         |
+| `stopped`          | `parent_stopped`                                       | `parent_command` | null         |
+| `cancelled`        | `parent_cancelled`                                     | `parent_command` | null         |
+| `continue_running` | `parent_stopped` or `parent_cancelled`                 | `parent_command` | null         |
+
+`child_result` admits the first five rows and never `continue_running`;
+`child_lifecycle_disposition` admits only the last three rows. A
+`parent_command` outcome requires `parent_and_descendants` for `stopped` or
+parent-caused `cancelled`, and requires `parent_alone` for `continue_running`.
+Any other outcome/reason/provenance/content combination is a contradictory frame
+and is rejected. Thus every lifecycle result names both why it happened and the
+exact child turn or parent command that caused it.
 
 The internal `delegation_wake` outbox event is a scheduler nudge, not a
 session-follow update. Clients observe the durable result or message update that
