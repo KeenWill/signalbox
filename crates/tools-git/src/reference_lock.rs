@@ -72,6 +72,9 @@ struct CreatedReferenceDirectory {
     identity: FileIdentity,
 }
 
+#[derive(Default)]
+pub(super) struct CreatedReferenceDirectories(Vec<CreatedReferenceDirectory>);
+
 struct OpenedReferenceDirectory {
     directory: OwnedFd,
     created_identity: Option<FileIdentity>,
@@ -657,6 +660,38 @@ impl ReferenceLock {
 impl ReferenceParent {
     fn remove_created_directories(&mut self) {
         for created in self.created_directories.drain(..).rev() {
+            let _ = remove_entry_if_identity(
+                &created.parent,
+                &created.name,
+                created.identity,
+                AtFlags::REMOVEDIR,
+            );
+        }
+    }
+}
+
+impl CreatedReferenceDirectories {
+    pub(super) fn open_or_create(
+        &mut self,
+        parent: &OwnedFd,
+        name: &OsStr,
+        mode: Mode,
+    ) -> Result<OwnedFd, LocalGitFailure> {
+        let opened = open_or_create_ref_directory_with_mode_tracked(parent, name, mode)?;
+        if let Some(identity) = opened.created_identity {
+            self.0.push(CreatedReferenceDirectory {
+                parent: dup(parent).map_err(|_| LocalGitFailure::Operation)?,
+                name: name.to_owned(),
+                identity,
+            });
+        }
+        Ok(opened.directory)
+    }
+}
+
+impl Drop for CreatedReferenceDirectories {
+    fn drop(&mut self) {
+        for created in self.0.drain(..).rev() {
             let _ = remove_entry_if_identity(
                 &created.parent,
                 &created.name,

@@ -14,7 +14,8 @@ use rustix::{
 
 use crate::bounded::{bounded_bytes, tree_for_commit};
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
+use crate::layout::valid_reference_name;
+use crate::limits::{MAX_BRANCH_BYTES, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
 use crate::packed_reference::packed_reference_target;
 use crate::pinning::PinnedRepository;
 #[cfg(test)]
@@ -167,7 +168,12 @@ pub(super) fn open_status_reference_parent(
 }
 
 pub(super) fn status_reference_path(name: &[u8]) -> Result<PathBuf, LocalGitFailure> {
-    if name != b"HEAD" && !name.starts_with(b"refs/") {
+    if name != b"HEAD"
+        && (!name.starts_with(b"refs/")
+            || name.len() > MAX_REFERENCE_BYTES
+            || std::str::from_utf8(name).is_err()
+            || !valid_reference_name(name))
+    {
         return Err(LocalGitFailure::Operation);
     }
     let path = PathBuf::from(OsString::from_vec(name.to_vec()));

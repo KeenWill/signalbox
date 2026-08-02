@@ -3,7 +3,7 @@ use std::{
     collections::BTreeSet,
     error::Error,
     ffi::{OsStr, OsString},
-    fmt, fs,
+    fmt,
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
 };
@@ -28,7 +28,7 @@ use crate::bounded::{
 };
 use crate::branch::branch_create;
 use crate::commit::{commit, publish_symbolic_head};
-use crate::descriptor::{RepositoryIdentity, file_identity};
+use crate::descriptor::RepositoryIdentity;
 use crate::diff::diff;
 use crate::failure::LocalGitFailure;
 use crate::identity::GitIdentity;
@@ -363,8 +363,9 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     }
 
     pub(super) fn validate_current_repository(&self) -> Result<(), LocalGitFailure> {
-        let observed =
-            validate_repository_layout(&self.root_path).map_err(|_| LocalGitFailure::Repository)?;
+        self.repository_authority.validate_supported_layout()?;
+        let observed = validate_repository_layout(&self.root_path, self.root.identity())
+            .map_err(|_| LocalGitFailure::Repository)?;
         if observed == self.repository_identity {
             Ok(())
         } else {
@@ -373,31 +374,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     }
 
     pub(super) fn validate_current_repository_identity(&self) -> Result<(), LocalGitFailure> {
-        let root =
-            fs::symlink_metadata(&self.root_path).map_err(|_| LocalGitFailure::Repository)?;
-        let git_directory = fs::symlink_metadata(self.root_path.join(".git"))
-            .map_err(|_| LocalGitFailure::Repository)?;
-        let config = fs::symlink_metadata(self.root_path.join(".git/config"))
-            .map_err(|_| LocalGitFailure::Repository)?;
-        if root.file_type().is_symlink()
-            || !root.is_dir()
-            || git_directory.file_type().is_symlink()
-            || !git_directory.is_dir()
-            || config.file_type().is_symlink()
-            || !config.is_file()
-        {
-            return Err(LocalGitFailure::Repository);
-        }
-        let observed = RepositoryIdentity {
-            root: file_identity(&root),
-            git_directory: file_identity(&git_directory),
-            config: file_identity(&config),
-        };
-        if observed == self.repository_identity {
-            Ok(())
-        } else {
-            Err(LocalGitFailure::Repository)
-        }
+        self.validate_current_repository()
     }
 
     pub(super) fn bind_locked_index(
@@ -416,8 +393,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         &self,
         repository: &Repository,
     ) -> Result<IndexSnapshot, LocalGitFailure> {
-        let (snapshot, mut index) =
-            IndexSnapshot::acquire(&self.repository_authority.git_path("index"))?;
+        let (snapshot, mut index) = IndexSnapshot::acquire(
+            &self.repository_authority.git_path("index"),
+            self.repository_authority.object_format,
+        )?;
         repository
             .set_index(&mut index)
             .map_err(|_| LocalGitFailure::Operation)?;

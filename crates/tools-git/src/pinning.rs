@@ -269,6 +269,14 @@ impl PinnedRepository {
             .map_err(|_| LocalGitFailure::Repository)
     }
 
+    pub(super) fn open_repository_shell(&self) -> Result<RepositoryShell, LocalGitFailure> {
+        self.validate_supported_layout()?;
+        let repository = open_pinned_repository(&self.config_snapshot, self.object_format)
+            .map_err(|_| LocalGitFailure::Repository)?;
+        self.validate_supported_layout()?;
+        Ok(repository)
+    }
+
     pub(super) fn git_path(&self, path: &str) -> PathBuf {
         descriptor_path(&self.git_directory).join(path)
     }
