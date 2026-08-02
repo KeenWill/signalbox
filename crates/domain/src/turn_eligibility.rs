@@ -6789,7 +6789,7 @@ mod tests {
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
         ModelSelectionRequest, NormalizedToolArguments, PerInputConfigurationChoices,
         ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionPlacement,
+        SessionCreationCause, SessionCreationProvenance, SessionPlacement, SessionPlacementVersion,
         SessionReconstitutionInput, ToolApprovalDecision,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
@@ -6925,6 +6925,9 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             command_defaults,
+            prepared.session().id(),
+            SessionPlacementVersion::INITIAL,
+            prepared.session().id(),
             VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             conversation,
             vec![crate::ImportedSessionSeedReconstitutionInput::new(

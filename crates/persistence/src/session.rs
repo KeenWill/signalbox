@@ -285,15 +285,12 @@ fn decode_complete(
         }
         let placement =
             decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
-        if placement.current_session != requested_session
-            || placement.event_session != requested_session
-            || placement.current_version != placement.placement.version()
-        {
-            return Err(SessionCorruption::Inconsistent("current placement selection").into());
-        }
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
+            placement.current_session,
+            placement.current_version,
+            placement.event_session,
             placement.placement,
         )
         .map_err(map_imported_error);

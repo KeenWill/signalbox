@@ -864,6 +864,9 @@ fn identity_collision(error: &sqlx::Error) -> Option<ImportedSessionIdentityColl
 pub(crate) fn reconstitute_bounded_current(
     requested_session: SessionId,
     row: PgRow,
+    current_placement_session: SessionId,
+    current_placement_version: SessionPlacementVersion,
+    placement_session: SessionId,
     current_placement: VersionedSessionPlacement,
 ) -> Result<Session, ImportedSessionRepositoryError> {
     require_spelling(&row, "stored_cause", USER_INITIATED)?;
@@ -939,6 +942,9 @@ pub(crate) fn reconstitute_bounded_current(
         defaults_session,
         defaults_version,
         defaults,
+        current_placement_session,
+        current_placement_version,
+        placement_session,
         current_placement,
         seed_records,
         seed_headers,
@@ -972,6 +978,9 @@ pub(crate) async fn load_complete_current(
         session.id(),
         current_defaults.version(),
         current_defaults.defaults().clone(),
+        session.id(),
+        session.current_placement().version(),
+        session.id(),
         session.current_placement().clone(),
         conversation,
         projection.seed_records,
