@@ -102,18 +102,20 @@ jobs:
     # availability setting is documented above and deliberately supplies no
     # additional author-trust decision.
     environment: web-smoke
-    # A queued web-smoke invocation can be evicted by a third concurrent
-    # trigger rather than merely delayed: a concurrency group holds at most
-    # one running and one pending member, and `cancel-in-progress: false`
-    # does not protect the pending slot from replacement. Scoping this group
-    # per ref, as the workflow-level group above does for whole runs, would
-    # close that gap but would also let unrelated PRs spend the shared
-    # credential concurrently, defeating the single-flight serialization this
-    # literal group provides. Accepted for a report-only, non-gating job: a
-    # dropped queued run costs one missed smoke, not a silent merge risk.
+    # Scoped per ref for pull_request events and per run otherwise, mirroring
+    # rust.yml: a superseded PR run cancels its own predecessor, and every
+    # other event gets a group of its own so a third trigger never evicts a
+    # second run's still-queued predecessor. Owner-accepted trade-off:
+    # unrelated PRs and pushes can now spend the Brave credential
+    # concurrently rather than serializing behind one another. This job is
+    # report-only and non-gating, and reliable queue survival (every
+    # triggering revision gets its own smoke run) is preferred over bounding
+    # concurrent credentialed spend.
     concurrency:
-      group: web-smoke
-      cancel-in-progress: false
+      group: >-
+        web-smoke-${{ github.event_name == 'pull_request'
+        && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
