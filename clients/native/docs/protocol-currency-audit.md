@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `35538d33` on 2026-08-02.
+Verified against repository head `fefb39b8` on 2026-08-02.
 
 ## Scope and method
 
@@ -25,7 +25,7 @@ The process specification's committed but unimplemented session-delegation
 proposal defines no present daemon/client frames, so it is not counted as drift
 from the current protocol.
 
-The current Rust protocol has 46 client request verbs and 62 server message
+The current Rust protocol has 50 client request verbs and 65 server message
 kinds. Before this work, native modeled 16 request verbs and 34 server message
 kinds, plus a generic unknown-message envelope. Twelve of the 13 current durable
 `SessionEvent` variants and all four current text-entry variants were named, but
@@ -37,8 +37,9 @@ preserved through the generic visibly-unrecognized event representation.
 Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
-Disposition counts are by the gap rows below, not by individual wire variants:
-13 close-now, 13 staged, and 3 report-only.
+Disposition counts are by current gap rows below, not by individual wire
+variants: 13 close-now, 14 staged, and 1 report-only. Resolved findings retained
+for traceability are excluded.
 
 ## Close-now gaps
 
@@ -75,6 +76,7 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 | S11 | High     | `listConversations` eagerly reads every 100-row page on each refresh and throws when its 100-page application cap is reached instead of publishing a bounded prefix.                                                                                                                                                                                                                                                                                                                                                                                                                                       | **staged** — see [session organization, visibility, and retention](../../../docs/open-questions.md#session-organization-visibility-and-retention). |
 | S12 | Medium   | Imported detail reads retain and project the entire transcript before publishing it, so latency and memory grow linearly toward the 50,000-entry application cap.                                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — see [conversation import](../../../docs/open-questions.md#conversation-import).                                                       |
 | S13 | High     | Added members on known version-one frames, messages, nested states, errors, or details invalidate the closed wire shape and therefore erase the known projection.                                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — changing that rule requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                             |
+| S14 | High     | Native can encode only the single-frame `import_conversation` write. It lacks the four current chunked-import requests, their three acknowledgements, and typed import-rejection details, so larger sources have no native write path and import refusals degrade to a visibly unknown server message.                                                                                                                                                                                                                                                                                                     | **staged** — add transport and error presentation with a future [conversation-import](../../../docs/open-questions.md#conversation-import) UI.     |
 
 ## Report-only gap
 
@@ -86,23 +88,28 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 
 These findings are outside `clients/native/**`; this effort records them and
 does not alter daemon behavior. Staged daemon finding S08 appears in the staged
-inventory above so disposition totals remain unambiguous.
+inventory above. The two live findings below were resolved by daemon work that
+merged while this audit remained open, so they are retained for traceability and
+excluded from current-gap disposition totals.
 
-| ID  | Severity | Finding                                                                                                                                           | Disposition                                                                                     |
-| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| R02 | High     | Import rejection maps 17 failure classes to one opaque `invalid_request` response and emits no diagnostic log, erasing actionable failure detail. | **report-only** — add typed or logged daemon diagnostics in a daemon-owned change.              |
-| R03 | High     | The daemon's 6 MiB import-frame ceiling rejects oversized imports before schema processing.                                                       | **report-only** — revisit transport/import framing and size admission in a daemon-owned change. |
+| ID  | Severity | Finding                                                                                                                                       | Current status                                                                                                                                                                                        |
+| --- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R02 | High     | Import rejection mapped 17 failure classes to one opaque `invalid_request` response and emitted no diagnostic log, erasing actionable detail. | **resolved upstream** — current protocol/runtime returns content-silent typed rejection evidence with the closed failure class and applicable record ordinal.                                         |
+| R03 | High     | The former single-frame import ceiling rejected oversized imports before schema processing.                                                   | **resolved upstream** — current protocol/runtime provides bounded begin, append, commit, and abort transport under a separately configured total-source limit; native adoption remains staged as S14. |
 
 ## Current shape catalog
 
-The 30 request verbs absent from native are the five non-review verbs in S01
-through S05, the 20 review verbs in S06 and S07, and the five goal verbs in S09.
-The 28 named server kinds absent before this work are `steering_submitted`; the
-three template sequence kinds; `session_defaults_replaced`; `session_compacted`;
-the five goal kinds `goal_transition_applied`, `goal_history_start`,
-`goal_history_state`, `goal_history_item`, and `goal_history_end`; and these 17
-review kinds: `review_target_created`, `review_run_started`,
-`review_pass_activated`, `review_pass_completed`, `review_findings_recorded`,
+The 34 request verbs absent from native are the five non-review verbs in S01
+through S05, the 20 review verbs in S06 and S07, the five goal verbs in S09, and
+the four chunked-import verbs in S14. The 31 named server kinds absent before
+this work are `steering_submitted`; the three template sequence kinds;
+`session_defaults_replaced`; `session_compacted`; the three chunked-import
+acknowledgements `conversation_import_begun`, `conversation_import_appended`,
+and `conversation_import_aborted`; the five goal kinds
+`goal_transition_applied`, `goal_history_start`, `goal_history_state`,
+`goal_history_item`, and `goal_history_end`; and these 17 review kinds:
+`review_target_created`, `review_run_started`, `review_pass_activated`,
+`review_pass_completed`, `review_findings_recorded`,
 `review_finding_event_recorded`, `review_external_link_reserved`,
 `review_external_link_attached`, `review_target`, `review_run`,
 `review_finding`, `review_findings_start`, `review_finding_item`,
