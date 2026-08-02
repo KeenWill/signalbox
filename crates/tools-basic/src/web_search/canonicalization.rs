@@ -63,24 +63,20 @@ pub(super) fn canonicalized_authority_port_zero_fragment(value: &str) -> Option<
     (!canonical_port.is_empty()).then(|| format!("{authority_context}:{canonical_port}"))
 }
 
-pub(super) fn canonicalized_port_path_zero_fragments(value: &str) -> Vec<String> {
-    let Some((port_fragment, path_suffix)) = value.split_once('/') else {
-        return Vec::new();
-    };
+pub(super) fn canonicalized_port_path_zero_fragment(value: &str) -> Option<String> {
+    let (authority_and_port, path_suffix) = value.split_once('/')?;
+    let port_fragment = authority_and_port
+        .rsplit_once(':')
+        .map_or(authority_and_port, |(_, port)| port);
     if port_fragment.len() < 2
         || !port_fragment.starts_with('0')
         || !port_fragment.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Vec::new();
+        return None;
     }
-    let removable_zeroes = port_fragment
-        .bytes()
-        .take_while(|byte| *byte == b'0')
-        .count()
-        .min(port_fragment.len() - 1);
-    (1..=removable_zeroes)
-        .map(|removed| format!("{}/{}", &port_fragment[removed..], path_suffix))
-        .collect()
+    let canonical_port = port_fragment.parse::<u16>().ok()?;
+    let retained_prefix = authority_and_port.strip_suffix(port_fragment)?;
+    Some(format!("{retained_prefix}{canonical_port}/{path_suffix}"))
 }
 
 pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> Option<String> {

@@ -297,7 +297,7 @@ fn extend_url_collision_variants(
         if let Some(normalized) = canonicalized_authority_port_zero_fragment(&variant) {
             retain_url_collision_variant(variants, &normalized);
         }
-        for normalized in canonicalized_port_path_zero_fragments(&variant) {
+        if let Some(normalized) = canonicalized_port_path_zero_fragment(&variant) {
             retain_url_collision_variant(variants, &normalized);
         }
         if let Some(normalized) = canonicalized_complete_url(&variant) {
