@@ -3917,16 +3917,25 @@ fn initial_tool_approval_matches_posture(
     posture: DangerousToolAutoApproval,
     approval: InitialToolApproval,
 ) -> bool {
-    match posture {
-        DangerousToolAutoApproval::ApproveAll => matches!(
-            approval,
+    match (posture, approval) {
+        (DangerousToolAutoApproval::ApproveAll, InitialToolApproval::Confirm)
+        | (DangerousToolAutoApproval::Disabled, InitialToolApproval::SessionBlanket) => false,
+        (
+            DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::AlwaysConfirm
-                | InitialToolApproval::SessionBlanket
-                | InitialToolApproval::PolicyAuto
-                | InitialToolApproval::Human
-                | InitialToolApproval::Delegated
-        ),
-        DangerousToolAutoApproval::Disabled => approval != InitialToolApproval::SessionBlanket,
+            | InitialToolApproval::SessionBlanket
+            | InitialToolApproval::PolicyAuto
+            | InitialToolApproval::Human
+            | InitialToolApproval::Delegated,
+        )
+        | (
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::Confirm
+            | InitialToolApproval::AlwaysConfirm
+            | InitialToolApproval::PolicyAuto
+            | InitialToolApproval::Human
+            | InitialToolApproval::Delegated,
+        ) => true,
     }
 }
 

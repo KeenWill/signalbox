@@ -1640,12 +1640,9 @@ fn reconstitute_batch(
         .iter()
         .position(|request| !approvals.contains_key(&request.id()))
         && requests.iter().skip(first_undecided + 1).any(|request| {
-            approvals.get(&request.id()).is_some_and(|approval| {
-                matches!(
-                    approval.source(),
-                    crate::ToolDecisionSource::UserCommand | crate::ToolDecisionSource::Delegate
-                )
-            })
+            approvals
+                .get(&request.id())
+                .is_some_and(|approval| approval.source().requires_ordered_prefix())
         })
     {
         return Err(fail(
@@ -2032,36 +2029,48 @@ mod tests {
     /// whose frozen posture reserves the decision for a human.
     #[test]
     fn inv049_reconstitution_rejects_delegate_resolution_for_human_request() {
-        let delegated_request = ToolRequestReconstitutionInput::new(
-            tool_request_id(10),
-            session_id(1),
-            turn_id(2),
-            model_call_id(3),
-            ToolRequestOrdinal::from_u32(0),
-            ToolName::try_new(String::from("tool_10")).expect("fixture name is valid"),
+        const SUBJECT_REQUEST_SEED: u128 = 10;
+        const SUBJECT_SESSION_SEED: u128 = 1;
+        const SUBJECT_TURN_SEED: u128 = 2;
+        const ISSUING_CALL_SEED: u128 = 3;
+        const SUBJECT_ORDINAL: u32 = 0;
+        const JUDGE_MODEL_SEED: u128 = 11;
+        const JUDGE_CALL_SEED: u128 = 12;
+        const EXECUTION_ATTEMPT_SEED: u128 = 4;
+        const SUBJECT_TOOL_NAME: &str = "tool_10";
+        const JUDGE_RATIONALE: &str = "bounded request";
+
+        let request_id = tool_request_id(SUBJECT_REQUEST_SEED);
+        let session = session_id(SUBJECT_SESSION_SEED);
+        let turn = turn_id(SUBJECT_TURN_SEED);
+        let issuing_call = model_call_id(ISSUING_CALL_SEED);
+        let ordinal = ToolRequestOrdinal::from_u32(SUBJECT_ORDINAL);
+        let name =
+            ToolName::try_new(String::from(SUBJECT_TOOL_NAME)).expect("fixture name is valid");
+        let arguments =
             NormalizedToolArguments::try_from_stored(ToolArgumentsKind::Json, String::from("{}"))
-                .expect("fixture arguments are canonical"),
-        )
-        .with_approval_posture(crate::ToolApprovalPosture::Delegated)
-        .into_request();
-        let stored_request = ToolRequestReconstitutionInput::new(
-            tool_request_id(10),
-            session_id(1),
-            turn_id(2),
-            model_call_id(3),
-            ToolRequestOrdinal::from_u32(0),
-            ToolName::try_new(String::from("tool_10")).expect("fixture name is valid"),
-            NormalizedToolArguments::try_from_stored(ToolArgumentsKind::Json, String::from("{}"))
-                .expect("fixture arguments are canonical"),
-        )
-        .with_approval_posture(crate::ToolApprovalPosture::Human)
-        .into_request();
-        let rationale = crate::ToolDecisionRationale::try_new(String::from("bounded request"))
+                .expect("fixture arguments are canonical");
+        let request_with_posture = |posture| {
+            ToolRequestReconstitutionInput::new(
+                request_id,
+                session,
+                turn,
+                issuing_call,
+                ordinal,
+                name.clone(),
+                arguments.clone(),
+            )
+            .with_approval_posture(posture)
+            .into_request()
+        };
+        let delegated_request = request_with_posture(crate::ToolApprovalPosture::Delegated);
+        let stored_request = request_with_posture(crate::ToolApprovalPosture::Human);
+        let rationale = crate::ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
             .expect("fixture rationale is admitted");
         let delegated = crate::DelegateToolApproval::try_new(
             &delegated_request,
-            crate::DirectModelSelection::from_uuid(uuid::Uuid::from_u128(11)),
-            model_call_id(12),
+            crate::DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED)),
+            model_call_id(JUDGE_CALL_SEED),
             crate::DelegateApprovalRecommendation::Approve,
             rationale,
         )
@@ -2070,15 +2079,15 @@ mod tests {
             .reconstitute()
             .expect("the delegate evidence is internally valid");
         let input = ToolBatchReconstitutionInput::new(
-            session_id(1),
-            turn_id(2),
-            model_call_id(3),
+            session,
+            turn,
+            issuing_call,
             yielded_snapshot(),
             vec![stored_request],
             vec![resolution],
             vec![],
             ToolBatchPhaseReconstitutionInput::Executing {
-                turn_attempt: turn_attempt_id(4),
+                turn_attempt: turn_attempt_id(EXECUTION_ATTEMPT_SEED),
             },
         );
 

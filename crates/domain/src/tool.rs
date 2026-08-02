@@ -574,6 +574,15 @@ pub enum ToolDecisionSource {
     Delegate,
 }
 
+impl ToolDecisionSource {
+    pub(crate) const fn requires_ordered_prefix(self) -> bool {
+        match self {
+            Self::UserCommand | Self::Delegate => true,
+            Self::PolicyAuto | Self::SessionBlanket | Self::SessionOverride => false,
+        }
+    }
+}
+
 /// Who made one explicit approval decision.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ToolApprovalDecider {
@@ -1123,10 +1132,10 @@ impl InitialToolApproval {
 
     /// Returns whether this outcome leaves an explicit decision outstanding.
     pub const fn requires_decision(self) -> bool {
-        matches!(
-            self,
-            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated
-        )
+        match self {
+            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => true,
+            Self::PolicyAuto | Self::SessionBlanket => false,
+        }
     }
 }
 
@@ -1614,14 +1623,21 @@ mod tests {
     /// request frozen as human-only.
     #[test]
     fn inv049_delegate_narrows_and_never_widens_human_authority() {
-        let request = request(40);
-        let model = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(41));
-        let rationale = ToolDecisionRationale::try_new(String::from("needs user authority"))
+        const HUMAN_ONLY_REQUEST_SEED: u128 = 40;
+        const JUDGE_MODEL_SEED: u128 = 41;
+        const APPROVAL_CALL_SEED: u128 = 42;
+        const DENIAL_CALL_SEED: u128 = 43;
+        const ESCALATION_CALL_SEED: u128 = 44;
+        const HUMAN_AUTHORITY_RATIONALE: &str = "needs user authority";
+
+        let request = request(HUMAN_ONLY_REQUEST_SEED);
+        let model = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED));
+        let rationale = ToolDecisionRationale::try_new(String::from(HUMAN_AUTHORITY_RATIONALE))
             .expect("fixture rationale is admitted");
         let rejected = DelegateToolApproval::try_new(
             &request,
             model,
-            model_call_id(42),
+            model_call_id(APPROVAL_CALL_SEED),
             DelegateApprovalRecommendation::Approve,
             rationale.clone(),
         )
@@ -1629,7 +1645,7 @@ mod tests {
         let rejected_denial = DelegateToolApproval::try_new(
             &request,
             model,
-            model_call_id(43),
+            model_call_id(DENIAL_CALL_SEED),
             DelegateApprovalRecommendation::Deny,
             rationale.clone(),
         )
@@ -1637,7 +1653,7 @@ mod tests {
         let escalated = DelegateToolApproval::try_new(
             &request,
             model,
-            model_call_id(44),
+            model_call_id(ESCALATION_CALL_SEED),
             DelegateApprovalRecommendation::EscalateToHuman,
             rationale,
         )
