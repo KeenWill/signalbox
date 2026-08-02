@@ -95,7 +95,7 @@ CREATE TABLE session_delegation_event (
     ),
     reason_kind text CHECK (
         reason_kind IS NULL OR reason_kind IN (
-            'child_completed', 'child_execution_failed',
+            'child_completed', 'child_execution_failed', 'child_result_unavailable',
             'child_stopped', 'child_cancelled',
             'parent_stopped_parent_alone', 'parent_stopped_parent_and_descendants',
             'parent_cancelled_parent_alone', 'parent_cancelled_parent_and_descendants'
@@ -305,7 +305,9 @@ BEGIN
                 RAISE EXCEPTION 'child completion has invalid provenance or outcome'
                     USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
             END IF;
-        ELSIF NEW.reason_kind = 'child_execution_failed' THEN
+        ELSIF NEW.reason_kind IN (
+            'child_execution_failed', 'child_result_unavailable'
+        ) THEN
             IF NEW.outcome_kind <> 'child_failed'
                 OR NEW.provenance_kind <> 'child_turn'
                 OR NEW.provenance_session_id <> relation_child THEN

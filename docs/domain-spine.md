@@ -827,6 +827,7 @@ pub struct DelegationContent(/* private NonEmptyUnicodeText */);
 impl DelegationContent {
     pub fn try_new(value: String) -> Result<Self, DelegationContentError>;
     pub fn as_str(&self) -> &str;
+    pub fn from_assistant_text(parts: &[AssistantText]) -> Result<Self, DelegationContentError>;
 }
 pub enum DelegationContentError {
     Invalid(NonEmptyUnicodeTextFailure),
@@ -842,11 +843,28 @@ impl TerminalChildTurn {
     // accessors: session(), turn()
 }
 
+pub enum ParentTerminationKind { Stopped, Cancelled }
+pub struct ParentTerminationAuthority { /* private exact applied command authority */ }
+impl ParentTerminationAuthority {
+    // accessors: parent(), turn(), command(), scope(), kind()
+}
+pub struct ParentTerminationOutcomeReconstitutionInput { /* private complete stored record */ }
+impl ParentTerminationOutcomeReconstitutionInput {
+    pub const fn new(
+        parent: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+        kind: ParentTerminationKind,
+        scope: DescendantTerminationScope,
+        action: BoundChildAction,
+    ) -> Self;
+}
+
 pub struct DelegationProvenance { /* private typed authority */ }
 impl DelegationProvenance {
     pub fn from_tool_request(request: &ToolRequest) -> Self;
     pub const fn from_terminal_child(terminal: TerminalChildTurn) -> Self;
-    pub const fn from_parent_command(parent: SessionId, turn: TurnId, command: DurableCommandId) -> Self;
+    pub const fn from_parent_termination(authority: ParentTerminationAuthority) -> Self;
     // accessors: tool_request(), child_turn(), parent_command()
 }
 
@@ -858,6 +876,7 @@ impl DelegationMessage {
 pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
+    ChildResultUnavailable,
     ChildStopped,
     ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
@@ -909,6 +928,10 @@ impl SessionDelegation {
     ) -> Result<(Self, DelegationEvent), DelegationTransitionError>;
     pub fn record_outcome(self, outcome: DelegationOutcome)
         -> Result<Self, DelegationTransitionError>;
+    pub fn reconstitute_parent_termination_outcome(
+        self,
+        input: ParentTerminationOutcomeReconstitutionInput,
+    ) -> Result<Self, DelegationTransitionError>;
     // accessors: spawning_request(), parent(), child(), task(), policy(), lifecycle(),
     //   events(), child_creation_provenance()
 }
@@ -8024,7 +8047,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
 | domain: session                                    | 21                   |
-| domain: session_delegation                         | 20                   |
+| domain: session_delegation                         | 22                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8052,7 +8075,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **620 (+7 free fn)** |
+| **signalbox-domain total**                         | **622 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

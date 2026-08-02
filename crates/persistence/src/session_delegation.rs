@@ -7,8 +7,9 @@ use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegationContent, DelegationEvent,
     DelegationMessageDirection, DelegationMessageId, DelegationOutcome, DelegationOutcomeReason,
     DelegationProvenance, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
-    DurableCommandId, ModelCallId, NormalizedToolArguments, SessionDelegation, SessionId,
-    TerminalChildTurn, ToolArgumentsKind, ToolName, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    DurableCommandId, ModelCallId, NormalizedToolArguments, ParentTerminationKind,
+    ParentTerminationOutcomeReconstitutionInput, SessionDelegation, SessionId, TerminalChildTurn,
+    ToolArgumentsKind, ToolName, ToolRequest, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
@@ -484,6 +485,11 @@ async fn replay_event(
             }
             Ok(updated)
         }
+        "outcome_recorded" if required_string(&row, "provenance_kind")? == "parent_command" => {
+            delegation
+                .reconstitute_parent_termination_outcome(decode_parent_termination_outcome(&row)?)
+                .map_err(|error| SessionDelegationRepositoryError::Domain(error.failure()))
+        }
         "outcome_recorded" => delegation
             .record_outcome(decode_outcome(
                 &row,
@@ -630,10 +636,8 @@ async fn decode_provenance(
                 ))?;
             Ok(DelegationProvenance::from_terminal_child(terminal))
         }
-        "parent_command" => Ok(DelegationProvenance::from_parent_command(
-            session,
-            TurnId::from_uuid(row.try_get("provenance_turn_id")?),
-            DurableCommandId::from_uuid(row.try_get("provenance_command_id")?),
+        "parent_command" => Err(SessionDelegationRepositoryError::Corruption(
+            "parent termination replay path",
         )),
         _ => Err(SessionDelegationRepositoryError::Corruption(
             "provenance kind",
@@ -731,6 +735,47 @@ fn decode_outcome(
     }
 }
 
+fn decode_parent_termination_outcome(
+    row: &PgRow,
+) -> Result<ParentTerminationOutcomeReconstitutionInput, SessionDelegationRepositoryError> {
+    let (kind, scope) = match reason_from_str(&required_string(row, "reason_kind")?)? {
+        DelegationOutcomeReason::ParentStopped { scope } => (ParentTerminationKind::Stopped, scope),
+        DelegationOutcomeReason::ParentCancelled { scope } => {
+            (ParentTerminationKind::Cancelled, scope)
+        }
+        DelegationOutcomeReason::ChildCompleted
+        | DelegationOutcomeReason::ChildExecutionFailed
+        | DelegationOutcomeReason::ChildResultUnavailable
+        | DelegationOutcomeReason::ChildStopped
+        | DelegationOutcomeReason::ChildCancelled => {
+            return Err(SessionDelegationRepositoryError::Corruption(
+                "parent termination reason",
+            ));
+        }
+    };
+    let action = match required_string(row, "outcome_kind")?.as_str() {
+        "continue_running" => BoundChildAction::KeepRunning,
+        "child_stopped" => BoundChildAction::Stop,
+        "child_cancelled" => BoundChildAction::Cancel,
+        "result_returned" | "child_failed" => {
+            return Err(SessionDelegationRepositoryError::Corruption(
+                "parent termination outcome",
+            ));
+        }
+        _ => {
+            return Err(SessionDelegationRepositoryError::Corruption("outcome kind"));
+        }
+    };
+    Ok(ParentTerminationOutcomeReconstitutionInput::new(
+        SessionId::from_uuid(row.try_get("provenance_session_id")?),
+        TurnId::from_uuid(row.try_get("provenance_turn_id")?),
+        DurableCommandId::from_uuid(row.try_get("provenance_command_id")?),
+        kind,
+        scope,
+        action,
+    ))
+}
+
 fn encode_policy(
     policy: ChildRelationshipPolicy,
 ) -> (&'static str, Option<&'static str>, Option<&'static str>) {
@@ -787,6 +832,7 @@ fn reason_to_str(value: DelegationOutcomeReason) -> &'static str {
     match value {
         DelegationOutcomeReason::ChildCompleted => "child_completed",
         DelegationOutcomeReason::ChildExecutionFailed => "child_execution_failed",
+        DelegationOutcomeReason::ChildResultUnavailable => "child_result_unavailable",
         DelegationOutcomeReason::ChildStopped => "child_stopped",
         DelegationOutcomeReason::ChildCancelled => "child_cancelled",
         DelegationOutcomeReason::ParentStopped {
@@ -809,6 +855,7 @@ fn reason_from_str(
     match value {
         "child_completed" => Ok(DelegationOutcomeReason::ChildCompleted),
         "child_execution_failed" => Ok(DelegationOutcomeReason::ChildExecutionFailed),
+        "child_result_unavailable" => Ok(DelegationOutcomeReason::ChildResultUnavailable),
         "child_stopped" => Ok(DelegationOutcomeReason::ChildStopped),
         "child_cancelled" => Ok(DelegationOutcomeReason::ChildCancelled),
         "parent_stopped_parent_alone" => Ok(DelegationOutcomeReason::ParentStopped {

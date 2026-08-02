@@ -42,8 +42,7 @@ use signalbox_domain::{
     ChildRelationshipPolicy, CompletedModelCallIdentities, ContextFrontierId,
     CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
     CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult, DelegationContent,
-    DelegationMessageId, DelegationOutcome, DelegationOutcomeReason, DelegationProvenance,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DelegationMessageId, DelegationWaitMode, DeliveryRequest, DirectModelSelection,
     DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
@@ -329,7 +328,11 @@ async fn delegated_parent_message_round_trips_direction() -> Result<(), Box<dyn 
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd800;
     let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
-    let content = DelegationContent::try_new("work packet".to_owned()).expect("valid content");
+    let content = DelegationContent::from_assistant_text(&[
+        AssistantText::try_new("work ".to_owned()).expect("valid first assistant text part"),
+        AssistantText::try_new("packet".to_owned()).expect("valid second assistant text part"),
+    ])
+    .expect("assistant text projects to delegation content");
     let spawn_arguments = background_spawn_arguments();
     let send_arguments = serde_json::json!({
         "content": content.as_str(), "peer_session_id": child.as_uuid().to_string(),
@@ -414,7 +417,7 @@ async fn delegated_parent_message_round_trips_direction() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegated_terminal_outcome_wakes_parent_and_replay_is_idempotent()
+async fn delegated_parent_termination_record_reconstitutes_sealed_authority()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xd900;
@@ -442,45 +445,161 @@ async fn delegated_terminal_outcome_wakes_parent_and_replay_is_idempotent()
     .expect("distinct child");
     let repository = SessionDelegationRepository::new(pool.clone(), test_session_credential_pin());
     repository.create(&relation).await?;
-    let outcome = DelegationOutcome::ChildStopped {
-        reason: DelegationOutcomeReason::ParentStopped {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        },
-        provenance: DelegationProvenance::from_parent_command(
-            fixture.session,
-            fixture.turn,
-            DurableCommandId::from_uuid(Uuid::from_u128(seed + 7)),
-        ),
-    };
-
-    let updated = repository
-        .record_outcome(request_id, outcome.clone())
-        .await?;
-    let replayed = repository.record_outcome(request_id, outcome).await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind,
+             reason_kind, provenance_kind, provenance_session_id,
+             provenance_turn_id, provenance_command_id)
+         VALUES ($1, 2, 'outcome_recorded', 'child_stopped',
+                 'parent_stopped_parent_and_descendants',
+                 'parent_command', $2, $3, $4)",
+    )
+    .bind(request_id.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(seed + 7))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind)
+         VALUES ($1, 2, 'outcome_recorded', 'child_stopped')",
+    )
+    .bind(request_id.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
     let loaded = repository
         .load(request_id)
         .await?
         .expect("delegation loads");
 
-    assert_eq!(loaded, updated);
-    assert_eq!(replayed, updated);
     assert_eq!(loaded.events().len(), 2);
-    let wake = sqlx::query(
-        "SELECT session_id, subject_kind, result_spawning_request_id
-           FROM delegation_wake_outbox_event
-          WHERE spawning_tool_request_id = $1",
+    assert_eq!(
+        loaded.lifecycle(),
+        signalbox_domain::DelegationLifecycle::Terminal
+    );
+    let stored = sqlx::query(
+        "SELECT outcome_kind, reason_kind, provenance_session_id,
+                provenance_turn_id, provenance_command_id
+           FROM session_delegation_event
+          WHERE spawning_tool_request_id = $1 AND event_ordinal = 2",
     )
     .bind(request_id.into_uuid())
     .fetch_one(&pool)
     .await?;
+    assert_eq!(stored.try_get::<String, _>("outcome_kind")?, "child_stopped");
     assert_eq!(
-        wake.try_get::<Uuid, _>("session_id")?,
-        fixture.session.into_uuid()
+        stored.try_get::<String, _>("reason_kind")?,
+        "parent_stopped_parent_and_descendants"
     );
-    assert_eq!(wake.try_get::<String, _>("subject_kind")?, "result");
+    assert_eq!(stored.try_get::<Uuid, _>("provenance_session_id")?, fixture.session.into_uuid());
+    assert_eq!(stored.try_get::<Uuid, _>("provenance_turn_id")?, fixture.turn.into_uuid());
+    assert_eq!(stored.try_get::<Uuid, _>("provenance_command_id")?, Uuid::from_u128(seed + 7));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_unavailable_child_result_reconstitutes_from_completed_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xda00;
+    let child_value = seed + 0x200;
+    let child = SessionId::from_uuid(Uuid::from_u128(child_value));
+    let child_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0x212));
+    let spawn_arguments = background_spawn_arguments();
+    let (fixture, _model_repository, _observation, request_id) =
+        checkpoint_confirmed_tool_round(&pool, seed, "spawn_session", &spawn_arguments).await?;
+    let request = ToolRequestReconstitutionInput::new(
+        request_id,
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        ToolRequestOrdinal::from_u32(0),
+        ToolName::try_new("spawn_session".to_owned()).expect("valid name"),
+        NormalizedToolArguments::try_from_provider_text(spawn_arguments).expect("valid arguments"),
+    )
+    .into_request();
+    let relation = SessionDelegation::spawn(&request, child, ChildRelationshipPolicy::Background)
+        .expect("distinct child");
+    let repository = SessionDelegationRepository::new(pool.clone(), test_session_credential_pin());
+    repository.create(&relation).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x210,
+                child_value,
+                "produce delegated result",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x211)),
+            Some(child_turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: child.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x213),
+            starting_frontier: Uuid::from_u128(seed + 0x214),
+            initial_attempt: Uuid::from_u128(seed + 0x215),
+        },
+    )
+    .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        fixture.selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            seed + 6,
+        ))),
+    )])
+    .expect("one delegated fixture target forms a catalog");
+    complete_text_turn(
+        &pool,
+        child,
+        targets,
+        model_credential_reference(),
+        seed + 0x300,
+        "completed response without extractable result",
+    )
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind,
+             reason_kind, provenance_kind, provenance_session_id,
+             provenance_turn_id)
+         VALUES ($1, 2, 'outcome_recorded', 'child_failed',
+                 'child_result_unavailable', 'child_turn', $2, $3)",
+    )
+    .bind(request_id.into_uuid())
+    .bind(child.into_uuid())
+    .bind(child_turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind)
+         VALUES ($1, 2, 'outcome_recorded', 'child_failed')",
+    )
+    .bind(request_id.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let loaded = repository
+        .load(request_id)
+        .await?
+        .expect("delegation loads");
+    assert_eq!(loaded.events().len(), 2);
     assert_eq!(
-        wake.try_get::<Uuid, _>("result_spawning_request_id")?,
-        request_id.into_uuid()
+        loaded.lifecycle(),
+        signalbox_domain::DelegationLifecycle::Terminal
     );
 
     pool.close().await;
