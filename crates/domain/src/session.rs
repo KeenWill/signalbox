@@ -695,6 +695,19 @@ impl Session {
     }
 }
 
+/// Labeled, independently stored placement facts for current-session reconstitution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPlacementReconstitutionFacts {
+    /// Session identity owning the mutable current-placement pointer.
+    pub current_pointer_session: SessionId,
+    /// Placement version selected by the current-placement pointer.
+    pub current_pointer_version: SessionPlacementVersion,
+    /// Session identity owning the selected immutable placement event.
+    pub selected_event_session: SessionId,
+    /// Complete selected immutable placement event.
+    pub selected_event: VersionedSessionPlacement,
+}
+
 /// Complete checked inputs for reconstituting one current [`Session`].
 ///
 /// Each independently stored identity and version is retained so the domain
@@ -719,10 +732,10 @@ pub struct SessionReconstitutionInput {
 }
 
 impl SessionReconstitutionInput {
-    /// Supplies the complete typed facts required by the current-session
+    /// Supplies every independently stored fact required by the current-session
     /// reconstitution seam.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -731,6 +744,7 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
         Self::new_with_template_and_placement(
             requested_session,
@@ -742,16 +756,14 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            stored_session,
-            SessionPlacementVersion::INITIAL,
-            stored_session,
-            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            placement,
         )
     }
 
-    /// Supplies complete typed facts including optional template provenance.
+    /// Supplies every independently stored fact, including optional template
+    /// provenance, required by the current-session reconstitution seam.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new_with_template_provenance(
+    pub fn new_with_template_provenance(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -761,6 +773,7 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
         Self::new_with_template_and_placement(
             requested_session,
@@ -772,16 +785,13 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            stored_session,
-            SessionPlacementVersion::INITIAL,
-            stored_session,
-            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            placement,
         )
     }
 
     /// Supplies complete stored facts including current placement history.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new_with_template_and_placement(
+    pub fn new_with_template_and_placement(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -791,11 +801,14 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        current_placement_session: SessionId,
-        current_placement_version: SessionPlacementVersion,
-        placement_session: SessionId,
-        current_placement: VersionedSessionPlacement,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
+        let SessionPlacementReconstitutionFacts {
+            current_pointer_session,
+            current_pointer_version,
+            selected_event_session,
+            selected_event,
+        } = placement;
         Self {
             requested_session,
             stored_session,
@@ -806,10 +819,10 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
-            current_placement_session,
-            current_placement_version,
-            placement_session,
-            current_placement,
+            current_placement_session: current_pointer_session,
+            current_placement_version: current_pointer_version,
+            placement_session: selected_event_session,
+            current_placement: selected_event,
         }
     }
 
@@ -1487,7 +1500,20 @@ mod tests {
         defaults: SessionConfigurationDefaults,
     ) -> SessionReconstitutionInput {
         SessionReconstitutionInput::new(
-            session, session, provenance, session, version, session, version, defaults,
+            session,
+            session,
+            provenance,
+            session,
+            version,
+            session,
+            version,
+            defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            },
         )
     }
 
@@ -1779,10 +1805,12 @@ mod tests {
                 self.defaults_session,
                 self.defaults_version,
                 self.defaults,
-                self.current_placement_session,
-                self.current_placement_version,
-                self.placement_session,
-                self.placement,
+                crate::SessionPlacementReconstitutionFacts {
+                    current_pointer_session: self.current_placement_session,
+                    current_pointer_version: self.current_placement_version,
+                    selected_event_session: self.placement_session,
+                    selected_event: self.placement,
+                },
             )
         }
     }

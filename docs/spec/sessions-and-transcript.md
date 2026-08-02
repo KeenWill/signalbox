@@ -172,11 +172,12 @@ loud `SessionPlacement::root_global_read` constructor, which requires
 record, and version-one event all preserve both its path and the explicit
 global-read-intent bit. Ordinary scoped construction rejects a root path.
 
-Why (append-only, one exception): provenance, defaults versions, command
-receipts, and scheduler registration are historical facts; in-place mutation
-would rewrite recorded intent and the context that later work consumed. The
-current-defaults pointer alone is mutable because "current" is a present choice,
-not a historical fact.
+Why (append-only, two pointer exceptions): provenance, defaults versions,
+placement events, command receipts, and scheduler registration are historical
+facts; in-place mutation would rewrite recorded intent and the context that
+later work consumed. The current-defaults pointer and
+`session_current_placement` head are mutable because each selects a present
+choice without rewriting history.
 
 ### Create from an imported frontier
 

@@ -14,7 +14,7 @@ use crate::{
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, TranscriptAncestry, VersionedSessionConfigurationDefaults,
+    SessionId, SessionPlacementVersion, TranscriptAncestry, VersionedSessionConfigurationDefaults,
     VersionedSessionPlacement,
 };
 
@@ -372,6 +372,9 @@ pub struct BoundedImportedSessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    current_placement_session: SessionId,
+    current_placement_version: SessionPlacementVersion,
+    placement_session: SessionId,
     current_placement: VersionedSessionPlacement,
     seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
     seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
@@ -389,6 +392,9 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
         current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
@@ -402,6 +408,9 @@ impl BoundedImportedSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement_session,
+            current_placement_version,
+            placement_session,
             current_placement,
             seed_records,
             seed_headers,
@@ -430,6 +439,9 @@ impl BoundedImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
         current_placement: VersionedSessionPlacement,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
         seed_headers: Vec<ImportedSessionSeedHeaderReconstitutionInput>,
@@ -454,6 +466,9 @@ impl BoundedImportedSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement_session,
+            current_placement_version,
+            placement_session,
             current_placement,
             seed_records,
             seed_headers,
@@ -488,6 +503,24 @@ impl BoundedImportedSessionReconstitutionInput {
             return Err(fail(
                 self,
                 BoundedImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ));
+        }
+        if self.current_placement_session != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::CurrentPlacementSessionMismatch,
+            ));
+        }
+        if self.placement_session != self.stored_session {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::PlacementSessionMismatch,
+            ));
+        }
+        if self.current_placement_version != self.current_placement.version() {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
             ));
         }
         let TranscriptAncestry::ImportedConversation {
@@ -591,6 +624,21 @@ impl BoundedImportedSessionReconstitutionInput {
         &self.defaults
     }
 
+    /// Returns the session identity owning the current-placement pointer.
+    pub const fn current_placement_session(&self) -> SessionId {
+        self.current_placement_session
+    }
+
+    /// Returns the version selected by the current-placement pointer.
+    pub const fn current_placement_version(&self) -> SessionPlacementVersion {
+        self.current_placement_version
+    }
+
+    /// Returns the session identity owning the selected placement event.
+    pub const fn placement_session(&self) -> SessionId {
+        self.placement_session
+    }
+
     /// Borrows the selected current placement event.
     pub const fn current_placement(&self) -> &VersionedSessionPlacement {
         &self.current_placement
@@ -618,6 +666,12 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The current pointer and selected row name different versions.
     CurrentDefaultsVersionMismatch,
+    /// The current-placement pointer belongs to another session.
+    CurrentPlacementSessionMismatch,
+    /// The selected placement event belongs to another session.
+    PlacementSessionMismatch,
+    /// The placement pointer and selected event name different versions.
+    CurrentPlacementVersionMismatch,
     /// The stored ancestry is not imported ancestry.
     AncestryNotImported,
     /// No one-to-one seed record was supplied.
@@ -883,6 +937,9 @@ pub struct ImportedSessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    current_placement_session: SessionId,
+    current_placement_version: SessionPlacementVersion,
+    placement_session: SessionId,
     current_placement: VersionedSessionPlacement,
     imported_conversation: ImportedConversation,
     seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
@@ -902,6 +959,9 @@ impl ImportedSessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: SessionId,
         current_placement: VersionedSessionPlacement,
         imported_conversation: ImportedConversation,
         seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
@@ -917,6 +977,9 @@ impl ImportedSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement_session,
+            current_placement_version,
+            placement_session,
             current_placement,
             imported_conversation,
             seed_records,
@@ -955,6 +1018,24 @@ impl ImportedSessionReconstitutionInput {
             return Err(fail(
                 self,
                 ImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ));
+        }
+        if self.current_placement_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentPlacementSessionMismatch,
+            ));
+        }
+        if self.placement_session != self.stored_session {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::PlacementSessionMismatch,
+            ));
+        }
+        if self.current_placement_version != self.current_placement.version() {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
             ));
         }
         let projection = match validate_imported_seed_projection(
@@ -1030,6 +1111,21 @@ impl ImportedSessionReconstitutionInput {
         &self.defaults
     }
 
+    /// Returns the session identity owning the current-placement pointer.
+    pub const fn current_placement_session(&self) -> SessionId {
+        self.current_placement_session
+    }
+
+    /// Returns the version selected by the current-placement pointer.
+    pub const fn current_placement_version(&self) -> SessionPlacementVersion {
+        self.current_placement_version
+    }
+
+    /// Returns the session identity owning the selected placement event.
+    pub const fn placement_session(&self) -> SessionId {
+        self.placement_session
+    }
+
     /// Borrows the selected current placement event.
     pub const fn current_placement(&self) -> &VersionedSessionPlacement {
         &self.current_placement
@@ -1067,6 +1163,12 @@ pub enum ImportedSessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The current pointer and selected row name different versions.
     CurrentDefaultsVersionMismatch,
+    /// The current-placement pointer belongs to another session.
+    CurrentPlacementSessionMismatch,
+    /// The selected placement event belongs to another session.
+    PlacementSessionMismatch,
+    /// The placement pointer and selected event name different versions.
+    CurrentPlacementVersionMismatch,
     /// The imported seed projection is inconsistent.
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
@@ -1623,6 +1725,9 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.command().initial_configuration_defaults().clone(),
+            prepared.session().id(),
+            SessionPlacementVersion::INITIAL,
+            prepared.session().id(),
             VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             conversation.clone(),
             seeds,
@@ -1649,6 +1754,9 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             prepared.command().initial_configuration_defaults().clone(),
+            prepared.session().id(),
+            SessionPlacementVersion::INITIAL,
+            prepared.session().id(),
             VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             vec![ImportedSessionSeedReconstitutionInput::new(
                 seed.session(),
@@ -1675,6 +1783,19 @@ mod tests {
         let error = input
             .reconstitute()
             .expect_err("the corrupted bounded seed proof must fail");
+        assert_eq!(error.failure(), expected);
+        assert_eq!(error.input(), &unchanged);
+    }
+
+    #[track_caller]
+    fn assert_current_failure(
+        input: ImportedSessionReconstitutionInput,
+        expected: ImportedSessionReconstitutionFailure,
+    ) {
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("the corrupted current imported-session facts must fail");
         assert_eq!(error.failure(), expected);
         assert_eq!(error.input(), &unchanged);
     }
@@ -1882,6 +2003,7 @@ mod tests {
             .unwrap(),
         );
         input.current_placement = placement.clone();
+        input.current_placement_version = placement.version();
         assert_eq!(input.current_placement(), &placement);
 
         let reconstituted = input
@@ -1917,6 +2039,7 @@ mod tests {
             .unwrap(),
         );
         input.current_placement = placement.clone();
+        input.current_placement_version = placement.version();
         assert_eq!(input.current_placement(), &placement);
 
         let session = input
@@ -1970,6 +2093,28 @@ mod tests {
         assert_bounded_failure(
             defaults_version,
             BoundedImportedSessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+        );
+
+        let mut current_placement_session = bounded_input(&prepared);
+        current_placement_session.current_placement_session = session_id(96);
+        assert_bounded_failure(
+            current_placement_session,
+            BoundedImportedSessionReconstitutionFailure::CurrentPlacementSessionMismatch,
+        );
+
+        let mut placement_session = bounded_input(&prepared);
+        placement_session.placement_session = session_id(97);
+        assert_bounded_failure(
+            placement_session,
+            BoundedImportedSessionReconstitutionFailure::PlacementSessionMismatch,
+        );
+
+        let mut placement_version = bounded_input(&prepared);
+        placement_version.current_placement_version = SessionPlacementVersion::try_from_u64(2)
+            .expect("the second synthetic placement version exists");
+        assert_bounded_failure(
+            placement_version,
+            BoundedImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
         );
 
         let mut ancestry = bounded_input(&prepared);
@@ -2055,6 +2200,35 @@ mod tests {
         assert_bounded_failure(
             member_count,
             BoundedImportedSessionReconstitutionFailure::SeedMemberCountMismatch,
+        );
+    }
+
+    /// S28 / INV-002 / INV-003: current imported-session placement rows and
+    /// pointers cannot be cross-wired across session identities or versions.
+    #[test]
+    fn s28_inv002_inv003_current_placement_corruption_is_typed() {
+        let (conversation, _, prepared) = prepared_fixture();
+
+        let mut current_placement_session = current_input(&conversation, &prepared);
+        current_placement_session.current_placement_session = session_id(96);
+        assert_current_failure(
+            current_placement_session,
+            ImportedSessionReconstitutionFailure::CurrentPlacementSessionMismatch,
+        );
+
+        let mut placement_session = current_input(&conversation, &prepared);
+        placement_session.placement_session = session_id(97);
+        assert_current_failure(
+            placement_session,
+            ImportedSessionReconstitutionFailure::PlacementSessionMismatch,
+        );
+
+        let mut placement_version = current_input(&conversation, &prepared);
+        placement_version.current_placement_version = SessionPlacementVersion::try_from_u64(2)
+            .expect("the second synthetic placement version exists");
+        assert_current_failure(
+            placement_version,
+            ImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
         );
     }
 

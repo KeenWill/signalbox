@@ -6789,7 +6789,7 @@ mod tests {
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
         ModelSelectionRequest, NormalizedToolArguments, PerInputConfigurationChoices,
         ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionPlacement,
+        SessionCreationCause, SessionCreationProvenance, SessionPlacement, SessionPlacementVersion,
         SessionReconstitutionInput, ToolApprovalDecision,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
@@ -6820,6 +6820,14 @@ mod tests {
             session,
             version,
             defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("test session facts are fully correlated")
@@ -6925,6 +6933,9 @@ mod tests {
             prepared.session().id(),
             SessionConfigurationDefaultsVersion::first(),
             command_defaults,
+            prepared.session().id(),
+            SessionPlacementVersion::INITIAL,
+            prepared.session().id(),
             VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             conversation,
             vec![crate::ImportedSessionSeedReconstitutionInput::new(
@@ -13822,6 +13833,14 @@ mod tests {
             ancestral,
             version,
             defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: ancestral,
+                current_pointer_version: crate::SessionPlacementVersion::INITIAL,
+                selected_event_session: ancestral,
+                selected_event: crate::VersionedSessionPlacement::initial(
+                    crate::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("ancestral session facts are fully correlated");

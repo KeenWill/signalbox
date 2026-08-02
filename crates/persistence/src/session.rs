@@ -285,15 +285,12 @@ fn decode_complete(
         }
         let placement =
             decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
-        if placement.current_session != requested_session
-            || placement.event_session != requested_session
-            || placement.current_version != placement.placement.version()
-        {
-            return Err(SessionCorruption::Inconsistent("current placement selection").into());
-        }
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
+            placement.current_session,
+            placement.current_version,
+            placement.event_session,
             placement.placement,
         )
         .map_err(map_imported_error);
@@ -341,10 +338,12 @@ fn decode_complete(
         defaults_session,
         defaults_version,
         defaults,
-        placement.current_session,
-        placement.current_version,
-        placement.event_session,
-        placement.placement,
+        signalbox_domain::SessionPlacementReconstitutionFacts {
+            current_pointer_session: placement.current_session,
+            current_pointer_version: placement.current_version,
+            selected_event_session: placement.event_session,
+            selected_event: placement.placement,
+        },
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
