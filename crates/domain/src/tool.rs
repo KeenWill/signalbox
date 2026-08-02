@@ -637,6 +637,17 @@ impl ToolDecisionRationaleError {
     }
 }
 
+impl std::fmt::Display for ToolDecisionRationaleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "tool decision rationale must be nonempty, at most {MAX_TOOL_DECISION_RATIONALE_BYTES} bytes, and contain no U+0000"
+        )
+    }
+}
+
+impl std::error::Error for ToolDecisionRationaleError {}
+
 /// Closed result vocabulary emitted by an approval judge.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DelegateApprovalRecommendation {
@@ -739,6 +750,18 @@ impl DelegateToolApprovalError {
         self.recommendation
     }
 }
+
+impl std::fmt::Display for DelegateToolApprovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "delegate recommendation {:?} exceeds {:?} approval-posture authority",
+            self.recommendation, self.posture
+        )
+    }
+}
+
+impl std::error::Error for DelegateToolApprovalError {}
 
 /// One checked optional denial explanation.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

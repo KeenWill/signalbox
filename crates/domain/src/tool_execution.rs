@@ -1331,6 +1331,18 @@ impl DelegateToolApprovalTransitionError {
     }
 }
 
+impl std::fmt::Display for DelegateToolApprovalTransitionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "delegate approval transition failed: {:?}",
+            self.failure
+        )
+    }
+}
+
+impl std::error::Error for DelegateToolApprovalTransitionError {}
+
 impl PreparedToolBatchDecision {
     fn rejected(
         batch: ToolBatch,
