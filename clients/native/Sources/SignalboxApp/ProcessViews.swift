@@ -1334,10 +1334,16 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case unknownNestedState
   }
 
+  private enum TimelinePresentationKey: Hashable {
+    case normalized(String)
+    case unrecognized(UInt64)
+  }
+
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
   private var sideSnapshotCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
-  private var unrecognizedLiveEventCursors: Set<UInt64> = []
-  private var unrecognizedLiveTimelineItems: [SignalboxTimelineItem] = []
+  private var normalizedTimelineItemIDs: Set<String> = []
+  private var timelinePresentationOrder: [TimelinePresentationKey] = []
+  private var unrecognizedLiveTimelineItemsByCursor: [UInt64: SignalboxTimelineItem] = [:]
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
@@ -1918,8 +1924,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     activeTurnID = nil
     mutationBlocksByTurnID = [:]
     sideSnapshotCursorsByTurnID = [:]
-    unrecognizedLiveEventCursors = []
-    unrecognizedLiveTimelineItems = []
+    normalizedTimelineItemIDs = []
+    timelinePresentationOrder = []
+    unrecognizedLiveTimelineItemsByCursor = [:]
     phase = .stopped
     latestDiagnostic = nil
     isSubmitting = false
@@ -2066,25 +2073,43 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     decodingDiagnostic: SignalboxDecodingDiagnostic?,
     cursor: SignalboxCanonicalUInt64
   ) {
-    guard unrecognizedLiveEventCursors.insert(cursor.rawValue).inserted else {
+    guard unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] == nil else {
       return
     }
-    let eventID = SignalboxEventID(rawValue: -1 - unrecognizedLiveTimelineItems.count)
-    unrecognizedLiveTimelineItems.append(
-      .unknown(
-        SignalboxUnknownEventCard(
-          eventID: eventID,
-          kind: SignalboxProcessPresentation.retainedLabel(kind),
-          diagnostic: decodingDiagnostic?.message
-            ?? "The session event kind is not rendered by this client."
-        )
+    let eventID = SignalboxEventID(
+      rawValue: -1 - unrecognizedLiveTimelineItemsByCursor.count
+    )
+    unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] = .unknown(
+      SignalboxUnknownEventCard(
+        eventID: eventID,
+        kind: SignalboxProcessPresentation.retainedLabel(kind),
+        diagnostic: decodingDiagnostic?.message
+          ?? "The session event kind is not rendered by this client."
       )
     )
+    timelinePresentationOrder.append(.unrecognized(cursor.rawValue))
     refreshTimeline()
   }
 
   private func refreshTimeline() {
-    timeline = normalizer.timelineItems + unrecognizedLiveTimelineItems
+    let normalizedItems = normalizer.timelineItems
+    let normalizedItemsByID = Dictionary(
+      normalizedItems.map { ($0.id, $0) },
+      uniquingKeysWith: { first, _ in first }
+    )
+    for item in normalizedItems {
+      if normalizedTimelineItemIDs.insert(item.id).inserted {
+        timelinePresentationOrder.append(.normalized(item.id))
+      }
+    }
+    timeline = timelinePresentationOrder.compactMap { key in
+      switch key {
+      case .normalized(let id):
+        return normalizedItemsByID[id]
+      case .unrecognized(let cursor):
+        return unrecognizedLiveTimelineItemsByCursor[cursor]
+      }
+    }
   }
 
   private func admitsStateTransition(

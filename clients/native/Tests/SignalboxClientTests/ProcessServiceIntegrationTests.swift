@@ -6702,13 +6702,23 @@ extension ProcessServiceIntegrationTests {
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
     let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
     let followed = try ProcessProjectionFixture.unknownSessionEvent()
+    viewModel.apply(.authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithUserEntry()))
 
     viewModel.apply(.event(followed))
     viewModel.apply(.event(followed))
     viewModel.apply(.diagnostic(ProcessProjectionFixture.transportDiagnostic))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithProposedTool(),
+        trigger: try ProcessProjectionFixture.proposedToolTrigger()
+      )
+    )
 
     let unknown = try ProcessProjectionFixture.onlyUnknownCard(in: viewModel.timeline)
-    XCTAssertEqual(viewModel.timeline.count, ProcessProjectionFixture.singleRecordCount)
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: viewModel.timeline),
+      ProcessProjectionFixture.unknownEventSideSnapshotTimelineKinds
+    )
     XCTAssertEqual(
       unknown.kind,
       SignalboxProcessPresentation.retainedLabel(ProcessProjectionFixture.oversizedUnknownState)
@@ -6721,6 +6731,9 @@ extension ProcessServiceIntegrationTests {
 extension ProcessProjectionFixture {
   static let unknownSessionEventDiagnostic =
     "The session event kind is not rendered by this client."
+  static let unknownEventSideSnapshotTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .message, .unknown, .tool,
+  ]
 
   static func unknownSessionEvent() throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
@@ -6747,4 +6760,28 @@ extension ProcessProjectionFixture {
     }
     return unknown
   }
+
+  static func timelineKinds(
+    in timeline: [SignalboxTimelineItem]
+  ) -> [ProcessTimelineFixtureKind] {
+    timeline.map { item in
+      switch item {
+      case .message:
+        return .message
+      case .tool:
+        return .tool
+      case .turnFailure:
+        return .turnFailure
+      case .unknown:
+        return .unknown
+      }
+    }
+  }
+}
+
+private enum ProcessTimelineFixtureKind: Equatable {
+  case message
+  case tool
+  case turnFailure
+  case unknown
 }
