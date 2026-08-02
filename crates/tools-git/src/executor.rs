@@ -106,15 +106,17 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .map_err(|_| LocalGitFailure::Operation)?;
         let result = match operation {
             LocalOperation::Status => {
-                let _index_snapshot = self.bind_index_snapshot(&repository)?;
+                let index_snapshot = self.bind_index_snapshot(&repository)?;
                 let untracked = self.discover_untracked_paths(&repository)?;
-                LocalGitResult::Status(status(
+                let status = status(
                     &repository,
                     &self.repository_authority,
                     &self.filesystem,
                     &self.root,
                     untracked,
-                )?)
+                )?;
+                index_snapshot.validate()?;
+                LocalGitResult::Status(status)
             }
             LocalOperation::Diff(arguments) => {
                 let index_snapshot = if matches!(arguments, GitDiffArguments::Worktree) {
@@ -127,14 +129,18 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 } else {
                     Vec::new()
                 };
-                LocalGitResult::Diff(diff(
+                let diff = diff(
                     &repository,
                     &self.repository_authority,
                     arguments,
                     &self.filesystem,
                     &self.root,
                     untracked,
-                )?)
+                )?;
+                if let Some(index_snapshot) = index_snapshot {
+                    index_snapshot.validate()?;
+                }
+                LocalGitResult::Diff(diff)
             }
             LocalOperation::Log(arguments) => {
                 LocalGitResult::Log(log(&repository, &self.repository_authority, arguments)?)
@@ -431,10 +437,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         &self,
         repository: &Repository,
     ) -> Result<IndexSnapshot, LocalGitFailure> {
-        let (snapshot, mut index) = IndexSnapshot::acquire(
-            &self.repository_authority.git_path("index"),
-            self.repository_authority.object_format,
-        )?;
+        let (snapshot, mut index) =
+            IndexSnapshot::acquire_for_repository(&self.repository_authority)?;
         repository
             .set_index(&mut index)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -738,6 +742,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             return Err(LocalGitFailure::Operation);
         }
         validate_index_objects(repository, &current_index)?;
+        if current_index.iter().any(|entry| {
+            entry.flags & 0x3000 == 0 && entry.flags_extended & INDEX_SKIP_WORKTREE != 0
+        }) {
+            return Err(LocalGitFailure::Operation);
+        }
         let staged = repository
             .diff_tree_to_index(current_tree.as_ref(), Some(&current_index), None)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -930,6 +939,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &signature,
                 || {
                     before_head_publish();
+                    operation_state.validate(&self.repository_authority)?;
                     self.validate_current_repository_identity()
                 },
             )

@@ -119,10 +119,15 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             || untracked_files.contains(&path)
         {
             match filesystem.entry_kind(root, &path) {
-                Ok(WorkspaceEntryKind::Directory) => diff_index_files
-                    .get(&path)
-                    .filter(|(_, mode)| *mode == GITLINK_MODE)
-                    .map(|(oid, mode)| (gitlink_buffer(*oid), *mode)),
+                Ok(WorkspaceEntryKind::Directory) => {
+                    if diff_index_files
+                        .get(&path)
+                        .is_some_and(|(_, mode)| *mode == GITLINK_MODE)
+                    {
+                        return Err(LocalGitFailure::Operation);
+                    }
+                    None
+                }
                 Ok(WorkspaceEntryKind::Symlink)
                 | Err(WorkspaceResolveError::Rejected(WorkspacePathRejection::Symlink)) => {
                     let bytes = read_worktree_symlink(authority, &path, MAX_OBJECT_BYTES)?;

@@ -56,12 +56,10 @@ where
         return Err(LocalGitFailure::Operation);
     }
     revision_snapshot.validate(authority)?;
-    create_loose_branch_reference(
-        authority,
-        &arguments.name,
-        commit.id(),
-        validate_root_before_publish,
-    )?;
+    create_loose_branch_reference(authority, &arguments.name, commit.id(), || {
+        validate_root_before_publish()?;
+        revision_snapshot.validate(authority)
+    })?;
     Ok(BranchResult {
         branch: arguments.name,
         head,

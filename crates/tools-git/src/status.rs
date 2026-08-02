@@ -77,7 +77,9 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
     for (path, (oid, mode)) in &indexed {
         if *mode == GITLINK_MODE {
             match filesystem.entry_kind(root, path) {
-                Ok(WorkspaceEntryKind::Directory) => {}
+                Ok(WorkspaceEntryKind::Directory) => {
+                    return Err(LocalGitFailure::Operation);
+                }
                 Err(WorkspaceResolveError::Io { source, .. })
                     if matches!(
                         source.kind(),

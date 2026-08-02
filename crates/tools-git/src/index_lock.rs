@@ -40,6 +40,9 @@ pub(super) struct IndexLock {
 }
 
 pub(super) struct IndexSnapshot {
+    parent: OwnedFd,
+    index_name: OsString,
+    expected: Option<IndexSnapshotIdentity>,
     _file: fs::File,
 }
 
@@ -63,20 +66,38 @@ pub(super) struct IndexContentIdentity {
 }
 
 impl IndexSnapshot {
-    pub(super) fn acquire(
-        index_path: &Path,
-        object_format: ObjectFormat,
+    pub(super) fn acquire_for_repository(
+        authority: &PinnedRepository,
     ) -> Result<(Self, Index), LocalGitFailure> {
+        let parent = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+        let index_name = OsString::from("index");
         let mut file = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
-        copy_index_snapshot(
-            index_path,
+        let (expected, _) = copy_index_snapshot_at(
+            &parent,
+            &index_name,
             &mut file,
             IndexSnapshotPermissions::RetainDestination,
-            object_format,
+            authority.object_format,
         )?;
-        let index = Index::open_ext(&descriptor_path(&file), object_format)
+        let index = Index::open_ext(&descriptor_path(&file), authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
-        Ok((Self { _file: file }, index))
+        Ok((
+            Self {
+                parent,
+                index_name,
+                expected,
+                _file: file,
+            },
+            index,
+        ))
+    }
+
+    pub(super) fn validate(&self) -> Result<(), LocalGitFailure> {
+        if index_snapshot_identity_at(&self.parent, &self.index_name)? == self.expected {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
     }
 }
 

@@ -6,7 +6,10 @@ use std::{
     path::Path,
 };
 
-use git2::{BranchType, ObjectFormat, Repository, RepositoryInitOptions, Signature};
+use git2::{
+    BranchType, IndexEntry, IndexTime, ObjectFormat, Odb, Repository, RepositoryInitOptions,
+    Signature,
+};
 
 use crate::LocalGitExecutor;
 use crate::arguments::{
@@ -14,12 +17,13 @@ use crate::arguments::{
     GitLogArguments, GitStageArguments, LocalOperation,
 };
 use crate::bounded::RevisionSnapshot;
+use crate::branch::branch_create;
 use crate::failure::LocalGitFailure;
 use crate::limits::{
-    MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REVISION_BYTES,
-    MAX_STAGE_PATHS,
+    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
+    MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
-use crate::pinning::parse_pack_index;
+use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
 use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
     CHANGED_CONTENT, FIX_BRANCH, Fixture, INITIAL_CONTENT, MODEL_MESSAGE, Sha256Fixture,
@@ -154,6 +158,47 @@ fn branch_create_rejects_a_name_outside_git_reference_grammar() {
 }
 
 #[test]
+fn branch_create_rejects_a_start_reference_changed_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+    let pinned_objects =
+        PinnedObjectDatabase::capture(&executor.repository_authority).expect("objects capture");
+    let object_database = Odb::new_ext(executor.repository_authority.object_format)
+        .expect("private object database constructs");
+    pinned_objects
+        .add_to(&object_database)
+        .expect("captured objects install");
+    repository
+        .set_odb(&object_database)
+        .expect("captured objects bind");
+
+    let failure = branch_create(
+        &repository,
+        &executor.repository_authority,
+        &object_database,
+        GitBranchCreateArguments {
+            name: FIX_BRANCH.to_owned(),
+            start: "refs/heads/main".to_owned(),
+        },
+        || {
+            fs::write(
+                fixture.root().join(".git/refs/heads/main"),
+                format!("{}\n", fixture.initial),
+            )
+            .expect("racing branch tip writes");
+            Ok(())
+        },
+    )
+    .expect_err("changed start reference rejects branch publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(!fixture.root().join(".git/refs/heads/agent/fix").exists());
+}
+
+#[test]
 fn branch_switch_checks_out_root_level_changes_inside_the_injected_root() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -218,6 +263,104 @@ fn branch_switch_rejects_merge_state_from_the_injected_git_directory() {
             .shorthand(),
         Ok("main")
     );
+}
+
+#[test]
+fn branch_switch_rejects_operation_state_created_before_head_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_head_publish_hook(
+            &repository,
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::write(
+                    fixture.root().join(".git/MERGE_HEAD"),
+                    format!("{}\n", fixture.initial),
+                )
+                .expect("racing merge state writes");
+            },
+        )
+        .expect_err("changed operation state rejects HEAD publication");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_skip_worktree_index_entry() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let mut index = repository.index().expect("fixture index opens");
+    let mut entry = index
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("tracked entry exists");
+    entry.flags_extended |= INDEX_SKIP_WORKTREE;
+    index.add(&entry).expect("skip-worktree entry replaces");
+    index.write().expect("skip-worktree index publishes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }))
+        .expect_err("skip-worktree index rejects branch switching");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("worktree content remains"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn status_rejects_an_unsupported_gitlink_worktree() {
+    let fixture = Fixture::new();
+    install_gitlink_index_entry(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Status)
+        .expect_err("gitlink worktree status rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn worktree_diff_rejects_an_unsupported_gitlink_worktree() {
+    let fixture = Fixture::new();
+    install_gitlink_index_entry(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree))
+        .expect_err("gitlink worktree diff rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]
@@ -619,4 +762,26 @@ fn remove_first_installed_pack(root: &Path) {
         })
         .expect("installed object pack exists");
     fs::remove_file(pack).expect("installed object pack removes");
+}
+
+fn install_gitlink_index_entry(fixture: &Fixture) {
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let mut index = repository.index().expect("fixture index opens");
+    let entry = IndexEntry {
+        ctime: IndexTime::new(0, 0),
+        mtime: IndexTime::new(0, 0),
+        dev: 0,
+        ino: 0,
+        mode: GITLINK_MODE,
+        uid: 0,
+        gid: 0,
+        file_size: 0,
+        id: fixture.initial,
+        flags: 0,
+        flags_extended: 0,
+        path: b"submodule".to_vec(),
+    };
+    index.add(&entry).expect("gitlink index entry adds");
+    index.write().expect("gitlink index publishes");
+    fs::create_dir(fixture.root().join("submodule")).expect("gitlink worktree directory creates");
 }
