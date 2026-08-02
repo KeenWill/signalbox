@@ -12,8 +12,8 @@ use std::{
 
 use rustix::{
     fs::{
-        AtFlags, FileType, Mode, OFlags, RenameFlags, mkdirat, openat, renameat_with, statat,
-        unlinkat,
+        AtFlags, FileType, Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat_with,
+        statat, unlinkat,
     },
     io::dup,
 };
@@ -1090,17 +1090,38 @@ where
     match openat(parent, name, flags, Mode::empty()) {
         Ok(directory) => Ok(directory),
         Err(error) if error == rustix::io::Errno::NOENT => {
-            mkdirat(parent, name, mode).map_err(|_| LocalGitFailure::Operation)?;
-            post_create()?;
-            let directory = match openat(parent, name, flags, Mode::empty()) {
-                Ok(directory) => directory,
-                Err(_) => return Err(LocalGitFailure::Operation),
-            };
-            let descriptor_identity = file_identity(
-                &fs::File::from(dup(&directory).map_err(|_| LocalGitFailure::Operation)?)
+            mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+                .map_err(|_| LocalGitFailure::Operation)?;
+            let created = openat(parent, name, flags, Mode::empty())
+                .map_err(|_| LocalGitFailure::Operation)?;
+            let created_identity = file_identity(
+                &fs::File::from(dup(&created).map_err(|_| LocalGitFailure::Operation)?)
                     .metadata()
                     .map_err(|_| LocalGitFailure::Operation)?,
             );
+            post_create()?;
+            let current = match openat(parent, name, flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(_) => return Err(LocalGitFailure::Operation),
+            };
+            let current_identity = file_identity(
+                &fs::File::from(dup(&current).map_err(|_| LocalGitFailure::Operation)?)
+                    .metadata()
+                    .map_err(|_| LocalGitFailure::Operation)?,
+            );
+            if current_identity != created_identity {
+                return Ok(current);
+            }
+            fchmod(&created, mode).map_err(|_| LocalGitFailure::Operation)?;
+            let created_metadata =
+                fs::File::from(dup(&created).map_err(|_| LocalGitFailure::Operation)?)
+                    .metadata()
+                    .map_err(|_| LocalGitFailure::Operation)?;
+            if file_identity(&created_metadata) != created_identity
+                || created_metadata.mode() & 0o2777 != mode.bits() & 0o2777
+            {
+                return Err(LocalGitFailure::Operation);
+            }
             let path_identity = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
                 .ok()
                 .filter(|status| FileType::from_raw_mode(status.st_mode) == FileType::Directory)
@@ -1108,10 +1129,10 @@ where
                     device: status.st_dev,
                     inode: status.st_ino,
                 });
-            if path_identity != Some(descriptor_identity) {
+            if path_identity != Some(created_identity) {
                 return Err(LocalGitFailure::Operation);
             }
-            Ok(directory)
+            Ok(created)
         }
         Err(_) => Err(LocalGitFailure::Operation),
     }

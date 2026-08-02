@@ -1,0 +1,85 @@
+# Git authority threat model
+
+This page specifies the repository trust boundary implemented by the stack
+rooted at PR #409 (`agent/git-tools-authority`). The bottom slice establishes
+the authority and filesystem laws; its child slices add local operations, their
+typed tool surface, and explicitly approved repair writes. Daemon catalog wiring
+is outside this stack.
+
+The deployment injects one workspace root. The Git family may operate only on a
+direct main worktree whose `.git` directory is immediately inside that root.
+Repository paths and repository data are untrusted input. The local process,
+kernel, filesystem implementation, cryptographic hash implementations, and the
+typed Git library are trusted computing-base components.
+
+## Stated invariants
+
+**Typed operations only.** Every admitted Git action is a fixed typed operation
+with a compiled argument schema and a typed result or failure. No operation
+accepts a command line, shell fragment, executable, repository path, or remote
+destination. The implementation never spawns a Git binary. Text fields such as a
+commit message are data: they are bounded, recorded verbatim, and never
+interpreted as configuration or instructions.
+
+**Pinned repository root.** Construction begins with the injected
+`WorkspaceRoot` descriptor identity and binds the direct `.git` directory under
+that root. Repository administration paths are opened descriptor-relatively with
+no-follow semantics and are revalidated at operation boundaries. A symlinked
+root or administration entry, a `.git` indirection file, `commondir`, a
+linked-worktree layout, a replaced pinned directory, or a path component that
+escapes the bound hierarchy is rejected. Mutation cleanup removes or restores
+only entries whose captured identities are still current; a foreign replacement
+is preserved and the operation fails closed.
+
+**No ambient repository discovery.** The suite never searches the current
+directory, ancestors, environment, home directory, or process-global Git state
+for a repository. The workspace root is construction input, not a per-call
+argument. Local operations cannot select another repository. An external-write
+slice may name a branch, but its remote endpoint is deployment configuration and
+is never model-supplied data.
+
+**References match the repository object format.** The pinned repository
+configuration selects SHA-1 or SHA-256 once. Direct reference values, detached
+`HEAD`, packed-reference targets and peels, index checksums, and operation
+object identifiers must use that format's exact width. Symbolic references must
+be bounded valid `refs/` names. Abbreviated, cross-format, malformed, oversized,
+or changed-after-snapshot values are rejected rather than coerced.
+
+These invariants are the security acceptance boundary. A finding that
+demonstrates their violation remains must-fix regardless of review-wave count. A
+newly identified gap in the mechanisms that enforce one of these invariants is
+in-scope hardening and is fixed in the current pull request's single batched
+disposition commit.
+
+## Explicitly accepted residuals
+
+- Signalbox does not provide transaction isolation from every process that can
+  write the same repository. It detects observed concurrent replacement or
+  in-place change at its validation points, preserves entries it no longer owns,
+  and fails closed; another same-authority or privileged process can still
+  mutate repository data after the final validation or after an operation
+  returns.
+- Descriptor pinning does not sandbox a hostile same-UID process, prevent writes
+  through pre-existing hard links or already-open descriptors, or defend against
+  a compromised kernel, filesystem, Git library, compression library, or hash
+  implementation. Such interference may produce a typed failure or a later
+  repository change, not a guarantee of uninterrupted availability.
+- Bounded scans and bounded content limit Signalbox's own work, but do not
+  guarantee repository availability. Unsupported layouts and formats, exhausted
+  bounds, allocation failure, and host I/O failure are rejected; the tool does
+  not repair an already corrupt repository.
+- Repository semantics outside the direct main-worktree subset are unsupported,
+  not partially trusted. Linked worktrees, repository discovery, alternate
+  object databases, replacement-object configuration, and other rejected
+  extension surfaces require a separate owner-approved contract before support.
+- Remote authentication, transport security, server-side authorization, and
+  remote repository behavior are not properties of the local authority. The
+  repair-write slice separately constrains egress to the configured remote and
+  requires non-overridable explicit approval before push.
+
+For this stack's review disposition, a finding that does not violate a stated
+invariant, identify an in-scope enforcement gap, or contradict another
+implemented contract is classified **accepted residual**. Its in-thread reply
+cites this page and the matching residual, then the thread is resolved without a
+code change. This classification cannot be used for a reproducing invariant
+violation or for a defect introduced by this stack.

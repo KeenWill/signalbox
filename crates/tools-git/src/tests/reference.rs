@@ -1,6 +1,6 @@
 //! Reference-hierarchy creation and rollback properties.
 
-use std::{ffi::OsStr, fs};
+use std::{ffi::OsStr, fs, os::unix::fs::MetadataExt};
 
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat};
 
@@ -56,6 +56,37 @@ fn created_reference_directory_replacement_is_never_treated_as_owned() {
     assert_eq!(
         fs::read(parent.path().join(created_name).join("marker")).expect("actor marker reads"),
         actor_marker
+    );
+}
+
+#[test]
+fn created_reference_directory_receives_the_intended_mode() {
+    let parent = tempfile::tempdir().expect("reference parent constructs");
+    let directory = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("reference parent opens");
+    let created_name = OsStr::new("created");
+    let intended_mode = Mode::from_raw_mode(0o2770);
+
+    let opened = open_or_create_ref_directory_with_mode_tracked_and_hook(
+        &directory,
+        created_name,
+        intended_mode,
+        || Ok(()),
+    )
+    .expect("reference directory creates");
+
+    assert_eq!(
+        fs::File::from(opened)
+            .metadata()
+            .expect("created directory metadata reads")
+            .mode()
+            & 0o2777,
+        intended_mode.bits()
     );
 }
 
