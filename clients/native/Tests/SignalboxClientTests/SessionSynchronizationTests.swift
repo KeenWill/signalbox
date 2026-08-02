@@ -1952,6 +1952,46 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testModelIdentityMarkerRejectsForeignSourceSession() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.queuedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.secondActiveRunningTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 0)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelIdentityMarker(
+          turnID: SynchronizationFixture.secondTurn,
+          sourceSessionID: SynchronizationFixture.foreignSession
+        )
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+  }
+
   func testModelIdentityMarkerIsUniquePerTurn() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -2617,6 +2657,7 @@ private enum SynchronizationFixture {
   static let recoveredCursor: UInt64 = 30
   static let capacityBelowEncodedFutureEvent: UInt = 32
   static let session = "11111111-1111-4111-8111-111111111111"
+  static let foreignSession = "11111111-1111-4111-8111-111111111112"
   static let turn = "22222222-2222-4222-8222-222222222222"
   static let acceptedInput = "33333333-3333-4333-8333-333333333333"
   static let secondTurn = "99999999-9999-4999-8999-999999999999"
@@ -3170,6 +3211,23 @@ private enum SynchronizationFixture {
     )
   }
 
+  static func secondActiveRunningTurn() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(secondTurn)",
+        "acceptance_position":"2",
+        "state":{
+          "type":"active_running",
+          "current_attempt_id":"\(attempt)",
+          "current_model_call":null
+        }
+      }
+      """
+    )
+  }
+
   static func completedTurn() throws -> SignalboxProcessServerMessage {
     try message(
       """
@@ -3314,14 +3372,15 @@ private enum SynchronizationFixture {
   static func modelIdentityMarker(
     turnID: String,
     index: UInt64 = 0,
-    entryID: String = entry
+    entryID: String = entry,
+    sourceSessionID: String = session
   ) throws -> SignalboxProcessServerMessage {
     try message(
       """
       {
         "type":"transcript_entry",
         "entry_index":"\(index)",
-        "source_session_id":"\(session)",
+        "source_session_id":"\(sourceSessionID)",
         "entry_id":"\(entryID)",
         "entry":{
           "type":"model_identity_changed",

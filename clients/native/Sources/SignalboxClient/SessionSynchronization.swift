@@ -1520,6 +1520,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       guard
         modelCallsEnded && pendingModelIdentityTurnID == nil,
         !entry.entry.hasMalformedStoredProjection && entry.entry.modelIdentityTurnIsKnown(in: turnAcceptancePositions),
+        entry.entry.modelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
         entry.entry.modelIdentityTurnID == nil || entry.entry.modelIdentityTurnID != firstTurnID,
         entry.entry.modelIdentityTurnID.map({ !queuedTurnIDs.contains($0) }) ?? true,
         entry.entryIndex.rawValue == entryCount,

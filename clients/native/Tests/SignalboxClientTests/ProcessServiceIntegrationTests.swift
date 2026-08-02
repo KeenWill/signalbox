@@ -986,6 +986,34 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
+  func testSideSnapshotAdoptsRunningSuccessorAfterReconciliation() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let trigger = try ProcessProjectionFixture.modelReconciliationTrigger(
+      cursor: ProcessProjectionFixture.bufferedTransitionCursor
+    )
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    viewModel.apply(.event(trigger))
+
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithReconciliationAndActiveSuccessor(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    XCTAssertEqual(viewModel.activeTurnID?.rawValue, ProcessProjectionFixture.secondPendingTurn)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertTrue(viewModel.canStopAndSend)
+  }
+
+  @MainActor
   func testSideSnapshotFenceKeepsRecoveryAcrossBufferedActivation() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -4818,6 +4846,78 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithReconciliationAndActiveSuccessor(
+    cursor: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"\(cursor)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"reconciliation_required",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(secondPendingTurn)",
+          "acceptance_position":"2",
+          "state":{
+            "type":"active_running",
+            "current_attempt_id":"\(reconciliationAttempt)",
+            "current_model_call":null
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          },
+          "cost":null
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"\(cursor)",
+          "turn_count":"2",
+          "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
   private static func snapshotWithTerminalTurnState(
     _ state: String,
     cursor: UInt64
@@ -5787,6 +5887,22 @@ private enum ProcessProjectionFixture {
         "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
       }
       """
+    )
+  }
+
+  static func modelReconciliationTrigger(
+    cursor: UInt64
+  ) throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"turn_reconciliation_required",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "terminal_frontier_id":"\(ProcessDriverFixture.frontier)"
+      }
+      """,
+      cursor: cursor
     )
   }
 

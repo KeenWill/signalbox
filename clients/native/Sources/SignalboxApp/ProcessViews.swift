@@ -1707,6 +1707,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         normalizer.upsert(contentsOf: projection.records)
         timeline = normalizer.timelineItems
         let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
+        let snapshotActiveTurnID = activeTurnID(in: snapshot)
         terminalTurnIDs.formUnion(snapshotTerminalTurnIDs)
         if let activeTurnID, snapshotTerminalTurnIDs.contains(activeTurnID) {
           self.activeTurnID = nil
@@ -1721,10 +1722,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
             return (turn.turnID, snapshot.cursor.rawValue)
           })
         materializedAcceptedInputIDs.formUnion(projection.materializedAcceptedInputIDs)
-        if case .turnActivated(let turnID, _) = trigger.event,
+        if let snapshotActiveTurnID, projection.activity.state == .running {
+          activeTurnID = snapshotActiveTurnID
+          activity = projection.activity
+        } else if case .turnActivated(let turnID, _) = trigger.event,
           snapshotTerminalTurnIDs.contains(turnID)
         {
-          activeTurnID = activeTurnID(in: snapshot)
+          activeTurnID = snapshotActiveTurnID
           activity = projection.activity
         } else if !mutationBlocksByTurnID.isEmpty
           || projection.activity.state == .recoveryRequired
