@@ -65,7 +65,15 @@ pub(super) fn success_evidence(
     if scrubber.contains_credential(&content) {
         return Err(WebSearchExecutorError::EvidenceEncoding);
     }
-    completed_text_evidence(content)
+    let evidence = completed_text_evidence(content)?;
+    let rendered_result = format!(
+        "{:?}",
+        Ok::<&ToolExecutorEvidence, WebSearchExecutorError>(&evidence)
+    );
+    if scrubber.contains_credential(&rendered_result) {
+        return Err(WebSearchExecutorError::EvidenceEncoding);
+    }
+    Ok(evidence)
 }
 
 pub(super) fn redact_entity_escaped_component(

@@ -29,6 +29,23 @@ fn web_search_final_success_payload_rejects_credential_collision() {
     );
 }
 
+/// INV-035: a credential spanning completed JSON and the enclosing successful
+/// evidence `Debug` suffix is rejected before that result can be returned.
+#[test]
+fn web_search_rejects_populated_success_result_suffix_collision() {
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_SUCCESS_RESULT_SUFFIX_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response_with_result_count(0), &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: JSON-aware error sanitization decodes an escaped credential
 /// before the body can enter durable failure evidence.
 #[test]

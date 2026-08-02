@@ -57,7 +57,16 @@ pub(super) struct EscapedSnippet(String);
 ///     let _ = (result.title(), result.url(), result.snippet());
 /// }
 /// ```
-#[derive(Clone, Eq, PartialEq)]
+///
+/// ```compile_fail
+/// fn compare_provider_components(
+///     response: &signalbox_tools_basic::WebSearchResponse,
+///     candidate: &signalbox_tools_basic::WebSearchResult,
+/// ) {
+///     let _ = &response.results()[0] == candidate;
+/// }
+/// ```
+#[derive(Clone)]
 pub struct WebSearchResult {
     pub(super) title: ResultTitle,
     pub(super) url: ParsedResultUrl,
@@ -280,7 +289,7 @@ pub(super) fn entity_escape(source: &str, maximum_bytes: usize) -> Option<String
 }
 
 /// One complete bounded provider response.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct WebSearchResponse {
     pub(super) results: Vec<WebSearchResult>,
     pub(super) completeness: WebSearchPageCompleteness,
