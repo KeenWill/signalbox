@@ -964,29 +964,29 @@ storage below plus the delegation-stack extension identified inline:
   `turn_completed_outbox_event`, `turn_refused_outbox_event`,
   `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
   `runner_state_transition_outbox_event`, and the delegation stack's
-  `delegation_update_outbox_event` — with a deferred trigger requiring exactly
-  one typed record per header. A runner-transition record carries the affected
-  runner, the positive placement revision, the sandbox profile, one closed
-  transition state, and the relocation facts that state requires, so a follower
-  learns of loss, suspicion, recovery, replacement, working-directory
-  relocation, and abandonment from the same family. The family is deliberately
-  shaped for extension: a later runner fact — another relocation shape, or
-  runner metadata and attributes — adds a state and its columns to this one
-  record kind rather than a second event kind, so a follower already decoding
-  the family needs no new kind to keep hearing runner news. Extension stays
-  version-gated rather than silent: an addition every existing decoder can
-  ignore leaves the kind-scoped `storage_version` alone, while a new closed
-  transition state or a newly required column advances it, and a decoder that
-  predates the advance rejects the record as `Unsupported` instead of coercing
-  an unknown state onto one it knows. Tool-batch transition records carry the
-  producing call and exactly one closed state shape: `proposed` names the
-  yielded assistant/tool-use frontier, `results_projected` names the
-  all-resolved result frontier, and `recovery_required` names the exact
-  ambiguous physical attempt. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and every outbox table rejects `TRUNCATE`.
-  A context-compacted record names the authoritative compaction, its completed
-  dedicated call, exact positive through position, appended summary, and result
-  frontier.
+  `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
+  deferred trigger requiring exactly one typed record per header. A
+  runner-transition record carries the affected runner, the positive placement
+  revision, the sandbox profile, one closed transition state, and the relocation
+  facts that state requires, so a follower learns of loss, suspicion, recovery,
+  replacement, working-directory relocation, and abandonment from the same
+  family. The family is deliberately shaped for extension: a later runner fact —
+  another relocation shape, or runner metadata and attributes — adds a state and
+  its columns to this one record kind rather than a second event kind, so a
+  follower already decoding the family needs no new kind to keep hearing runner
+  news. Extension stays version-gated rather than silent: an addition every
+  existing decoder can ignore leaves the kind-scoped `storage_version` alone,
+  while a new closed transition state or a newly required column advances it,
+  and a decoder that predates the advance rejects the record as `Unsupported`
+  instead of coercing an unknown state onto one it knows. Tool-batch transition
+  records carry the producing call and exactly one closed state shape:
+  `proposed` names the yielded assistant/tool-use frontier, `results_projected`
+  names the all-resolved result frontier, and `recovery_required` names the
+  exact ambiguous physical attempt. The header and typed record tables are
+  append-only (`reject_immutable_record_change`), and every outbox table rejects
+  `TRUNCATE`. A context-compacted record names the authoritative compaction, its
+  completed dedicated call, exact positive through position, appended summary,
+  and result frontier.
 
 **Session-delegation foundation proposal.** Migration `202608020018` in the full
 delegation stack adds one version-one `delegation_update_outbox_event` typed
@@ -996,17 +996,17 @@ shape-specific columns carry `child_session_id` and relationship for
 `child_spawned`, `await_request_id`, child, and mode for `child_waiting`, child,
 outcome, reason, and provenance for `child_lifecycle_disposition`, those fields
 plus nullable result content for `child_result`, or message identity, endpoints,
-ordinal, and content for `session_message`. `delegation_wake` is another
-`update_kind` in that table, not a separate event kind or typed record table. It
-carries one closed wake subject: `result` requires an equal
-`result_spawning_request_id`, while `message` requires a `DelegationMessageId`
-belonging to that relationship. The header's `session_id` is the stream
-receiving the update. Per-kind checks require exactly that shape's columns and
-reject all others; foreign keys correlate every supplied identity to the same
-relationship. Dispatch decodes the same closed union and rejects every other
-storage version. The header completeness trigger includes this record kind, and
-the typed record is append-only and rejects `TRUNCATE` with the rest of the
-family.
+ordinal, and content for `session_message`. A separate version-one
+`delegation_wake_outbox_event` typed table carries the internal
+`delegation_wake` event kind and one closed wake subject: `result` requires an
+equal `result_spawning_request_id`, while `message` requires a
+`DelegationMessageId` belonging to that relationship. The header's `session_id`
+is the stream receiving the update or wake. Per-kind checks require exactly that
+shape's columns and reject all others; foreign keys correlate every supplied
+identity to the same relationship. Dispatch decodes both closed unions and
+rejects every other storage version. The header completeness trigger includes
+both record kinds, and both typed records are append-only and reject `TRUNCATE`
+with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
