@@ -40,6 +40,8 @@ pub(super) const FIXTURE_IPV6_LEADING_ZERO_PORT_RESULT_URL: &str = "https://[::1
 
 pub(super) const FIXTURE_INTERNAL_ZERO_PORT_RESULT_URL: &str = "https://example.com:0400/";
 
+pub(super) const FIXTURE_PORT_PATH_ZERO_RESULT_URL: &str = "https://example.com:0400/path";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
 
 pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
@@ -169,6 +171,8 @@ pub(super) const URL_IPV6_AUTHORITY_PORT_ZERO_COLLISION_KEY: &str = "]:0";
 
 pub(super) const URL_INTERNAL_PORT_ZERO_COLLISION_KEY: &str = "m:04";
 
+pub(super) const URL_PORT_PATH_ZERO_COLLISION_KEY: &str = "00/p";
+
 pub(super) const URL_AUTHORITY_WITH_PORT_NON_COLLISION_KEY: &str = "com:1";
 
 pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
@@ -188,6 +192,8 @@ pub(super) const URL_IPV6_COMPRESSED_FRAGMENT_COLLISION_KEY: &str = "0db8::1";
 pub(super) const URL_IPV4_TAIL_IPV6_COLLISION_KEY: &str = "192.168";
 
 pub(super) const URL_IPV4_TAIL_DIGIT_SUBSTRING_COLLISION_KEY: &str = "68";
+
+pub(super) const URL_IPV4_TAIL_SEPARATOR_SUBSTRING_COLLISION_KEY: &str = ".168";
 
 pub(super) const URL_MIXED_COMPRESSED_IPV6_TAIL_COLLISION_KEY: &str = "::ffff:192.168";
 
