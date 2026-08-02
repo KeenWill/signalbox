@@ -1,6 +1,8 @@
 pub(super) const MAX_BRANCH_BYTES: usize = 255;
 
-pub(super) const MAX_REVISION_BYTES: usize = 1024;
+pub(super) const MAX_REFERENCE_BYTES: usize = 1024;
+
+pub(super) const MAX_REVISION_BYTES: usize = MAX_REFERENCE_BYTES + "ref: \n".len();
 
 pub(super) const MAX_COMMIT_MESSAGE_BYTES: usize = 64 * 1024;
 

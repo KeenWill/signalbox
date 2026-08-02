@@ -16,8 +16,11 @@ use crate::layout::{
     reject_administrative_symlinks, validate_repository_layout,
     validate_shallow_file_at_with_test_hook,
 };
-use crate::limits::{MAX_BRANCH_BYTES, MAX_OBJECT_BYTES};
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
+use crate::limits::{MAX_BRANCH_BYTES, MAX_OBJECT_BYTES, MAX_REFERENCE_BYTES};
+use crate::pinning::{
+    PinnedObjectDatabase, PinnedRepository, live_object_database_bytes_with_test_hook,
+    repository_filemode,
+};
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::tests::support::{
@@ -69,7 +72,7 @@ fn repository_layout_rejects_an_abbreviated_detached_head() {
 #[test]
 fn repository_layout_rejects_an_oversized_symbolic_head_target() {
     let fixture = Fixture::new();
-    let target = format!("refs/heads/{}", "x".repeat(MAX_BRANCH_BYTES));
+    let target = format!("refs/heads/{}", "x".repeat(MAX_REFERENCE_BYTES));
     fs::write(fixture.root().join(".git/HEAD"), format!("ref: {target}\n"))
         .expect("oversized symbolic HEAD writes");
 
@@ -77,6 +80,16 @@ fn repository_layout_rejects_an_oversized_symbolic_head_target() {
         .expect_err("oversized symbolic HEAD rejects admission");
 
     assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_layout_accepts_a_symbolic_head_with_a_maximum_branch_input() {
+    let fixture = Fixture::new();
+    let target = format!("refs/heads/{}", "x".repeat(MAX_BRANCH_BYTES));
+    fs::write(fixture.root().join(".git/HEAD"), format!("ref: {target}\n"))
+        .expect("maximum symbolic HEAD writes");
+
+    validate_repository_layout(fixture.root()).expect("maximum symbolic HEAD admits repository");
 }
 
 #[test]
@@ -331,6 +344,40 @@ fn object_capture_rejects_a_pack_file_rewritten_after_scan() {
     })
     .err()
     .expect("rewritten pack file rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_byte_count_rejects_a_loose_object_added_after_measurement() {
+    let fixture = Fixture::new();
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = live_object_database_bytes_with_test_hook(&authority, || {
+        plant_loose_blob(fixture.root(), b"actor object added after measurement");
+    })
+    .expect_err("added loose object rejects byte count");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn object_byte_count_rejects_a_pack_directory_replaced_after_measurement() {
+    let fixture = Fixture::new();
+    plant_packed_blob(fixture.root(), b"packed fixture content");
+    let pack = fixture.root().join(".git/objects/pack");
+    let retired_pack = fixture.root().join(".git/objects/pack.retired");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = live_object_database_bytes_with_test_hook(&authority, || {
+        fs::rename(&pack, &retired_pack).expect("measured pack directory retires");
+        fs::create_dir(&pack).expect("replacement pack directory constructs");
+    })
+    .expect_err("replacement pack directory rejects byte count");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }

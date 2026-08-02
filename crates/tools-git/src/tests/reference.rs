@@ -7,7 +7,7 @@ use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat};
 use crate::descriptor::{QuarantineDirectory, file_identity, remove_entry_if_identity};
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
-use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
+use crate::limits::{MAX_BRANCH_BYTES, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
 use crate::pinning::PinnedRepository;
 use crate::reference_lock::{
     ReferenceLock, ReferenceParentMode, open_or_create_ref_directory_with_mode_tracked_and_hook,
@@ -63,7 +63,10 @@ fn created_reference_directory_replacement_is_never_treated_as_owned() {
 fn oversized_reference_name_rejects_before_creating_parent_directories() {
     let fixture = Fixture::new();
     let first_new_parent = fixture.root().join(".git/refs/heads/too-deep");
-    let name = format!("refs/heads/too-deep/{}leaf", "a/".repeat(MAX_BRANCH_BYTES));
+    let name = format!(
+        "refs/heads/too-deep/{}leaf",
+        "a/".repeat(MAX_REFERENCE_BYTES)
+    );
     let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
@@ -74,6 +77,18 @@ fn oversized_reference_name_rejects_before_creating_parent_directories() {
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert!(!first_new_parent.exists());
+}
+
+#[test]
+fn reference_lock_accepts_a_branch_beyond_the_old_prefixed_name_bound() {
+    let fixture = Fixture::new();
+    let branch = "a".repeat(MAX_BRANCH_BYTES - "refs/heads/".len() + 1);
+    let name = format!("refs/heads/{branch}");
+    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    ReferenceLock::acquire(&authority, &name).expect("bounded branch reference lock acquires");
 }
 
 #[test]
@@ -566,7 +581,7 @@ fn symbolic_reference_preparation_rejects_a_non_reference_target_without_mutatio
 fn symbolic_reference_preparation_rejects_an_oversized_target_without_mutation() {
     let fixture = Fixture::new();
     let name = "refs/heads/topic";
-    let target = format!("refs/heads/{}", "a".repeat(MAX_BRANCH_BYTES));
+    let target = format!("refs/heads/{}", "a".repeat(MAX_REFERENCE_BYTES));
     let expected_identity =
         validate_repository_layout(fixture.root()).expect("fixture layout validates");
     let authority =
@@ -589,7 +604,7 @@ fn symbolic_reference_preparation_rejects_an_oversized_target_without_mutation()
 #[test]
 fn oversized_reference_name_cannot_fall_back_to_packed_references() {
     let fixture = Fixture::new();
-    let name = format!("refs/heads/{}", "a".repeat(MAX_BRANCH_BYTES));
+    let name = format!("refs/heads/{}", "a".repeat(MAX_REFERENCE_BYTES));
     fs::write(
         fixture.root().join(".git/packed-refs"),
         format!("# pack-refs with: sorted\n{} {name}\n", fixture.initial),

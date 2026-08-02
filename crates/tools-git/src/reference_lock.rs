@@ -23,7 +23,7 @@ use crate::descriptor::{
     remove_entry_if_identity,
 };
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_BRANCH_BYTES, MAX_REVISION_BYTES};
+use crate::limits::{MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
 use crate::packed_reference::{PackedReferenceNamespace, packed_reference_state};
 use crate::pinning::PinnedRepository;
 use crate::reference_read::{open_git_directory_path, read_reference_leaf};
@@ -1033,7 +1033,7 @@ pub(super) fn open_reference_parent(
 }
 
 pub(super) fn validate_reference_name(name: &str) -> Result<(), LocalGitFailure> {
-    if name.len() > MAX_BRANCH_BYTES
+    if name.len() > MAX_REFERENCE_BYTES
         || (name != "HEAD" && (!name.starts_with("refs/") || !git2::Reference::is_valid_name(name)))
     {
         Err(LocalGitFailure::Operation)
