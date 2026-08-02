@@ -38,6 +38,7 @@ pub(super) struct ParsedResultUrl {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct ParsedResultUrlRemovalFacts {
     pub(super) user_information: bool,
+    pub(super) empty_port: bool,
     pub(super) query: bool,
     pub(super) fragment: bool,
 }
@@ -135,13 +136,17 @@ impl ParsedResultUrl {
         if source.len() > MAX_RESULT_URL_BYTES {
             return None;
         }
+        let source_authority_facts = source_authority_removal_facts(source);
         let mut parsed = Url::parse(source).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
             return None;
         }
 
         let removal_facts = ParsedResultUrlRemovalFacts {
-            user_information: !parsed.username().is_empty() || parsed.password().is_some(),
+            user_information: source_authority_facts.user_information
+                || !parsed.username().is_empty()
+                || parsed.password().is_some(),
+            empty_port: source_authority_facts.empty_port,
             query: parsed.query().is_some(),
             fragment: parsed.fragment().is_some(),
         };
@@ -171,6 +176,42 @@ impl ParsedResultUrl {
 
     pub(super) const fn removal_facts(&self) -> ParsedResultUrlRemovalFacts {
         self.removal_facts
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SourceAuthorityRemovalFacts {
+    user_information: bool,
+    empty_port: bool,
+}
+
+fn source_authority_removal_facts(source: &str) -> SourceAuthorityRemovalFacts {
+    let preprocessed = source
+        .chars()
+        .filter(|character| !matches!(character, '\t' | '\n' | '\r'))
+        .collect::<String>();
+    let trimmed = preprocessed.trim_matches(|character: char| character <= '\u{20}');
+    let authority = trimmed
+        .split_once(':')
+        .map(|(_, after_scheme)| after_scheme.trim_start_matches(['/', '\\']))
+        .map(|after_slashes| {
+            let end = after_slashes
+                .find(['/', '\\', '?', '#'])
+                .unwrap_or(after_slashes.len());
+            &after_slashes[..end]
+        });
+    let Some(authority) = authority else {
+        return SourceAuthorityRemovalFacts {
+            user_information: false,
+            empty_port: false,
+        };
+    };
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, retained)| retained);
+    SourceAuthorityRemovalFacts {
+        user_information: authority.contains('@'),
+        empty_port: host_and_port.ends_with(':'),
     }
 }
 
@@ -308,6 +349,7 @@ pub(super) fn fixed_result_diagnostic_outputs() -> [String; 6] {
             rendered: String::new(),
             removal_facts: ParsedResultUrlRemovalFacts {
                 user_information: false,
+                empty_port: false,
                 query: false,
                 fragment: false,
             },
