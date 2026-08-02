@@ -1335,6 +1335,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var projector = SignalboxProcessTranscriptProjector()
   private var normalizer = SignalboxIncrementalEventNormalizer()
 
+  var canDecideToolRequest: Bool {
+    connectedService != nil && mutationBlocksByTurnID.isEmpty && !isDecidingTool
+  }
+
   init(
     session: SignalboxProcessSession,
     serviceProvider: @escaping () -> (any SignalboxProcessServiceProtocol)?
@@ -2457,6 +2461,7 @@ struct ProcessSessionDetailScreen: View {
     case .tool(let tool):
       ToolInvocationCard(
         tool: tool,
+        decisionAvailable: tool.decisionAvailable && viewModel.canDecideToolRequest,
         onApprove: {
           Task {
             await viewModel.decideToolRequest(tool.invocationID, decision: .approve)

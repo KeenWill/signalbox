@@ -692,6 +692,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertFalse(viewModel.canSend)
     XCTAssertFalse(viewModel.canStopAndSend)
+    XCTAssertFalse(viewModel.canDecideToolRequest)
   }
 
   @MainActor
@@ -1378,6 +1379,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(.event(try ProcessProjectionFixture.refusedEvent()))
 
     XCTAssertTrue(viewModel.canSend)
+    XCTAssertTrue(viewModel.canDecideToolRequest)
   }
 
   @MainActor
