@@ -169,7 +169,6 @@ impl std::error::Error for DelegationContentError {}
 enum TerminalChildTurnKind {
     Returned,
     Failed,
-    Stopped,
     Cancelled,
 }
 
@@ -371,7 +370,6 @@ pub enum DelegationOutcomeReason {
     ChildCompleted,
     ChildExecutionFailed,
     ChildResultUnavailable,
-    ChildStopped,
     ChildCancelled,
     ParentStopped { scope: DescendantTerminationScope },
     ParentCancelled { scope: DescendantTerminationScope },
@@ -797,17 +795,6 @@ fn validate_outcome(
             None,
             TerminalChildTurnKind::Failed,
         ),
-        DelegationOutcome::ChildStopped { .. }
-            if reason == DelegationOutcomeReason::ChildStopped =>
-        {
-            child_turn_matches(
-                relation,
-                provenance,
-                reason,
-                None,
-                TerminalChildTurnKind::Stopped,
-            )
-        }
         DelegationOutcome::ChildCancelled { .. }
             if reason == DelegationOutcomeReason::ChildCancelled =>
         {
@@ -833,7 +820,6 @@ fn validate_outcome(
             DelegationOutcomeReason::ChildCompleted => true,
             DelegationOutcomeReason::ChildExecutionFailed
             | DelegationOutcomeReason::ChildResultUnavailable
-            | DelegationOutcomeReason::ChildStopped
             | DelegationOutcomeReason::ChildCancelled
             | DelegationOutcomeReason::ParentStopped { .. }
             | DelegationOutcomeReason::ParentCancelled { .. } => false,
@@ -842,14 +828,12 @@ fn validate_outcome(
             DelegationOutcomeReason::ChildExecutionFailed
             | DelegationOutcomeReason::ChildResultUnavailable => true,
             DelegationOutcomeReason::ChildCompleted
-            | DelegationOutcomeReason::ChildStopped
             | DelegationOutcomeReason::ChildCancelled
             | DelegationOutcomeReason::ParentStopped { .. }
             | DelegationOutcomeReason::ParentCancelled { .. } => false,
         },
         DelegationOutcome::ChildStopped { .. } => {
-            reason == DelegationOutcomeReason::ChildStopped
-                || descendant_action(relation.policy, reason) == Some(BoundChildAction::Stop)
+            descendant_action(relation.policy, reason) == Some(BoundChildAction::Stop)
         }
         DelegationOutcome::ChildCancelled { .. } => {
             reason == DelegationOutcomeReason::ChildCancelled
@@ -956,7 +940,6 @@ fn parent_command_matches(
         DelegationOutcomeReason::ChildCompleted
         | DelegationOutcomeReason::ChildExecutionFailed
         | DelegationOutcomeReason::ChildResultUnavailable
-        | DelegationOutcomeReason::ChildStopped
         | DelegationOutcomeReason::ChildCancelled => None,
     };
     matches!(
@@ -1006,7 +989,6 @@ fn descendant_action(
             DelegationOutcomeReason::ChildCompleted
             | DelegationOutcomeReason::ChildExecutionFailed
             | DelegationOutcomeReason::ChildResultUnavailable
-            | DelegationOutcomeReason::ChildStopped
             | DelegationOutcomeReason::ChildCancelled
             | DelegationOutcomeReason::ParentStopped {
                 scope: DescendantTerminationScope::ParentAlone,
@@ -1190,7 +1172,6 @@ mod tests {
             DelegationOutcomeReason::ChildCompleted
             | DelegationOutcomeReason::ChildExecutionFailed
             | DelegationOutcomeReason::ChildResultUnavailable
-            | DelegationOutcomeReason::ChildStopped
             | DelegationOutcomeReason::ChildCancelled => {
                 panic!("only parent termination has parent command authority")
             }
