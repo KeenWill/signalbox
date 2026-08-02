@@ -46,13 +46,14 @@ pub(super) fn read_pinned_reference(
     authority: &PinnedRepository,
     name: &str,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-    read_pinned_reference_with_hook(authority, name, || {})
+    read_pinned_reference_with_hooks(authority, name, || {}, || {})
 }
 
-fn read_pinned_reference_with_hook<Hook: FnOnce()>(
+fn read_pinned_reference_with_hooks<AfterMetadata: FnOnce(), AfterFirstRead: FnOnce()>(
     authority: &PinnedRepository,
     name: &str,
-    after_metadata: Hook,
+    after_metadata: AfterMetadata,
+    after_first_read: AfterFirstRead,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
     validate_reference_name(name)?;
     let bound = match open_reference_parent(authority, name, ReferenceParentMode::ExistingOnly) {
@@ -79,7 +80,12 @@ fn read_pinned_reference_with_hook<Hook: FnOnce()>(
         name,
         after_metadata,
     )?;
+    after_first_read();
     if !bound.hierarchy_is_current(authority) {
+        return Err(LocalGitFailure::Operation);
+    }
+    let confirmed = read_reference_leaf(&bound.directory, &bound.leaf, authority, name)?;
+    if confirmed != value {
         return Err(LocalGitFailure::Operation);
     }
     Ok(value)
@@ -230,7 +236,16 @@ pub(super) fn read_pinned_reference_with_test_hook<Hook: FnOnce()>(
     name: &str,
     after_metadata: Hook,
 ) -> Result<PinnedReferenceValue, LocalGitFailure> {
-    read_pinned_reference_with_hook(authority, name, after_metadata)
+    read_pinned_reference_with_hooks(authority, name, after_metadata, || {})
+}
+
+#[cfg(test)]
+pub(super) fn read_pinned_reference_with_post_read_test_hook<Hook: FnOnce()>(
+    authority: &PinnedRepository,
+    name: &str,
+    after_first_read: Hook,
+) -> Result<PinnedReferenceValue, LocalGitFailure> {
+    read_pinned_reference_with_hooks(authority, name, || {}, after_first_read)
 }
 
 pub(super) fn resolve_pinned_reference_chain(

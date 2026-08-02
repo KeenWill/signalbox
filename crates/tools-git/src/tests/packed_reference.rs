@@ -11,7 +11,7 @@ use crate::packed_reference::{
     packed_reference_target, read_packed_references_with_test_hook,
 };
 use crate::pinning::PinnedRepository;
-use crate::tests::support::{Fixture, TRACKED_PATH, commit_all};
+use crate::tests::support::{Fixture, TRACKED_PATH, commit_all, workspace_root_identity};
 
 #[test]
 fn duplicate_packed_reference_names_are_rejected() {
@@ -27,7 +27,9 @@ fn duplicate_packed_reference_names_are_rejected() {
         ),
     )
     .expect("duplicate packed references write");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -46,7 +48,9 @@ fn abbreviated_packed_reference_object_id_is_rejected() {
         format!("# pack-refs with: sorted\nabc123 {name}\n"),
     )
     .expect("abbreviated packed reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -68,7 +72,9 @@ fn abbreviated_peeled_packed_reference_object_id_is_rejected() {
         ),
     )
     .expect("abbreviated peeled reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -89,7 +95,9 @@ fn sorted_packed_reference_header_rejects_unsorted_records() {
         ),
     )
     .expect("unsorted packed references write");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -107,7 +115,9 @@ fn orphaned_packed_reference_peel_is_rejected() {
         format!("^{}\n", fixture.initial),
     )
     .expect("orphaned packed-reference peel writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -125,7 +135,9 @@ fn malformed_packed_reference_peel_is_rejected() {
         format!("{} refs/heads/topic\n^not-an-object-id\n", fixture.initial),
     )
     .expect("malformed packed-reference peel writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -146,7 +158,9 @@ fn immediate_valid_packed_reference_peel_is_accepted() {
         ),
     )
     .expect("valid packed-reference peel writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -168,7 +182,9 @@ fn packed_reference_state_combines_target_and_namespace_from_one_snapshot() {
         ),
     )
     .expect("target and namespace-conflict snapshot writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -195,7 +211,9 @@ fn interior_blank_packed_reference_record_is_rejected() {
         ),
     )
     .expect("interior blank packed-reference record writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -213,7 +231,9 @@ fn doubled_final_packed_reference_newline_is_rejected() {
         format!("{} refs/heads/topic\n\n", fixture.initial),
     )
     .expect("doubled final packed-reference newline writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -234,7 +254,9 @@ fn unrecognized_packed_reference_comment_is_rejected() {
         ),
     )
     .expect("unrecognized packed-reference comment writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -255,7 +277,9 @@ fn packed_reference_read_rejects_a_path_replaced_after_snapshot() {
         format!("{} refs/heads/topic\n", fixture.initial),
     )
     .expect("validated packed references write");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 

@@ -14,9 +14,16 @@ use crate::reference_lock::{
     open_reference_parent,
 };
 use crate::reference_read::{
-    read_pinned_reference_with_test_hook, read_reference_leaf_with_test_hook,
+    read_pinned_reference_with_post_read_test_hook, read_pinned_reference_with_test_hook,
+    read_reference_leaf_with_test_hook,
 };
-use crate::tests::support::{Fixture, Sha256Fixture};
+use crate::tests::support::{
+    Fixture, Sha256Fixture, real_git_contended_lock, real_git_contended_reference,
+    real_git_contended_update_rejects, real_git_loose_topic, real_git_packed_references,
+    real_git_packed_topic_target, real_git_resolved_topic, real_git_update_ref_after,
+    real_git_update_ref_before, real_git_update_ref_lock_exists, real_git_update_ref_target,
+    workspace_root_identity,
+};
 
 #[test]
 fn created_reference_directory_replacement_is_never_treated_as_owned() {
@@ -98,7 +105,9 @@ fn oversized_reference_name_rejects_before_creating_parent_directories() {
         "refs/heads/too-deep/{}leaf",
         "a/".repeat(MAX_REFERENCE_BYTES)
     );
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -115,11 +124,158 @@ fn reference_lock_accepts_a_branch_beyond_the_old_prefixed_name_bound() {
     let fixture = Fixture::new();
     let branch = "a".repeat(MAX_BRANCH_BYTES - "refs/heads/".len() + 1);
     let name = format!("refs/heads/{branch}");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
     ReferenceLock::acquire(&authority, &name).expect("bounded branch reference lock acquires");
+}
+
+#[test]
+fn real_git_fixture_confirms_loose_reference_precedes_packed_reference() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        real_git_packed_references(),
+    )
+    .expect("real Git packed-reference fixture writes");
+    fs::write(
+        fixture.root().join(".git").join(name),
+        real_git_loose_topic(),
+    )
+    .expect("real Git loose-reference fixture writes");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let packed = crate::packed_reference::packed_reference_target(&authority, name)
+        .expect("real Git packed-reference target reads");
+    let resolved = crate::reference_read::read_pinned_reference(&authority, name)
+        .expect("real Git precedence fixture resolves");
+
+    assert_eq!(packed, Some(real_git_packed_topic_target()));
+    assert_eq!(
+        resolved,
+        crate::reference_lock::PinnedReferenceValue::Direct(real_git_resolved_topic())
+    );
+}
+
+#[test]
+fn real_git_update_ref_fixture_matches_reference_lock_publication() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/lock-fixture";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/lock-fixture.lock");
+    fs::write(&reference_path, real_git_update_ref_before())
+        .expect("real Git pre-update reference writes");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
+    let previous = lock.read(&authority).expect("pre-update reference reads");
+
+    lock.prepare(&authority, real_git_update_ref_target())
+        .expect("real Git target prepares");
+    lock.publish(&authority, &previous)
+        .expect("real Git-equivalent reference publishes");
+
+    assert_eq!(
+        fs::read(reference_path).expect("published reference reads"),
+        real_git_update_ref_after()
+    );
+    assert_eq!(lock_path.exists(), real_git_update_ref_lock_exists());
+}
+
+#[test]
+fn symbolic_head_publication_switches_to_an_existing_branch() {
+    let fixture = Fixture::new();
+    let head_path = fixture.root().join(".git/HEAD");
+    let topic_path = fixture.root().join(".git/refs/heads/topic");
+    fs::write(&topic_path, format!("{}\n", fixture.initial)).expect("topic reference writes");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, "HEAD").expect("HEAD lock acquires");
+    let previous = lock.read(&authority).expect("symbolic HEAD reads");
+
+    lock.prepare_symbolic(&authority, "refs/heads/topic")
+        .expect("replacement symbolic HEAD prepares");
+    lock.publish(&authority, &previous)
+        .expect("symbolic HEAD publishes");
+
+    assert_eq!(
+        fs::read_to_string(head_path).expect("published HEAD reads"),
+        "ref: refs/heads/topic\n"
+    );
+    authority
+        .validate_supported_layout()
+        .expect("published symbolic HEAD remains valid");
+}
+
+#[test]
+fn detached_head_publication_advances_to_a_full_object_id() {
+    let fixture = Fixture::new();
+    let head_path = fixture.root().join(".git/HEAD");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let mut lock = ReferenceLock::acquire(&authority, "HEAD").expect("HEAD lock acquires");
+    let previous = lock.read(&authority).expect("symbolic HEAD reads");
+
+    lock.prepare(&authority, fixture.initial)
+        .expect("detached HEAD prepares");
+    lock.publish(&authority, &previous)
+        .expect("detached HEAD publishes");
+
+    assert_eq!(
+        fs::read_to_string(head_path).expect("published detached HEAD reads"),
+        format!("{}\n", fixture.initial)
+    );
+    authority
+        .validate_supported_layout()
+        .expect("published detached HEAD remains valid");
+}
+
+#[test]
+fn real_git_contended_lock_fixture_is_rejected_without_mutation() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/contended";
+    let reference_path = fixture.root().join(".git").join(name);
+    let lock_path = fixture.root().join(".git/refs/heads/contended.lock");
+    fs::write(&reference_path, real_git_contended_reference())
+        .expect("real Git contended reference writes");
+    fs::write(&lock_path, real_git_contended_lock()).expect("real Git contended lock writes");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = ReferenceLock::acquire(&authority, name)
+        .err()
+        .expect("real Git contended lock rejects");
+
+    assert!(real_git_contended_update_rejects());
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(reference_path).expect("contended reference reads"),
+        real_git_contended_reference()
+    );
+    assert_eq!(
+        fs::read(lock_path).expect("contended lock reads"),
+        real_git_contended_lock()
+    );
 }
 
 #[test]
@@ -238,7 +394,8 @@ fn reference_publication_rolls_back_when_its_hierarchy_is_replaced() {
     let reference_path = heads.join("topic");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock =
@@ -278,7 +435,8 @@ fn reference_publication_restores_the_exact_entry_displaced_by_exchange() {
     let actor_bytes = format!("{actor_target}\n");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -307,7 +465,8 @@ fn absent_reference_publication_preserves_a_post_publish_replacement() {
     let reference_path = fixture.root().join(".git").join(name);
     let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -344,7 +503,8 @@ fn reference_publication_reports_success_when_displaced_reference_is_replaced_af
     let actor_replacement = b"actor replacement\n".to_vec();
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -381,7 +541,8 @@ fn reference_publication_reports_success_when_displaced_reference_is_removed_aft
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -414,7 +575,8 @@ fn exchanged_reference_publication_preserves_a_post_publish_replacement() {
     let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -451,7 +613,8 @@ fn reference_publication_rejects_an_in_place_rewrite_of_prepared_bytes() {
     let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -481,7 +644,8 @@ fn reference_preparation_rejects_bytes_rewritten_before_snapshot() {
     let actor_target = git2::Oid::from_bytes(&[1_u8; 20]).expect("actor target constructs");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -506,7 +670,8 @@ fn nested_reference_publication_retains_created_parent_directories() {
     let name = "refs/heads/feature/topic";
     let reference_path = fixture.root().join(".git").join(name);
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock =
@@ -535,7 +700,8 @@ fn direct_reference_preparation_truncates_injected_trailing_bytes() {
     let target = git2::Oid::ZERO_SHA1;
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -564,7 +730,8 @@ fn symbolic_reference_preparation_truncates_injected_trailing_bytes() {
     let target = "refs/heads/main";
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -591,7 +758,8 @@ fn symbolic_reference_preparation_rejects_a_non_reference_target_without_mutatio
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
     let actor_payload = b"actor payload remains unchanged".to_vec();
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -614,7 +782,8 @@ fn symbolic_reference_preparation_rejects_an_oversized_target_without_mutation()
     let name = "refs/heads/topic";
     let target = format!("refs/heads/{}", "a".repeat(MAX_REFERENCE_BYTES));
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -642,7 +811,8 @@ fn oversized_reference_name_cannot_fall_back_to_packed_references() {
     )
     .expect("oversized packed reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
 
@@ -659,7 +829,8 @@ fn abbreviated_loose_reference_object_id_is_rejected() {
     fs::write(fixture.root().join(".git").join(name), "abc123\n")
         .expect("abbreviated loose reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
 
@@ -676,7 +847,8 @@ fn symbolic_reference_preparation_rejects_a_newline_target_without_mutation() {
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
     let actor_payload = b"actor payload remains unchanged".to_vec();
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -700,7 +872,8 @@ fn direct_reference_preparation_rejects_an_oid_from_another_object_format() {
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
     let actor_payload = b"actor payload remains unchanged".to_vec();
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("SHA-256 layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("SHA-256 repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -725,7 +898,8 @@ fn reference_publication_preserves_a_directory_replacing_the_cleanup_path() {
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -757,7 +931,8 @@ fn reference_publication_preserves_a_file_replacing_the_cleanup_path() {
     let actor_replacement = b"actor cleanup replacement\n".to_vec();
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -797,7 +972,8 @@ fn reference_publication_preserves_new_bytes_that_race_cleanup() {
     );
     fs::write(&reference_path, &original).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -831,7 +1007,8 @@ fn reference_finalization_keeps_the_published_reference_visible() {
     let published = format!("{}\n", git2::Oid::ZERO_SHA1);
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -850,12 +1027,46 @@ fn reference_finalization_keeps_the_published_reference_visible() {
 }
 
 #[test]
+fn loose_reference_rejects_a_path_replaced_after_the_first_complete_read() {
+    let fixture = Fixture::new();
+    let name = "refs/heads/topic";
+    let reference_path = fixture.root().join(".git").join(name);
+    let retired_reference = fixture.root().join(".git/refs/heads/topic.retired");
+    let original = format!("{}\n", fixture.initial);
+    let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
+    fs::write(&reference_path, &original).expect("fixture reference writes");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+
+    let failure = read_pinned_reference_with_post_read_test_hook(&authority, name, || {
+        fs::rename(&reference_path, &retired_reference).expect("validated reference retires");
+        fs::write(&reference_path, &actor_target).expect("replacement reference writes");
+    })
+    .expect_err("post-read reference path replacement rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read_to_string(reference_path).expect("replacement reference reads"),
+        actor_target
+    );
+    assert_eq!(
+        fs::read_to_string(retired_reference).expect("retired reference reads"),
+        original
+    );
+}
+
+#[test]
 fn loose_reference_rejects_growth_after_metadata_capture() {
     let fixture = Fixture::new();
     let name = "refs/heads/growing";
     let reference_path = fixture.root().join(".git").join(name);
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let bound = open_reference_parent(&authority, name, ReferenceParentMode::ExistingOnly)
@@ -878,7 +1089,9 @@ fn loose_reference_rejects_same_length_rewrite_after_metadata_capture() {
     let name = "refs/heads/rewritten";
     let reference_path = fixture.root().join(".git").join(name);
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let bound = open_reference_parent(&authority, name, ReferenceParentMode::ExistingOnly)
@@ -902,7 +1115,9 @@ fn loose_reference_rejects_a_leaf_path_replacement_after_open() {
     let retired_path = fixture.root().join(".git/refs/heads/replaced.retired");
     let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -929,7 +1144,9 @@ fn loose_reference_rejects_a_parent_path_replacement_after_open() {
     let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
     fs::create_dir(&parent_path).expect("fixture reference parent constructs");
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -956,7 +1173,9 @@ fn packed_reference_fallback_rejects_a_new_loose_leaf_after_snapshot() {
     let actor_target = format!("{}\n", git2::Oid::ZERO_SHA1);
     fs::write(&packed_path, format!("{} {name}\n", fixture.initial))
         .expect("packed reference writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -985,7 +1204,8 @@ fn reference_publication_rejects_an_existing_packed_namespace_conflict() {
     )
     .expect("packed namespace conflict writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -1008,7 +1228,8 @@ fn reference_publication_rolls_back_a_racing_packed_namespace_conflict() {
     let reference_path = fixture.root().join(".git").join(name);
     let packed_path = fixture.root().join(".git/packed-refs");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -1043,7 +1264,8 @@ fn absent_reference_rollback_preserves_a_replacement_after_validation() {
     let packed_path = fixture.root().join(".git/packed-refs");
     let actor_replacement = b"actor replacement remains\n".to_vec();
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -1087,7 +1309,8 @@ fn exchange_rollback_preserves_a_displaced_replacement_after_validation() {
     let actor_replacement = b"actor displaced replacement\n".to_vec();
     fs::write(&reference_path, format!("{}\n", fixture.initial)).expect("fixture reference writes");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -1133,7 +1356,8 @@ fn absent_reference_publication_rolls_back_a_racing_commondir() {
     let reference_path = fixture.root().join(".git").join(name);
     let commondir_path = fixture.root().join(".git/commondir");
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");
@@ -1165,7 +1389,8 @@ fn absent_reference_final_verification_preserves_a_racing_replacement() {
     let reference_path = fixture.root().join(".git").join(name);
     let actor_target = format!("{}\n", fixture.initial);
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let mut lock = ReferenceLock::acquire(&authority, name).expect("reference lock acquires");

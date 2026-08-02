@@ -9,11 +9,13 @@ use std::{
     path::Path,
 };
 
+use bstr::BStr;
 use git2::ObjectFormat;
 use rustix::{
     fs::{CWD, Dir, Mode, OFlags, openat},
     io::dup,
 };
+use signalbox_tools_workspace::WorkspaceRootIdentity;
 
 use crate::construction::LocalGitToolsConstructionError;
 use crate::descriptor::{
@@ -41,6 +43,7 @@ pub(super) struct RepositoryHead {
 
 pub(super) fn validate_repository_layout(
     root: &Path,
+    injected_root: WorkspaceRootIdentity,
 ) -> Result<RepositoryIdentity, LocalGitToolsConstructionError> {
     let root_metadata =
         fs::symlink_metadata(root).map_err(|_| LocalGitToolsConstructionError::Repository)?;
@@ -48,6 +51,9 @@ pub(super) fn validate_repository_layout(
         return Err(LocalGitToolsConstructionError::Repository);
     }
     let root_identity = file_identity(&root_metadata);
+    if root_identity.device != injected_root.device || root_identity.inode != injected_root.inode {
+        return Err(LocalGitToolsConstructionError::Repository);
+    }
     let dot_git = root.join(".git");
     let metadata =
         fs::symlink_metadata(&dot_git).map_err(|_| LocalGitToolsConstructionError::Repository)?;
@@ -162,16 +168,11 @@ fn valid_head_record(bytes: &[u8], object_format: ObjectFormat) -> bool {
         return false;
     }
     if let Some(target) = record.strip_prefix(b"ref: ") {
-        return std::str::from_utf8(target).is_ok_and(|target| {
-            target.len() <= MAX_REFERENCE_BYTES
-                && target.starts_with("refs/")
-                && git2::Reference::is_valid_name(target)
-        });
+        return target.len() <= MAX_REFERENCE_BYTES
+            && target.starts_with(b"refs/")
+            && valid_reference_name(target);
     }
-    std::str::from_utf8(record)
-        .ok()
-        .and_then(|value| parse_full_object_id(value, object_format))
-        .is_some()
+    parse_full_object_id_bytes(record, object_format).is_some()
 }
 
 pub(super) fn reject_administrative_symlinks(
@@ -186,10 +187,6 @@ pub(super) fn reject_administrative_symlinks(
     )
 }
 
-pub(super) const fn object_id_hex_bytes(object_format: ObjectFormat) -> usize {
-    object_id_bytes(object_format) * 2
-}
-
 pub(super) const fn object_id_bytes(object_format: ObjectFormat) -> usize {
     match object_format {
         ObjectFormat::Sha1 => 20,
@@ -198,9 +195,25 @@ pub(super) const fn object_id_bytes(object_format: ObjectFormat) -> usize {
 }
 
 pub(super) fn parse_full_object_id(value: &str, object_format: ObjectFormat) -> Option<git2::Oid> {
-    (value.len() == object_id_hex_bytes(object_format))
-        .then(|| git2::Oid::from_str_ext(value, object_format).ok())
+    parse_full_object_id_bytes(value.as_bytes(), object_format)
+}
+
+pub(super) fn parse_full_object_id_bytes(
+    value: &[u8],
+    object_format: ObjectFormat,
+) -> Option<git2::Oid> {
+    let parsed = gix_hash::ObjectId::from_hex(value).ok()?;
+    let expected_kind = match object_format {
+        ObjectFormat::Sha1 => gix_hash::Kind::Sha1,
+        ObjectFormat::Sha256 => gix_hash::Kind::Sha256,
+    };
+    (parsed.kind() == expected_kind)
+        .then(|| git2::Oid::from_bytes(parsed.as_slice()).ok())
         .flatten()
+}
+
+pub(super) fn valid_reference_name(name: &[u8]) -> bool {
+    gix_validate::reference::name(BStr::new(name)).is_ok()
 }
 
 fn reject_administrative_symlinks_for_format(
@@ -318,13 +331,11 @@ pub(super) fn validate_shallow_file(
         return Err(LocalGitToolsConstructionError::Repository);
     }
     let mut entries = 0_usize;
-    let object_id_bytes = object_id_hex_bytes(object_format);
     for line in records.split(|byte| *byte == b'\n') {
         entries = entries.saturating_add(1);
         if entries > MAX_SHALLOW_ENTRIES
             || line.is_empty()
-            || line.len() != object_id_bytes
-            || !line.iter().all(u8::is_ascii_hexdigit)
+            || parse_full_object_id_bytes(line, object_format).is_none()
         {
             return Err(LocalGitToolsConstructionError::Repository);
         }
@@ -477,7 +488,7 @@ fn validate_repository_config_descriptor(
     let mut repository_format_version = None;
     let mut bare_seen = false;
     for line in config.lines() {
-        let mut normalized = line.trim().to_ascii_lowercase();
+        let mut normalized = line.trim().to_owned();
         if normalized.is_empty() || normalized.starts_with('#') || normalized.starts_with(';') {
             continue;
         }
@@ -485,7 +496,7 @@ fn validate_repository_config_descriptor(
             let closing = normalized
                 .find(']')
                 .ok_or(LocalGitToolsConstructionError::Repository)?;
-            let header = normalized[1..closing].trim();
+            let header = normalized[1..closing].trim().to_ascii_lowercase();
             let section_name = header
                 .split(|character: char| character.is_ascii_whitespace() || character == '.')
                 .next()
@@ -510,18 +521,19 @@ fn validate_repository_config_descriptor(
             let key = key_value
                 .map(|(key, _)| key.trim())
                 .or_else(|| normalized.split_ascii_whitespace().next())
-                .unwrap_or("");
-            if key_value.is_none() && matches!(key, "bare" | "repositoryformatversion") {
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if key_value.is_none() && matches!(key.as_str(), "bare" | "repositoryformatversion") {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
             if matches!(
-                key,
+                key.as_str(),
                 "worktree" | "excludesfile" | "attributesfile" | "hookspath" | "fsmonitor"
             ) {
                 return Err(LocalGitToolsConstructionError::Repository);
             }
             if let Some((key, value)) = key_value
-                && key.trim() == "repositoryformatversion"
+                && key.trim().eq_ignore_ascii_case("repositoryformatversion")
             {
                 if repository_format_version.is_some() {
                     return Err(LocalGitToolsConstructionError::Repository);
@@ -534,9 +546,10 @@ fn validate_repository_config_descriptor(
                 );
             }
             if let Some((key, value)) = key_value
-                && key.trim() == "bare"
+                && key.trim().eq_ignore_ascii_case("bare")
             {
-                if bare_seen || !matches!(value.trim(), "false" | "no" | "off" | "0") {
+                let value = value.trim().to_ascii_lowercase();
+                if bare_seen || !matches!(value.as_str(), "false" | "no" | "off" | "0") {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
                 bare_seen = true;
@@ -546,7 +559,7 @@ fn validate_repository_config_descriptor(
             let (key, value) = normalized
                 .split_once('=')
                 .ok_or(LocalGitToolsConstructionError::Repository)?;
-            match key.trim() {
+            match key.trim().to_ascii_lowercase().as_str() {
                 "objectformat" if !object_format_seen => {
                     object_format = match value.trim() {
                         "sha1" => ObjectFormat::Sha1,

@@ -11,7 +11,7 @@ use crate::index_lock::{IndexLock, copy_index_snapshot_with_test_hook, write_ind
 use crate::layout::validate_repository_layout;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::PinnedRepository;
-use crate::tests::support::{Fixture, Sha256Fixture};
+use crate::tests::support::{Fixture, Sha256Fixture, workspace_root_identity};
 
 #[test]
 fn index_lock_acquisition_failure_removes_the_created_lock() {
@@ -131,7 +131,9 @@ fn absent_index_publication_rejects_a_replacement_during_layout_validation() {
     let lock_path = fixture.root().join(".git/index.lock");
     let actor_index = b"actor index remains live".to_vec();
     fs::remove_file(&index_path).expect("fixture index removes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let (index_lock, _index) =
@@ -161,7 +163,7 @@ fn index_lock_rejects_an_in_place_rewrite_of_prepared_bytes() {
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
     index_lock
-        .write_raw(b"prepared index bytes")
+        .write_raw(&original_index)
         .expect("prepared index writes");
     fs::write(&lock_path, b"actor index bytes").expect("actor rewrites prepared index in place");
 
@@ -186,7 +188,7 @@ fn index_lock_rejects_bytes_rewritten_before_prepared_snapshot() {
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
 
     let failure = index_lock
-        .write_raw_with_test_hook(b"intended index bytes", || {
+        .write_raw_with_test_hook(&original_index, || {
             fs::write(&lock_path, b"actor index bytes")
                 .expect("actor rewrites index before prepared snapshot");
         })
@@ -206,7 +208,9 @@ fn repository_index_commit_rejects_config_changed_after_acquisition() {
     let lock_path = fixture.root().join(".git/index.lock");
     let config_path = fixture.root().join(".git/config");
     let original_index = fs::read(&index_path).expect("fixture index reads");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let (index_lock, _index) =
@@ -237,13 +241,15 @@ fn repository_index_commit_rolls_back_config_changed_after_exchange() {
     let lock_path = fixture.root().join(".git/index.lock");
     let config_path = fixture.root().join(".git/config");
     let original_index = fs::read(&index_path).expect("fixture index reads");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let (mut index_lock, _index) =
         IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
     index_lock
-        .write_raw(b"prepared replacement index")
+        .write_raw(&original_index)
         .expect("replacement index prepares");
 
     let failure = index_lock
@@ -270,7 +276,9 @@ fn repository_index_commit_rejects_head_changed_before_publication() {
     let index_path = fixture.root().join(".git/index");
     let head_path = fixture.root().join(".git/HEAD");
     let original_index = fs::read(&index_path).expect("fixture index reads");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let (mut lock, mut index) =
@@ -297,7 +305,9 @@ fn repository_index_commit_rejects_alternates_created_after_acquisition() {
     let lock_path = fixture.root().join(".git/index.lock");
     let alternates_path = fixture.root().join(".git/objects/info/alternates");
     let original_index = fs::read(&index_path).expect("fixture index reads");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let (index_lock, _index) =
@@ -391,13 +401,47 @@ fn index_snapshot_rejects_same_length_rewrite_after_metadata_capture() {
 }
 
 #[test]
+fn index_snapshot_rejects_a_source_path_replaced_after_open() {
+    let fixture = Fixture::new();
+    let actor_fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let retired_index = fixture.root().join(".git/index.retired");
+    let original_bytes = fs::read(&index_path).expect("fixture index reads");
+    let actor_bytes =
+        fs::read(actor_fixture.root().join(".git/index")).expect("actor fixture index reads");
+    let mut destination = tempfile::tempfile().expect("private index snapshot constructs");
+
+    let failure = copy_index_snapshot_with_test_hook(
+        &index_path,
+        &mut destination,
+        ObjectFormat::Sha1,
+        || {
+            fs::rename(&index_path, &retired_index).expect("source index retires");
+            fs::write(&index_path, &actor_bytes).expect("replacement index writes");
+        },
+    )
+    .expect_err("replaced source path rejects index snapshot");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        fs::read(&index_path).expect("replacement index reads"),
+        actor_bytes
+    );
+    assert_eq!(
+        fs::read(retired_index).expect("retired source index reads"),
+        original_bytes
+    );
+}
+
+#[test]
 fn index_commit_rejects_a_replacement_before_exchange() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
     let actor_index = b"actor index replacement".to_vec();
     let expected_identity =
-        validate_repository_layout(fixture.root()).expect("fixture layout validates");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected_identity).expect("fixture repository pins");
     let (mut index_lock, mut index) =
@@ -425,7 +469,7 @@ fn index_lock_reports_success_when_the_displaced_index_is_replaced_after_exchang
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
-    let prepared_index = b"prepared index bytes".to_vec();
+    let prepared_index = fs::read(&index_path).expect("valid prepared index reads");
     let actor_replacement = b"actor replacement bytes".to_vec();
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
@@ -455,7 +499,7 @@ fn index_lock_reports_success_when_the_displaced_index_is_removed_after_exchange
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
-    let prepared_index = b"prepared index bytes".to_vec();
+    let prepared_index = fs::read(&index_path).expect("valid prepared index reads");
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
     index_lock
@@ -480,7 +524,7 @@ fn index_lock_accepts_a_new_writer_after_displaced_index_removal() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
-    let prepared_index = b"prepared index bytes".to_vec();
+    let prepared_index = fs::read(&index_path).expect("valid prepared index reads");
     let next_writer = b"next writer lock".to_vec();
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
@@ -509,7 +553,7 @@ fn index_lock_preserves_a_directory_replacing_the_displaced_cleanup_path() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
-    let prepared_index = b"prepared index bytes".to_vec();
+    let prepared_index = fs::read(&index_path).expect("valid prepared index reads");
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
     index_lock
@@ -536,7 +580,7 @@ fn index_lock_preserves_a_file_replacing_the_displaced_cleanup_path() {
     let fixture = Fixture::new();
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
-    let prepared_index = b"prepared index bytes".to_vec();
+    let prepared_index = fs::read(&index_path).expect("valid prepared index reads");
     let actor_replacement = b"actor cleanup replacement".to_vec();
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
@@ -568,7 +612,7 @@ fn index_final_verification_preserves_the_original_when_publication_changes() {
     let index_path = fixture.root().join(".git/index");
     let lock_path = fixture.root().join(".git/index.lock");
     let original_index = fs::read(&index_path).expect("fixture index reads");
-    let prepared_index = b"prepared index bytes".to_vec();
+    let prepared_index = original_index.clone();
     let actor_index = b"actor index remains live".to_vec();
     let (mut index_lock, _index) =
         IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
@@ -676,9 +720,86 @@ fn manual_index_serialization_rejects_too_many_entries_before_writing() {
     );
 }
 
+#[test]
+fn repository_index_write_rejects_too_many_path_backed_entries() {
+    let fixture = Fixture::new();
+    let lock_path = fixture.root().join(".git/index.lock");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (mut lock, mut index) =
+        IndexLock::acquire_for_repository(&authority).expect("repository index lock acquires");
+    add_index_entries_until(&mut index, MAX_INDEX_ENTRIES + 1);
+    let prepared_before = fs::read(&lock_path).expect("prepared lock reads");
+
+    let failure = lock
+        .write(&mut index)
+        .expect_err("over-limit path-backed index rejects write");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(lock_path).expect("unchanged prepared lock reads"),
+        prepared_before
+    );
+}
+
+#[test]
+fn raw_index_write_rejects_malformed_bytes_without_mutating_the_lock() {
+    let fixture = Fixture::new();
+    let index_path = fixture.root().join(".git/index");
+    let lock_path = fixture.root().join(".git/index.lock");
+    let (mut lock, _index) =
+        IndexLock::acquire(&index_path, &lock_path).expect("fixture index lock acquires");
+    let prepared_before = fs::read(&lock_path).expect("prepared lock reads");
+
+    let failure = lock
+        .write_raw(b"not a Git index")
+        .expect_err("malformed raw index rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(lock_path).expect("unchanged prepared lock reads"),
+        prepared_before
+    );
+}
+
+#[test]
+fn raw_index_write_rejects_another_object_formats_checksum() {
+    let fixture = Sha256Fixture::new();
+    let sha1_fixture = Fixture::new();
+    let lock_path = fixture.root().join(".git/index.lock");
+    let sha1_index =
+        fs::read(sha1_fixture.root().join(".git/index")).expect("SHA-1 index fixture reads");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("SHA-256 layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
+    let (mut lock, _index) =
+        IndexLock::acquire_for_repository(&authority).expect("SHA-256 index lock acquires");
+    let prepared_before = fs::read(&lock_path).expect("SHA-256 prepared lock reads");
+
+    let failure = lock
+        .write_raw(&sha1_index)
+        .expect_err("SHA-1 raw index rejects under SHA-256 authority");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(lock_path).expect("unchanged SHA-256 prepared lock reads"),
+        prepared_before
+    );
+}
+
 fn index_with_entries(entries: usize) -> Index {
     let mut index = Index::new().expect("in-memory index constructs");
-    (0..entries).for_each(|entry_number| {
+    add_index_entries_until(&mut index, entries);
+    index
+}
+
+fn add_index_entries_until(index: &mut Index, entries: usize) {
+    (index.len()..entries).for_each(|entry_number| {
         index
             .add(&IndexEntry {
                 ctime: IndexTime::new(0, 0),
@@ -696,5 +817,4 @@ fn index_with_entries(entries: usize) -> Index {
             })
             .expect("fixture index entry adds");
     });
-    index
 }

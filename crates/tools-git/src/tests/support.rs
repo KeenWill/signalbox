@@ -6,6 +6,7 @@ use flate2::{Compression, write::ZlibEncoder};
 use git2::{
     IndexAddOption, ObjectFormat, ObjectType, Oid, Repository, RepositoryInitOptions, Signature,
 };
+use signalbox_tools_workspace::{LocalWorkspaceFileSystem, WorkspaceRoot, WorkspaceRootIdentity};
 use tempfile::TempDir;
 
 pub(super) const AUTHOR_NAME: &str = "Signalbox Fixer";
@@ -17,6 +18,71 @@ pub(super) const INITIAL_MESSAGE: &str = "initial";
 pub(super) const TRACKED_PATH: &str = "tracked.txt";
 
 pub(super) const INITIAL_CONTENT: &str = "before\n";
+
+pub(super) fn workspace_root_identity(root: &Path) -> WorkspaceRootIdentity {
+    WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, root)
+        .expect("fixture workspace root pins")
+        .identity()
+}
+
+pub(super) fn real_git_packed_references() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/packed-refs.bin")
+}
+
+pub(super) fn real_git_packed_replacement_reference() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/packed-replacement-record")
+}
+
+pub(super) fn real_git_packed_topic_target() -> Oid {
+    real_git_fixture_oid(include_bytes!(
+        "fixtures/git-conformance/packed-topic-target"
+    ))
+}
+
+pub(super) fn real_git_loose_topic() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/loose-topic")
+}
+
+pub(super) fn real_git_resolved_topic() -> Oid {
+    real_git_fixture_oid(include_bytes!("fixtures/git-conformance/resolved-topic"))
+}
+
+pub(super) fn real_git_update_ref_before() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/update-ref-before")
+}
+
+pub(super) fn real_git_update_ref_after() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/update-ref-after")
+}
+
+pub(super) fn real_git_update_ref_target() -> Oid {
+    real_git_fixture_oid(real_git_update_ref_after())
+}
+
+pub(super) fn real_git_update_ref_lock_exists() -> bool {
+    include_bytes!("fixtures/git-conformance/update-ref-lock-state").as_slice() == b"present\n"
+}
+
+pub(super) fn real_git_contended_reference() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/contended-ref")
+}
+
+pub(super) fn real_git_contended_lock() -> &'static [u8] {
+    include_bytes!("fixtures/git-conformance/contended-lock")
+}
+
+pub(super) fn real_git_contended_update_rejects() -> bool {
+    include_bytes!("fixtures/git-conformance/contended-result").as_slice() == b"rejected\n"
+}
+
+fn real_git_fixture_oid(bytes: &[u8]) -> Oid {
+    let record = bytes
+        .strip_suffix(b"\n")
+        .expect("real Git OID fixture ends in a newline");
+    let text = std::str::from_utf8(record).expect("real Git OID fixture is UTF-8");
+    crate::layout::parse_full_object_id(text, ObjectFormat::Sha1)
+        .expect("real Git OID fixture is a full SHA-1 ID")
+}
 
 pub(super) struct Fixture {
     directory: TempDir,

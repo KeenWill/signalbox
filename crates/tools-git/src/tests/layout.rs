@@ -3,13 +3,18 @@
 use std::{
     ffi::OsStr,
     fs,
-    os::{fd::OwnedFd, unix::fs::symlink},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::fs::symlink,
+    },
 };
 
 use git2::{ObjectFormat, ObjectType};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, statat, symlinkat};
+use signalbox_tools_workspace::{LocalWorkspaceFileSystem, WorkspaceRoot};
 
 use crate::construction::LocalGitToolsConstructionError;
+use crate::descriptor::unsupported_object_alternates_are_absent_with_test_hook;
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
 use crate::layout::{
@@ -24,7 +29,9 @@ use crate::pinning::{
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::tests::support::{
-    Fixture, Sha256Fixture, plant_loose_blob, plant_loose_blob_with_claimed_id, plant_packed_blob,
+    Fixture, Sha256Fixture, TRACKED_PATH, commit_all, plant_loose_blob,
+    plant_loose_blob_with_claimed_id, plant_packed_blob, real_git_packed_replacement_reference,
+    workspace_root_identity,
 };
 
 #[track_caller]
@@ -41,7 +48,8 @@ fn repository_layout_rejects_a_missing_head() {
     fs::remove_file(fixture.root().join(".git/HEAD")).expect("fixture HEAD removes");
 
     let failure =
-        validate_repository_layout(fixture.root()).expect_err("missing HEAD rejects admission");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("missing HEAD rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -52,7 +60,8 @@ fn repository_layout_rejects_a_malformed_head() {
     fs::write(fixture.root().join(".git/HEAD"), b"not a head\n").expect("malformed HEAD writes");
 
     let failure =
-        validate_repository_layout(fixture.root()).expect_err("malformed HEAD rejects admission");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("malformed HEAD rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -63,8 +72,9 @@ fn repository_layout_rejects_an_abbreviated_detached_head() {
     fs::write(fixture.root().join(".git/HEAD"), "abc123\n")
         .expect("abbreviated detached HEAD writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("abbreviated detached HEAD rejects admission");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("abbreviated detached HEAD rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -76,8 +86,9 @@ fn repository_layout_rejects_an_oversized_symbolic_head_target() {
     fs::write(fixture.root().join(".git/HEAD"), format!("ref: {target}\n"))
         .expect("oversized symbolic HEAD writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("oversized symbolic HEAD rejects admission");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("oversized symbolic HEAD rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -89,7 +100,8 @@ fn repository_layout_accepts_a_symbolic_head_with_a_maximum_branch_input() {
     fs::write(fixture.root().join(".git/HEAD"), format!("ref: {target}\n"))
         .expect("maximum symbolic HEAD writes");
 
-    validate_repository_layout(fixture.root()).expect("maximum symbolic HEAD admits repository");
+    validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+        .expect("maximum symbolic HEAD admits repository");
 }
 
 #[test]
@@ -97,8 +109,9 @@ fn repository_layout_rejects_a_missing_refs_directory() {
     let fixture = Fixture::new();
     fs::remove_dir_all(fixture.root().join(".git/refs")).expect("fixture refs directory removes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("missing refs directory rejects admission");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("missing refs directory rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -110,8 +123,9 @@ fn repository_layout_rejects_a_regular_refs_file() {
     fs::remove_dir_all(&refs_path).expect("fixture refs directory removes");
     fs::write(&refs_path, b"not a reference directory").expect("regular refs file writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("regular refs file rejects admission");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("regular refs file rejects admission");
 
     assert_repository_construction_failure(failure);
 }
@@ -121,7 +135,9 @@ fn operation_guard_rejects_a_replaced_administrative_directory() {
     let fixture = Fixture::new();
     let git_path = fixture.root().join(".git");
     let retired_git_path = fixture.root().join(".git.retired");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let guard = authority
@@ -182,7 +198,9 @@ fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
 #[test]
 fn repository_shell_never_binds_a_path_resolved_worktree() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let repository = authority.repository().expect("fixture repository locks");
@@ -210,7 +228,9 @@ fn repository_shell_never_binds_a_path_resolved_worktree() {
 #[test]
 fn operation_guard_rejects_a_valid_repository_replacing_the_root_path() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let guard = authority
@@ -235,7 +255,9 @@ fn operation_guard_rejects_a_valid_repository_replacing_the_root_path() {
 #[test]
 fn object_capture_rejects_an_object_database_replaced_after_scan() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let objects = fixture.root().join(".git/objects");
@@ -257,7 +279,9 @@ fn object_capture_rejects_an_object_database_replaced_after_scan() {
 #[test]
 fn object_capture_rejects_a_loose_directory_replaced_after_scan() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let objects = fixture.root().join(".git/objects");
@@ -282,7 +306,9 @@ fn object_capture_rejects_a_loose_directory_replaced_after_scan() {
 #[test]
 fn object_capture_rejects_a_loose_object_replaced_after_scan() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let object_id = fixture.initial.to_string();
@@ -307,7 +333,9 @@ fn object_capture_rejects_a_loose_object_replaced_after_scan() {
 #[test]
 fn object_capture_rejects_a_loose_object_added_after_scan() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let object_id = fixture.initial.to_string();
@@ -330,7 +358,9 @@ fn object_capture_rejects_a_loose_object_added_after_scan() {
 fn object_capture_rejects_a_pack_file_rewritten_after_scan() {
     let fixture = Fixture::new();
     let pack_path = plant_packed_blob(fixture.root(), b"packed fixture content");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let pack_length = fs::metadata(&pack_path)
@@ -351,7 +381,9 @@ fn object_capture_rejects_a_pack_file_rewritten_after_scan() {
 #[test]
 fn object_byte_count_rejects_a_loose_object_added_after_measurement() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -369,7 +401,9 @@ fn object_byte_count_rejects_a_pack_directory_replaced_after_measurement() {
     plant_packed_blob(fixture.root(), b"packed fixture content");
     let pack = fixture.root().join(".git/objects/pack");
     let retired_pack = fixture.root().join(".git/objects/pack.retired");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -395,8 +429,9 @@ fn administrative_scan_rejects_a_symlink_without_retaining_a_deep_path() {
     plant_deep_administrative_symlink(&git_directory, 256);
     assert_deep_administrative_symlink(git_directory, 256);
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("deep administrative symlink rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("deep administrative symlink rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -439,7 +474,9 @@ fn assert_deep_administrative_symlink(mut parent: OwnedFd, depth: usize) {
 #[test]
 fn repository_open_rejects_an_administrative_directory_replaced_after_open() {
     let fixture = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let git_path = fixture.root().join(".git");
     let retired_git = fixture.root().join(".git.retired");
     let replacement_git = git_path.clone();
@@ -470,7 +507,8 @@ fn repository_open_rejects_a_symlinked_root_path() {
             .expect("fixture root names")
             .to_string_lossy()
     ));
-    let expected = validate_repository_layout(&root).expect("fixture layout validates");
+    let expected = validate_repository_layout(&root, workspace_root_identity(&root))
+        .expect("fixture layout validates");
     fs::rename(&root, &retired_root).expect("fixture root retires");
     symlink(&retired_root, &root).expect("fixture root symlink constructs");
 
@@ -483,11 +521,34 @@ fn repository_open_rejects_a_symlinked_root_path() {
 }
 
 #[test]
+fn repository_admission_rejects_a_path_replacing_the_injected_workspace_root() {
+    let parent = tempfile::tempdir().expect("workspace parent constructs");
+    let root = parent.path().join("workspace");
+    let retired = parent.path().join("retired");
+    let repository = git2::Repository::init(&root).expect("injected repository initializes");
+    fs::write(root.join(TRACKED_PATH), "injected\n").expect("injected fixture file writes");
+    commit_all(&repository, "injected");
+    let workspace = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, &root)
+        .expect("injected workspace root pins");
+    fs::rename(&root, &retired).expect("injected workspace retires");
+    git2::Repository::init(&root).expect("replacement repository initializes");
+
+    let failure = validate_repository_layout(&root, workspace.identity())
+        .expect_err("replacement repository root rejects admission");
+
+    assert_repository_construction_failure(failure);
+    assert!(retired.join(".git").exists());
+    assert!(root.join(".git").exists());
+}
+
+#[test]
 fn repository_open_rejects_a_symlinked_administrative_path() {
     let fixture = Fixture::new();
     let git_path = fixture.root().join(".git");
     let retired_git_path = fixture.root().join(".git.retired");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     fs::rename(&git_path, &retired_git_path).expect("fixture administrative directory retires");
     symlink(".git.retired", &git_path).expect("administrative symlink constructs");
 
@@ -510,7 +571,8 @@ fn repository_config_rejects_a_utf8_bom_before_an_include_section() {
     .expect("BOM-prefixed fixture config writes");
 
     let failure =
-        validate_repository_layout(fixture.root()).expect_err("BOM-prefixed include rejects");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("BOM-prefixed include rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -525,8 +587,9 @@ fn repository_config_rejects_a_tab_delimited_filter_section() {
     )
     .expect("tab-delimited fixture filter config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("tab-delimited filter section rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("tab-delimited filter section rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -541,8 +604,9 @@ fn repository_config_rejects_an_unsupported_reference_storage_extension() {
     )
     .expect("unsupported reference storage config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("unsupported reference storage extension rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("unsupported reference storage extension rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -554,8 +618,9 @@ fn repository_config_rejects_an_unsupported_format_version() {
     fs::write(&config_path, "[core]\nrepositoryformatversion = 2\n")
         .expect("future repository format config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("future repository format version rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("future repository format version rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -570,8 +635,41 @@ fn repository_config_rejects_sha256_under_format_version_zero() {
     )
     .expect("mismatched object format config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("SHA-256 under format version zero rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("SHA-256 under format version zero rejects");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_config_rejects_an_uppercase_sha1_object_format_value() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".git/config"),
+        "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectFormat = SHA1\n",
+    )
+    .expect("uppercase SHA-1 config writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("uppercase SHA-1 object-format value rejects");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_config_rejects_an_uppercase_sha256_object_format_value() {
+    let fixture = Sha256Fixture::new();
+    fs::write(
+        fixture.root().join(".git/config"),
+        "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectFormat = SHA256\n",
+    )
+    .expect("uppercase SHA-256 config writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("uppercase SHA-256 object-format value rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -586,8 +684,9 @@ fn repository_config_rejects_duplicate_format_versions() {
     )
     .expect("duplicate repository format config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("duplicate repository format versions reject");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("duplicate repository format versions reject");
 
     assert_repository_construction_failure(failure);
 }
@@ -602,7 +701,9 @@ fn repository_config_rejects_a_bare_repository() {
     )
     .expect("bare repository config writes");
 
-    let failure = validate_repository_layout(fixture.root()).expect_err("bare repository rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("bare repository rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -618,7 +719,8 @@ fn repository_config_rejects_duplicate_bare_declarations() {
     .expect("duplicate bare config writes");
 
     let failure =
-        validate_repository_layout(fixture.root()).expect_err("duplicate bare declarations reject");
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("duplicate bare declarations reject");
 
     assert_repository_construction_failure(failure);
 }
@@ -633,8 +735,9 @@ fn repository_config_rejects_a_valueless_hooks_path() {
     )
     .expect("valueless hooks path config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("valueless hooks path rejects repository");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("valueless hooks path rejects repository");
 
     assert_repository_construction_failure(failure);
 }
@@ -649,8 +752,9 @@ fn repository_config_rejects_a_valueless_worktree() {
     )
     .expect("valueless worktree config writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("valueless worktree rejects repository");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("valueless worktree rejects repository");
 
     assert_repository_construction_failure(failure);
 }
@@ -660,7 +764,9 @@ fn authority_operation_rejects_live_config_bytes_changed_after_open() {
     let fixture = Fixture::new();
     let config_path = fixture.root().join(".git/config");
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     fs::write(&config_path, "[core]\nfilemode = false\nbare = false\n")
@@ -681,7 +787,9 @@ fn authority_operation_rejects_identical_replacement_config_after_open() {
     let retired_config_path = fixture.root().join(".git/config.retired");
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
     let original_config = fs::read(&config_path).expect("fixture config reads");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     fs::rename(&config_path, retired_config_path).expect("fixture config retires");
@@ -700,7 +808,8 @@ fn repository_layout_accepts_an_empty_shallow_file() {
     let fixture = Fixture::new();
     fs::write(fixture.root().join(".git/shallow"), b"").expect("empty shallow file writes");
 
-    validate_repository_layout(fixture.root()).expect("empty shallow file validates");
+    validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+        .expect("empty shallow file validates");
 }
 
 #[test]
@@ -712,8 +821,9 @@ fn repository_layout_rejects_a_leading_blank_shallow_record() {
     )
     .expect("leading blank shallow record writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("leading blank shallow record rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("leading blank shallow record rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -727,8 +837,9 @@ fn repository_layout_rejects_a_doubled_trailing_shallow_newline() {
     )
     .expect("doubled trailing shallow newline writes");
 
-    let failure = validate_repository_layout(fixture.root())
-        .expect_err("doubled trailing shallow newline rejects");
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("doubled trailing shallow newline rejects");
 
     assert_repository_construction_failure(failure);
 }
@@ -737,7 +848,9 @@ fn repository_layout_rejects_a_doubled_trailing_shallow_newline() {
 fn repository_open_rejects_commondir_created_after_layout_validation() {
     let fixture = Fixture::new();
     let commondir_path = fixture.root().join(".git/commondir");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
 
     let failure = PinnedRepository::open_with_hook(fixture.root(), expected, || {
         fs::write(&commondir_path, "../outside\n").expect("late commondir writes");
@@ -748,10 +861,89 @@ fn repository_open_rejects_commondir_created_after_layout_validation() {
 }
 
 #[test]
+fn repository_admission_rejects_info_grafts() {
+    let fixture = Fixture::new();
+    let info = fixture.root().join(".git/info");
+    fs::create_dir_all(&info).expect("repository info directory constructs");
+    fs::write(info.join("grafts"), format!("{}\n", fixture.initial))
+        .expect("grafts control writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("grafts control rejects admission");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_admission_rejects_replacement_references() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.root().join(".git/refs/replace"))
+        .expect("replacement-reference namespace constructs");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("replacement-reference namespace rejects admission");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn repository_admission_rejects_packed_replacement_references() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root().join(".git/packed-refs"),
+        real_git_packed_replacement_reference(),
+    )
+    .expect("real Git packed replacement fixture writes");
+
+    let failure =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect_err("packed replacement reference rejects admission");
+
+    assert_repository_construction_failure(failure);
+}
+
+#[test]
+fn alternates_check_rejects_an_objects_info_path_replacement() {
+    let fixture = Fixture::new();
+    let git_path = fixture.root().join(".git");
+    let info_path = git_path.join("objects/info");
+    let retired_info = git_path.join("objects/info.retired");
+    let alternates = info_path.join("alternates");
+    let actor_alternates = "/outside/objects\n";
+    fs::create_dir_all(&info_path).expect("object info directory constructs");
+    let git_directory = openat(
+        CWD,
+        &git_path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("administrative directory opens");
+
+    let failure =
+        unsupported_object_alternates_are_absent_with_test_hook(git_directory.as_fd(), || {
+            fs::rename(&info_path, &retired_info).expect("object info directory retires");
+            fs::create_dir(&info_path).expect("replacement object info directory constructs");
+            fs::write(&alternates, actor_alternates).expect("replacement alternates writes");
+        })
+        .expect_err("replaced object info directory rejects absence check");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        fs::read_to_string(alternates).expect("replacement alternates reads"),
+        actor_alternates
+    );
+    assert!(retired_info.is_dir());
+}
+
+#[test]
 fn object_capture_rejects_alternates_created_after_authority_open() {
     let fixture = Fixture::new();
     let alternates_path = fixture.root().join(".git/objects/info/alternates");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     fs::create_dir_all(alternates_path.parent().expect("alternates parent exists"))
@@ -770,7 +962,9 @@ fn reference_operation_rejects_alternates_created_after_authority_open() {
     let fixture = Fixture::new();
     let alternates_path = fixture.root().join(".git/objects/info/alternates");
     let lock_path = fixture.root().join(".git/refs/heads/topic.lock");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     fs::create_dir_all(alternates_path.parent().expect("alternates parent exists"))
@@ -836,7 +1030,9 @@ fn repository_open_parses_the_validated_config_snapshot() {
     let config_path = fixture.root().join(".git/config");
     fs::write(&config_path, "[core]\nfilemode = true\nbare = false\n")
         .expect("validated fixture config writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
 
     let authority = PinnedRepository::open(fixture.root(), expected)
         .expect("repository opens from the validated config snapshot");
@@ -850,7 +1046,9 @@ fn repository_open_parses_the_validated_config_snapshot() {
 fn repository_shell_rejects_an_object_database_symlink_replacement() {
     let fixture = Fixture::new();
     let outside = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let objects = fixture.root().join(".git/objects");
@@ -871,7 +1069,9 @@ fn repository_shell_rejects_an_object_database_symlink_replacement() {
 fn object_capture_rejects_an_object_database_symlink_replacement() {
     let fixture = Fixture::new();
     let outside = Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
     let objects = fixture.root().join(".git/objects");
@@ -895,7 +1095,9 @@ fn object_capture_rejects_a_compressed_loose_object_above_the_decoded_limit() {
     let compressed_bytes = fs::metadata(object_path)
         .expect("oversized loose object metadata reads")
         .len();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -915,7 +1117,9 @@ fn object_capture_rejects_trailing_bytes_after_a_loose_object_stream() {
     bytes.extend_from_slice(b"trailing bytes");
     fs::remove_file(&object_path).expect("loose object removes");
     fs::write(&object_path, bytes).expect("loose object with trailing bytes writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -932,7 +1136,9 @@ fn object_capture_rejects_a_loose_object_stored_under_an_unrelated_id() {
     let claimed_id =
         git2::Oid::hash_object(ObjectType::Blob, b"claimed blob").expect("claimed blob hashes");
     plant_loose_blob_with_claimed_id(fixture.root(), b"actual blob", claimed_id);
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -951,7 +1157,9 @@ fn object_capture_rejects_a_packed_object_above_the_decoded_limit() {
     let packed_bytes = fs::metadata(pack_path)
         .expect("oversized packed object metadata reads")
         .len();
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
 
@@ -972,7 +1180,9 @@ fn repository_open_rejects_live_object_format_changed_after_snapshot() {
         "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha1\n",
     )
     .expect("validated SHA-1 fixture config writes");
-    let expected = validate_repository_layout(fixture.root()).expect("fixture layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
 
     let failure = PinnedRepository::open_with_hooks(
         fixture.root(),
@@ -994,7 +1204,9 @@ fn repository_open_rejects_live_object_format_changed_after_snapshot() {
 #[test]
 fn sha256_repository_admits_the_declared_object_format() {
     let fixture = Sha256Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("SHA-256 layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
 
@@ -1010,13 +1222,16 @@ fn sha256_repository_accepts_a_sha256_shallow_boundary() {
     )
     .expect("SHA-256 shallow boundary writes");
 
-    validate_repository_layout(fixture.root()).expect("SHA-256 shallow boundary validates");
+    validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+        .expect("SHA-256 shallow boundary validates");
 }
 
 #[test]
 fn sha256_repository_resolves_its_symbolic_head() {
     let fixture = Sha256Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("SHA-256 layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
     let (_, head) =
@@ -1028,7 +1243,9 @@ fn sha256_repository_resolves_its_symbolic_head() {
 #[test]
 fn sha256_index_entries_retain_sha256_object_ids() {
     let fixture = Sha256Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("SHA-256 layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
     let (_, index) =
@@ -1041,7 +1258,9 @@ fn sha256_index_entries_retain_sha256_object_ids() {
 #[test]
 fn sha256_index_publication_writes_a_sha256_checksum() {
     let fixture = Sha256Fixture::new();
-    let expected = validate_repository_layout(fixture.root()).expect("SHA-256 layout validates");
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("SHA-256 layout validates");
     let authority =
         PinnedRepository::open(fixture.root(), expected).expect("SHA-256 repository pins");
     let (index_lock, index) =

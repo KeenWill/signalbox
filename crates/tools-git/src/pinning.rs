@@ -29,7 +29,7 @@ use crate::descriptor::{
 use crate::failure::LocalGitFailure;
 use crate::layout::{
     object_id_bytes, open_repository_config_at, open_repository_head_at, open_repository_refs_at,
-    validate_live_shallow,
+    parse_full_object_id_bytes, validate_live_shallow,
 };
 use crate::limits::{
     MAX_LOOSE_OBJECT_HEADER_BYTES, MAX_OBJECT_BYTES, MAX_OBJECT_DATABASE_BYTES,
@@ -44,9 +44,6 @@ pub(super) struct PinnedRepository {
     _config: fs::File,
     config_snapshot: fs::File,
     config_identity: FileSnapshotIdentity,
-    _head: fs::File,
-    head_identity: FileSnapshotIdentity,
-    head_bytes: Vec<u8>,
     pub(super) object_format: ObjectFormat,
     repository: Mutex<RepositoryShell>,
 }
@@ -100,9 +97,15 @@ pub(super) enum ObjectDirectoryKind {
 impl ObjectDirectoryKind {
     fn validates_name(self, name: &OsStr) -> bool {
         match self {
-            Self::Loose { filename_bytes, .. } => {
+            Self::Loose {
+                object_format,
+                directory_prefix,
+                filename_bytes,
+            } => {
+                let mut claimed_object_id = directory_prefix.to_vec();
+                claimed_object_id.extend_from_slice(name.as_bytes());
                 name.as_bytes().len() == filename_bytes
-                    && name.as_bytes().iter().all(u8::is_ascii_hexdigit)
+                    && parse_full_object_id_bytes(&claimed_object_id, object_format).is_some()
             }
             Self::Pack => true,
         }
@@ -248,9 +251,6 @@ impl PinnedRepository {
             _config: config.source,
             config_snapshot: config.snapshot,
             config_identity: config.identity,
-            _head: head.source,
-            head_identity: head.identity,
-            head_bytes: head.bytes,
             object_format: config.object_format,
             repository: Mutex::new(repository),
         };
@@ -278,6 +278,8 @@ impl PinnedRepository {
     }
 
     pub(super) fn validate_supported_layout(&self) -> Result<(), LocalGitFailure> {
+        let head = open_repository_head_at(&self.git_directory, self.object_format)
+            .map_err(|_| LocalGitFailure::Repository)?;
         validate_supported_layout(
             &self.root_path,
             &self.root,
@@ -285,8 +287,8 @@ impl PinnedRepository {
             &self._refs,
             &self.config_snapshot,
             self.config_identity,
-            self.head_identity,
-            &self.head_bytes,
+            head.identity,
+            &head.bytes,
             self.object_format,
         )
     }
@@ -297,6 +299,8 @@ impl PinnedRepository {
 
     pub(super) fn operation_guard(&self) -> Result<RepositoryOperationGuard, LocalGitFailure> {
         self.validate_supported_layout()?;
+        let head = open_repository_head_at(&self.git_directory, self.object_format)
+            .map_err(|_| LocalGitFailure::Repository)?;
         let guard = RepositoryOperationGuard {
             root_path: self.root_path.clone(),
             root: self
@@ -320,12 +324,9 @@ impl PinnedRepository {
                 .try_clone()
                 .map_err(|_| LocalGitFailure::Operation)?,
             config_identity: self.config_identity,
-            _head: self
-                ._head
-                .try_clone()
-                .map_err(|_| LocalGitFailure::Operation)?,
-            head_identity: self.head_identity,
-            head_bytes: self.head_bytes.clone(),
+            _head: head.source,
+            head_identity: head.identity,
+            head_bytes: head.bytes,
             object_format: self.object_format,
         };
         guard.validate_supported_layout()?;
@@ -539,7 +540,11 @@ impl PinnedObjectDatabase {
                 });
                 continue;
             }
-            if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_hexdigit) {
+            if bytes.len() != 2
+                || name
+                    .to_str()
+                    .is_none_or(|prefix| gix_hash::Prefix::from_hex_nonempty(prefix).is_err())
+            {
                 return Err(LocalGitFailure::Repository);
             }
             let directory_prefix = bytes.try_into().map_err(|_| LocalGitFailure::Repository)?;

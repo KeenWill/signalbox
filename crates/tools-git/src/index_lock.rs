@@ -344,6 +344,7 @@ impl IndexLock {
         if bytes.len() > MAX_INDEX_BYTES {
             return Err(LocalGitFailure::Operation);
         }
+        validate_index_bytes(bytes, self.object_format)?;
         let expected = index_content_identity(bytes)?;
         self.lock
             .set_len(0)
@@ -356,6 +357,7 @@ impl IndexLock {
     }
 
     pub(super) fn write(&mut self, index: &mut Index) -> Result<(), LocalGitFailure> {
+        validate_index_entries(index, self.object_format)?;
         if index.path() != Some(self.private_index_path.as_path()) {
             let expected = write_index_entries(&mut self.lock, index, self.object_format)?;
             return self.record_prepared_index(expected);
@@ -812,15 +814,7 @@ pub(super) fn write_index_entries(
     index: &Index,
     object_format: ObjectFormat,
 ) -> Result<IndexContentIdentity, LocalGitFailure> {
-    if index.len() > MAX_INDEX_ENTRIES {
-        return Err(LocalGitFailure::Operation);
-    }
-    if index
-        .iter()
-        .any(|entry| entry.id.object_format() != object_format)
-    {
-        return Err(LocalGitFailure::Operation);
-    }
+    validate_index_entries(index, object_format)?;
     let mut bytes = Vec::new();
     let version = if index.iter().any(|entry| entry.flags_extended != 0) {
         3_u32
@@ -889,20 +883,26 @@ fn copy_index_snapshot(
     permissions: IndexSnapshotPermissions,
     object_format: ObjectFormat,
 ) -> Result<(), LocalGitFailure> {
-    match openat(
+    let expected = match openat(
         CWD,
         index_path,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
-        Ok(descriptor) => {
-            copy_open_index_snapshot(descriptor, destination, permissions, object_format)
-                .map(drop)?
-        }
+        Ok(descriptor) => Some(copy_open_index_snapshot(
+            descriptor,
+            destination,
+            permissions,
+            object_format,
+        )?),
         Err(rustix::io::Errno::NOENT) => {
             write_empty_index(destination, object_format).map(drop)?;
+            None
         }
         Err(_) => return Err(LocalGitFailure::Repository),
+    };
+    if index_snapshot_identity_at_path(index_path)? != expected {
+        return Err(LocalGitFailure::Repository);
     }
     Ok(())
 }
@@ -971,14 +971,17 @@ pub(super) fn copy_index_snapshot_with_test_hook<AfterMetadata: FnOnce()>(
         Mode::empty(),
     )
     .map_err(|_| LocalGitFailure::Repository)?;
-    copy_open_index_snapshot_with_hook(
+    let expected = copy_open_index_snapshot_with_hook(
         descriptor,
         destination,
         IndexSnapshotPermissions::RetainDestination,
         object_format,
         after_metadata,
-    )
-    .map(drop)
+    )?;
+    if index_snapshot_identity_at_path(index_path)? != Some(expected) {
+        return Err(LocalGitFailure::Repository);
+    }
+    Ok(())
 }
 
 impl Drop for IndexLock {
@@ -1036,10 +1039,16 @@ fn copy_index_snapshot_at(
         Ok(descriptor) => {
             let snapshot =
                 copy_open_index_snapshot(descriptor, destination, permissions, object_format)?;
+            if index_snapshot_identity_at(parent, index_name)? != Some(snapshot) {
+                return Err(LocalGitFailure::Repository);
+            }
             Ok((Some(snapshot), snapshot.content()))
         }
         Err(rustix::io::Errno::NOENT) => {
             let content = write_empty_index(destination, object_format)?;
+            if index_snapshot_identity_at(parent, index_name)?.is_some() {
+                return Err(LocalGitFailure::Repository);
+            }
             Ok((None, content))
         }
         Err(_) => Err(LocalGitFailure::Repository),
@@ -1064,6 +1073,51 @@ fn index_snapshot_identity_at(
         Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
         Err(_) => Err(LocalGitFailure::Operation),
     }
+}
+
+fn index_snapshot_identity_at_path(
+    path: &Path,
+) -> Result<Option<IndexSnapshotIdentity>, LocalGitFailure> {
+    match openat(
+        CWD,
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => {
+            let mut file = fs::File::from(descriptor);
+            let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
+            snapshot_identity(&mut file, &metadata).map(Some)
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+        Err(_) => Err(LocalGitFailure::Repository),
+    }
+}
+
+fn validate_index_entries(
+    index: &Index,
+    object_format: ObjectFormat,
+) -> Result<(), LocalGitFailure> {
+    if index.len() > MAX_INDEX_ENTRIES
+        || index
+            .iter()
+            .any(|entry| entry.id.object_format() != object_format)
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    Ok(())
+}
+
+fn validate_index_bytes(bytes: &[u8], object_format: ObjectFormat) -> Result<(), LocalGitFailure> {
+    reject_split_index(bytes, object_format).map_err(|_| LocalGitFailure::Operation)?;
+    let mut snapshot = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
+    snapshot
+        .write_all(bytes)
+        .and_then(|()| snapshot.sync_all())
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let index = Index::open_ext(&descriptor_path(&snapshot), object_format)
+        .map_err(|_| LocalGitFailure::Operation)?;
+    validate_index_entries(&index, object_format)
 }
 
 fn snapshot_identity(
