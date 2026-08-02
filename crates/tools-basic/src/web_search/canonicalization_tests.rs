@@ -459,6 +459,31 @@ fn web_search_rejects_canonicalized_embedded_ipv6_hextet_credential() {
     );
 }
 
+/// INV-035: a credential spanning an IPv6 hextet separator and discarded
+/// leading zero cannot survive typed host canonicalization.
+#[test]
+fn web_search_rejects_separator_spanning_ipv6_hextet_credential() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_SEPARATOR_SPANNING_IPV6_HEXTET_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("separator-spanning IPv6 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV6_SEPARATOR_SPANNING_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-hextet credential fragment is canonicalized as one
 /// contiguous sequence before comparison with an IPv6 result host.
 #[test]
@@ -617,6 +642,29 @@ fn web_search_rejects_canonicalized_legacy_ipv4_credential_in_result_host() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_LEGACY_IPV4_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential ending at the permitted trailing dot of a legacy
+/// IPv4 host cannot survive typed host canonicalization.
+#[test]
+fn web_search_rejects_trailing_dot_ipv4_credential() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_TRAILING_DOT_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("trailing-dot IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_IPV4_TRAILING_DOT_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 
