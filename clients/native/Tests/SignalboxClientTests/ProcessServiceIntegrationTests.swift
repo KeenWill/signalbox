@@ -4334,12 +4334,14 @@ private enum ProcessProjectionFixture {
           "model_call_index":"0",
           "turn_id":"\(ProcessDriverFixture.turn)",
           "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
           "usage":{
             "input_tokens":null,
             "output_tokens":null,
             "cache_creation_input_tokens":null,
             "cache_read_input_tokens":null
-          }
+          },
+          "cost":null
         }
         """,
         """
@@ -4434,12 +4436,14 @@ private enum ProcessProjectionFixture {
           "model_call_index":"0",
           "turn_id":"\(ProcessDriverFixture.turn)",
           "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
           "usage":{
             "input_tokens":null,
             "output_tokens":null,
             "cache_creation_input_tokens":null,
             "cache_read_input_tokens":null
-          }
+          },
+          "cost":null
         }
         """,
         """

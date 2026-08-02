@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `e0538237` on 2026-08-01.
+Verified against repository head `e56f4ab1` on 2026-08-01.
 
 ## Scope and method
 
@@ -47,7 +47,7 @@ Disposition counts are by the gap rows below, not by individual wire variants:
 | C06 | Medium   | Future failed-call dispositions and causes, terminal model-call dispositions, process error codes, and conversation cursor origins failed scalar enum decoding.                        | **close-now** — retain unknown scalar values and use conservative labels or explicit protocol errors.                                        |
 | C07 | Medium   | A future durable `SessionEvent` was preserved and diagnosed by synchronization but produced no timeline row.                                                                           | **close-now** — add a stable, visibly unrecognized timeline entry without interpreting its payload.                                          |
 | C08 | Medium   | The `model_identity_changed` transcript entry was the only current non-text entry kind native could not name.                                                                          | **close-now** — decode it and show its selected model and defaults version in the existing timeline idiom.                                   |
-| C09 | Medium   | `transcript_model_call_usage` decoded and participated in snapshot counts but the projector silently discarded all four nullable token fields.                                       | **close-now** — render a minimal typed usage entry for the owning model call.                                                                |
+| C09 | Medium   | `transcript_model_call_usage` decoded and participated in snapshot counts but the projector silently discarded provenance, all four nullable token fields, and optional dollar cost. | **close-now** — render a minimal typed usage entry for the owning model call.                                                                |
 | C10 | Medium   | `context_summary` was rendered as an ordinary assistant message, hiding that the text is compacted context.                                                                            | **close-now** — retain the text while giving it a distinct typed timeline label.                                                             |
 | C11 | Medium   | `plan_read` tool results were shown only as an undifferentiated raw JSON tool result.                                                                                                  | **close-now** — recognize the current tool name and render a minimal faithful plan read in the existing tool card.                           |
 | C12 | Medium   | `plan_write` arguments and results were shown only as undifferentiated raw JSON.                                                                                                       | **close-now** — recognize the current tool name and render a minimal faithful plan update in the existing tool card.                         |

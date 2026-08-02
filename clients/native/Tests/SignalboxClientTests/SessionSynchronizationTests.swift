@@ -1605,6 +1605,78 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
   }
 
+  func testModelCallCostStringsExceedSnapshotCapacityByOneByte() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 10,
+        maximumUTF8Bytes: SynchronizationFixture.modelCallUsageCostUTF8Bytes - 1
+      )
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedTurn()
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsageWithCost()
+      )
+    )
+
+    XCTAssertFalse(SynchronizationFixture.containsPublishedSnapshot(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .history)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.first?.kind, .protocolViolation)
+  }
+
+  func testModelCallCostStringsFitAtExactSnapshotCapacity() throws {
+    var transport = try SynchronizationFixture.transportInHistory(
+      cursor: SynchronizationFixture.initialCursor,
+      snapshotCapacity: .init(
+        maximumRecords: 10,
+        maximumUTF8Bytes: SynchronizationFixture.modelCallUsageCostUTF8Bytes
+      )
+    )
+
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.completedTurn()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallUsageWithCost()
+      )
+    )
+    _ = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.modelCallsEnd(count: 1)
+      )
+    )
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.snapshotEnd(
+          cursor: SynchronizationFixture.initialCursor,
+          turnCount: 1,
+          entryCount: 0
+        )
+      )
+    )
+    _ = try SynchronizationFixture.publishedSnapshot(in: effects)
+
+    XCTAssertTrue(transport.machine.diagnostics.isEmpty)
+  }
+
   func testModelCallUsageRejectsUUIDOrderRegressionWithinATurn() throws {
     var transport = try SynchronizationFixture.transportInHistory(
       cursor: SynchronizationFixture.initialCursor
@@ -2476,6 +2548,11 @@ private enum SynchronizationFixture {
   static let secondAcceptedInput = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
   static let earlierModelCall = "44444444-4444-4444-8444-444444444444"
   static let modelCall = "55555555-5555-4555-8555-555555555555"
+  static let modelCallUsageCostAmountUSD = "0.125"
+  static let modelCallUsageCostRateVersion = "rates-v7"
+  static let modelCallUsageCostUTF8Bytes = UInt(
+    modelCallUsageCostAmountUSD.utf8.count + modelCallUsageCostRateVersion.utf8.count
+  )
   static let entry = "66666666-6666-4666-8666-666666666666"
   static let frontier = "77777777-7777-4777-8777-777777777777"
   static let attempt = "88888888-8888-4888-8888-888888888888"
@@ -3223,11 +3300,38 @@ private enum SynchronizationFixture {
         "model_call_index":"\(index)",
         "turn_id":"\(turn)",
         "model_call_id":"\(modelCallID)",
+        "usage_provenance":"reported",
         "usage":{
           "input_tokens":"10",
           "output_tokens":"0",
           "cache_creation_input_tokens":null,
           "cache_read_input_tokens":"4"
+        },
+        "cost":null
+      }
+      """
+    )
+  }
+
+  static func modelCallUsageWithCost() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"transcript_model_call_usage",
+        "model_call_index":"0",
+        "turn_id":"\(turn)",
+        "model_call_id":"\(modelCall)",
+        "usage_provenance":"reported",
+        "usage":{
+          "input_tokens":"10",
+          "output_tokens":"0",
+          "cache_creation_input_tokens":null,
+          "cache_read_input_tokens":"4"
+        },
+        "cost":{
+          "amount_usd":"\(modelCallUsageCostAmountUSD)",
+          "rate_version":"\(modelCallUsageCostRateVersion)",
+          "label":"metered_equivalent"
         }
       }
       """
