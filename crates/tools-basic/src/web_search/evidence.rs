@@ -1,7 +1,7 @@
 use signalbox_application::ToolExecutorEvidence;
 use signalbox_domain::{ToolExecutionErrorDetail, ToolExecutionErrorDetailFailure, ToolResultText};
 
-use super::{diagnostic::*, redaction::*, result::*};
+use super::{diagnostic::*, redaction::*, result::*, text_decoding::*};
 
 pub(super) const TRUNCATION_SUFFIX: &str = " … [truncated]";
 
@@ -27,7 +27,11 @@ pub(super) fn success_evidence(
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
 
-            let title = scrubber.redact_text(result.title.as_str());
+            let title = redact_entity_escaped_component(
+                result.title.as_str(),
+                MAX_RESULT_TITLE_BYTES,
+                scrubber,
+            )?;
             if title.len() > MAX_RESULT_TITLE_BYTES || title.trim().is_empty() {
                 return Err(WebSearchExecutorError::EvidenceEncoding);
             }
@@ -35,10 +39,11 @@ pub(super) fn success_evidence(
             let parsed_url = ParsedResultUrl::try_new(&url)
                 .filter(|parsed| parsed.as_str() == url)
                 .ok_or(WebSearchExecutorError::EvidenceEncoding)?;
-            let snippet = scrubber.redact_text(result.snippet.as_str());
-            if snippet.len() > MAX_RESULT_SNIPPET_BYTES {
-                return Err(WebSearchExecutorError::EvidenceEncoding);
-            }
+            let snippet = redact_entity_escaped_component(
+                result.snippet.as_str(),
+                MAX_RESULT_SNIPPET_BYTES,
+                scrubber,
+            )?;
             Ok(RenderedSearchResult {
                 title,
                 url: parsed_url.as_str().to_owned(),
@@ -55,6 +60,17 @@ pub(super) fn success_evidence(
         return Err(WebSearchExecutorError::EvidenceEncoding);
     }
     completed_text_evidence(content)
+}
+
+pub(super) fn redact_entity_escaped_component(
+    component: &str,
+    maximum_bytes: usize,
+    scrubber: &CredentialScrubber,
+) -> Result<String, WebSearchExecutorError> {
+    let raw = decode_html_character_references(component)
+        .ok_or(WebSearchExecutorError::EvidenceEncoding)?;
+    let redacted = scrubber.redact_text(&raw.text);
+    entity_escape(&redacted, maximum_bytes).ok_or(WebSearchExecutorError::EvidenceEncoding)
 }
 
 pub(super) fn completed_text_evidence(
@@ -119,8 +135,13 @@ pub(super) fn detail_after_redaction(
         Err(rejected) => rejected,
     };
     let (detail, failure) = rejected.into_parts();
-    if !matches!(failure, ToolExecutionErrorDetailFailure::TooLong { .. }) {
-        return Err(WebSearchExecutorError::EvidenceEncoding);
+    match failure {
+        ToolExecutionErrorDetailFailure::TooLong { .. } => {}
+        ToolExecutionErrorDetailFailure::Empty
+        | ToolExecutionErrorDetailFailure::SurroundingWhitespace
+        | ToolExecutionErrorDetailFailure::ContainsControl => {
+            return Err(WebSearchExecutorError::EvidenceEncoding);
+        }
     }
 
     let boundaries = detail
@@ -142,15 +163,16 @@ pub(super) fn detail_after_redaction(
                 admitted = Some(detail);
                 first_candidate = candidate_index + 1;
             }
-            Err(rejected)
-                if matches!(
-                    rejected.failure(),
-                    ToolExecutionErrorDetailFailure::TooLong { .. }
-                ) =>
-            {
-                last_candidate = candidate_index.saturating_sub(1);
-            }
-            Err(_) => return Err(WebSearchExecutorError::EvidenceEncoding),
+            Err(rejected) => match rejected.failure() {
+                ToolExecutionErrorDetailFailure::TooLong { .. } => {
+                    last_candidate = candidate_index.saturating_sub(1);
+                }
+                ToolExecutionErrorDetailFailure::Empty
+                | ToolExecutionErrorDetailFailure::SurroundingWhitespace
+                | ToolExecutionErrorDetailFailure::ContainsControl => {
+                    return Err(WebSearchExecutorError::EvidenceEncoding);
+                }
+            },
         }
     }
     admitted.ok_or(WebSearchExecutorError::EvidenceEncoding)

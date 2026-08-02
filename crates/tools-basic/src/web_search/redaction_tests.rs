@@ -183,10 +183,10 @@ fn web_search_success_evidence_redacts_text_matching_decoded_credential() {
     assert!(!content.contains(REVERSE_ENCODED_COLLISION_VALUE));
 }
 
-/// INV-035: an unimplemented standard named HTML reference fails closed
-/// before provider-controlled text enters completed evidence.
+/// INV-035: an unimplemented standard named HTML reference remains literal
+/// and is entity-escaped before provider-controlled text enters evidence.
 #[test]
-fn web_search_redacts_unsupported_named_html_reference_in_result_text() {
+fn web_search_preserves_escaped_unsupported_named_html_reference_in_result_text() {
     let reflected = WebSearchResult::try_new(WebSearchResultFields {
         title: String::from(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE),
         url: String::from(FIXTURE_RESULT_URL),
@@ -205,6 +205,50 @@ fn web_search_redacts_unsupported_named_html_reference_in_result_text() {
 
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY));
     assert!(!content.contains(UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE));
+    assert!(content.contains(UNSUPPORTED_NAMED_ENTITY_ESCAPED_VALUE));
+}
+
+/// INV-035: unknown terminated named references remain literal and are
+/// entity-escaped rather than causing all provider text to fail closed.
+#[test]
+fn web_search_preserves_entity_escaped_unknown_named_references() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET),
+    })
+    .expect("unknown named-reference fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+
+    let evidence = success_evidence(response, &scrubber()).expect("response encodes safely");
+    let content = completed_text(evidence);
+
+    assert!(content.contains(FIXTURE_ESCAPED_UNKNOWN_NAMED_REFERENCE_TITLE));
+    assert!(content.contains(FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET));
+}
+
+/// INV-035: credential removal cannot turn an entity-escaped literal into
+/// markup-bearing output after typed result construction.
+#[test]
+fn web_search_rejects_credential_collision_with_entity_escape_syntax() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_LITERAL_ENTITY_TITLE),
+        url: String::from(FIXTURE_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("literal entity fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        ENTITY_ESCAPE_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
 }
 
 /// INV-035: semicolonless numeric HTML-reference syntax fails closed
@@ -483,8 +527,8 @@ fn web_search_html_reference_scan_handles_multibyte_boundaries() {
     ));
 }
 
-/// INV-035: character-reference terminator search is bounded and fails
-/// closed at every ampersand in a maximum-size provider body.
+/// INV-035: numeric character-reference terminator search is bounded and
+/// fails closed in a maximum-size provider body.
 #[test]
 fn web_search_html_reference_scan_bounds_and_rejects_distant_terminator() {
     let source = distant_html_reference_terminator();

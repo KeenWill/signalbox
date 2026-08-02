@@ -36,9 +36,8 @@ pub(super) fn canonicalized_url_port_fragment(value: &str) -> Option<String> {
     if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let candidate = format!("http://example.com:{port}/");
-    let url = Url::parse(&candidate).ok()?;
-    url.port().map(|port| format!("{retained_prefix}{port}"))
+    let port = port.parse::<u16>().ok()?;
+    Some(format!("{retained_prefix}{port}"))
 }
 
 pub(super) fn canonicalized_url_host(value: &str) -> Option<String> {
@@ -82,17 +81,30 @@ pub(super) fn idna_mapped_unicode_variant(value: &str) -> Option<String> {
 }
 
 pub(super) fn canonicalized_ipv4_component_fragments(value: &str) -> impl Iterator<Item = Vec<u8>> {
-    [
-        canonicalized_ipv4_fragment(&format!("{value}.0.0.1"), 0..1),
-        canonicalized_ipv4_fragment(&format!("0.{value}.0.1"), 1..2),
-        canonicalized_ipv4_fragment(&format!("0.0.{value}.1"), 2..3),
-        canonicalized_ipv4_fragment(&format!("0.0.0.{value}"), 3..4),
-        canonicalized_ipv4_fragment(&format!("0.0.{value}"), 2..4),
-        canonicalized_ipv4_fragment(&format!("0.{value}"), 1..4),
-        canonicalized_ipv4_fragment(value, 0..4),
-    ]
-    .into_iter()
-    .flatten()
+    let mut spellings = vec![value.to_owned()];
+    if value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        spellings.push(format!("0x{value}"));
+    }
+    if value.bytes().all(|byte| matches!(byte, b'0'..=b'7')) {
+        spellings.push(format!("0{value}"));
+    }
+    let mut fragments = Vec::new();
+    for spelling in spellings {
+        fragments.extend(
+            [
+                canonicalized_ipv4_fragment(&format!("{spelling}.0.0.1"), 0..1),
+                canonicalized_ipv4_fragment(&format!("0.{spelling}.0.1"), 1..2),
+                canonicalized_ipv4_fragment(&format!("0.0.{spelling}.1"), 2..3),
+                canonicalized_ipv4_fragment(&format!("0.0.0.{spelling}"), 3..4),
+                canonicalized_ipv4_fragment(&format!("0.0.{spelling}"), 2..4),
+                canonicalized_ipv4_fragment(&format!("0.{spelling}"), 1..4),
+                canonicalized_ipv4_fragment(&spelling, 0..4),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
+    fragments.into_iter()
 }
 
 pub(super) fn canonicalized_ipv4_fragment(
@@ -149,6 +161,20 @@ pub(super) fn canonicalized_ipv6_fragments(value: &str) -> Vec<Vec<u16>> {
         }
     }
     fragments
+}
+
+pub(super) fn canonicalized_ipv6_hextet_text_fragment(value: &str) -> Option<String> {
+    let value = value.strip_prefix('[').unwrap_or(value);
+    let value = value.strip_suffix(']').unwrap_or(value);
+    if value.is_empty()
+        || value.len() > 4
+        || value.contains(':')
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let hextet = u16::from_str_radix(value, 16).ok()?;
+    Some(format!("{hextet:x}"))
 }
 
 pub(super) fn embedded_ipv6_fragment_candidate(

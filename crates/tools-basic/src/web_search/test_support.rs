@@ -19,7 +19,13 @@ pub(super) const FIXTURE_LEGACY_IPV4_RESULT_URL: &str = "https://2130706433/resu
 
 pub(super) const FIXTURE_CANONICAL_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.0.1/";
 
+pub(super) const FIXTURE_HEX_AFFIX_IPV4_RESULT_URL: &str = "http://0x7f.0.0.1/";
+
+pub(super) const FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL: &str = "http://0177.0.0.1/";
+
 pub(super) const FIXTURE_MULTI_OCTET_IPV4_COMPONENT_RESULT_URL: &str = "http://127.0.1.0/";
+
+pub(super) const FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL: &str = "https://[0db8::1]/";
 
 pub(super) const FIXTURE_TAB_NORMALIZED_RESULT_URL: &str = "http://example.com/abcd";
 
@@ -39,6 +45,16 @@ pub(super) const FIXTURE_IDNA_COMPATIBILITY_RESULT_URL: &str = "https://x-a¼b-y
 pub(super) const FIXTURE_C0_PREPROCESSED_RESULT_URL: &str = "https://example.com/abc";
 
 pub(super) const FIXTURE_RESULT_SNIPPET: &str = "Synthetic recorded snippet";
+
+pub(super) const FIXTURE_UNKNOWN_NAMED_REFERENCE_TITLE: &str = "Synthetic R&D; result";
+
+pub(super) const FIXTURE_ESCAPED_UNKNOWN_NAMED_REFERENCE_TITLE: &str = "Synthetic R&amp;D; result";
+
+pub(super) const FIXTURE_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
+    "Synthetic &copy; snippet";
+
+pub(super) const FIXTURE_ESCAPED_UNSUPPORTED_VALID_NAMED_REFERENCE_SNIPPET: &str =
+    "Synthetic &amp;copy; snippet";
 
 pub(super) const FIXTURE_WHITESPACE_TITLE: &str = " \t\n";
 
@@ -64,6 +80,10 @@ pub(super) const FIXTURE_MARKUP_TITLE: &str = "Synthetic <result> & \"title\"";
 
 pub(super) const FIXTURE_ESCAPED_MARKUP_TITLE: &str =
     "Synthetic &lt;result&gt; &amp; &quot;title&quot;";
+
+pub(super) const FIXTURE_LITERAL_ENTITY_TITLE: &str = "&lt;script&gt;";
+
+pub(super) const ENTITY_ESCAPE_COLLISION_KEY: &str = "amp;";
 
 pub(super) const FIXTURE_PROVIDER_ERROR_DETAIL: &str = "Synthetic <rejection> & detail";
 
@@ -102,9 +122,15 @@ pub(super) const URL_OCTAL_IPV4_COMPONENT_COLLISION_KEY: &str = "0177";
 
 pub(super) const URL_HEX_IPV4_COMPONENT_COLLISION_KEY: &str = "0x7f";
 
+pub(super) const URL_EMBEDDED_HEX_IPV4_COLLISION_KEY: &str = "7f";
+
+pub(super) const URL_EMBEDDED_OCTAL_IPV4_COLLISION_KEY: &str = "177";
+
 pub(super) const URL_MULTI_OCTET_IPV4_COMPONENT_COLLISION_KEY: &str = "0x100";
 
 pub(super) const URL_IPV6_HEXTET_COLLISION_KEY: &str = "0db8";
+
+pub(super) const URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY: &str = "0db";
 
 pub(super) const URL_IPV6_MULTI_HEXTET_COLLISION_KEY: &str = "0db8:0000";
 
@@ -144,6 +170,10 @@ pub(super) const URL_BARE_PORT_COLLISION_KEY: &str = "08081";
 
 pub(super) const URL_PORT_COLLISION_VALUE: &str = "http://example.com:8081/";
 
+pub(super) const URL_DEFAULT_PORT_FRAGMENT_COLLISION_KEY: &str = "080";
+
+pub(super) const URL_EMBEDDED_PORT_COLLISION_VALUE: &str = "https://example.com:0800/";
+
 pub(super) const URL_COMPLETE_DEFAULT_PORT_COLLISION_KEY: &str = "https://example.com:443/";
 
 pub(super) const HTML_ENTITY_COLLISION_KEY: &str = "abc&def";
@@ -153,6 +183,8 @@ pub(super) const HTML_ENTITY_COLLISION_VALUE: &str = "abc&amp;def";
 pub(super) const UNSUPPORTED_NAMED_ENTITY_COLLISION_KEY: &str = "*";
 
 pub(super) const UNSUPPORTED_NAMED_ENTITY_COLLISION_VALUE: &str = "&ast;";
+
+pub(super) const UNSUPPORTED_NAMED_ENTITY_ESCAPED_VALUE: &str = "&amp;ast;";
 
 pub(super) const HTML_NUMERIC_C1_COLLISION_KEY: &str = "€";
 
@@ -263,7 +295,7 @@ pub(super) fn html_multibyte_boundary_reflection() -> String {
 }
 
 pub(super) fn distant_html_reference_terminator() -> String {
-    format!("{};", "&".repeat(MAX_PROVIDER_RESPONSE_BYTES - 1))
+    format!("&#{};", "1".repeat(MAX_PROVIDER_RESPONSE_BYTES - 3))
 }
 
 pub(super) fn over_window_numeric_html_reflection() -> String {

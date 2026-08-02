@@ -436,6 +436,29 @@ fn web_search_rejects_canonicalized_ipv6_hextet_credential_in_result_host() {
     );
 }
 
+/// INV-035: a credential that becomes a proper substring of one IPv6 hextet
+/// after canonicalization cannot survive in a provider result host.
+#[test]
+fn web_search_rejects_canonicalized_embedded_ipv6_hextet_credential() {
+    let result = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_EMBEDDED_IPV6_HEXTET_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("embedded IPv6 hextet fixture result is admitted");
+    let response = WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMBEDDED_IPV6_HEXTET_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-hextet credential fragment is canonicalized as one
 /// contiguous sequence before comparison with an IPv6 result host.
 #[test]
@@ -649,6 +672,52 @@ fn web_search_rejects_hex_credential_in_canonical_ipv4_component() {
     );
 }
 
+/// INV-035: a provider-added hexadecimal radix prefix cannot conceal a
+/// credential that forms the digits of one legacy IPv4 component.
+#[test]
+fn web_search_rejects_credential_inside_hexadecimal_ipv4_component() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_HEX_AFFIX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("hexadecimal-affix IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMBEDDED_HEX_IPV4_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a provider-added octal radix prefix cannot conceal a credential
+/// that forms the digits of one legacy IPv4 component.
+#[test]
+fn web_search_rejects_credential_inside_octal_ipv4_component() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(FIXTURE_OCTAL_AFFIX_IPV4_RESULT_URL),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("octal-affix IPv4 fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_EMBEDDED_OCTAL_IPV4_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
 /// INV-035: a multi-octet final IPv4 component is preserved as one
 /// credential-derived fragment when compared with a canonical result host.
 #[test]
@@ -711,6 +780,29 @@ fn web_search_rejects_canonicalized_bare_port_credential_in_result_url() {
         .expect("fixture response is admitted");
     let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
         URL_BARE_PORT_COLLISION_KEY.as_bytes().to_vec(),
+    ))
+    .expect("fixture credential is usable");
+
+    assert_eq!(
+        success_evidence(response, &scrubber),
+        Err(WebSearchExecutorError::EvidenceEncoding)
+    );
+}
+
+/// INV-035: a credential normalized to a default HTTP port remains a numeric
+/// fragment when it is embedded in another provider result port.
+#[test]
+fn web_search_rejects_default_port_credential_fragment_in_result_url() {
+    let reflected = WebSearchResult::try_new(WebSearchResultFields {
+        title: String::from(FIXTURE_RESULT_TITLE),
+        url: String::from(URL_EMBEDDED_PORT_COLLISION_VALUE),
+        snippet: String::from(FIXTURE_RESULT_SNIPPET),
+    })
+    .expect("embedded port fixture result is admitted");
+    let response = WebSearchResponse::new(vec![reflected], WebSearchPageCompleteness::Complete)
+        .expect("fixture response is admitted");
+    let scrubber = CredentialScrubber::try_new(&CredentialValue::new(
+        URL_DEFAULT_PORT_FRAGMENT_COLLISION_KEY.as_bytes().to_vec(),
     ))
     .expect("fixture credential is usable");
 

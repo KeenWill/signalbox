@@ -73,9 +73,14 @@ pub(super) fn decode_html_character_references(text: &str) -> Option<DecodedText
             continue;
         };
         let entity = &reference[1..relative_end];
-        let replacement = decode_html_character_reference(entity)?;
-        decoded.push_str(&replacement);
-        changed = true;
+        match decode_html_character_reference(entity) {
+            Some(replacement) => {
+                decoded.push_str(&replacement);
+                changed = true;
+            }
+            None if entity.starts_with('#') => return None,
+            None => decoded.push_str(&reference[..relative_end + 1]),
+        }
         remaining = &reference[relative_end + 1..];
     }
     decoded.push_str(remaining);

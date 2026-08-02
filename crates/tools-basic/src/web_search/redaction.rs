@@ -163,10 +163,16 @@ impl CredentialScrubber {
                 std::net::IpAddr::V6(result_ipv6) => {
                     let result_components = result_ipv6.segments();
                     let result_octets = result_ipv6.octets();
+                    let result_hextets =
+                        result_components.map(|component| format!("{component:x}"));
                     return self.reversible_variants().any(|variant| {
                         let (mixed_components, mixed_octets) =
                             canonicalized_mixed_ipv6_ipv4_tail_fragments(variant);
-                        canonicalized_ipv6_fragments(variant)
+                        canonicalized_ipv6_hextet_text_fragment(variant).is_some_and(|fragment| {
+                            result_hextets
+                                .iter()
+                                .any(|component| component.contains(&fragment))
+                        }) || canonicalized_ipv6_fragments(variant)
                             .into_iter()
                             .any(|fragment| {
                                 result_components

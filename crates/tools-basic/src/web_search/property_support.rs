@@ -30,6 +30,18 @@ pub(super) struct CredentialReflection {
     pub(super) reflection: String,
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct IndependentlyDecodedEvidence {
+    pub(super) results: Vec<IndependentlyDecodedResult>,
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct IndependentlyDecodedResult {
+    pub(super) title: String,
+    pub(super) url: String,
+    pub(super) snippet: String,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum StructuralUrlSlot {
     Username,
@@ -151,7 +163,7 @@ pub(super) fn assert_credential_bearing_url_property() {
                 WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
                     .ok_or_else(|| TestCaseError::fail("generated response must be bounded"))?;
 
-            assert_safe_evidence(success_evidence(response, &scrubber), &scrubber)?;
+            assert_safe_evidence(success_evidence(response, &scrubber), &case.credential)?;
             Ok(())
         })
         .expect("credential-bearing URL grammar satisfies the output property");
@@ -170,7 +182,7 @@ pub(super) fn assert_provider_text_property() {
                 WebSearchResponse::new(vec![result], WebSearchPageCompleteness::Complete)
                     .ok_or_else(|| TestCaseError::fail("generated response must be bounded"))?;
 
-            assert_safe_evidence(success_evidence(response, &scrubber), &scrubber)?;
+            assert_safe_evidence(success_evidence(response, &scrubber), &case.credential)?;
             Ok(())
         })
         .expect("provider-text grammar satisfies the output property");
@@ -296,11 +308,20 @@ fn provider_text_fields(reflection: &str, slot: ProviderTextSlot) -> WebSearchRe
 
 fn assert_safe_evidence(
     evidence: Result<signalbox_application::ToolExecutorEvidence, WebSearchExecutorError>,
-    scrubber: &CredentialScrubber,
+    credential: &CredentialReflection,
 ) -> TestCaseResult {
     match evidence {
         Ok(signalbox_application::ToolExecutorEvidence::CompletedText(content)) => {
-            prop_assert!(!scrubber.contains_credential(&content));
+            let decoded: IndependentlyDecodedEvidence = serde_json::from_str(&content)
+                .map_err(|_| TestCaseError::fail("completed evidence must remain typed JSON"))?;
+            prop_assert_eq!(decoded.results.len(), 1);
+            let result = decoded
+                .results
+                .first()
+                .ok_or_else(|| TestCaseError::fail("generated evidence must retain one result"))?;
+            assert_independent_component_absence(&result.title, credential)?;
+            assert_independent_component_absence(&result.url, credential)?;
+            assert_independent_component_absence(&result.snippet, credential)?;
             Ok(())
         }
         Ok(signalbox_application::ToolExecutorEvidence::KnownFailed { .. })
@@ -312,6 +333,18 @@ fn assert_safe_evidence(
             "unexpected evidence failure: {error:?}"
         ))),
     }
+}
+
+fn assert_independent_component_absence(
+    component: &str,
+    credential: &CredentialReflection,
+) -> TestCaseResult {
+    let component = component.to_ascii_lowercase();
+    let credential_spelling = credential.credential.to_ascii_lowercase();
+    let reflected_spelling = credential.reflection.to_ascii_lowercase();
+    prop_assert!(!component.contains(&credential_spelling));
+    prop_assert!(!component.contains(&reflected_spelling));
+    Ok(())
 }
 
 fn percent_encode(value: &str) -> String {
