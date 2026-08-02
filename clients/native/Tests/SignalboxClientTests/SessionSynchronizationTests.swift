@@ -660,6 +660,50 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
+  func testUnknownModelCallStateKindCountsTowardReplayUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportAtReplay(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 1)
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownModelCallStateEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .replay)
+    )
+  }
+
+  func testUnknownToolBatchStateKindCountsTowardReplayUTF8Capacity() throws {
+    var transport = try SynchronizationFixture.transportAtReplay(
+      cursor: SynchronizationFixture.initialCursor,
+      eventBufferCapacity: SynchronizationFixture.eventByteCapacity(maximumUTF8Bytes: 1)
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.unknownToolBatchStateEvent(
+          cursor: SynchronizationFixture.unknownCursor
+        )
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .replay)
+    )
+  }
+
   func testRetainedDiagnosticHistoryIsBounded() throws {
     var transport = try SynchronizationFixture.transport()
 
@@ -2600,6 +2644,27 @@ final class SessionSynchronizationTests: XCTestCase {
     XCTAssertEqual(transport.machine.diagnostics.last?.kind, .terminalFailure)
   }
 
+  func testUnknownLiveErrorCodeEntersBoundedRecovery() throws {
+    var transport = try SynchronizationFixture.synchronizedTransport(
+      cursor: SynchronizationFixture.initialCursor
+    )
+
+    let effects = transport.send(
+      .frame(
+        generation: SynchronizationFixture.initialGeneration,
+        message: try SynchronizationFixture.futureError()
+      )
+    )
+
+    XCTAssertTrue(SynchronizationFixture.containsRetrySchedule(effects))
+    XCTAssertFalse(SynchronizationFixture.containsTerminalFailure(effects))
+    XCTAssertEqual(
+      transport.machine.phase,
+      SynchronizationFixture.firstRecovery(failedStage: .steady)
+    )
+    XCTAssertEqual(transport.machine.diagnostics.last?.kind, .protocolViolation)
+  }
+
   func testPrimaryDisconnectDuringSideSnapshotIsAttributedToSteadyStage() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(cursor: 10)
 
@@ -2885,6 +2950,34 @@ private enum SynchronizationFixture {
           turnCount: 0,
           entryCount: 0
         )
+      )
+    )
+    return result
+  }
+
+  static func transportAtReplay(
+    cursor: UInt64,
+    eventBufferCapacity: SignalboxSynchronizationEventBufferCapacity
+  ) throws -> ScriptedSynchronizationTransport {
+    var result = try transport(eventBufferCapacity: eventBufferCapacity)
+    _ = result.send(.start)
+    _ = result.send(.connected(generation: initialGeneration))
+    _ = result.send(
+      .frame(
+        generation: initialGeneration,
+        message: try snapshotStart(cursor: cursor)
+      )
+    )
+    _ = result.send(
+      .frame(
+        generation: initialGeneration,
+        message: try modelCallsEnd(count: 0)
+      )
+    )
+    _ = result.send(
+      .frame(
+        generation: initialGeneration,
+        message: try snapshotEnd(cursor: cursor, turnCount: 0, entryCount: 0)
       )
     )
     return result
@@ -3859,6 +3952,18 @@ private enum SynchronizationFixture {
         "type":"error",
         "code":"not_found",
         "message":"fixture session missing"
+      }
+      """
+    )
+  }
+
+  static func futureError() throws -> SignalboxProcessServerMessage {
+    try message(
+      """
+      {
+        "type":"error",
+        "code":"fixture_future_error",
+        "message":"fixture future failure"
       }
       """
     )

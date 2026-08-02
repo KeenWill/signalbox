@@ -1020,8 +1020,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       return enterRecovery(
         stage: failedStage,
         message: message,
-        kind: .protocolViolation,
-        permitsRetry: false
+        kind: .protocolViolation
       )
     }
   }
@@ -2004,8 +2003,8 @@ extension SignalboxProcessSessionEvent {
 extension SignalboxModelCallState {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .unknown(_, let payload):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
     case .terminal(let disposition):
       return disposition.retainedUTF8Bytes
     case .prepared, .inFlight, .cancellationRequested:
@@ -2025,8 +2024,8 @@ extension SignalboxModelCallDisposition {
 
 extension SignalboxToolBatchState {
   fileprivate var retainedUTF8Bytes: UInt {
-    if case .unknown(_, let payload) = self {
-      return payload.encodedUTF8Bytes
+    if case .unknown(let kind, let payload) = self {
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
     }
     return 0
   }
