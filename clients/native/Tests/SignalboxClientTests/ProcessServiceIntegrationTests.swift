@@ -541,6 +541,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testModelUsageKeepsItsTranscriptAnchorAfterNormalization() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithAnchoredUsageAndLaterMessage()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.anchoredUsageTimelineKinds
+    )
+  }
+
   func testUnknownFollowedEventProjectsAsConservativeEvidence() throws {
     let followed = try ProcessProjectionFixture.unknownFollowedEvent()
     let projector = SignalboxProcessTranscriptProjector()
@@ -559,6 +572,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       event.diagnostic,
       ProcessProjectionFixture.futureFollowedModelCallDiagnostic
+    )
+  }
+
+  func testUnknownTerminalDispositionRetainsAttribution() throws {
+    let followed = try ProcessProjectionFixture.unknownDispositionModelCallEvent()
+    let projector = SignalboxProcessTranscriptProjector()
+
+    let event = try XCTUnwrap(projector.projectUnrecognizedFollowedEvent(followed))
+
+    XCTAssertEqual(event.kind, ProcessProjectionFixture.unknownDispositionPresentationKind)
+    XCTAssertEqual(
+      event.diagnostic,
+      ProcessProjectionFixture.unknownDispositionPresentationDiagnostic
     )
   }
 
@@ -813,6 +839,126 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       tool.outputPreview,
       ProcessProjectionFixture.futurePlanEntryReferenceOutput
+    )
+  }
+
+  func testDuplicatePlanReadArgumentKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.duplicatePlanReadArgumentToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.duplicatePlanReadArguments
+    )
+  }
+
+  func testDuplicatePlanWriteArgumentKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.duplicatePlanWriteArgumentToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.duplicatePlanWriteArguments
+    )
+  }
+
+  func testMismatchedPlanWriteResultKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedPlanWriteResultToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateOutput)
+  }
+
+  func testMismatchedPlanWriteTextKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedPlanWriteTextToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.mismatchedPlanCreateOutput)
+  }
+
+  func testPlanReadResultBeforeRequestedCursorKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planReadBeforeCursorToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadBeforeCursorOutput)
+  }
+
+  func testIncompletePlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.incompletePlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.incompletePlanHistoryPreview)
+  }
+
+  func testPlanHistoryMismatchKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.mismatchedPlanHistoryPreview)
+  }
+
+  func testRepeatedPlanHistoryAttemptKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.repeatedPlanHistoryAttemptToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.repeatedPlanHistoryAttemptPreview)
+  }
+
+  func testPlanHistoryDependencyOverflowKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.planHistoryDependencyOverflowToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.planHistoryDependencyOverflowPreview
+    )
+  }
+
+  func testUnrequestedPlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.unrequestedPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.emptyIncludedPlanHistoryOutput)
+  }
+
+  func testCyclicPlanHistoryKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.cyclicPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.cyclicPlanHistoryPreview)
+  }
+
+  func testDenseAcyclicPlanPageUsesTypedEvidence() throws {
+    let record = ProcessProjectionFixture.denseAcyclicPlanToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertNotEqual(tool.outputPreview, ProcessProjectionFixture.denseAcyclicPlanOutput)
+  }
+
+  func testMultilinePlanTextCannotCreateSummaryLabels() throws {
+    let record = ProcessProjectionFixture.multilinePlanCreateToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.multilinePlanArgumentPresentation
+    )
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.multilinePlanOutputPresentation
     )
   }
 
@@ -2672,6 +2818,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       viewModel.latestDiagnostic,
       ProcessProjectionFixture.unknownDispositionDiagnostic
     )
+    let unknown = try ProcessProjectionFixture.onlyUnknownCard(in: viewModel.timeline)
+    XCTAssertEqual(unknown.kind, ProcessProjectionFixture.unknownDispositionPresentationKind)
   }
 
   @MainActor
@@ -5331,6 +5479,11 @@ private enum ProcessProjectionFixture {
   static let futureFollowedModelCallDiagnostic =
     "Turn \(ProcessDriverFixture.turn), model call \(ProcessDriverFixture.modelCall): "
     + "the daemon reported an unrecognized model-call state."
+  static let unknownDispositionPresentationKind =
+    "model_call_transition.disposition.\(unknownDisposition)"
+  static let unknownDispositionPresentationDiagnostic =
+    "Turn \(ProcessDriverFixture.turn), model call \(ProcessDriverFixture.modelCall): "
+    + "the daemon reported an unrecognized terminal disposition."
   static let futureSnapshotStatePresentationKinds = [
     futureTurnStatePresentationKind, futureCurrentModelStatePresentationKind,
   ]
@@ -5353,9 +5506,10 @@ private enum ProcessProjectionFixture {
   static let planGeneration = UInt64(3)
   static let planProvenance = #""provenance":{"turn_id":"\#(planTurnID)","issuing_attempt_id":"\#(planIssuingAttemptID)","request_id":"\#(planProvenanceRequestID)","attempt_id":"\#(planAttemptID)","generation":\#(planGeneration)}"#
   static let planReadArguments = #"{"include_history":true}"#
-  static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[2],"readiness":"waiting"}],"next_after_entry_id":null,"plan_truncated":false,"history":[],"history_truncated":false}"#
+  static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":[{"ordinal":1,"kind":"created","entry_id":1,"text":"Audit protocol",\#(planProvenance)}],"history_truncated":false}"#
   static let planCreateArguments = #"{"kind":"create","text":"Draft protocol"}"#
   static let planCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planProvenance)}}"#
+  static let mismatchedPlanCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Different text",\#(planProvenance)}}"#
   static let planOutputWithoutProvenance =
     #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol"}}"#
   static let planReviseArguments = #"{"kind":"revise","entry_id":1,"text":"Audit protocol"}"#
@@ -5366,6 +5520,10 @@ private enum ProcessProjectionFixture {
   static let planWriteOutput = #"{"event":{"ordinal":4,"kind":"depends_on","entry_id":1,"dependency_id":2,\#(planProvenance)}}"#
   static let malformedPlanArguments = #"{"kind":"set_status","entry_id":0,"status":"completed"}"#
   static let malformedPlanReadArguments = #"{"after_entry_id":0,"unexpected":true}"#
+  static let duplicatePlanReadArguments =
+    #"{"include_history":false,"include_history":true}"#
+  static let duplicatePlanWriteArguments =
+    #"{"kind":"create","text":"First","text":"Second"}"#
   static let malformedPlanReadOutput = #"{"entries":[{"entry_id":0,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
   static let expandedPlanWriteOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planProvenance)},"future_field":"retained"}"#
   static let contradictoryPlanReadCursorOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[],"readiness":"ready"}],"next_after_entry_id":1,"plan_truncated":false,"history":null,"history_truncated":false}"#
@@ -5398,6 +5556,42 @@ private enum ProcessProjectionFixture {
     entries: #"[{"entry_id":1,"text":"First","status":"pending","dependencies":[2],"readiness":"waiting"},{"entry_id":2,"text":"Second","status":"completed","dependencies":[],"readiness":"ready"}]"#
   )
   static let futurePlanEntryReferenceOutput = #"{"event":{"ordinal":2,"kind":"status_changed","entry_id":3,"status":"completed",\#(planProvenance)}}"#
+  static let planReadBeforeCursorArguments =
+    #"{"after_entry_id":1,"include_history":false}"#
+  static let planReadBeforeCursorOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}]"#
+  )
+  static let incompletePlanHistoryOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":2,"text":"Second","status":"pending","dependencies":[],"readiness":"ready"}]"#,
+    history: #"[{"ordinal":2,"kind":"created","entry_id":2,"text":"Second",\#(planProvenance)}]"#
+  )
+  static let mismatchedPlanHistoryOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}]"#,
+    history: #"[{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planProvenance)}]"#
+  )
+  static let repeatedPlanHistoryAttemptOutput = rawPlanReadOutput(
+    entries: #"[{"entry_id":1,"text":"First","status":"pending","dependencies":[],"readiness":"ready"},{"entry_id":2,"text":"Second","status":"pending","dependencies":[],"readiness":"ready"}]"#,
+    history: #"[{"ordinal":1,"kind":"created","entry_id":1,"text":"First",\#(planProvenance)},{"ordinal":2,"kind":"created","entry_id":2,"text":"Second",\#(planProvenance)}]"#
+  )
+  static let planHistoryDependencyOverflowOutput = makePlanHistoryDependencyOverflowOutput()
+  static let emptyIncludedPlanHistoryOutput = rawPlanReadOutput(
+    entries: "[]",
+    history: "[]"
+  )
+  static let cyclicPlanHistoryOutput = makeCyclicPlanHistoryOutput()
+  static let denseAcyclicPlanOutput = makeDenseAcyclicPlanOutput()
+  static let multilinePlanText = "Draft\nHistory"
+  static let multilinePlanArguments = #"{"kind":"create","text":"Draft\nHistory"}"#
+  static let multilinePlanOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft\nHistory",\#(planProvenance)}}"#
+  static let incompletePlanHistoryPreview = rawToolOutputPreview(incompletePlanHistoryOutput)
+  static let mismatchedPlanHistoryPreview = rawToolOutputPreview(mismatchedPlanHistoryOutput)
+  static let repeatedPlanHistoryAttemptPreview = rawToolOutputPreview(
+    repeatedPlanHistoryAttemptOutput
+  )
+  static let planHistoryDependencyOverflowPreview = rawToolOutputPreview(
+    planHistoryDependencyOverflowOutput
+  )
+  static let cyclicPlanHistoryPreview = rawToolOutputPreview(cyclicPlanHistoryOutput)
   static let planReadDisplayName = "Plan read"
   static let planWriteDisplayName = "Plan update"
   static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
@@ -5405,7 +5599,21 @@ private enum ProcessProjectionFixture {
   static let planReviseArgumentPresentation = "Revise entry #1: Audit protocol"
   static let planStatusArgumentPresentation = "Set entry #1 to Completed"
   static let planDependencyArgumentPresentation = "Make entry #1 depend on entry #2"
-  static let planReadOutputPresentation = "Entries\n#1 [In progress, Waiting] Audit protocol\nDependencies: #2\nNext entry: None\nPlan truncated: No\nHistory\nNone\nHistory truncated: No"
+  static let planReadOutputPresentation = """
+    Entries
+    #1 [Pending, Ready] Audit protocol
+    Dependencies: None
+    Next entry: None
+    Plan truncated: No
+    History
+    Event #1: Create entry #1: Audit protocol
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    History truncated: No
+    """
   static let planCreateOutputPresentation = """
     Event #1: Create entry #1: Draft protocol
     Turn: \(planTurnID)
@@ -5432,6 +5640,15 @@ private enum ProcessProjectionFixture {
     """
   static let planDependencyOutputPresentation = """
     Event #4: Make entry #1 depend on entry #2
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    """
+  static let multilinePlanArgumentPresentation = "Create entry: Draft\\nHistory"
+  static let multilinePlanOutputPresentation = """
+    Event #1: Create entry #1: Draft\\nHistory
     Turn: \(planTurnID)
     Issuing attempt: \(planIssuingAttemptID)
     Request: \(planProvenanceRequestID)
@@ -5485,7 +5702,10 @@ private enum ProcessProjectionFixture {
     message: "Fixture transport diagnostic."
   )
   static let neutralToolCardStatus = SignalboxToolCardStatus.completed
-  static let orderedPresentationIDs = [1, 2]
+  static let orderedPresentationIDs = [1, 3]
+  static let anchoredUsageTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .message, .processEvidence, .message,
+  ]
   static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
@@ -6708,6 +6928,95 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithAnchoredUsageAndLaterMessage() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall),
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedUserEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"1",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
   private static func modelUsageSnapshot(
     evidence: [String]
   ) throws -> SignalboxSynchronizationSnapshot {
@@ -7008,6 +7317,106 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func duplicatePlanReadArgumentToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: malformedPlanReadRequestID,
+      toolName: "plan_read",
+      arguments: duplicatePlanReadArguments,
+      output: nil,
+      status: .proposed
+    )
+  }
+
+  static func duplicatePlanWriteArgumentToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: malformedPlanRequestID,
+      toolName: "plan_write",
+      arguments: duplicatePlanWriteArguments,
+      output: nil,
+      status: .proposed
+    )
+  }
+
+  static func mismatchedPlanWriteResultToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReviseRequestID,
+      toolName: "plan_write",
+      arguments: planReviseArguments,
+      output: planCreateOutput,
+      status: .completed
+    )
+  }
+
+  static func mismatchedPlanWriteTextToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: mismatchedPlanCreateOutput,
+      status: .completed
+    )
+  }
+
+  static func planReadBeforeCursorToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: planReadBeforeCursorArguments,
+      output: planReadBeforeCursorOutput,
+      status: .completed
+    )
+  }
+
+  static func incompletePlanHistoryToolRecord() -> SignalboxStoredEvent {
+    planReadToolRecord(output: incompletePlanHistoryOutput)
+  }
+
+  static func mismatchedPlanHistoryToolRecord() -> SignalboxStoredEvent {
+    planReadToolRecord(output: mismatchedPlanHistoryOutput)
+  }
+
+  static func repeatedPlanHistoryAttemptToolRecord() -> SignalboxStoredEvent {
+    planReadToolRecord(output: repeatedPlanHistoryAttemptOutput)
+  }
+
+  static func planHistoryDependencyOverflowToolRecord() -> SignalboxStoredEvent {
+    planReadToolRecord(output: planHistoryDependencyOverflowOutput)
+  }
+
+  static func unrequestedPlanHistoryToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: #"{"include_history":false}"#,
+      output: emptyIncludedPlanHistoryOutput,
+      status: .completed
+    )
+  }
+
+  static func cyclicPlanHistoryToolRecord() -> SignalboxStoredEvent {
+    planReadToolRecord(output: cyclicPlanHistoryOutput)
+  }
+
+  static func denseAcyclicPlanToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: #"{"include_history":false}"#,
+      output: denseAcyclicPlanOutput,
+      status: .completed
+    )
+  }
+
+  static func multilinePlanCreateToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: multilinePlanArguments,
+      output: multilinePlanOutput,
+      status: .completed
+    )
+  }
+
   private static func planToolRecord(
     requestID: String,
     toolName: String,
@@ -7032,12 +7441,66 @@ private enum ProcessProjectionFixture {
   private static let excessivePlanDependencies =
     (2...34).map(String.init).joined(separator: ",")
 
+  private static func makeCyclicPlanHistoryOutput() -> String {
+    let events = [
+      #"{"ordinal":1,"kind":"created","entry_id":1,"text":"First",\#(planProvenanceJSON(attemptOrdinal: 1))}"#,
+      #"{"ordinal":2,"kind":"created","entry_id":2,"text":"Second",\#(planProvenanceJSON(attemptOrdinal: 2))}"#,
+      #"{"ordinal":3,"kind":"depends_on","entry_id":1,"dependency_id":2,\#(planProvenanceJSON(attemptOrdinal: 3))}"#,
+      #"{"ordinal":4,"kind":"depends_on","entry_id":2,"dependency_id":1,\#(planProvenanceJSON(attemptOrdinal: 4))}"#,
+    ].joined(separator: ",")
+    return rawPlanReadOutput(entries: "[]", history: "[\(events)]")
+  }
+
+  private static func makeDenseAcyclicPlanOutput() -> String {
+    let entries = (1...SignalboxProcessProtocol.maximumPlanReadEntries).map { entryID in
+      let dependencies: [Int]
+      switch entryID {
+      case 1:
+        dependencies = []
+      case 2:
+        dependencies = [1]
+      default:
+        dependencies = [entryID - 2, entryID - 1]
+      }
+      let encodedDependencies = dependencies.map(String.init).joined(separator: ",")
+      return #"{"entry_id":\#(entryID),"text":"Entry \#(entryID)","status":"completed","dependencies":[\#(encodedDependencies)],"readiness":"ready"}"#
+    }.joined(separator: ",")
+    return rawPlanReadOutput(entries: "[\(entries)]")
+  }
+
+  private static func makePlanHistoryDependencyOverflowOutput() -> String {
+    let creations = (1...34).map { ordinal in
+      #"{"ordinal":\#(ordinal),"kind":"created","entry_id":\#(ordinal),"text":"Entry \#(ordinal)",\#(planProvenanceJSON(attemptOrdinal: ordinal))}"#
+    }
+    let dependencies = (2...34).map { dependencyID in
+      let ordinal = dependencyID + 33
+      return #"{"ordinal":\#(ordinal),"kind":"depends_on","entry_id":1,"dependency_id":\#(dependencyID),\#(planProvenanceJSON(attemptOrdinal: ordinal))}"#
+    }
+    return rawPlanReadOutput(
+      entries: "[]",
+      history: "[\((creations + dependencies).joined(separator: ","))]"
+    )
+  }
+
+  private static func planProvenanceJSON(attemptOrdinal: Int) -> String {
+    let attemptID = String(
+      format: "aaaaaaaa-5555-4555-8555-%012d",
+      attemptOrdinal
+    )
+    return #""provenance":{"turn_id":"\#(planTurnID)","issuing_attempt_id":"\#(planIssuingAttemptID)","request_id":"\#(planProvenanceRequestID)","attempt_id":"\#(attemptID)","generation":\#(planGeneration)}"#
+  }
+
   private static func rawPlanReadOutput(
     entries: String,
     history: String = "null",
     historyTruncated: Bool = false
   ) -> String {
     #"{"entries":\#(entries),"next_after_entry_id":null,"plan_truncated":false,"history":\#(history),"history_truncated":\#(historyTruncated)}"#
+  }
+
+  private static func rawToolOutputPreview(_ output: String) -> String {
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.count <= 480 ? trimmed : String(trimmed.prefix(480)) + "..."
   }
 
   static func importedContentKinds(
