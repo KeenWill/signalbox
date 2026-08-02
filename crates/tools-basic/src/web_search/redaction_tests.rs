@@ -1,3 +1,4 @@
+use reqwest::StatusCode;
 use signalbox_application::ToolExecutorEvidence;
 use signalbox_domain::ToolExecutionErrorDetail;
 use signalbox_model_runtime::CredentialValue;
@@ -74,6 +75,24 @@ fn web_search_rejects_credential_colliding_with_response_option() {
 
     assert!(collision.is_none());
     assert!(rendered.contains(POPULATED_RESPONSE_OPTION_DEBUG_COLLISION_KEY));
+}
+
+/// INV-035: credentials spanning the populated provider-error `Option`
+/// wrapper and its opaque diagnostic are rejected before public formatting.
+#[test]
+fn web_search_rejects_credential_colliding_with_provider_error_option() {
+    let collision = CredentialScrubber::try_new(&CredentialValue::new(
+        POPULATED_PROVIDER_ERROR_OPTION_DEBUG_COLLISION_KEY
+            .as_bytes()
+            .to_vec(),
+    ));
+    let rendered = format!(
+        "{:?}",
+        WebSearchProviderError::new(StatusCode::BAD_REQUEST.as_u16(), Vec::new())
+    );
+
+    assert!(collision.is_none());
+    assert!(rendered.contains(POPULATED_PROVIDER_ERROR_OPTION_DEBUG_COLLISION_KEY));
 }
 
 /// INV-035: credentials colliding with fixed provider, policy, or

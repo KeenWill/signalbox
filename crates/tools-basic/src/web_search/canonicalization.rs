@@ -92,25 +92,34 @@ pub(super) fn removed_default_port_fragment(value: &str, default_port: u16) -> O
     let leading_port_digits = !authority_context.is_empty()
         && port_fragment.len() < default_port_text.len()
         && default_port_text.starts_with(port_fragment);
-    let trailing_port_digits = authority_context.is_empty()
-        && port_fragment.len() < default_port_text.len()
-        && default_port_text.ends_with(port_fragment);
+    let trailing_port_digits =
+        port_fragment.len() < default_port_text.len() && default_port_text.ends_with(port_fragment);
     if !complete_port && !leading_port_digits && !trailing_port_digits {
         return None;
     }
     path_suffix.map_or_else(
-        || {
-            ((complete_port || leading_port_digits) && !authority_context.is_empty())
-                .then(|| authority_context.to_owned())
-        },
+        || (!authority_context.is_empty()).then(|| authority_context.to_owned()),
         |path| {
-            Some(if complete_port {
-                format!("{authority_context}/{path}")
-            } else {
+            Some(if authority_context.is_empty() {
                 format!("/{path}")
+            } else {
+                format!("{authority_context}/{path}")
             })
         },
     )
+}
+
+pub(super) fn removed_host_trailing_dot_fragment(value: &str) -> Option<String> {
+    let removable_dot = value.match_indices('.').rev().find_map(|(index, _)| {
+        value
+            .as_bytes()
+            .get(index + 1)
+            .is_none_or(|byte| matches!(byte, b'/' | b':' | b'?' | b'#'))
+            .then_some(index)
+    })?;
+    let mut retained = value.to_owned();
+    retained.remove(removable_dot);
+    (!retained.is_empty()).then_some(retained)
 }
 
 pub(super) fn inserted_special_scheme_authority_slash_fragment(value: &str) -> Option<String> {

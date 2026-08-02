@@ -256,6 +256,11 @@ impl CredentialScrubber {
                 {
                     retain_url_collision_variant(&mut variants, &retained);
                 }
+                if removal_facts.host_trailing_dot
+                    && let Some(retained) = removed_host_trailing_dot_fragment(&variant)
+                {
+                    retain_url_collision_variant(&mut variants, &retained);
+                }
                 if removal_facts.query
                     && let Some((retained, _)) = variant.split_once('?')
                 {
