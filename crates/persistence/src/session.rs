@@ -7,9 +7,9 @@ use signalbox_application::SessionReader;
 use signalbox_domain::{
     DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionReconstitutionFailure, SessionReconstitutionInput,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    TranscriptAncestry,
+    SessionId, SessionPlacementEventKind, SessionPlacementVersion, SessionReconstitutionFailure,
+    SessionReconstitutionInput, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, TranscriptAncestry, VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -19,6 +19,7 @@ use crate::create_session_from_imported_frontier::{
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
+    session_placement_event_kind_from_str,
 };
 
 // Applied migrations freeze this legacy storage spelling.
@@ -190,6 +191,17 @@ pub(crate) async fn load_session_from_connection(
             seed_frontier.owning_session_id AS seed_frontier_session_id,
             seed_frontier.context_frontier_id AS seed_frontier_id,
             seed_frontier.member_count AS seed_frontier_member_count
+            ,placement_head.session_id AS current_placement_session_id
+            ,placement_head.current_version AS current_placement_head_version
+            ,placement.session_id AS current_placement_event_session_id
+            ,placement.version AS current_placement_event_version
+            ,placement.prior_version AS current_placement_prior_version
+            ,placement.event_kind AS current_placement_event_kind
+            ,placement.placement_path AS current_placement_path
+            ,placement.root_global_read_intent AS current_placement_root_intent
+            ,placement_native_creation.command_id AS current_native_creation_command_id
+            ,placement_imported_creation.command_id AS current_imported_creation_command_id
+            ,placement_update.command_id AS current_placement_update_command_id
          FROM session AS s
          LEFT JOIN session_current_defaults AS p
            ON p.session_id = s.session_id
@@ -204,6 +216,36 @@ pub(crate) async fn load_session_from_connection(
            ON seed_frontier.owning_session_id = seed.session_id
           AND seed_frontier.context_frontier_id =
                   seed.seed_context_frontier_id
+         LEFT JOIN session_current_placement AS placement_head
+           ON placement_head.session_id = s.session_id
+         LEFT JOIN session_placement_event AS placement
+           ON placement.session_id = placement_head.session_id
+          AND placement.version = placement_head.current_version
+         LEFT JOIN create_session_command AS placement_native_creation
+           ON placement_native_creation.command_id = placement.provenance_command_id
+          AND placement_native_creation.created_session_id = placement.session_id
+          AND placement_native_creation.result_kind = 'applied'
+          AND placement_native_creation.placement_path
+                IS NOT DISTINCT FROM placement.placement_path
+          AND placement_native_creation.root_global_read_intent =
+                placement.root_global_read_intent
+         LEFT JOIN create_session_from_imported_frontier_command
+                   AS placement_imported_creation
+           ON placement_imported_creation.command_id = placement.provenance_command_id
+          AND placement_imported_creation.created_session_id = placement.session_id
+          AND placement_imported_creation.result_kind = 'applied'
+          AND placement.placement_path IS NULL
+          AND NOT placement.root_global_read_intent
+         LEFT JOIN update_session_placement_command AS placement_update
+           ON placement_update.command_id = placement.provenance_command_id
+          AND placement_update.session_id = placement.session_id
+          AND placement_update.result_kind = 'applied'
+          AND placement_update.result_version = placement.version
+          AND placement_update.expected_version = placement.prior_version
+          AND placement_update.replacement_path
+                IS NOT DISTINCT FROM placement.placement_path
+          AND placement_update.root_global_read_intent =
+                placement.root_global_read_intent
          WHERE s.session_id = $1",
     )
     .bind(session_id_to_uuid(requested_session))
@@ -241,9 +283,15 @@ fn decode_complete(
             )
             .into());
         }
+        let placement =
+            decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
         return create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
+            placement.current_session,
+            placement.current_version,
+            placement.event_session,
+            placement.placement,
         )
         .map_err(map_imported_error);
     }
@@ -278,8 +326,9 @@ fn decode_complete(
         required(&row, "dangerous_tool_auto_approval")?,
         row.try_get("system_prompt")?,
     )?;
+    let placement = decode_current_placement(&row, PlacementCreationFamily::Native)?;
 
-    SessionReconstitutionInput::new_with_template_provenance(
+    SessionReconstitutionInput::new_with_template_and_placement(
         requested_session,
         stored_session,
         provenance,
@@ -289,9 +338,93 @@ fn decode_complete(
         defaults_session,
         defaults_version,
         defaults,
+        signalbox_domain::SessionPlacementReconstitutionFacts {
+            current_pointer_session: placement.current_session,
+            current_pointer_version: placement.current_version,
+            selected_event_session: placement.event_session,
+            selected_event: placement.placement,
+        },
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
+}
+
+#[derive(Clone, Copy)]
+enum PlacementCreationFamily {
+    Native,
+    ImportedConversation,
+}
+
+struct DecodedCurrentPlacement {
+    current_session: SessionId,
+    current_version: SessionPlacementVersion,
+    event_session: SessionId,
+    placement: VersionedSessionPlacement,
+}
+
+fn decode_current_placement(
+    row: &PgRow,
+    creation_family: PlacementCreationFamily,
+) -> Result<DecodedCurrentPlacement, SessionRepositoryError> {
+    let current_session = session_id_from_uuid(required(row, "current_placement_session_id")?);
+    let current_version =
+        crate::session_placement::decode_version(required(row, "current_placement_head_version")?)
+            .map_err(|_| SessionCorruption::Inconsistent("current placement head version"))?;
+    let event_session = session_id_from_uuid(required(row, "current_placement_event_session_id")?);
+    let event_version =
+        crate::session_placement::decode_version(required(row, "current_placement_event_version")?)
+            .map_err(|_| SessionCorruption::Inconsistent("current placement version"))?;
+    let prior = row
+        .try_get::<Option<Decimal>, _>("current_placement_prior_version")?
+        .map(crate::session_placement::decode_version)
+        .transpose()
+        .map_err(|_| SessionCorruption::Inconsistent("current placement prior version"))?;
+    let event_kind_spelling: String = required(row, "current_placement_event_kind")?;
+    let event_kind =
+        session_placement_event_kind_from_str(&event_kind_spelling).ok_or_else(|| {
+            SessionRepositoryError::from(SessionCorruption::Unsupported {
+                field: "current placement event kind",
+                value: event_kind_spelling,
+            })
+        })?;
+    let native_creation: Option<Uuid> = row.try_get("current_native_creation_command_id")?;
+    let imported_creation: Option<Uuid> = row.try_get("current_imported_creation_command_id")?;
+    let update: Option<Uuid> = row.try_get("current_placement_update_command_id")?;
+    let receipt_is_valid = match event_kind {
+        SessionPlacementEventKind::Created => {
+            event_version == SessionPlacementVersion::INITIAL
+                && prior.is_none()
+                && update.is_none()
+                && match creation_family {
+                    PlacementCreationFamily::Native => {
+                        native_creation.is_some() && imported_creation.is_none()
+                    }
+                    PlacementCreationFamily::ImportedConversation => {
+                        imported_creation.is_some() && native_creation.is_none()
+                    }
+                }
+        }
+        SessionPlacementEventKind::Updated => {
+            prior.is_some()
+                && update.is_some()
+                && native_creation.is_none()
+                && imported_creation.is_none()
+        }
+    };
+    if !receipt_is_valid {
+        return Err(SessionCorruption::Inconsistent("current placement provenance receipt").into());
+    }
+    let placement = crate::session_placement::decode_placement(
+        row.try_get("current_placement_path")?,
+        required(row, "current_placement_root_intent")?,
+    )
+    .map_err(|_| SessionCorruption::Inconsistent("current placement"))?;
+    Ok(DecodedCurrentPlacement {
+        current_session,
+        current_version,
+        event_session,
+        placement: VersionedSessionPlacement::reconstitute(event_version, placement),
+    })
 }
 
 fn decode_template_provenance(

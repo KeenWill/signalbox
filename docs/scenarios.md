@@ -1138,6 +1138,31 @@ INV-tagged test names and attached doc comments.
   richer prompt/tool composition remains owned by
   [configuration categories](open-questions.md#configuration-categories).
 
+## S36 — Scope a session's cross-session reads by placement path
+
+- **User intent:** Place a session in a dotted project directory so it can read
+  sibling and descendant native conversations without reading above or outside
+  that directory.
+- **Durable commands:** Creation records pathless, scoped, or loudly
+  acknowledged root-global-read placement as history version one.
+  `UpdateSessionPlacement(expected_version, replacement)` appends one explicit
+  next-version event and preserves every prior event.
+- **State transitions:** Pathless retains legacy read behavior. Scoped placement
+  reads the parent directory subtree by one prefix comparison. Root placement
+  reads everything only when the current creation or update event records
+  explicit global-read intent.
+- **Transient updates:** None; a denied selected-transcript read returns typed
+  refusal evidence naming the requester's directory and closed reason.
+- **Owning component:** Domain owns validated paths, events, and scope decision;
+  Postgres owns history and current selection; conversation introspection owns
+  enforcement; process surfaces own creation, update, and display.
+- **Failure behavior:** Empty, malformed, overlong, and over-deep paths fail
+  before command handling. Stale updates are authoritative typed rejections.
+  Ancestor, pathless-target, and disjoint scoped reads are typed refusals rather
+  than empty successful results.
+- **Required invariants:** INV-008, INV-012, INV-050.
+- **Remaining questions:** None.
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input
