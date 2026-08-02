@@ -35,6 +35,7 @@ owned by a sibling page is linked, never restated.
 - [Goal mode](goal-mode.md)
 - [Model-call execution](model-call-execution.md)
 - [Tool loop](tool-loop.md)
+- [Web egress threat model](web-egress-threat-model.md)
 - [Runner protocol and placement](runner-protocol.md)
 - [Review workflows](review-workflows.md)
 - [Persistence protocol](persistence-protocol.md)
