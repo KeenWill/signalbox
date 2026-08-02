@@ -307,8 +307,9 @@ INV-tagged test names and attached doc comments.
   turn.
 - **Required invariants:** INV-007–INV-009, INV-012, INV-025, INV-028, INV-029.
 - **Remaining questions:** Provider/tool-specific cancellation evidence remains
-  open. Child-cancellation propagation is excluded from the baseline and
-  reserved for the open [delegation decision](open-questions.md#delegation).
+  open. Delegated-child propagation follows the explicit relationship policy and
+  user-selected scope owned by
+  [S19](#s19--cancel-a-parent-while-child-work-is-active).
 
 ## S08 — Submit safe-point steering
 
@@ -567,52 +568,53 @@ INV-tagged test names and attached doc comments.
 
 - **User intent:** Assign related work to an independently browsable child and
   receive an explicit result.
-- **Durable commands:** Future delegation commands (open:
-  [delegation](open-questions.md#delegation)) must add a delegated
-  creation-cause variant with an exact durable parent-work identity, create the
-  child with that cause and a parent-work relation, persist task input, record a
-  typed parent wait/reference, and later persist explicit result delivery.
-- **State transitions:** Child creation and execution use a distinct session.
-  Parent wait, resume, result, and cancellation transitions are intentionally
-  not part of the first implementable turn state machine; the delegation
-  decision must add a typed child-wait phase before delegation ships.
-- **Transient updates:** Child progress summaries and presence indicators.
+- **Durable commands:** `spawn_session` creates one child whose delegated cause
+  names the exact parent tool request, with ancestry `None`, task input, and a
+  background or bound relationship. `await_session` records foreground or
+  background delivery; `send_session_message` records either direction, as owned
+  by the
+  [delegation tool contract](spec/tool-loop.md#session-delegation-tool-family).
+- **State transitions:** A foreground wait retains the parent's only active turn
+  slot until an explicit child result arrives. A background wait registers
+  delivery without retaining that slot; result commit creates a durable parent
+  wake. The returned value or typed failure becomes delivered parent content,
+  never child transcript content, under the
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+- **Transient updates:** Best-effort nudges reduce result/message wake latency;
+  the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
   retains independent history.
-- **Failure behavior:** Once the delegation decision defines the feature,
-  restart must restore both child state and parent wait, and child failure must
-  be delivered explicitly rather than disappearing into parent UI state. The
-  current foundation does not permit an implementation to invent those
-  transitions.
+- **Failure behavior:** Restart restores the relationship, exact wait, messages,
+  and undelivered result. Child failure, stop, or cancellation is delivered as a
+  typed outcome. A detached result remains durable after parent termination, as
+  owned by
+  [session delegation](spec/sessions-and-transcript.md#session-delegation).
 - **Required invariants:** INV-003, INV-010, INV-034.
-- **Remaining questions:** The delegation decision must define the child-wait
-  variant, result representation, cancellation propagation, detached work, and
-  resource limits. Any accepted child wait retains the parent session slot
-  unless that decision also defines explicit branching or rebasing.
+- **Remaining questions:** Multi-source or merged transcript ancestry remains
+  separate and unchanged.
 
 ## S19 — Cancel a parent while child work is active
 
 - **User intent:** Stop parent work with a clear understanding of what happens
   to the child.
-- **Durable commands:** No baseline command is exposed for canceling a parent in
-  a child wait. The delegation decision must define and atomically persist
-  parent cancellation together with an explicit child-disposition decision
-  before enabling this scenario.
-- **State transitions:** Reserved for the delegation decision; the first turn
-  state machine has no `AwaitingChild` phase and therefore no incomplete
-  cancellation edge.
-- **Transient updates:** Cancellation progress for each physical attempt.
-- **Owning component:** Daemon applies the eventual delegation policy; executors
-  only respond to cancellation requests.
-- **Failure behavior:** A future policy may keep or cancel the child, but
-  already-issued effects are never undone, the child never silently disappears,
-  and ambiguous child effects remain reconcilable. Implementations must not
-  choose a policy before the delegation decision is accepted.
+- **Durable commands:** Parent stop/cancel carries `ParentAlone` or
+  `ParentAndDescendants`. The latter atomically records a disposition for each
+  evaluated relationship from the durable descendant walk defined by
+  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+- **State transitions:** Background children continue. Bound children apply
+  their separately recorded stop/cancel action; `KeepRunning` is itself a typed
+  disposition. A child is never deleted and may finish after the parent.
+- **Transient updates:** Cancellation progress remains per physical attempt;
+  relationship outcomes are durable updates rather than presence hints.
+- **Owning component:** Daemon applies the recorded policy and user-selected
+  scope; executors respond only to typed stop/cancel authority.
+- **Failure behavior:** Every evaluated child has an explicit reason and exact
+  spawn, parent-event, and command provenance. Already-issued effects are not
+  undone and ambiguous effects remain reconcilable under the
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
-- **Remaining questions:** The delegation decision remains blocking for
-  propagation, detached-child support, result delivery after parent termination,
-  and the parent/child disposition model. Ordinary archive is independently
-  non-cascading; destructive retention remains separate later scope.
+- **Remaining questions:** Ordinary archive remains independently non-cascading;
+  destructive retention remains separate later scope.
 
 ## S20 — Resolve a curated model alias
 
@@ -1164,7 +1166,8 @@ INV-tagged test names and attached doc comments.
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input
-lifecycle. Delegation cancellation, fallback, capability vocabulary, safety
-policy, queue management, archive behavior, and protocol choices remain open. A
-decision that changes a lifecycle should update the affected scenarios and cite
-the invariant changes it requires.
+lifecycle. Fallback, capability vocabulary, safety policy, queue management,
+archive behavior, and other protocol choices remain open; the delegation
+command, result, message, and descendant-scope protocols are committed by S18
+and S19. A decision that changes a lifecycle should update the affected
+scenarios and cite the invariant changes it requires.

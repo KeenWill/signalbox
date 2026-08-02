@@ -1545,7 +1545,8 @@ async fn complete_active_text_turn(
 /// from exact-snapshot reimport while retaining the winner's identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_inv038_reports_inserted_then_already_imported() -> Result<(), Box<dyn Error>> {
+async fn s28_inv038_single_shot_and_chunked_import_resolve_the_same_snapshot()
+-> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let source = ConversationImportSource::new(
@@ -1581,14 +1582,43 @@ async fn s28_inv038_reports_inserted_then_already_imported() -> Result<(), Box<d
         }
     );
 
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(source.as_bytes().len())?);
     connection
         .request_version(
             ProtocolVersion::One,
             2,
-            ClientRequest::ImportConversation {
+            ClientRequest::BeginConversationImport {
                 format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
-                source,
+                declared_size_bytes,
             },
+        )
+        .await?;
+    let begun = response_within(&mut connection).await?;
+    assert_eq!(
+        begun.message(),
+        &ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        }
+    );
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::AppendConversationImport { chunk: source },
+        )
+        .await?;
+    let appended = response_within(&mut connection).await?;
+    assert_eq!(
+        appended.message(),
+        &ServerMessage::ConversationImportAppended {
+            assembled_size_bytes: declared_size_bytes,
+        }
+    );
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::CommitConversationImport {},
         )
         .await?;
     let already_imported = response_within(&mut connection).await?;
@@ -1600,6 +1630,84 @@ async fn s28_inv038_reports_inserted_then_already_imported() -> Result<(), Box<d
     );
 
     drop(connection);
+    runtime.stop().await
+}
+
+/// S28: disconnect discards per-connection partial import state.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let chunk = vec![b'x'];
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(chunk.len())?);
+    let mut abandoned = Connection::connect(runtime.socket()).await?;
+    abandoned
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::BeginConversationImport {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                declared_size_bytes,
+            },
+        )
+        .await?;
+    let begun = response_within(&mut abandoned).await?;
+    assert_eq!(
+        begun.message(),
+        &ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        }
+    );
+    abandoned
+        .request_version(
+            ProtocolVersion::One,
+            2,
+            ClientRequest::AppendConversationImport {
+                chunk: ConversationImportSource::new(chunk.clone()),
+            },
+        )
+        .await?;
+    let appended = response_within(&mut abandoned).await?;
+    assert_eq!(
+        appended.message(),
+        &ServerMessage::ConversationImportAppended {
+            assembled_size_bytes: declared_size_bytes,
+        }
+    );
+    drop(abandoned);
+
+    let mut replacement = Connection::connect(runtime.socket()).await?;
+    replacement
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::BeginConversationImport {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                declared_size_bytes,
+            },
+        )
+        .await?;
+    let replacement_begun = response_within(&mut replacement).await?;
+    assert_eq!(
+        replacement_begun.message(),
+        &ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        }
+    );
+    replacement
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::AbortConversationImport {},
+        )
+        .await?;
+    let aborted = response_within(&mut replacement).await?;
+    assert_eq!(
+        aborted.message(),
+        &ServerMessage::ConversationImportAborted {}
+    );
+
+    drop(replacement);
     runtime.stop().await
 }
 
