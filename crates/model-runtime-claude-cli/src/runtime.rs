@@ -7,8 +7,8 @@ use signalbox_model_runtime::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentOverride,
     CliEnvironmentVariable, CliProcessRequest, DeliveryMode, FastMode, ModelCapabilityCatalog,
     ModelOperation, ModelRuntime, ModelSettings, ObservationSink, PreparationDefect,
-    PreparationFailure, PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, TerminalEvidence,
-    TerminalReport, UnsentCause, execute_cli_process,
+    PreparationFailure, PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, ServiceTier,
+    TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
 };
 use tempfile::TempDir;
 
@@ -354,6 +354,16 @@ impl ClaudeCliRuntime {
 fn claude_reasoning_effort(
     settings: &ModelSettings,
 ) -> Result<Option<&'static str>, PreparationFailure> {
+    match settings.service_tier {
+        None => {}
+        Some(ServiceTier::Anthropic(_))
+        | Some(ServiceTier::OpenAi(_))
+        | Some(ServiceTier::CodexCli(_)) => {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "Claude CLI cannot enforce an explicit service tier".to_string(),
+            });
+        }
+    }
     settings
         .reasoning_level
         .map(|level| match level {
@@ -548,8 +558,9 @@ async fn execute_process<C: Clone + Send + Sync>(
 mod tests {
     use super::{
         CLAUDE_CONFIG_HOME_VARIABLE, CLAUDE_ENVIRONMENT, CliEnvironmentVariable, ModelSettings,
-        ReasoningLevel, claude_reasoning_effort,
+        ReasoningLevel, ServiceTier, claude_reasoning_effort,
     };
+    use signalbox_model_runtime::AnthropicServiceTier;
 
     const DIRECT_CREDENTIAL_VARIABLE: &str = "ANTHROPIC_API_KEY";
 
@@ -590,6 +601,14 @@ mod tests {
     fn claude_effort_mapping_rejects_ultra() {
         let mut settings = ModelSettings::new(64);
         settings.reasoning_level = Some(ReasoningLevel::Ultra);
+
+        assert!(claude_reasoning_effort(&settings).is_err());
+    }
+
+    #[test]
+    fn claude_mapping_rejects_an_explicit_service_tier() {
+        let mut settings = ModelSettings::new(64);
+        settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto));
 
         assert!(claude_reasoning_effort(&settings).is_err());
     }

@@ -23,7 +23,7 @@ use signalbox_model_runtime::{
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
-use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog};
+use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog, ModelCapabilityError};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
@@ -136,6 +136,21 @@ impl std::fmt::Display for AnthropicConstructionError {
 impl std::error::Error for AnthropicConstructionError {}
 
 impl<A: CredentialAccess> AnthropicRuntime<A> {
+    fn apply_model_capabilities<C>(
+        &self,
+        operation: &mut ModelOperation<C>,
+    ) -> Result<(), ModelCapabilityError> {
+        let capabilities = self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)?;
+        if let Some(capabilities) = capabilities {
+            operation.resolved_target = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)?
+                .clone();
+        }
+        Ok(())
+    }
+
     /// Builds the adapter and its HTTP client.
     ///
     /// # Transport discipline: one send is one physical request
@@ -286,11 +301,8 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, AnthropicPreparedRequest<C>> {
         let correlation = operation.correlation.clone();
-        let capabilities = match self
-            .model_capabilities
-            .validate_explicit(&operation.resolved_target, &operation.settings)
-        {
-            Ok(capabilities) => capabilities,
+        match self.apply_model_capabilities(&mut operation) {
+            Ok(()) => {}
             Err(error) => {
                 return PreparationOutcome::Failed {
                     correlation,
@@ -299,21 +311,6 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     },
                 };
             }
-        };
-        if let Some(capabilities) = capabilities {
-            operation.resolved_target = match capabilities
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
-            {
-                Ok(target) => target.clone(),
-                Err(error) => {
-                    return PreparationOutcome::Failed {
-                        correlation,
-                        failure: PreparationFailure::UnsupportedOperation {
-                            detail: error.to_string(),
-                        },
-                    };
-                }
-            };
         }
         let wire_request = match build_request(&operation) {
             Ok(request) => request,
@@ -600,10 +597,13 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
 {
     async fn count_input_tokens(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         mut cancellation: CancellationSignal,
     ) -> InputTokenCountOutcome<C> {
         let correlation = operation.correlation.clone();
+        if self.apply_model_capabilities(&mut operation).is_err() {
+            return InputTokenCountOutcome::Failed { correlation };
+        }
         let wire_request = match build_request(&operation) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
@@ -623,14 +623,17 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         let Some(api_key_header) = sensitive_header(&credential) else {
             return InputTokenCountOutcome::Failed { correlation };
         };
-        let request = match build_http_request(
-            self.client
-                .post(self.count_tokens_url.clone())
-                .header("x-api-key", api_key_header)
-                .header("anthropic-version", self.version_header.clone())
-                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                .body(body),
-        ) {
+        let mut builder = self
+            .client
+            .post(self.count_tokens_url.clone())
+            .header("x-api-key", api_key_header)
+            .header("anthropic-version", self.version_header.clone())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(body);
+        if operation.settings.fast_mode == FastMode::Enabled {
+            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
+        }
+        let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
