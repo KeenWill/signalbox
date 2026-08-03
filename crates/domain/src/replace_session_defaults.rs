@@ -102,7 +102,7 @@ impl ReplaceSessionDefaults {
     ) -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError> {
         if self.session != current.id() {
             return Err(ReplaceSessionDefaultsPreparationError {
-                command: self,
+                command: Box::new(self),
                 provided_session: current.id(),
             });
         }
@@ -307,7 +307,7 @@ impl PreparedReplaceSessionDefaults {
 /// command rejection, and therefore does not claim the command identifier.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaultsPreparationError {
-    command: ReplaceSessionDefaults,
+    command: Box<ReplaceSessionDefaults>,
     provided_session: SessionId,
 }
 
@@ -324,7 +324,7 @@ impl ReplaceSessionDefaultsPreparationError {
 
     /// Returns both unchanged correlation inputs.
     pub fn into_parts(self) -> (ReplaceSessionDefaults, SessionId) {
-        (self.command, self.provided_session)
+        (*self.command, self.provided_session)
     }
 }
 

@@ -1,5 +1,8 @@
 # Model and session settings
 
+Verified against PR #436 (`agent/model-settings-domain`) for its foundation
+proposal and domain/runtime value shapes.
+
 This page is the foundation proposal at the bottom of the model-settings
 implementation stack. It specifies the cross-crate contract for model reasoning,
 speed, and service-tier settings; the per-model capability catalog; durable
@@ -15,11 +18,11 @@ delegation, and Swift user-interface implementation are also outside this stack.
 ## Setting vocabulary
 
 `ReasoningLevel` is one ordered provider-neutral enum. In ascending order it is
-`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`.
-`none` is an explicit provider value and is therefore distinct from an absent
-reasoning setting, which selects the provider default. `ultra` is the Codex
-model effort value. Claude Code's `ultracode` is workflow orchestration rather
-than a model reasoning level and has no representation here.
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. `none`
+is an explicit provider value and is therefore distinct from an absent reasoning
+setting, which selects the provider default. `ultra` is the Codex model effort
+value. Claude Code's `ultracode` is workflow orchestration rather than a model
+reasoning level and has no representation here.
 
 `FastMode` is the closed `disabled` or `enabled` request/session setting. It is
 not a model name and is independent of service tier even where an adapter must
@@ -37,8 +40,8 @@ unsupported rather than a string that can be passed through.
 
 `ModelSettings` is the complete effective value: an optional reasoning level,
 one fast-mode value, and an optional provider-tagged service tier, together with
-the existing generation controls at the Layer-1 runtime boundary. The default
-is absent reasoning, disabled fast mode, and absent service tier.
+the existing generation controls at the Layer-1 runtime boundary. The default is
+absent reasoning, disabled fast mode, and absent service tier.
 
 ## Layers and immutable provenance
 
@@ -114,12 +117,12 @@ source of each value decides the treatment:
 - when the new model exposes no reasoning setting, reasoning clears to the
   provider default;
 - enabled fast mode becomes disabled when unsupported; and
-- an unsupported service tier clears to the provider default because tiers
-  have no cross-provider ordering.
+- an unsupported service tier clears to the provider default because tiers have
+  no cross-provider ordering.
 
 Each adjustment is recorded. Reasoning never clamps upward when any supported
-lower value exists. A caller that explicitly sets the same incompatible value
-in the model-change command receives the ordinary unsupported-value error;
+lower value exists. A caller that explicitly sets the same incompatible value in
+the model-change command receives the ordinary unsupported-value error;
 `inherit` is what identifies incompatibility as model-change-induced.
 
 Alias retargeting is a model change for this rule. Because an alias can acquire
@@ -129,13 +132,12 @@ adjustment with that origin turn.
 
 ## Durable events
 
-Every session defaults epoch stores the complete settings snapshot and its
-layer provenance. Creation records version one. A successful defaults
-replacement that changes a setting or model appends one
-`SessionModelSettingsChanged` event carrying the prior and installed defaults
-versions, prior and installed model selections, prior and installed settings,
-the caller override, and the ordered automatic-adjustment list. The event and
-new current pointer commit atomically.
+Every session defaults epoch stores the complete settings snapshot and its layer
+provenance. Creation records version one. A successful defaults replacement that
+changes a setting or model appends one `SessionModelSettingsChanged` event
+carrying the prior and installed defaults versions, prior and installed model
+selections, prior and installed settings, the caller override, and the ordered
+automatic-adjustment list. The event and new current pointer commit atomically.
 
 Every accepted origin records one `TurnModelSettingsResolved` event carrying the
 accepted-input and turn identities, defaults version, frozen direct selection,
@@ -148,23 +150,23 @@ Adjustment variants are closed: `reasoning_level_clamped { from, to }`,
 `reasoning_level_cleared { from }`, `fast_mode_disabled`, and
 `service_tier_cleared { from }`. Stored and wire representations use distinct
 types but preserve every field. Equal durable-command replay returns the first
-recorded result and events; conflicting override provenance is conflicting
-reuse (INV-012).
+recorded result and events; conflicting override provenance is conflicting reuse
+(INV-012).
 
 ## Adapter translation
 
 Mappings are exhaustive tables evaluated during preparation:
 
-| Domain level | Anthropic | OpenAI Chat Completions | Codex CLI | Claude Code CLI |
-| --- | --- | --- | --- | --- |
-| `none` | unsupported | `none` | `none` | unsupported |
-| `minimal` | unsupported | `minimal` | `minimal` | unsupported |
-| `low` | `low` | `low` | `low` | `low` |
-| `medium` | `medium` | `medium` | `medium` | `medium` |
-| `high` | `high` | `high` | `high` | `high` |
-| `xhigh` | `xhigh` | `xhigh` | `xhigh` | `xhigh` |
-| `max` | `max` | `max` | `max` | `max` |
-| `ultra` | unsupported | unsupported | `ultra` | unsupported |
+| Domain level | Anthropic   | OpenAI Chat Completions | Codex CLI | Claude Code CLI |
+| ------------ | ----------- | ----------------------- | --------- | --------------- |
+| `none`       | unsupported | `none`                  | `none`    | unsupported     |
+| `minimal`    | unsupported | `minimal`               | `minimal` | unsupported     |
+| `low`        | `low`       | `low`                   | `low`     | `low`           |
+| `medium`     | `medium`    | `medium`                | `medium`  | `medium`        |
+| `high`       | `high`      | `high`                  | `high`    | `high`          |
+| `xhigh`      | `xhigh`     | `xhigh`                 | `xhigh`   | `xhigh`         |
+| `max`        | `max`       | `max`                   | `max`     | `max`           |
+| `ultra`      | unsupported | unsupported             | `ultra`   | unsupported     |
 
 Anthropic sends effort as `output_config.effort`, fast mode as `speed: "fast"`
 with the required public beta header, and its exact service-tier spelling. Fast
@@ -177,9 +179,9 @@ and every other simultaneous explicit tier conflicts.
 
 Codex CLI passes the closed effort string through a fixed `--config` argument.
 It enables the `fast_mode` feature whenever it passes a tier, preventing the CLI
-from silently dropping the field. Fast disabled admits `default` or `flex`;
-fast enabled admits `priority`; every conflicting combination rejects before
-spawn. The legacy tier spelling `fast` is never emitted. Output-token ceiling,
+from silently dropping the field. Fast disabled admits `default` or `flex`; fast
+enabled admits `priority`; every conflicting combination rejects before spawn.
+The legacy tier spelling `fast` is never emitted. Output-token ceiling,
 temperature, top-p, and stop sequences remain advisory because this CLI exposes
 no enforcing controls for them.
 
@@ -197,23 +199,24 @@ Protocol version one adds a capability-catalog list request and ordered item
 stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
 unsupported-setting results, and the two durable settings events above. The
-protocol freeze condition has not occurred, so the same-tree protocol changes
-in place.
+protocol freeze condition has not occurred, so the same-tree protocol changes in
+place.
 
 The capability projection never exposes a mapped fast serving identity. Client
 choices name only the durable direct selection and supported setting values.
 
-**Committed unimplemented functionality (Swift settings UI).** No present
-Swift user interface reads this capability catalog, submits session or per-call
-settings, or presents automatic adjustments. A future Swift UI must derive
-every offered value from the daemon-provided per-model capability record and
-must preserve explicit-versus-inherited override provenance. No present Swift
-screen provides this functionality.
+**Committed unimplemented functionality (Swift settings UI).** No present Swift
+user interface reads this capability catalog, submits session or per-call
+settings, or presents automatic adjustments. A future Swift UI must derive every
+offered value from the daemon-provided per-model capability record and must
+preserve explicit-versus-inherited override provenance. No present Swift screen
+provides this functionality.
 
 ## Open edges
 
 Compaction threshold, target size, and never-compact/full-context controls are
-deferred to the [session-runtime settings question](../open-questions.md#configuration-categories).
+deferred to the
+[session-runtime settings question](../open-questions.md#configuration-categories).
 Provider reasoning summaries, thinking display, verbosity, prompt caching,
 retention, inference geography, task budgets, and tool-choice subcontrols are
 not committed by this contract.

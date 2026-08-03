@@ -189,11 +189,11 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   Reasoning level, fast mode, and provider-tagged service tier are owned by
   [model and session settings](spec/model-session-settings.md). Compaction
   threshold, target size, and never-compact/full-context controls remain a
-  separate committed follow-on slice.
-  Static copy-on-create session templates compose model selection, bounded
-  system prompt, dangerous-tool blanket, and the model-settings layer owned by
-  that contract; every other richer composition or configuration category stays
-  blocked here. (S02, S05, S13–S16, S34, S35, S37)
+  separate committed follow-on slice. Static copy-on-create session templates
+  compose model selection, bounded system prompt, dangerous-tool blanket, and
+  the model-settings layer owned by that contract; every other richer
+  composition or configuration category stays blocked here. (S02, S05, S13–S16,
+  S34, S35, S37)
 
 ## Template storage and authoring
 

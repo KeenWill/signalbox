@@ -1175,18 +1175,18 @@ INV-tagged test names and attached doc comments.
   carries an optional per-call override and freezes one complete effective
   value. Steering inherits its source turn and carries no override.
 - **State transitions:** An explicit unsupported value rejects before command
-  effects or provider preparation. A model-change-induced incompatibility
-  clamps reasoning downward, disables fast mode, or clears service tier, then
-  records the exact adjustment. Alias retargeting applies the same rule at input
+  effects or provider preparation. A model-change-induced incompatibility clamps
+  reasoning downward, disables fast mode, or clears service tier, then records
+  the exact adjustment. Alias retargeting applies the same rule at input
   acceptance. A declared fast serving target is authorized lineage; no
   undeclared target or suffix is.
 - **Transient updates:** None. Capability discovery is a read-only projection;
   settings, provenance, and adjustments are durable facts.
 - **Owning component:** Domain owns setting values, precedence, compatibility,
-  and adjustment events; daemon configuration owns model capabilities and
-  copied global/profile layers; Postgres owns epochs and origin records; the
-  process protocol exposes the catalog and commands; provider adapters own
-  exhaustive translations.
+  and adjustment events; daemon configuration owns model capabilities and copied
+  global/profile layers; Postgres owns epochs and origin records; the process
+  protocol exposes the catalog and commands; provider adapters own exhaustive
+  translations.
 - **Failure behavior:** Explicit unsupported reasoning, fast, service-tier, or
   adapter-specific combinations remain distinct typed invalid requests. Missing
   or contradictory capability declarations reject configuration. A provider

@@ -227,7 +227,7 @@ impl SubmitInput {
                     acceptance_position,
                     turn,
                     queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
-                    origin_configuration,
+                    origin_configuration: Box::new(origin_configuration),
                     applied_interrupt: None,
                 },
             )),
@@ -472,7 +472,7 @@ impl SubmitInput {
                             acceptance_position,
                             turn,
                             queue_order,
-                            origin_configuration,
+                            origin_configuration: Box::new(origin_configuration),
                             applied_interrupt: Some(Box::new(applied_interrupt)),
                         },
                     )),
@@ -607,7 +607,7 @@ impl SubmitInput {
                             acceptance_position,
                             turn,
                             queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
-                            origin_configuration,
+                            origin_configuration: Box::new(origin_configuration),
                             applied_interrupt: None,
                         },
                     )),
@@ -754,7 +754,7 @@ pub struct SubmitInputTurnOriginAppliedResult {
     acceptance_position: SessionInputPosition,
     turn: TurnId,
     queue_order: AcceptedInputQueueOrder,
-    origin_configuration: OriginConfiguration,
+    origin_configuration: Box<OriginConfiguration>,
     applied_interrupt: Option<Box<AppliedInterruptCommandResult>>,
 }
 
@@ -1036,7 +1036,7 @@ struct SubmitInputTurnOriginReconstitutionFacts {
 
 #[derive(Clone, Debug)]
 enum TurnOriginProvenance {
-    Submit(ReconstitutedSubmitInput),
+    Submit(Box<ReconstitutedSubmitInput>),
     Goal(GoalTurnOriginFacts),
 }
 
@@ -1219,7 +1219,7 @@ impl SubmitInputTurnOriginReconstitutionInput {
         } = input;
         Self {
             chain: vec![SubmitInputTurnOriginReconstitutionFacts {
-                provenance: TurnOriginProvenance::Submit(receipt),
+                provenance: TurnOriginProvenance::Submit(Box::new(receipt)),
                 lifecycle,
                 queue_accepted_input,
                 queue_session,
@@ -1286,7 +1286,7 @@ impl SubmitInputTurnOriginReconstitutionInput {
             disposition,
         } = source_terminal;
         origin.chain.push(SubmitInputTurnOriginReconstitutionFacts {
-            provenance: TurnOriginProvenance::Submit(receipt),
+            provenance: TurnOriginProvenance::Submit(Box::new(receipt)),
             lifecycle,
             queue_accepted_input,
             queue_session,
@@ -2193,7 +2193,7 @@ impl SubmitInputReconstitutionInput {
                         acceptance_position: accepted_position,
                         turn: result_turn,
                         queue_order,
-                        origin_configuration,
+                        origin_configuration: Box::new(origin_configuration),
                         applied_interrupt,
                     },
                 ))
@@ -3480,17 +3480,21 @@ mod tests {
         source
             .chain
             .push(super::SubmitInputTurnOriginReconstitutionFacts {
-                provenance: super::TurnOriginProvenance::Submit(ReconstitutedSubmitInput {
-                    command,
-                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
-                        super::SubmitInputPendingSteeringAppliedResult {
-                            accepted_input,
-                            session: session_id(1),
-                            acceptance_position: position,
-                            binding: SteeringBinding::new(source_turn),
-                        },
-                    )),
-                }),
+                provenance: super::TurnOriginProvenance::Submit(Box::new(
+                    ReconstitutedSubmitInput {
+                        command,
+                        result: SubmitInputResult::Applied(
+                            SubmitInputAppliedResult::PendingSteering(
+                                super::SubmitInputPendingSteeringAppliedResult {
+                                    accepted_input,
+                                    session: session_id(1),
+                                    acceptance_position: position,
+                                    binding: SteeringBinding::new(source_turn),
+                                },
+                            ),
+                        ),
+                    },
+                )),
                 lifecycle: AcceptedInputLifecycle::new(
                     accepted_input,
                     AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
