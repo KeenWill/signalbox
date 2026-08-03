@@ -49,6 +49,26 @@ finishing a milestone.
   than running it unattended; report the wave history so far at the pause.
   Non-core pull requests keep the adaptive wave rule in `AGENTS.md` unchanged.
 
+### Long-running commands
+
+- Describe a long-running background command as progressing only on advancing
+  evidence: process CPU time increasing between two samples, output growing, or
+  a progress counter moving. Absence of failures is not progress, and neither is
+  silence.
+- Before electing to wait on a background run, sample the process itself —
+  elapsed and CPU time, for example `ps -o etime,time -p <pid>` — and record
+  what that sample showed, so the next check has a prior observation to compare
+  against.
+- A run whose CPU time and output have not advanced across two samples roughly
+  five minutes apart is presumed wedged, not slow. Capture state first — process
+  table, container status, output tail — then kill the run and its containers,
+  remediate, and rerun the targeted subset before the full suite. Never wait for
+  a zero-CPU command to exit on its own.
+- Before launching a heavyweight suite, find and kill the leaked runs and
+  containers an earlier turn left behind. A suite queued behind an abandoned run
+  of its own waits on resources that run still holds, advances not at all, and
+  reports no failure — the case these rules exist for.
+
 ## Finishing
 
 A milestone is complete when all of its pull requests are finished (per
