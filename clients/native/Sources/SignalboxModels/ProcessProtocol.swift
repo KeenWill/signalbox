@@ -908,6 +908,7 @@ public struct SignalboxToolRequestDecided: Decodable, Equatable, Sendable {
 /// introducing a presentation contract ahead of that work.
 public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
   public let rawValue: [String: SignalboxJSONValue]
+  private let validatedForSelectionID: SignalboxCanonicalUUID?
 
   public init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
@@ -949,6 +950,16 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
       )
     }
     rawValue = payload.payload
+    validatedForSelectionID = validatedFor
+  }
+
+  fileprivate func matches(_ modelSelection: SignalboxModelSelection) -> Bool {
+    switch (modelSelection, validatedForSelectionID) {
+    case (.direct(let selectionID), .some(let validatedForSelectionID)):
+      return selectionID == validatedForSelectionID
+    case (.direct, .none), (.alias, _):
+      return true
+    }
   }
 }
 
@@ -1236,13 +1247,25 @@ public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
       decoder: decoder
     )
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
-    defaultsVersion = try container.decode(SignalboxCanonicalUInt64.self, forKey: .defaultsVersion)
-    modelSelection = try container.decode(SignalboxModelSelection.self, forKey: .modelSelection)
-    modelSettings = try container.decode(
+    let decodedModelSelection = try container.decode(
+      SignalboxModelSelection.self,
+      forKey: .modelSelection
+    )
+    let decodedModelSettings = try container.decode(
       SignalboxModelSettingsSnapshot.self,
       forKey: .modelSettings
     )
+    guard decodedModelSettings.matches(decodedModelSelection) else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .modelSettings,
+        in: container,
+        debugDescription: "Model settings were validated for another direct selection."
+      )
+    }
+    sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
+    defaultsVersion = try container.decode(SignalboxCanonicalUInt64.self, forKey: .defaultsVersion)
+    modelSelection = decodedModelSelection
+    modelSettings = decodedModelSettings
     dangerousToolAutoApproval = try container.decode(
       Bool.self,
       forKey: .dangerousToolAutoApproval

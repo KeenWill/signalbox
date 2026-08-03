@@ -71,6 +71,32 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testSessionDefaultsRejectSettingsValidatedForAnotherDirectModel() {
+    let modelSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        validatedForSelectionID: "\"\(sessionID)\""
+      ),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "model_settings":\(modelSettings),
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
   func testSessionCreatedRequiresTheModelSettingsSnapshot() throws {
     let encoded = Data(
       """
