@@ -8372,6 +8372,9 @@ where
                 InternalDiagnostic::SubmitInputIdentityCollision,
             )
         }
+        SubmitInputRepositoryError::UnsupportedModelSetting(error) => {
+            ProtocolError::rejected(wire_unsupported_model_setting(error))
+        }
         SubmitInputRepositoryError::Corruption(_) => internal_protocol_error(
             Some(session_id.into_uuid()),
             InternalDiagnostic::SubmitInputCorruption,
@@ -14032,7 +14035,7 @@ context_window_tokens = 200000
         let command = DurableCommandId::from_uuid(Uuid::from_u128(2));
         let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(3));
         let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
-        let prior_version = SessionConfigurationDefaultsVersion::initial();
+        let prior_version = SessionConfigurationDefaultsVersion::first();
         let installed_version = prior_version
             .checked_next()
             .expect("the initial defaults version has a successor");
@@ -14080,7 +14083,7 @@ context_window_tokens = 200000
         let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
         let turn = TurnId::from_uuid(Uuid::from_u128(6));
         let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
-        let installed_version = SessionConfigurationDefaultsVersion::initial();
+        let installed_version = SessionConfigurationDefaultsVersion::first();
         let caller_override = ModelSettingsOverlay::inherit_all();
         let settings = ValidatedModelSettings::provider_defaults();
         let resolved = TurnModelSettingsResolved::try_new(
