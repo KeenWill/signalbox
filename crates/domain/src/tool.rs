@@ -13,8 +13,6 @@ use crate::{
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_NAME_BYTES: usize = 64;
-const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1024;
-const MAX_TOOL_DECISION_RATIONALE_BYTES: usize = 4096;
 const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
 
@@ -605,12 +603,12 @@ pub enum ToolApprovalDecider {
 pub struct ToolDecisionRationale(String);
 
 impl ToolDecisionRationale {
+    /// Maximum admitted UTF-8 byte length.
+    pub const MAX_UTF8_BYTES: usize = 4096;
+
     /// Admits nonempty bounded text without U+0000.
     pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError> {
-        if value.is_empty()
-            || value.len() > MAX_TOOL_DECISION_RATIONALE_BYTES
-            || value.contains('\0')
-        {
+        if value.is_empty() || value.len() > Self::MAX_UTF8_BYTES || value.contains('\0') {
             Err(ToolDecisionRationaleError { value })
         } else {
             Ok(Self(value))
@@ -650,7 +648,8 @@ impl std::fmt::Display for ToolDecisionRationaleError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "tool decision rationale must be nonempty, at most {MAX_TOOL_DECISION_RATIONALE_BYTES} bytes, and contain no U+0000"
+            "tool decision rationale must be nonempty, at most {} bytes, and contain no U+0000",
+            ToolDecisionRationale::MAX_UTF8_BYTES
         )
     }
 }
@@ -777,11 +776,14 @@ impl std::error::Error for DelegateToolApprovalError {}
 pub struct ToolDenialReason(String);
 
 impl ToolDenialReason {
+    /// Maximum admitted UTF-8 byte length.
+    pub const MAX_UTF8_BYTES: usize = 1024;
+
     /// Checks length, surrounding POSIX whitespace, and control characters.
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError> {
         let failure = if value.is_empty() {
             Some(ToolDenialReasonFailure::Empty)
-        } else if value.len() > MAX_TOOL_DENIAL_REASON_BYTES {
+        } else if value.len() > Self::MAX_UTF8_BYTES {
             Some(ToolDenialReasonFailure::TooLong { bytes: value.len() })
         } else if has_surrounding_posix_whitespace(&value) {
             Some(ToolDenialReasonFailure::SurroundingWhitespace)

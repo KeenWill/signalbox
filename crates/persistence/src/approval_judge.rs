@@ -19,12 +19,14 @@ use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
+        ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, session_id_to_uuid,
+        tool_approval_decision_source_to_str, tool_request_id_to_uuid, turn_id_to_uuid,
     },
     model_execution::{lock_session, resolve_session_credential},
+    outbox::{self, OutboxEvent},
     tool_loop::{ToolLoopRepositoryError, load_active_batch_from_connection},
 };
 
@@ -439,10 +441,13 @@ impl PostgresApprovalJudgeRepository {
                     "INSERT INTO tool_approval_decision
                         (request_id, decision_kind, decision_source, denial_reason,
                          delegate_model_selection_id, delegate_model_call_id, rationale)
-                     VALUES ($1, $2, 'delegate', $3, $4, $5, $6)",
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 )
                 .bind(tool_request_id_to_uuid(resolution.request()))
                 .bind(decision_kind)
+                .bind(tool_approval_decision_source_to_str(
+                    ToolApprovalDecisionSourceStorageKind::Delegate,
+                ))
                 .bind(denial_reason)
                 .bind(prepared.selection.into_uuid())
                 .bind(prepared.call.into_uuid())
@@ -450,6 +455,15 @@ impl PostgresApprovalJudgeRepository {
                 .execute(&mut *transaction)
                 .await?;
                 persist_successor_phase(&mut transaction, &decision).await?;
+                outbox::append(
+                    &mut transaction,
+                    OutboxEvent::ToolApprovalDecided {
+                        session: prepared.request.session(),
+                        turn: prepared.request.turn(),
+                        request: resolution.request(),
+                    },
+                )
+                .await?;
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => CompleteApprovalJudgeOutcome::EscalatedToHuman,

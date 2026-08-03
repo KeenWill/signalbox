@@ -39,6 +39,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     public let output: String?
     public let statusUpdates: [String]
     public let decisionReason: String?
+    public let approvalDecider: String?
+    public let approvalRationale: String?
     public let childSessionID: SignalboxSessionID?
     public let decisionAvailable: Bool
 
@@ -51,6 +53,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         output: String?,
         statusUpdates: [String],
         decisionReason: String?,
+        approvalDecider: String? = nil,
+        approvalRationale: String? = nil,
         childSessionID: SignalboxSessionID?,
         decisionAvailable: Bool = true
     ) {
@@ -62,6 +66,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         self.output = output
         self.statusUpdates = statusUpdates
         self.decisionReason = decisionReason
+        self.approvalDecider = approvalDecider
+        self.approvalRationale = approvalRationale
         self.childSessionID = childSessionID
         self.decisionAvailable = decisionAvailable
     }
