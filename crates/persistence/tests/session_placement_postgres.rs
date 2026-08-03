@@ -54,6 +54,10 @@ const ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x111;
 const ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED: u128 = 0x227;
 const ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED: u128 = 0x12d;
 const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
+const ARBITRARY_LAGGING_HEAD_READ_REJECTION_COMMAND_ID_SEED: u128 = 0x135;
+const ARBITRARY_LAGGING_HEAD_READ_LATER_UPDATE_COMMAND_ID_SEED: u128 = 0x136;
+const ARBITRARY_INITIAL_EVENT_SHAPE_SESSION_ID_SEED: u128 = 0x232;
+const ARBITRARY_INITIAL_EVENT_SHAPE_CREATION_COMMAND_ID_SEED: u128 = 0x137;
 const ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED: u128 = 0x223;
 const ARBITRARY_APPLIED_REPLAY_CREATION_COMMAND_ID_SEED: u128 = 0x125;
 const ARBITRARY_APPLIED_REPLAY_UPDATE_COMMAND_ID_SEED: u128 = 0x126;
@@ -553,6 +557,112 @@ async fn s36_inv002_inv012_creation_replay_rejects_a_missing_current_placement_h
         panic!("a missing placement head fails creation replay with typed corruption")
     };
     assert_eq!(field, "current_placement_head_version");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+struct InitialPlacementEventShapeFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    session: SessionId,
+    creation: signalbox_domain::PreparedCreateSession,
+}
+
+async fn initial_placement_event_shape_fixture()
+-> Result<InitialPlacementEventShapeFixture, Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session = session(ARBITRARY_INITIAL_EVENT_SHAPE_SESSION_ID_SEED);
+    let creation = creation(
+        command(ARBITRARY_INITIAL_EVENT_SHAPE_CREATION_COMMAND_ID_SEED),
+        session,
+        SessionPlacement::pathless(),
+    );
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation.clone())
+        .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_placement_event DISABLE TRIGGER USER;
+         DO $$
+         DECLARE shape_constraint name;
+         BEGIN
+             SELECT conname INTO STRICT shape_constraint
+               FROM pg_constraint
+              WHERE conrelid = 'session_placement_event'::regclass
+                AND contype = 'c'
+                AND position('event_kind' IN pg_get_constraintdef(oid)) > 0
+                AND position('prior_version' IN pg_get_constraintdef(oid)) > 0;
+             EXECUTE format(
+                 'ALTER TABLE session_placement_event DROP CONSTRAINT %I',
+                 shape_constraint
+             );
+         END $$;",
+    )
+    .execute(&pool)
+    .await?;
+    Ok(InitialPlacementEventShapeFixture {
+        container,
+        pool,
+        session,
+        creation,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_native_creation_replay_rejects_initial_placement_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = initial_placement_event_shape_fixture().await?;
+    sqlx::query(
+        "UPDATE session_placement_event
+            SET prior_version = 1
+          WHERE session_id = $1 AND version = 1",
+    )
+    .bind(*fixture.session.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+        .handle(fixture.creation)
+        .await
+        .expect_err("native creation replay rejects an initial placement predecessor");
+    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(reason)) =
+        error
+    else {
+        panic!("a malformed initial predecessor fails creation replay with typed corruption")
+    };
+    assert_eq!(reason, "initial placement effect");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_native_creation_replay_rejects_initial_placement_event_kind()
+-> Result<(), Box<dyn Error>> {
+    let fixture = initial_placement_event_shape_fixture().await?;
+    sqlx::query(
+        "UPDATE session_placement_event
+            SET event_kind = 'updated'
+          WHERE session_id = $1 AND version = 1",
+    )
+    .bind(*fixture.session.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+        .handle(fixture.creation)
+        .await
+        .expect_err("native creation replay rejects an updated initial placement event");
+    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(reason)) =
+        error
+    else {
+        panic!("a malformed initial event kind fails creation replay with typed corruption")
+    };
+    assert_eq!(reason, "initial placement effect");
 
     fixture.pool.close().await;
     drop(fixture.container);
@@ -1147,7 +1257,7 @@ async fn s36_inv012_applied_update_replay_requires_the_event_to_reach_the_curren
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
         panic!("a lagging placement head fails applied replay with typed corruption")
     };
-    assert_eq!(reason, "applied event not reached by placement head");
+    assert_eq!(reason, "session placement head behind event history");
 
     pool.close().await;
     drop(container);
@@ -1159,6 +1269,8 @@ struct LaggingPlacementHeadFixture {
     pool: PgPool,
     session: SessionId,
     creation_command: DurableCommandId,
+    applied_update: UpdateSessionPlacement,
+    rejected_update: UpdateSessionPlacement,
 }
 
 async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture, Box<dyn Error>> {
@@ -1172,19 +1284,35 @@ async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture,
             SessionPlacement::pathless(),
         ))
         .await?;
-    SessionPlacementRepository::new(pool.clone())
+    let repository = SessionPlacementRepository::new(pool.clone());
+    let applied_update = UpdateSessionPlacement::new(
+        command(ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED),
+        session,
+        SessionPlacementVersion::INITIAL,
+        scoped("projects.foo.current"),
+    );
+    repository.handle(applied_update.clone()).await?;
+    let rejected_update = UpdateSessionPlacement::new(
+        command(ARBITRARY_LAGGING_HEAD_READ_REJECTION_COMMAND_ID_SEED),
+        session,
+        SessionPlacementVersion::try_from_u64(3).expect("fixture mismatch version is positive"),
+        scoped("projects.foo.rejected"),
+    );
+    repository.handle(rejected_update.clone()).await?;
+    repository
         .handle(UpdateSessionPlacement::new(
-            command(ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED),
+            command(ARBITRARY_LAGGING_HEAD_READ_LATER_UPDATE_COMMAND_ID_SEED),
             session,
-            SessionPlacementVersion::INITIAL,
-            scoped("projects.foo.current"),
+            SessionPlacementVersion::try_from_u64(2)
+                .expect("fixture successor predecessor is positive"),
+            scoped("projects.foo.later"),
         ))
         .await?;
     sqlx::query("ALTER TABLE session_current_placement DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query(
-        "UPDATE session_current_placement SET current_version = 1
+        "UPDATE session_current_placement SET current_version = 2
           WHERE session_id = $1",
     )
     .bind(*session.as_uuid())
@@ -1195,6 +1323,8 @@ async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture,
         pool,
         session,
         creation_command,
+        applied_update,
+        rejected_update,
     })
 }
 
@@ -1263,6 +1393,44 @@ async fn s36_inv002_inv012_creation_replay_rejects_a_placement_head_behind_event
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_applied_update_replay_rejects_a_head_behind_event_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = lagging_placement_head_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .handle(fixture.applied_update)
+        .await
+        .expect_err("applied update replay rejects a head behind append-only history");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a lagging placement head fails applied update replay with typed corruption")
+    };
+    assert_eq!(reason, "session placement head behind event history");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_rejected_update_replay_rejects_a_head_behind_event_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = lagging_placement_head_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .handle(fixture.rejected_update)
+        .await
+        .expect_err("rejected update replay rejects a head behind append-only history");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a lagging placement head fails rejected update replay with typed corruption")
+    };
+    assert_eq!(reason, "session placement head behind event history");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
@@ -1308,7 +1476,7 @@ async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reac
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
         panic!("a lagging placement head fails rejected replay with typed corruption")
     };
-    assert_eq!(reason, "rejection event not reached by placement head");
+    assert_eq!(reason, "session placement head behind event history");
 
     pool.close().await;
     drop(container);

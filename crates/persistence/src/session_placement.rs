@@ -726,7 +726,13 @@ async fn load_record(
                 event.event_kind AS result_event_kind,
                 event.placement_path AS result_path,
                 event.root_global_read_intent AS result_root_intent,
-                event.provenance_command_id AS result_provenance_command_id
+                event.provenance_command_id AS result_provenance_command_id,
+                EXISTS (
+                    SELECT 1
+                      FROM session_placement_event AS later_event
+                     WHERE later_event.session_id = head.session_id
+                       AND later_event.version > head.current_version
+                ) AS current_placement_later_event_exists
            FROM update_session_placement_command AS command
            LEFT JOIN session_current_placement AS head
              ON head.session_id = command.session_id
@@ -742,6 +748,17 @@ async fn load_record(
         return Ok(None);
     };
     let session = session_id_from_uuid(row.try_get("session_id")?);
+    let history_head_state = PlacementHistoryHeadState::from_later_event_exists(
+        row.try_get("current_placement_later_event_exists")?,
+    );
+    match history_head_state {
+        PlacementHistoryHeadState::MatchesLatestEvent => {}
+        PlacementHistoryHeadState::BehindLaterEvent => {
+            return Err(SessionPlacementRepositoryError::Corruption(
+                "session placement head behind event history",
+            ));
+        }
+    }
     let authenticated_result_version = match row.try_get::<Option<Decimal>, _>("result_version")? {
         Some(version) => {
             let version = decode_version(version)?;

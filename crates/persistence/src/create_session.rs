@@ -24,7 +24,7 @@ use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
     defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-    session_id_to_uuid, session_placement_event_kind_to_str,
+    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -575,6 +575,8 @@ async fn load_from_connection(
             v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
             v.system_prompt AS stored_system_prompt
             ,pe.version AS stored_placement_version
+            ,pe.prior_version AS stored_placement_prior_version
+            ,pe.event_kind AS stored_placement_event_kind
             ,pe.placement_path AS stored_placement_path
             ,pe.root_global_read_intent AS stored_root_intent
             ,placement_head.current_version AS current_placement_head_version
@@ -721,6 +723,22 @@ fn decode_complete(
         required(&row, "stored_placement_version")?,
         "stored placement version",
     )?;
+    let stored_placement_prior: Option<Decimal> = row.try_get("stored_placement_prior_version")?;
+    let stored_placement_event_kind_spelling: String =
+        required(&row, "stored_placement_event_kind")?;
+    let stored_placement_event_kind = session_placement_event_kind_from_str(
+        &stored_placement_event_kind_spelling,
+    )
+    .ok_or(CreateSessionCorruption::Unsupported {
+        field: "stored placement event kind",
+        value: stored_placement_event_kind_spelling,
+    })?;
+    if stored_placement_version != SessionPlacementVersion::INITIAL
+        || stored_placement_prior.is_some()
+        || stored_placement_event_kind != SessionPlacementEventKind::Created
+    {
+        return Err(CreateSessionCorruption::Inconsistent("initial placement effect").into());
+    }
     let stored_placement = decode_placement(
         row.try_get("stored_placement_path")?,
         required(&row, "stored_root_intent")?,

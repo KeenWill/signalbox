@@ -166,8 +166,10 @@ through the selected head against each event's typed receipt and durable-command
 registry claim and rejects a head when immutable history contains a later event.
 Equal native and imported-frontier creation replay likewise rejects a missing or
 lagging current head while reconstituting its immutable creation receipt. A
-missing or lagging head, cross-wired history, or invalid command fact fails
-closed as typed storage corruption.
+placement-update replay rejects that same lagging-head state before
+reconstituting either applied or stateful-rejection evidence. A missing or
+lagging head, cross-wired history, or invalid command fact fails closed as typed
+storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one
