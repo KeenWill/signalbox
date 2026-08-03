@@ -336,8 +336,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    let environment_policy = environment;
     let environment =
-        match allowlisted_environment(environment, labels, |name| std::env::var_os(name)) {
+        match allowlisted_environment(environment_policy, labels, |name| std::env::var_os(name)) {
             Ok(environment) => environment,
             Err(rejection) => {
                 // Nothing was sent: the rejection precedes `SendCommenced` and the
@@ -350,7 +351,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         };
     let environment_overrides = match validated_environment_overrides(
         environment_overrides,
-        environment.iter().map(|(name, _)| *name),
+        environment_policy.iter().map(|variable| variable.name()),
     ) {
         Ok(overrides) => overrides,
         Err(name) => {
@@ -2016,6 +2017,24 @@ mod tests {
             validated_environment_overrides(overrides, ["PATH"]),
             Err("PATH")
         ));
+    }
+
+    #[test]
+    fn adapter_environment_override_cannot_replace_an_absent_declared_value() {
+        let declared_name = TEST_ENVIRONMENT[3].name();
+        let overrides = vec![CliEnvironmentOverride::new(
+            declared_name,
+            "fixture-relative",
+        )];
+
+        let rejected_name = validated_environment_overrides(
+            overrides,
+            TEST_ENVIRONMENT.iter().map(|variable| variable.name()),
+        )
+        .err()
+        .expect("an override cannot replace an absent declared value");
+
+        assert_eq!(rejected_name, declared_name);
     }
 
     #[test]
