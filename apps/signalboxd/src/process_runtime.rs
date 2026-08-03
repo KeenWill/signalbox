@@ -11399,7 +11399,10 @@ impl ProcessUpdateEvent {
         match self {
             Self::SessionCreated => SessionEvent::SessionCreated {},
             Self::SessionModelSettingsChanged(event) => SessionEvent::SessionModelSettingsChanged {
-                command_id: wire_uuid(event.command_id().into_uuid()),
+                command_id: signalbox_process_protocol::CommandId::try_from_uuid(
+                    event.command_id().into_uuid(),
+                )
+                .expect("durable command identities exclude reserved sentinels"),
                 prior_defaults_version: CanonicalU64::new(event.prior_defaults_version().as_u64()),
                 installed_defaults_version: CanonicalU64::new(
                     event.installed_defaults_version().as_u64(),
@@ -14109,7 +14112,10 @@ context_window_tokens = 200000
         assert_eq!(
             changed_update.wire(),
             SessionEvent::SessionModelSettingsChanged {
-                command_id: CanonicalUuid::from_uuid(command.into_uuid()),
+                command_id: signalbox_process_protocol::CommandId::try_from_uuid(
+                    command.into_uuid(),
+                )
+                .expect("fixture command identity is admitted"),
                 prior_defaults_version: CanonicalU64::new(prior_version.as_u64()),
                 installed_defaults_version: CanonicalU64::new(installed_version.as_u64()),
                 prior_model: signalbox_process_protocol::ModelSelection::Direct {
