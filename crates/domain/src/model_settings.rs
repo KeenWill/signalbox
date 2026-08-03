@@ -310,11 +310,14 @@ impl ValidatedModelSettings {
             fast_mode_source,
             service_tier_source,
         };
-        (precedence.resolve() == resolved).then_some(Self {
+        let reconstituted = Self {
             precedence,
             resolved,
             validated_for,
-        })
+        };
+        (precedence.resolve() == resolved
+            && (validated_for.is_some() || reconstituted == Self::provider_defaults()))
+        .then_some(reconstituted)
     }
 
     /// Returns the exact four-layer contributions that produced this value.
@@ -1196,6 +1199,34 @@ mod tests {
             None,
             None,
             Some(direct(1)),
+        );
+
+        assert_eq!(reconstituted, None);
+    }
+
+    /// INV-003 / INV-053: only exact provider defaults may omit the direct
+    /// selection that validated stored settings.
+    #[test]
+    fn inv003_inv053_non_default_stored_settings_require_a_validation_selection() {
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::High),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let resolved = precedence.resolve();
+
+        let reconstituted = super::ValidatedModelSettings::reconstitute(
+            precedence,
+            resolved.effective(),
+            resolved.reasoning_source(),
+            resolved.fast_mode_source(),
+            resolved.service_tier_source(),
+            None,
         );
 
         assert_eq!(reconstituted, None);
