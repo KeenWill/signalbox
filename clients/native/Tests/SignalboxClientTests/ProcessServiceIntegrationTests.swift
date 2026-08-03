@@ -3027,6 +3027,19 @@ private enum ProcessSubmissionFixture {
             "kind":"direct",
             "selection_id":"\(ProcessDriverFixture.modelCall)"
           },
+          "model_settings":{
+            "precedence":{
+              "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+            },
+            "effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},
+            "reasoning_source":null,
+            "fast_mode_source":null,
+            "service_tier_source":null,
+            "validated_for_selection_id":null
+          },
           "dangerous_tool_auto_approval":false,
           "system_prompt":null
         }

@@ -16,10 +16,10 @@
 
 use core::fmt;
 
+use crate::model_settings::apply_recorded_model_change_adjustments;
 use crate::{
-    AdjustedModelSettings, DangerousToolAutoApproval, EffectiveModelSettings, FastMode,
-    ModelCapabilityCatalog, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
-    ResolvedModelSettings, UnsupportedModelSetting, ValidatedModelSettings,
+    AdjustedModelSettings, DangerousToolAutoApproval, ModelCapabilityCatalog,
+    ModelChangeAdjustment, ModelSettingsOverlay, UnsupportedModelSetting, ValidatedModelSettings,
 };
 
 crate::define_identity!(
@@ -800,6 +800,13 @@ impl OriginConfiguration {
         {
             return None;
         }
+        let model_changed = request
+            .model_settings
+            .validated_for()
+            .is_some_and(|validated| validated != selected);
+        if !adjustments.is_empty() && !model_changed {
+            return None;
+        }
         let precedence = request
             .model_settings
             .precedence()
@@ -862,80 +869,6 @@ fn frozen_selection_matches_request(
     }
 }
 
-fn apply_recorded_model_change_adjustments(
-    prior: ResolvedModelSettings,
-    adjustments: &[ModelChangeAdjustment],
-) -> Option<EffectiveModelSettings> {
-    let mut effective = prior.effective();
-    let mut last_knob = 0_u8;
-    for adjustment in adjustments {
-        let knob = match adjustment {
-            ModelChangeAdjustment::ReasoningLevelClamped { from, to } => {
-                if last_knob > 1
-                    || prior.reasoning_source() == Some(ModelSettingSource::PerCall)
-                    || effective.reasoning_level() != Some(*from)
-                    || to >= from
-                {
-                    return None;
-                }
-                effective = EffectiveModelSettings::new(
-                    Some(*to),
-                    effective.fast_mode(),
-                    effective.service_tier(),
-                );
-                1
-            }
-            ModelChangeAdjustment::ReasoningLevelCleared { from } => {
-                if last_knob > 1
-                    || prior.reasoning_source() == Some(ModelSettingSource::PerCall)
-                    || effective.reasoning_level() != Some(*from)
-                {
-                    return None;
-                }
-                effective = EffectiveModelSettings::new(
-                    None,
-                    effective.fast_mode(),
-                    effective.service_tier(),
-                );
-                1
-            }
-            ModelChangeAdjustment::FastModeDisabled => {
-                if last_knob > 2
-                    || prior.fast_mode_source() == Some(ModelSettingSource::PerCall)
-                    || effective.fast_mode() != FastMode::Enabled
-                {
-                    return None;
-                }
-                effective = EffectiveModelSettings::new(
-                    effective.reasoning_level(),
-                    FastMode::Disabled,
-                    effective.service_tier(),
-                );
-                2
-            }
-            ModelChangeAdjustment::ServiceTierCleared { from } => {
-                if last_knob > 3
-                    || prior.service_tier_source() == Some(ModelSettingSource::PerCall)
-                    || effective.service_tier() != Some(*from)
-                {
-                    return None;
-                }
-                effective = EffectiveModelSettings::new(
-                    effective.reasoning_level(),
-                    effective.fast_mode(),
-                    None,
-                );
-                3
-            }
-        };
-        if knob == last_knob {
-            return None;
-        }
-        last_knob = knob;
-    }
-    Some(effective)
-}
-
 /// Why settings-aware origin freezing could not produce durable provenance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OriginModelSettingsError {
@@ -948,6 +881,33 @@ pub enum OriginModelSettingsError {
     },
     /// A caller-owned setting is unsupported by the selected model.
     Unsupported(UnsupportedModelSetting),
+}
+
+impl fmt::Display for OriginModelSettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownAlias(error) => write!(
+                formatter,
+                "model alias {} has no current definition",
+                error.alias().into_uuid()
+            ),
+            Self::MissingCapabilities { selection } => write!(
+                formatter,
+                "model selection {} has no capability record",
+                selection.into_uuid()
+            ),
+            Self::Unsupported(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for OriginModelSettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unsupported(error) => Some(error),
+            Self::UnknownAlias(_) | Self::MissingCapabilities { .. } => None,
+        }
+    }
 }
 
 /// Checked stored facts for reconstituting one explicit turn origin.
@@ -1157,7 +1117,7 @@ mod tests {
         let prior_selection = direct(1);
         let installed_selection = direct(2);
         let prior_capabilities = ModelCapabilities::new(
-            BTreeSet::from([ReasoningLevel::High]),
+            BTreeSet::from([ReasoningLevel::Minimal]),
             FastModeSupport::Unsupported,
             BTreeSet::new(),
         );
@@ -1167,7 +1127,7 @@ mod tests {
                 ModelSettingsPrecedence::new(
                     ModelSettingsOverlay::inherit_all(),
                     ModelSettingsOverlay::new(
-                        SettingOverlay::Value(ReasoningLevel::High),
+                        SettingOverlay::Value(ReasoningLevel::Minimal),
                         FastModeOverlay::Inherit,
                         SettingOverlay::Inherit,
                     ),
@@ -1191,7 +1151,7 @@ mod tests {
             )
             .expect("the fixture names the current defaults epoch");
         let installed_capabilities = ModelCapabilities::new(
-            BTreeSet::from([ReasoningLevel::Low]),
+            BTreeSet::from([ReasoningLevel::Medium]),
             FastModeSupport::Unsupported,
             BTreeSet::new(),
         );
@@ -1215,13 +1175,13 @@ mod tests {
                 .model_settings()
                 .effective()
                 .reasoning_level(),
-            Some(ReasoningLevel::Low)
+            Some(ReasoningLevel::Medium)
         );
         assert_eq!(
             origin.model_settings_adjustments(),
             [ModelChangeAdjustment::ReasoningLevelClamped {
-                from: ReasoningLevel::High,
-                to: ReasoningLevel::Low,
+                from: ReasoningLevel::Minimal,
+                to: ReasoningLevel::Medium,
             }]
         );
         assert_eq!(
@@ -1239,6 +1199,68 @@ mod tests {
         )
         .expect("stored resolution evidence reconstructs without the live catalog");
         assert_eq!(reconstituted, origin);
+    }
+
+    /// INV-003 / INV-053: adjustment evidence is impossible when the stored
+    /// settings were already validated for the unchanged direct selection.
+    #[test]
+    fn inv003_inv053_origin_rejects_adjustment_without_a_model_change() {
+        let selection = direct(1);
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low, ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        );
+        let high_precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::High),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let high = capabilities
+            .validate_precedence(selection, high_precedence)
+            .expect("the fixture level is supported");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            high,
+        );
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+        let low_precedence = high_precedence.with_effective_adjustment(
+            high_precedence.resolve(),
+            crate::EffectiveModelSettings::new(
+                Some(ReasoningLevel::Low),
+                crate::FastMode::Disabled,
+                None,
+            ),
+        );
+        let low = capabilities
+            .validate_precedence(selection, low_precedence)
+            .expect("the fixture level is supported");
+
+        let reconstituted = OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            FrozenModelSelection::Direct(selection),
+            low,
+            vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }],
+        );
+
+        assert_eq!(reconstituted, None);
     }
 
     /// INV-003 / INV-053: model-independent provider defaults remain valid

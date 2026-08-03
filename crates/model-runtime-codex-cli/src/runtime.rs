@@ -457,7 +457,10 @@ fn codex_controls(settings: &ModelSettings) -> Result<CodexControls, Preparation
                     .to_string(),
             });
         }
-        (_, Some(_)) => {
+        (
+            FastMode::Disabled | FastMode::Enabled,
+            Some(ServiceTier::Anthropic(_) | ServiceTier::OpenAi(_)),
+        ) => {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: "Codex cannot enforce another provider's service tier".to_string(),
             });

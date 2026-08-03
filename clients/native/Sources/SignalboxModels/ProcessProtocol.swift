@@ -891,10 +891,171 @@ public struct SignalboxToolRequestDecided: Decodable, Equatable, Sendable {
   }
 }
 
+/// A strictly validated version-one model-settings snapshot.
+///
+/// The native settings UI is intentionally unimplemented. Retaining the
+/// closed wire value here keeps session-default decoding wire-real without
+/// introducing a presentation contract ahead of that work.
+public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
+  public let rawValue: [String: SignalboxJSONValue]
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = [
+      "precedence", "effective", "reasoning_source", "fast_mode_source",
+      "service_tier_source", "validated_for_selection_id",
+    ]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    let _: SignalboxModelSettingsPrecedenceShape = try decoder.decode("precedence")
+    let _: SignalboxEffectiveModelSettingsShape = try decoder.decode("effective")
+    let _: SignalboxModelSettingSourceShape? = try decoder.decodeIfPresent("reasoning_source")
+    let _: SignalboxModelSettingSourceShape? = try decoder.decodeIfPresent("fast_mode_source")
+    let _: SignalboxModelSettingSourceShape? = try decoder.decodeIfPresent("service_tier_source")
+    let _: SignalboxCanonicalUUID? = try decoder.decodeIfPresent("validated_for_selection_id")
+    rawValue = payload.payload
+  }
+}
+
+private enum SignalboxReasoningLevelShape: String, Decodable {
+  case none, minimal, low, medium, high, xhigh, max, ultra
+}
+
+private enum SignalboxFastModeShape: String, Decodable {
+  case disabled, enabled
+}
+
+private enum SignalboxModelSettingSourceShape: String, Decodable {
+  case perCall = "per_call"
+  case session, profile
+  case globalDefault = "global_default"
+}
+
+private enum SignalboxAnthropicServiceTierShape: String, Decodable {
+  case auto
+  case standardOnly = "standard_only"
+}
+
+private enum SignalboxOpenAIServiceTierShape: String, Decodable {
+  case auto, `default`, flex, scale, priority, fast
+}
+
+private enum SignalboxCodexCLIServiceTierShape: String, Decodable {
+  case `default`, priority, flex
+}
+
+private struct SignalboxServiceTierShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = ["provider", "value"]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    switch try decoder.decode("provider") as String {
+    case "anthropic":
+      let _: SignalboxAnthropicServiceTierShape = try decoder.decode("value")
+    case "open_ai":
+      let _: SignalboxOpenAIServiceTierShape = try decoder.decode("value")
+    case "codex_cli":
+      let _: SignalboxCodexCLIServiceTierShape = try decoder.decode("value")
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("provider")],
+          debugDescription: "Unknown model service-tier provider."
+        )
+      )
+    }
+  }
+}
+
+private struct SignalboxSettingOverlayShape<Value: Decodable>: Decodable {
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "inherit", "provider_default":
+      try payload.rejectUnadmittedFields(["kind"], decoder: decoder)
+    case "value":
+      try payload.rejectUnadmittedFields(["kind", "value"], decoder: decoder)
+      try payload.requireFields(["kind", "value"], decoder: decoder)
+      let _: Value = try decoder.decode("value")
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("kind")],
+          debugDescription: "Unknown model setting overlay."
+        )
+      )
+    }
+  }
+}
+
+private struct SignalboxFastModeOverlayShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let kind: String = try decoder.decode("kind")
+    switch kind {
+    case "inherit":
+      try payload.rejectUnadmittedFields(["kind"], decoder: decoder)
+    case "value":
+      try payload.rejectUnadmittedFields(["kind", "value"], decoder: decoder)
+      try payload.requireFields(["kind", "value"], decoder: decoder)
+      let _: SignalboxFastModeShape = try decoder.decode("value")
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("kind")],
+          debugDescription: "Unknown fast-mode overlay."
+        )
+      )
+    }
+  }
+}
+
+private struct SignalboxModelSettingsOverlayShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = ["reasoning_level", "fast_mode", "service_tier"]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    let _: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape> =
+      try decoder.decode("reasoning_level")
+    let _: SignalboxFastModeOverlayShape = try decoder.decode("fast_mode")
+    let _: SignalboxSettingOverlayShape<SignalboxServiceTierShape> =
+      try decoder.decode("service_tier")
+  }
+}
+
+private struct SignalboxModelSettingsPrecedenceShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = ["per_call", "session", "profile", "global_default"]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("per_call")
+    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("session")
+    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("profile")
+    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("global_default")
+  }
+}
+
+private struct SignalboxEffectiveModelSettingsShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    let fields: Set<String> = ["reasoning_level", "fast_mode", "service_tier"]
+    try payload.rejectUnadmittedFields(fields, decoder: decoder)
+    try payload.requireFields(fields, decoder: decoder)
+    let _: SignalboxReasoningLevelShape? = try decoder.decodeIfPresent("reasoning_level")
+    let _: SignalboxFastModeShape = try decoder.decode("fast_mode")
+    let _: SignalboxServiceTierShape? = try decoder.decodeIfPresent("service_tier")
+  }
+}
+
 public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
   public let sessionID: SignalboxCanonicalUUID
   public let defaultsVersion: SignalboxCanonicalUInt64
   public let modelSelection: SignalboxModelSelection
+  public let modelSettings: SignalboxModelSettingsSnapshot
   public let dangerousToolAutoApproval: Bool
   public let systemPrompt: String?
 
@@ -911,6 +1072,10 @@ public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
     sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
     defaultsVersion = try container.decode(SignalboxCanonicalUInt64.self, forKey: .defaultsVersion)
     modelSelection = try container.decode(SignalboxModelSelection.self, forKey: .modelSelection)
+    modelSettings = try container.decode(
+      SignalboxModelSettingsSnapshot.self,
+      forKey: .modelSettings
+    )
     dangerousToolAutoApproval = try container.decode(
       Bool.self,
       forKey: .dangerousToolAutoApproval
@@ -931,6 +1096,7 @@ public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
     case sessionID = "session_id"
     case defaultsVersion = "defaults_version"
     case modelSelection = "model_selection"
+    case modelSettings = "model_settings"
     case dangerousToolAutoApproval = "dangerous_tool_auto_approval"
     case systemPrompt = "system_prompt"
   }
