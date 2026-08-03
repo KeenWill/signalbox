@@ -507,8 +507,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func turnStateIsActive(_ state: SignalboxTranscriptTurnState) -> Bool {
     switch state {
-    case .activeRunning, .activeAwaitingToolApproval, .activeAwaitingModelCallRecovery,
-      .activeAwaitingToolRecovery, .reconciliationRequired, .toolReconciliationRequired:
+    case .activeRunning, .activeAwaitingChild, .activeAwaitingToolApproval,
+      .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
+      .toolReconciliationRequired:
       return true
     case .queued, .queuedDelegated, .failed, .completed, .refused, .cancelled, .unknown:
       return false
@@ -769,6 +770,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return .init(state: .recoveryRequired, label: "Recovery required")
       }
       return .init(state: .running, label: "Running")
+    case .activeAwaitingChild:
+      return .init(state: .running, label: "Awaiting child")
     case .activeAwaitingToolApproval:
       return .init(state: .waitingForToolDecision, label: "Tool decision unavailable")
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery,
