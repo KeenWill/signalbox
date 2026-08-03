@@ -1143,8 +1143,9 @@ mod tests {
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
-        model_change_adjustments_to_json, model_settings_from_json, model_settings_to_json,
-        plan_event_kind_from_str, plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
+        model_change_adjustments_to_json, model_settings_from_json,
+        model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
+        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         session_placement_rejection_from_str, session_placement_result_kind_from_str,
         session_placement_result_kind_to_str, tool_approval_posture_from_str,
@@ -1197,6 +1198,21 @@ mod tests {
             .insert(String::from("unknown_member"), serde_json::Value::Null);
 
         let result = model_settings_from_json(encoded);
+
+        assert!(result.is_err());
+    }
+
+    /// INV-003: fast mode has no provider-default state in the domain, so a
+    /// durable spelling that invents one fails closed.
+    #[test]
+    fn inv003_model_settings_overlay_rejects_provider_default_fast_mode() {
+        let encoded = serde_json::json!({
+            "reasoning_level": {"kind": "inherit"},
+            "fast_mode": {"kind": "provider_default"},
+            "service_tier": {"kind": "inherit"}
+        });
+
+        let result = model_settings_overlay_from_json(encoded);
 
         assert!(result.is_err());
     }

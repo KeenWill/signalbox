@@ -5206,6 +5206,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositor
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             ModelCallCorruption::Inconsistent("origin accepted-input identity").into()
         }
+        SubmitInputRepositoryError::UnsupportedModelSetting(_) => {
+            ModelCallCorruption::Inconsistent("origin model settings").into()
+        }
         SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()
         }

@@ -24,7 +24,7 @@ use signalbox_domain::{
     ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
     ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, PerInputConfigurationChoices,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     SemanticTranscriptEntryId,
@@ -51,7 +51,8 @@ use signalbox_domain::{
     SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
     SubmitInputTurnOriginReconstitutionInput, TerminalAttemptEndReconstitutionInput, ToolRequestId,
-    TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition, UserContent,
+    TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition,
+    UnsupportedModelSetting, UserContent,
 };
 use sqlx::{FromRow, PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -235,6 +236,20 @@ mod tests {
             SubmitInputRepositoryError::CommitAmbiguous(_)
         ));
     }
+
+    #[test]
+    fn unsupported_model_setting_remains_a_caller_facing_repository_error() {
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x51));
+        let unsupported = UnsupportedModelSetting::FastMode { selection };
+
+        let error =
+            map_model_settings_resolution_error(OriginModelSettingsError::Unsupported(unsupported));
+
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::UnsupportedModelSetting(actual) if actual == unsupported
+        ));
+    }
 }
 
 /// The committed outcome of handling one canonical input submission.
@@ -343,6 +358,8 @@ pub enum SubmitInputRepositoryError {
         /// The colliding accepted-input candidate and active origin.
         accepted_input: AcceptedInputId,
     },
+    /// A caller-owned explicit setting is unsupported by the selected model.
+    UnsupportedModelSetting(UnsupportedModelSetting),
     /// Durable records cannot reconstruct the requested domain value.
     Corruption(SubmitInputCorruption),
     /// The active turn's model-execution aggregate could not apply or persist
@@ -374,6 +391,7 @@ impl fmt::Display for SubmitInputRepositoryError {
                 formatter,
                 "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
             ),
+            Self::UnsupportedModelSetting(error) => error.fmt(formatter),
             Self::Corruption(error) => error.fmt(formatter),
             Self::ModelExecution(error) => {
                 write!(formatter, "SubmitInput model execution failed: {error}")
@@ -387,6 +405,7 @@ impl Error for SubmitInputRepositoryError {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::DifferentCommandKind { .. } | Self::AcceptedInputIdentityCollision { .. } => None,
+            Self::UnsupportedModelSetting(error) => Some(error),
             Self::Corruption(error) => Some(error),
             Self::ModelExecution(error) => Some(error),
         }
@@ -1226,10 +1245,24 @@ async fn prepare_against_locked_state(
             SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
                 SubmitInputCorruption::Inconsistent("interrupt queue order").into()
             }
-            SubmitInputPreparationFailure::ModelSettingsResolution(_) => {
-                SubmitInputCorruption::Inconsistent("model settings resolution").into()
+            SubmitInputPreparationFailure::ModelSettingsResolution(error) => {
+                map_model_settings_resolution_error(error)
             }
         })
+}
+
+fn map_model_settings_resolution_error(
+    error: OriginModelSettingsError,
+) -> SubmitInputRepositoryError {
+    match error {
+        OriginModelSettingsError::Unsupported(error) => {
+            SubmitInputRepositoryError::UnsupportedModelSetting(error)
+        }
+        OriginModelSettingsError::UnknownAlias(_)
+        | OriginModelSettingsError::MissingCapabilities { .. } => {
+            SubmitInputCorruption::Inconsistent("model settings resolution").into()
+        }
+    }
 }
 
 pub(crate) async fn load_scheduling_projection(
