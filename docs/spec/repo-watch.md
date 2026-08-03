@@ -119,10 +119,10 @@ later completion even when its provider identity and conclusion are unchanged.
 Workflows that share a display name remain distinct, renaming a workflow cannot
 re-emit its already observed run attempt, and a new attempt under an unchanged
 run ID does emit. The display name remains the rule-visible event payload. A
-provider fact retained in the consecutive comparison baseline is not
-re-emitted. Rules receive only events: they cannot inspect normalized snapshots
-or rerun the differ. Why: transport independence requires both polling and a
-later authenticated webhook receiver to feed the same durable facts.
+provider fact retained in the consecutive comparison baseline is not re-emitted.
+Rules receive only events: they cannot inspect normalized snapshots or rerun the
+differ. Why: transport independence requires both polling and a later
+authenticated webhook receiver to feed the same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
