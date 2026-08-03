@@ -48,7 +48,7 @@ use signalbox_tools_conversations::{
     READ_OWN_CONVERSATION_NAME,
 };
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
-use signalbox_tools_web::WEB_FETCH_NAME;
+use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
     APPLY_PATCH_NAME, ActivatedTurnExecution, CHANGE_REQUEST_COMMENT_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_SUMMARY_NAME,
@@ -98,6 +98,8 @@ const FIRST_PLAN_STATUS: &str = "in_progress";
 const SECOND_PLAN_STATUS: &str = "completed";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/";
+const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
+const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -237,10 +239,17 @@ async fn run_live_smoke() -> SmokeResult {
         credential_file,
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
     );
+    let web_search_credentials = FileCredentialAccess::new(
+        credential_directory
+            .path()
+            .join(UNUSED_WEB_SEARCH_CREDENTIAL_FILE),
+        CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+    );
     let tools = DaemonTools::try_new_production(
         SystemCurrentTimeClock,
         pool.clone(),
         credentials,
+        web_search_credentials,
         GitHubCodeHostTransport::try_new()?,
         github_egress_policy,
         &configured_workspace,
@@ -652,6 +661,8 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
             SESSION_STATUS_UPDATE_NAME,
             json!({"title": "denied", "tags": [], "attributes": {}, "archived": false}),
         ),
+        call(WEB_FETCH_NAME, json!({"url": WEB_URL})),
+        call(WEB_SEARCH_NAME, json!({"query": DENIED_WEB_SEARCH_QUERY})),
         call(
             WRITE_FILE_NAME,
             json!({"path": DENIED_WRITE_PATH, "content": "denied\n"}),

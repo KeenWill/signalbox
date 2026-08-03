@@ -2,9 +2,10 @@
 
 This page specifies the implemented security boundary for web-tool output,
 verified against PR #403 (`agent/web-search-core`; via PR #365
-`agent/web-search`). It covers provider response parsing and evidence
-construction in `crates/tools-web`; provider selection, transport behavior, and
-daemon composition are owned by their implementing slices.
+`agent/web-search`). The daemon composition and approval defaults are verified
+against PR #433 (`agent/web-search-wiring`). It covers provider response parsing
+and evidence construction in `crates/tools-web`, together with the
+defense-in-depth approval boundary for web egress.
 
 ## Structural output boundary
 
@@ -33,6 +34,23 @@ control that prevents raw provider bytes from becoming output.
 The semantic trustworthiness, relevance, and safety of provider-supplied content
 are also outside this threat model. The boundary constrains how content is
 represented and bounded; it does not endorse what that content says.
+
+## Approval defense in depth
+
+`web_search` and `web_fetch` are daemon-composed egress tools with
+`ExternalEffect` declarations. Both declarations default to `Confirm`, and the
+shipped configuration resolves both exact tool names to the `Human` approval
+posture. An operator must therefore make an explicit policy choice before either
+tool can execute automatically.
+
+The approval boundary remains necessary even when an egress transport has an
+exact destination policy. A model can combine content read from a workspace with
+a `web_fetch` URL, or use a code-host read as authority for a subsequent search,
+without either source authorizing disclosure or delegation. Origin admission
+constrains the recipient; it does not establish the user's intent to send data
+or let one external system direct another. Why: conservative declarations keep
+deliberate operator policy and the ordinary approval flow as the only ways to
+widen egress authority.
 
 ## Review rule
 

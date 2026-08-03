@@ -3,6 +3,9 @@
 The delegated tool-approval posture and judge-selection configuration is
 verified against this PR (`agent/approval-judge-config`).
 
+The daemon web-tool composition, Brave credential channel, and shipped human
+postures are verified against PR #433 (`agent/web-search-wiring`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -46,7 +49,7 @@ unimplemented functionality as labeled below.
 
 ## Process configuration
 
-`signalboxd` reads five unconditionally required deployment values, the optional
+`signalboxd` reads six unconditionally required deployment values, the optional
 runner-socket override, and the conditionally required Anthropic key path from
 the process environment at startup, and also consults `HOME`:
 
@@ -65,6 +68,8 @@ the process environment at startup, and also consults `HOME`:
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value. It is required only when at least one static model mapping selects
   the Anthropic adapter; a Codex-only configuration does not consult it.
+- `BRAVE_API_KEY_FILE` — path to the file holding the current Brave Search API
+  key value used by the daemon-composed `web_search` tool.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current token shared by the
   GitHub-backed code-host and pull-request tool adapters.
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
@@ -126,10 +131,10 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The six deployment paths are accepted without I/O at
+limit (see Open edges). The seven deployment paths are accepted without I/O at
 environment parsing time; both catalogs and every template prompt file are read
-during startup. Neither credential file is read at startup (see credential
-lifecycle below).
+during startup. No credential file is read at startup (see credential lifecycle
+below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -505,12 +510,15 @@ durable approval flow. Exact-revision code-host and pull-request reads and all
 workspace reads default to `Auto`; code-host mutations, GitHub review
 publication, and every workspace mutation default to `Confirm`. Reading the
 invoking session's transcript defaults to `Auto`, while listing conversations
-and reading another native or imported conversation default to `Confirm`. With
-the session posture disabled, a confirmed request creates the ordinary durable
-approval wait exposed by the process protocol; execution does not enter its
-transport or filesystem boundary until a per-request approval is recorded. A
-session frozen with `ApproveAll` instead receives the existing explicit
-`SessionBlanket` approval and does not park. Only the explicit
+and reading another native or imported conversation default to `Confirm`.
+`web_search` and `web_fetch` also default to `Confirm`; the checked-in example
+strengthens both exact names to `human`, so its resolved requests park for the
+user even under a session blanket. With the session posture disabled, a
+confirmed request creates the ordinary durable approval wait exposed by the
+process protocol; execution does not enter its transport or filesystem boundary
+until a per-request approval is recorded. A session frozen with `ApproveAll`
+instead receives the existing explicit `SessionBlanket` approval and does not
+park unless an explicit human posture is configured. Only the explicit
 `[tool_approval_postures]` table changes a declaration's resolved posture;
 family composition itself does not.
 
@@ -792,17 +800,18 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The composition constants are
-  `anthropic-primary`, `codex-subscription-primary`, and `github-primary`; model
-  configuration may declare additional non-secret profiles.
+  `anthropic-primary`, `codex-subscription-primary`, `brave-search-primary`, and
+  `github-primary`; model configuration may declare additional non-secret
+  profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  the Anthropic and GitHub references to their corresponding deployment paths
-  and reads the file for every Anthropic model-call, code-host operation, or
-  pull-request tool operation preparation; nothing is cached. Why: atomic file
-  replacement rotates either credential without restarting signalboxd, and an
-  in-flight operation keeps the value it authenticated with. Resolution is
-  reference-scoped: a foreign reference fails typed `Unmapped`; a missing file
-  is `Unavailable`; an unreadable file is `Unreadable` — all reference-only
-  errors.
+  the Anthropic, Brave Search, and GitHub references to their corresponding
+  deployment paths and reads the file for every Anthropic model call, web
+  search, code-host operation, or pull-request tool operation preparation;
+  nothing is cached. Why: atomic file replacement rotates any credential without
+  restarting signalboxd, and an in-flight operation keeps the value it
+  authenticated with. Resolution is reference-scoped: a foreign reference fails
+  typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
+  `Unreadable` — all reference-only errors.
 - **External Codex login.** A Codex mapping's profile names the
   operator-selected ambient Codex CLI login. The default example uses
   `codex-subscription-primary`. The daemon and adapter neither locate nor read
@@ -821,9 +830,9 @@ deployment-side rules that code cannot enforce are stated in
   file holding nothing but termination narrows to an empty value, which the
   adapter boundary then refuses exactly as it already refuses an empty file;
   narrowing never invents a credential.
-- **No startup preflight.** signalboxd never reads either credential file at
-  boot, so a missing or unsynced credential cannot block startup or the recovery
-  scan. Why: recovery of acknowledged work must not depend on any provider or
+- **No startup preflight.** signalboxd never reads a credential file at boot, so
+  a missing or unsynced credential cannot block startup or the recovery scan.
+  Why: recovery of acknowledged work must not depend on any provider or
   integration credential (INV-034).
 - **Session credential history.** First handling of every native or imported
   session-creation command appends event ordinal 1 to that session's credential

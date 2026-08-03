@@ -55,6 +55,9 @@ use signalbox_process_protocol::{
     InputDelivery, ProtocolVersion, RequestId, ServerMessage, ToolDecision, decode_server_line,
     encode_client_line,
 };
+use signalbox_tools_web::{
+    WebSearchRequest, WebSearchTransport, WebSearchTransportFailure, WebSearchTransportOutcome,
+};
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
@@ -847,6 +850,19 @@ impl WebFetchTransport for OfflineWebTransport {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct UnusedWebSearchTransport;
+
+impl WebSearchTransport for UnusedWebSearchTransport {
+    async fn search(
+        &mut self,
+        _request: WebSearchRequest,
+        credential: &CredentialValue,
+    ) -> WebSearchTransportOutcome {
+        WebSearchTransportOutcome::failed(WebSearchTransportFailure::RequestFailed, credential)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct OfflineCodeHostCredentials;
 
 impl CredentialAccess for OfflineCodeHostCredentials {
@@ -916,6 +932,7 @@ impl ConversationIntrospectionPort for UnusedConversationPort {
 type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
     fn() -> SystemTime,
     OfflineWebTransport,
+    UnusedWebSearchTransport,
     Writer,
     OfflineCodeHostCredentials,
     HostTransport,
@@ -938,6 +955,8 @@ fn offline_daemon_tools<Writer, HostTransport>(
     DaemonTools::try_new(
         epoch as fn() -> SystemTime,
         web,
+        OfflineCodeHostCredentials,
+        UnusedWebSearchTransport,
         writer,
         OfflineCodeHostCredentials,
         code_host,
@@ -1017,6 +1036,7 @@ impl GitHubTransport for RecordingGitHubTransport {
 type CommissionedDaemonTools<HostTransport, GitHubTransportType> = DaemonTools<
     fn() -> SystemTime,
     OfflineWebTransport,
+    UnusedWebSearchTransport,
     UnusedSessionStatusWriter,
     OfflineCodeHostCredentials,
     HostTransport,
@@ -1039,6 +1059,8 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
     DaemonTools::try_new(
         epoch as fn() -> SystemTime,
         OfflineWebTransport::unused(),
+        OfflineCodeHostCredentials,
+        UnusedWebSearchTransport,
         UnusedSessionStatusWriter,
         OfflineCodeHostCredentials,
         code_host,

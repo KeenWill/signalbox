@@ -15,7 +15,10 @@ fn web_search_definition_carries_exact_policy() {
     let definition = &definitions[0];
 
     assert_eq!(definition.name().as_str(), WEB_SEARCH_NAME);
-    assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
+    assert_eq!(
+        definition.permission_default(),
+        ToolPermissionDefault::Confirm
+    );
     assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
 }
 

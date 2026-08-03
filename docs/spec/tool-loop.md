@@ -3,6 +3,9 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The daemon web-tool composition and conservative declaration defaults are
+verified against PR #433 (`agent/web-search-wiring`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -907,10 +910,10 @@ tools:
   deployment-owned
   [web-fetch catalog policy](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog),
   which owns the origin bound, canonicalization, and absent-or-empty behavior;
-  this admission gates automatic execution. A domain must resolve to between one
-  and 32 addresses and every address must be public; the admitted addresses are
-  pinned into the request client so connection setup cannot substitute a later
-  DNS answer. Its permission default is `Auto`; its effect class is
+  this admission gates execution. A domain must resolve to between one and 32
+  addresses and every address must be public; the admitted addresses are pinned
+  into the request client so connection setup cannot substitute a later DNS
+  answer. Its permission default is `Confirm`; its effect class is
   `ExternalEffect` because the remote server can observe a GET. One dispatch
   performs at most one credential-free request: ambient proxies, redirects,
   protocol retries, and idle reuse are disabled, TLS uses rustls with a TLS 1.2
@@ -923,6 +926,16 @@ tools:
   sanitized known failure; timeout, transport, or body loss after dispatch
   begins is commit-ambiguous. Truncation stops body consumption and never
   follows or issues another request.
+- `web_search` requires exactly one nonblank `query` of at most 400 characters
+  and 50 words. Its permission default is `Confirm`; its effect class is
+  `ExternalEffect`. Production pins the Brave provider, its exact API origin,
+  its sensitive credential header, and the `brave-search-primary` credential
+  reference. One request asks for at most 20 results, retains at most 10, and
+  accepts at most 512 KiB of provider response. Ambient proxies, redirects,
+  retries, and idle reuse are disabled. Success is compact JSON containing
+  bounded typed title, URL, and snippet components plus `truncated`; output and
+  credential-scrubbing semantics are owned by the
+  [web egress threat model](web-egress-threat-model.md).
 - `session_status_update` requires one complete existing session-metadata shape:
   nullable `title`, complete `tags`, complete string-to-string `attributes`, and
   `archived`. Partial patches are invalid. The invocation's session is the

@@ -272,7 +272,7 @@ impl<Transport> WebFetchTool<Transport> {
             ToolExecutionErrorDetail::try_new(String::from(REQUEST_FAILED_DETAIL))
                 .map_err(|_| WebFetchToolConstructionError::ErrorDetail)?;
         let definition = compile_contract_definition::<Self>(
-            ToolPermissionDefault::Auto,
+            ToolPermissionDefault::Confirm,
             ToolEffectClass::ExternalEffect,
         )
         .map_err(|error| match error {
@@ -615,15 +615,18 @@ mod tests {
         };
 
         assert_eq!(definition.name().as_str(), WEB_FETCH_NAME);
-        assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
+        assert_eq!(
+            definition.permission_default(),
+            ToolPermissionDefault::Confirm
+        );
         assert_eq!(definition.effect_class(), ToolEffectClass::ExternalEffect);
     }
 
-    /// Automatic approval cannot egress to an origin absent from the exact
-    /// deployment allowlist, while an ordinary path at an admitted origin
-    /// remains automatic and valid.
+    /// Confirmation does not replace the exact deployment allowlist: an absent
+    /// origin remains invalid while an ordinary path at an admitted origin is
+    /// valid.
     #[test]
-    fn web_fetch_auto_permission_is_bounded_to_configured_origin() {
+    fn web_fetch_confirm_permission_retains_the_configured_origin_bound() {
         let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())
             .expect("static web_fetch tool compiles")
             .into_parts();
@@ -634,7 +637,10 @@ mod tests {
         })
         .to_string();
 
-        assert_eq!(definition.permission_default(), ToolPermissionDefault::Auto);
+        assert_eq!(
+            definition.permission_default(),
+            ToolPermissionDefault::Confirm
+        );
         assert_eq!(
             catalog.validate_arguments(definition.name(), &arguments(&admitted)),
             Ok(())

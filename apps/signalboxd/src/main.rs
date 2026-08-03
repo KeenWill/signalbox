@@ -40,6 +40,7 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
+use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
     PostgresRunnerRegistrationService, RunnerProtocolRuntime, RunnerProtocolRuntimeError,
     RunnerRegistrationFailureCause,
@@ -70,6 +71,7 @@ const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
+const BRAVE_API_KEY_FILE_ENVIRONMENT: &str = "BRAVE_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
@@ -158,6 +160,7 @@ struct HubConfiguration {
     model_configuration_file: PathBuf,
     template_configuration_file: PathBuf,
     anthropic_api_key_file: Option<PathBuf>,
+    brave_api_key_file: PathBuf,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
     runner_socket_path: PathBuf,
@@ -170,17 +173,20 @@ impl HubConfiguration {
             env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
+            env::var_os(BRAVE_API_KEY_FILE_ENVIRONMENT),
             env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
             env::var_os(RUNNER_SOCKET_PATH_ENVIRONMENT),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_values(
         database_url: Option<OsString>,
         model_configuration_file: Option<OsString>,
         template_configuration_file: Option<OsString>,
         anthropic_api_key_file: Option<OsString>,
+        brave_api_key_file: Option<OsString>,
         github_token_file: Option<OsString>,
         process_socket_path: Option<OsString>,
         runner_socket_path: Option<OsString>,
@@ -215,6 +221,7 @@ impl HubConfiguration {
         )?;
         let anthropic_api_key_file =
             optional_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
+        let brave_api_key_file = required_path(BRAVE_API_KEY_FILE_ENVIRONMENT, brave_api_key_file)?;
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
             required_path(PROCESS_SOCKET_PATH_ENVIRONMENT, process_socket_path)?;
@@ -234,6 +241,7 @@ impl HubConfiguration {
             model_configuration_file,
             template_configuration_file,
             anthropic_api_key_file,
+            brave_api_key_file,
             github_token_file,
             process_socket_path,
             runner_socket_path,
@@ -267,6 +275,10 @@ impl HubConfiguration {
 
     fn github_token_file(&self) -> PathBuf {
         self.github_token_file.clone()
+    }
+
+    fn brave_api_key_file(&self) -> PathBuf {
+        self.brave_api_key_file.clone()
     }
 
     fn process_socket_path(&self) -> &Path {
@@ -942,6 +954,10 @@ async fn run_hub(
         configuration.github_token_file(),
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
     );
+    let web_search_credentials = FileCredentialAccess::new(
+        configuration.brave_api_key_file(),
+        CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+    );
     let compaction_anthropic = credential_access
         .clone()
         .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
@@ -1005,6 +1021,7 @@ async fn run_hub(
             SystemCurrentTimeClock,
             pool.clone(),
             code_host_credentials,
+            web_search_credentials,
             code_host_transport,
             tool_configuration.github_egress_policy(),
             tool_configuration.workspace_root(),
@@ -1014,6 +1031,7 @@ async fn run_hub(
             SystemCurrentTimeClock,
             pool.clone(),
             code_host_credentials,
+            web_search_credentials,
             code_host_transport,
             model_configuration.web_fetch_egress_policy(),
         ),
@@ -1607,8 +1625,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError, DATABASE_URL_ENVIRONMENT,
-        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError, HubRuntimeError,
+        ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError,
+        BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
+        HubConfiguration, HubConfigurationError, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
         RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
@@ -1621,6 +1640,8 @@ mod tests {
         runner_lifecycle_failure_class, should_close_pool,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
+
+    const BRAVE_KEY_FILE_FIXTURE: &str = "brave-key";
 
     #[derive(Clone, Default)]
     struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
@@ -1842,6 +1863,7 @@ mod tests {
                 Some(OsString::from("models.toml")),
                 Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
+                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
                 Some(OsString::from("/tmp/signalbox-runner.sock")),
@@ -1858,6 +1880,7 @@ mod tests {
                 Some(OsString::from("")),
                 Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
+                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
                 Some(OsString::from("/tmp/signalbox-runner.sock")),
@@ -1874,6 +1897,7 @@ mod tests {
                 Some(OsString::from("models.toml")),
                 None,
                 Some(OsString::from("key")),
+                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
                 Some(OsString::from("/tmp/signalbox-runner.sock")),
@@ -1891,6 +1915,24 @@ mod tests {
                 Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
                 None,
+                Some(OsString::from("github-token")),
+                Some(OsString::from("/tmp/signalbox.sock")),
+                Some(OsString::from("/tmp/signalbox-runner.sock")),
+            )
+            .err(),
+            Some(HubConfigurationError::new(
+                BRAVE_API_KEY_FILE_ENVIRONMENT,
+                RequiredSettingFailure::Missing,
+            ))
+        );
+        assert_eq!(
+            HubConfiguration::from_values(
+                Some(OsString::from("postgres://secret")),
+                Some(OsString::from("models.toml")),
+                Some(OsString::from("templates.toml")),
+                Some(OsString::from("key")),
+                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
+                None,
                 Some(OsString::from("/tmp/signalbox.sock")),
                 Some(OsString::from("/tmp/signalbox-runner.sock")),
             )
@@ -1906,6 +1948,7 @@ mod tests {
                 Some(OsString::from("models.toml")),
                 Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
+                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
                 Some(OsString::from("github-token")),
                 None,
                 Some(OsString::from("/tmp/signalbox-runner.sock")),
@@ -1921,6 +1964,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(OsString::from("/tmp/signalbox.sock")),
             None,
@@ -1936,6 +1980,7 @@ mod tests {
                 Some(OsString::from("models.toml")),
                 Some(OsString::from("templates.toml")),
                 Some(OsString::from("key")),
+                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
                 Some(OsString::from("github-token")),
                 Some(OsString::from("/tmp/signalbox.sock")),
                 Some(OsString::from("")),
@@ -1952,6 +1997,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(OsString::from("/tmp/signalbox.sock")),
             Some(OsString::from("/tmp/signalbox-runner.sock")),
@@ -1969,6 +2015,10 @@ mod tests {
         assert_eq!(
             configuration.anthropic_api_key_file(true),
             Ok(Some(std::path::PathBuf::from("key")))
+        );
+        assert_eq!(
+            configuration.brave_api_key_file(),
+            std::path::PathBuf::from(BRAVE_KEY_FILE_FIXTURE)
         );
         assert_eq!(
             configuration.github_token_file(),
@@ -1993,6 +2043,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(process_socket),
             None,
@@ -2010,6 +2061,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(shared_socket.clone()),
             Some(shared_socket),
@@ -2042,6 +2094,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(process_socket.into_os_string()),
             Some(runner_socket.into_os_string()),
@@ -2069,6 +2122,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(process_socket.into_os_string()),
             Some(runner_socket),
@@ -2092,6 +2146,7 @@ mod tests {
             Some(OsString::from("models.toml")),
             Some(OsString::from("templates.toml")),
             None,
+            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             Some(OsString::from("github-token")),
             Some(OsString::from("/tmp/signalbox.sock")),
             None,
