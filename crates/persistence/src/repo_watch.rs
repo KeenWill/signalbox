@@ -49,112 +49,7 @@ use crate::{
 const CURSOR_STORAGE_VERSION: u64 = 1;
 const CURSOR_STORAGE_VERSION_DB: i16 = 1;
 const EVENT_VERSION_V1: i16 = 1;
-const MAX_RESOURCE_KEY_BYTES: usize = 512;
-const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_EVENT_PAGE_SIZE: u16 = 100;
-
-/// One safe local identifier for a fetched resource or result page.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RepoWatchResourceKey(String);
-
-impl RepoWatchResourceKey {
-    pub fn try_new(value: String) -> Result<Self, RepoWatchCursorValueError> {
-        if value.is_empty() {
-            return Err(RepoWatchCursorValueError::EmptyResourceKey);
-        }
-        if value.len() > MAX_RESOURCE_KEY_BYTES {
-            return Err(RepoWatchCursorValueError::ResourceKeyTooLong);
-        }
-        if !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
-        }) {
-            return Err(RepoWatchCursorValueError::MalformedResourceKey);
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// One bounded HTTP entity-tag value retained for a conditional request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepoWatchEntityTag(String);
-
-impl RepoWatchEntityTag {
-    pub fn try_new(value: String) -> Result<Self, RepoWatchCursorValueError> {
-        if value.is_empty() {
-            return Err(RepoWatchCursorValueError::EmptyEntityTag);
-        }
-        if value.len() > MAX_ENTITY_TAG_BYTES {
-            return Err(RepoWatchCursorValueError::EntityTagTooLong);
-        }
-        if !value
-            .bytes()
-            .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
-        {
-            return Err(RepoWatchCursorValueError::MalformedEntityTag);
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// One resource-specific validator in a durable poll cursor.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepoWatchResourceValidator {
-    resource: RepoWatchResourceKey,
-    entity_tag: RepoWatchEntityTag,
-}
-
-impl RepoWatchResourceValidator {
-    pub const fn new(resource: RepoWatchResourceKey, entity_tag: RepoWatchEntityTag) -> Self {
-        Self {
-            resource,
-            entity_tag,
-        }
-    }
-
-    pub const fn resource(&self) -> &RepoWatchResourceKey {
-        &self.resource
-    }
-
-    pub const fn entity_tag(&self) -> &RepoWatchEntityTag {
-        &self.entity_tag
-    }
-}
-
-/// Why one cursor transport value was refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RepoWatchCursorValueError {
-    EmptyResourceKey,
-    ResourceKeyTooLong,
-    MalformedResourceKey,
-    EmptyEntityTag,
-    EntityTagTooLong,
-    MalformedEntityTag,
-    DuplicateResourceKey,
-}
-
-impl fmt::Display for RepoWatchCursorValueError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::EmptyResourceKey => "repository-watch resource key is empty",
-            Self::ResourceKeyTooLong => "repository-watch resource key exceeds its byte bound",
-            Self::MalformedResourceKey => "repository-watch resource key has an invalid shape",
-            Self::EmptyEntityTag => "repository-watch entity tag is empty",
-            Self::EntityTagTooLong => "repository-watch entity tag exceeds its byte bound",
-            Self::MalformedEntityTag => "repository-watch entity tag has an invalid shape",
-            Self::DuplicateResourceKey => "repository-watch cursor repeats a resource key",
-        })
-    }
-}
-
-impl Error for RepoWatchCursorValueError {}
 
 /// One positive append-only cursor generation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -187,30 +82,12 @@ impl RepoWatchCursorGeneration {
 /// Canonical cursor payload prepared by one complete successful poll.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCursorCandidate {
-    validators: Box<[RepoWatchResourceValidator]>,
     observation: RepoWatchObservation,
 }
 
 impl RepoWatchCursorCandidate {
-    pub fn try_new(
-        mut validators: Vec<RepoWatchResourceValidator>,
-        observation: RepoWatchObservation,
-    ) -> Result<Self, RepoWatchCursorValueError> {
-        validators.sort_by(|left, right| left.resource().cmp(right.resource()));
-        if validators
-            .windows(2)
-            .any(|adjacent| adjacent[0].resource() == adjacent[1].resource())
-        {
-            return Err(RepoWatchCursorValueError::DuplicateResourceKey);
-        }
-        Ok(Self {
-            validators: validators.into_boxed_slice(),
-            observation,
-        })
-    }
-
-    pub fn validators(&self) -> &[RepoWatchResourceValidator] {
-        &self.validators
+    pub const fn new(observation: RepoWatchObservation) -> Self {
+        Self { observation }
     }
 
     pub const fn observation(&self) -> &RepoWatchObservation {
@@ -496,14 +373,6 @@ impl From<RepoWatchPersistenceCorruption> for RepoWatchStoreError {
     }
 }
 
-impl From<RepoWatchCursorValueError> for RepoWatchStoreError {
-    fn from(_error: RepoWatchCursorValueError) -> Self {
-        Self::Corruption(RepoWatchPersistenceCorruption::InvalidCursorField(
-            "cursor_payload",
-        ))
-    }
-}
-
 impl From<RepoWatchTextError> for RepoWatchStoreError {
     fn from(_error: RepoWatchTextError) -> Self {
         Self::Corruption(RepoWatchPersistenceCorruption::InvalidStoredDomainValue)
@@ -726,16 +595,8 @@ fn validate_event_batch(
 #[serde(deny_unknown_fields)]
 struct CursorRecord {
     storage_version: u64,
-    validators: Vec<ValidatorRecord>,
     signal_reviewers: Vec<String>,
     state: RepositoryStateRecord,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ValidatorRecord {
-    resource: String,
-    entity_tag: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -833,14 +694,6 @@ fn encode_cursor_candidate(
 fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
     CursorRecord {
         storage_version: CURSOR_STORAGE_VERSION,
-        validators: candidate
-            .validators()
-            .iter()
-            .map(|validator| ValidatorRecord {
-                resource: validator.resource().as_str().to_owned(),
-                entity_tag: validator.entity_tag().as_str().to_owned(),
-            })
-            .collect(),
         signal_reviewers: candidate
             .observation()
             .signal_reviewers()
@@ -959,26 +812,14 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
     if record.storage_version != CURSOR_STORAGE_VERSION {
         return Err(RepoWatchPersistenceCorruption::UnsupportedCursorVersion.into());
     }
-    let validators = record
-        .validators
-        .into_iter()
-        .map(|validator| {
-            Ok(RepoWatchResourceValidator::new(
-                RepoWatchResourceKey::try_new(validator.resource)?,
-                RepoWatchEntityTag::try_new(validator.entity_tag)?,
-            ))
-        })
-        .collect::<Result<Vec<_>, RepoWatchStoreError>>()?;
     let signal_reviewers = record
         .signal_reviewers
         .into_iter()
         .map(RepoWatchAuthorLogin::try_new)
         .collect::<Result<Vec<_>, _>>()?;
     let state = decode_repository_state(record.state)?;
-    let candidate = RepoWatchCursorCandidate::try_new(
-        validators,
-        RepoWatchObservation::new(signal_reviewers, state),
-    )?;
+    let candidate =
+        RepoWatchCursorCandidate::new(RepoWatchObservation::new(signal_reviewers, state));
     if encode_cursor_candidate(&candidate)? != value {
         return Err(RepoWatchPersistenceCorruption::NonCanonicalCursor.into());
     }
@@ -1804,57 +1645,6 @@ mod tests {
     use std::{error::Error, num::NonZeroU16};
 
     use super::*;
-
-    const FIRST_RESOURCE: &str = "checks/page/1";
-    const SECOND_RESOURCE: &str = "pulls/page/1";
-    const ENTITY_TAG: &str = "\"fixture-etag\"";
-
-    fn empty_observation() -> RepoWatchObservation {
-        RepoWatchObservation::new(Vec::new(), RepoWatchRepositoryState::default())
-    }
-
-    fn validator(resource: &str) -> Result<RepoWatchResourceValidator, RepoWatchCursorValueError> {
-        Ok(RepoWatchResourceValidator::new(
-            RepoWatchResourceKey::try_new(resource.to_owned())?,
-            RepoWatchEntityTag::try_new(ENTITY_TAG.to_owned())?,
-        ))
-    }
-
-    #[test]
-    fn resource_keys_exclude_query_data() {
-        let result = RepoWatchResourceKey::try_new(String::from("pulls?page=1"));
-
-        assert_eq!(result, Err(RepoWatchCursorValueError::MalformedResourceKey));
-    }
-
-    #[test]
-    fn cursor_candidate_canonicalizes_validator_order() -> Result<(), Box<dyn Error>> {
-        let candidate = RepoWatchCursorCandidate::try_new(
-            vec![validator(SECOND_RESOURCE)?, validator(FIRST_RESOURCE)?],
-            empty_observation(),
-        )?;
-
-        assert_eq!(
-            candidate.validators()[0].resource().as_str(),
-            FIRST_RESOURCE
-        );
-        assert_eq!(
-            candidate.validators()[1].resource().as_str(),
-            SECOND_RESOURCE
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cursor_candidate_rejects_duplicate_resource_keys() -> Result<(), Box<dyn Error>> {
-        let result = RepoWatchCursorCandidate::try_new(
-            vec![validator(FIRST_RESOURCE)?, validator(FIRST_RESOURCE)?],
-            empty_observation(),
-        );
-
-        assert_eq!(result, Err(RepoWatchCursorValueError::DuplicateResourceKey));
-        Ok(())
-    }
 
     #[test]
     fn event_page_size_has_a_fixed_upper_bound() -> Result<(), Box<dyn Error>> {

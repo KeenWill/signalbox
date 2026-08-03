@@ -20,9 +20,8 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-        RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEntityTag,
-        RepoWatchEventPageSize, RepoWatchPersistenceCorruption, RepoWatchResourceKey,
-        RepoWatchResourceValidator, RepoWatchStoreError,
+        RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventPageSize,
+        RepoWatchPersistenceCorruption, RepoWatchStoreError,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -44,9 +43,6 @@ const CHANGED_HEAD: &str = "2222222222222222222222222222222222222222";
 const TITLE: &str = "Persist repository-watch facts";
 const BODY: &str = "A complete fixture pull request body.";
 const AUTHOR: &str = "fixture-author";
-const RESOURCE: &str = "pulls/page/1";
-const INITIAL_ETAG: &str = "\"etag-one\"";
-const CHANGED_ETAG: &str = "\"etag-two\"";
 const PULL_REQUEST: u64 = 41;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -122,14 +118,8 @@ fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>>
     )?)
 }
 
-fn candidate(etag: &str, head: Option<&str>) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
-    Ok(RepoWatchCursorCandidate::try_new(
-        vec![RepoWatchResourceValidator::new(
-            RepoWatchResourceKey::try_new(RESOURCE.to_owned())?,
-            RepoWatchEntityTag::try_new(etag.to_owned())?,
-        )],
-        observation(head)?,
-    )?)
+fn candidate(head: Option<&str>) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(observation(head)?))
 }
 
 fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
@@ -146,7 +136,7 @@ async fn cursor_event_commit_replay_conflict_and_keyset_page_are_durable()
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let store = PostgresRepoWatchStore::new(pool);
-    let first_candidate = candidate(INITIAL_ETAG, None)?;
+    let first_candidate = candidate(None)?;
     let first_generation = committed_generation(
         store
             .commit(
@@ -155,7 +145,7 @@ async fn cursor_event_commit_replay_conflict_and_keyset_page_are_durable()
             )
             .await?,
     );
-    let second_candidate = candidate(CHANGED_ETAG, Some(INITIAL_HEAD))?;
+    let second_candidate = candidate(Some(INITIAL_HEAD))?;
     let events = derive_repo_watch_events(
         &repository,
         Some(first_candidate.observation()),
@@ -225,7 +215,7 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let store = PostgresRepoWatchStore::new(pool.clone());
-    let baseline = candidate(INITIAL_ETAG, None)?;
+    let baseline = candidate(None)?;
     let first_generation = committed_generation(
         store
             .commit(
@@ -234,7 +224,7 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
             )
             .await?,
     );
-    let current = candidate(CHANGED_ETAG, Some(INITIAL_HEAD))?;
+    let current = candidate(Some(INITIAL_HEAD))?;
     let mut ids = FixedEventIds::default();
     let events = derive_repo_watch_events(
         &repository,
@@ -250,7 +240,7 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
             )
             .await?,
     );
-    let changed = candidate(CHANGED_ETAG, Some(CHANGED_HEAD))?;
+    let changed = candidate(Some(CHANGED_HEAD))?;
     let collision = derive_repo_watch_events(
         &repository,
         Some(current.observation()),
@@ -288,7 +278,7 @@ async fn append_only_guards_and_malformed_cursor_reads_fail_closed() -> Result<(
     store
         .commit(
             &repository,
-            RepoWatchCommitRequest::new(None, candidate(INITIAL_ETAG, None)?, Vec::new()),
+            RepoWatchCommitRequest::new(None, candidate(None)?, Vec::new()),
         )
         .await?;
     let update = sqlx::query(

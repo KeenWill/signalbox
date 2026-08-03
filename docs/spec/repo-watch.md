@@ -53,25 +53,29 @@ dispatch record, session parameter, error, or log.
 
 **Foundation contract.** Version one uses conditional-request polling with one
 independent task per configured repository and the repository's configured
-interval. Each resource request sends `If-None-Match` when its own ETag exists.
+interval. Each resource request sends `If-None-Match` only when the repository
+task's process-local cache holds that resource's ETag and typed accepted state.
 A resource-level `304 Not Modified` reuses only that resource's accepted state
 and does not skip the remaining fetches; GitHub does not count a conditional
-`304` against the primary rate limit. A failed, rejected, partial, or
-unparseable poll submits no persistence candidate. The next poll occurs after
-the per-repository interval; version one has no webhook fallback and no
-speculative second polling transport. No present runtime performs these polls;
-Slice 3 implements this constraint.
+`304` against the primary rate limit. Cache keys are bounded, non-secret
+resource/page identifiers rather than query strings. The cache starts empty on
+every daemon start, so the first poll and the first poll after restart perform
+one complete unconditional fetch. A failed, rejected, partial, or unparseable
+poll submits no persistence candidate. The next poll occurs after the
+per-repository interval; version one has no webhook fallback and no speculative
+second polling transport. No present runtime performs these polls; Slice 3
+implements this constraint.
 
-**Implemented behavior.** The versioned durable cursor retains a bounded ETag
-for every canonical resource/page key plus the complete normalized repository
-state and exact signal-reviewer set needed for comparison. Resource keys admit
-only bounded non-secret path-like identifiers, not query strings. A
-per-repository atomic commit accepts an expected generation, one complete cursor
-candidate, and its ordered event batch. It serializes competing commits, appends
-the cursor and every event together, rolls back the whole batch on failure,
-reports a stale generation as conflict, and recognizes only an exact
-candidate-and-event replay. An unchanged candidate with no events does not
-advance the cursor; an unchanged candidate carrying events is rejected.
+**Implemented behavior.** The versioned durable cursor retains only the complete
+normalized repository state and exact signal-reviewer set needed for comparison.
+It does not retain resource keys, ETags, accepted transport responses, raw
+provider payloads, or credentials. A per-repository atomic commit accepts an
+expected generation, one complete cursor candidate, and its ordered event batch.
+It serializes competing commits, appends the cursor and every event together,
+rolls back the whole batch on failure, reports a stale generation as conflict,
+and recognizes only an exact candidate-and-event replay. An unchanged candidate
+with no events does not advance the cursor; an unchanged candidate carrying
+events is rejected.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,
@@ -87,7 +91,8 @@ receiver to feed the same durable facts.
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
 the transport follows every result page needed to build that finite projection
-and retains its per-page validator. Slice 3 implements this transport behavior.
+and retains its per-page validator only in the repository task's process-local
+cache. Slice 3 implements this transport behavior.
 
 ## Durable event vocabulary
 
@@ -282,6 +287,18 @@ It matches `MergeableStateChanged` with
 and dispatches the merge-forward session template configured with the approved
 cheap model and pull-request context. The rule does not match transitions back
 to `mergeable` or `unknown`.
+
+## Designed-for version-two poll-cache persistence
+
+**Committed unimplemented functionality.** No present cursor persists HTTP
+validators or per-resource/page accepted transport snapshots. Version two is
+designed to pair each bounded canonical resource/page key and ETag with a typed,
+minimal snapshot sufficient to reconstruct that resource's normalized
+contribution and the identities needed for nested fetches after restart. It does
+not persist raw provider JSON, credentials, or reactions from actors outside the
+configured signal-reviewer set. These snapshots remain transport state: rules
+and durable events cannot inspect them. Until this upgrade is built, every
+daemon restart deliberately pays one bounded complete repository poll.
 
 ## Designed-for version-two webhook transport
 
