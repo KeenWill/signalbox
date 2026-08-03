@@ -488,6 +488,18 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testQueuedDelegatedTurnDecodesExactOriginProvenance() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.queuedDelegatedTurnFrame(turnID: turnID)
+    )
+    let origin = try ProcessProtocolFixture.queuedDelegatedOrigin(in: frame.message)
+
+    XCTAssertEqual(origin.spawningRequestID.rawValue, ProcessProtocolFixture.spawningRequestID)
+    XCTAssertEqual(origin.parentSessionID.rawValue, ProcessProtocolFixture.parentSessionID)
+    XCTAssertEqual(origin.parentTurnID.rawValue, ProcessProtocolFixture.parentTurnID)
+    XCTAssertEqual(origin.content, ProcessProtocolFixture.delegatedTaskContent)
+  }
+
   func testTranscriptModelCallCostWithoutAUsageAxisDegradesWithDiagnostic() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.modelCallCostWithoutUsageAxisFrame(turnID: turnID)
@@ -779,6 +791,10 @@ private enum ProcessProtocolFixture {
   static let modelIdentityDefaultsVersion: UInt64 = 7
   static let defaultsVersionField = "defaults_version"
   static let selectedModelID = "88888888-8888-4888-8888-888888888888"
+  static let spawningRequestID = "33333333-3333-4333-8333-333333333333"
+  static let parentSessionID = "44444444-4444-4444-8444-444444444444"
+  static let parentTurnID = "12121212-1212-4212-8212-121212121212"
+  static let delegatedTaskContent = "fixture delegated task"
   static let futureProviderFailureCause = "future_provider_failure"
   static let expandedErrorMessage = "fixture error"
   static let expandedRejectionMessage = "fixture rejection"
@@ -1292,6 +1308,29 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func queuedDelegatedTurnFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"queued_delegated",
+            "spawning_request_id":"\(spawningRequestID)",
+            "parent_session_id":"\(parentSessionID)",
+            "parent_turn_id":"\(parentTurnID)",
+            "content":"\(delegatedTaskContent)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func failedTurnWithNullCauseFrame(turnID: String) -> Data {
     Data(
       """
@@ -1386,6 +1425,28 @@ private enum ProcessProtocolFixture {
     return cause
   }
 
+  static func queuedDelegatedOrigin(
+    in message: SignalboxProcessServerMessage
+  ) throws -> (
+    spawningRequestID: SignalboxCanonicalUUID,
+    parentSessionID: SignalboxCanonicalUUID,
+    parentTurnID: SignalboxCanonicalUUID,
+    content: String
+  ) {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .queuedDelegated(
+        let spawningRequestID,
+        let parentSessionID,
+        let parentTurnID,
+        let content
+      ) = turn.state
+    else {
+      throw ProcessProtocolFixtureError.missingDelegatedOrigin
+    }
+    return (spawningRequestID, parentSessionID, parentTurnID, content)
+  }
+
   static func oversizedFrame() -> Data {
     Data(
       repeating: 0x20,
@@ -1416,6 +1477,7 @@ private enum ProcessProtocolFixture {
 }
 
 private enum ProcessProtocolFixtureError: Error {
+  case missingDelegatedOrigin
   case missingImportedEntry
   case missingRejectionDetail
   case missingProcessError

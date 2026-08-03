@@ -1575,6 +1575,11 @@ public struct SignalboxTranscriptTurn: Decodable, Equatable, Sendable {
 
 public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
   case queued(acceptedInputID: SignalboxCanonicalUUID, content: String)
+  case queuedDelegated(
+    spawningRequestID: SignalboxCanonicalUUID,
+    parentSessionID: SignalboxCanonicalUUID,
+    parentTurnID: SignalboxCanonicalUUID,
+    content: String)
   case activeRunning(
     currentAttemptID: SignalboxCanonicalUUID, currentModelCall: SignalboxCurrentModelCall?)
   case activeAwaitingModelCallRecovery(
@@ -1627,6 +1632,16 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
         )
         self = .queued(
           acceptedInputID: try decoder.decode("accepted_input_id"),
+          content: try decoder.decode("content"))
+      case "queued_delegated":
+        try tagged.rejectUnadmittedFields(
+          ["type", "spawning_request_id", "parent_session_id", "parent_turn_id", "content"],
+          decoder: decoder
+        )
+        self = .queuedDelegated(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          parentSessionID: try decoder.decode("parent_session_id"),
+          parentTurnID: try decoder.decode("parent_turn_id"),
           content: try decoder.decode("content"))
       case "active_running":
         try tagged.rejectUnadmittedFields(

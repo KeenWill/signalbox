@@ -3017,6 +3017,7 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
         TurnState::ActiveAwaitingModelCallRecovery { .. }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
         TurnState::Queued { .. }
+        | TurnState::QueuedDelegated { .. }
         | TurnState::ActiveRunning { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
         | TurnState::Completed { .. }
@@ -3079,6 +3080,7 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         ) => Ok(Some(TurnTerminal::ReconciliationRequired)),
         Some(
             TurnState::Queued { .. }
+            | TurnState::QueuedDelegated { .. }
             | TurnState::ActiveRunning { .. }
             | TurnState::ActiveAwaitingToolApproval { .. },
         ) => Ok(None),

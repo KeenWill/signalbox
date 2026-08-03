@@ -9596,6 +9596,17 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             accepted_input_id: wire_uuid(accepted_input.into_uuid()),
             content: InputContent::new(content.clone()),
         },
+        ProcessTurnState::QueuedDelegated {
+            spawning_request,
+            parent_session,
+            parent_turn,
+            content,
+        } => TurnState::QueuedDelegated {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            parent_session_id: wire_uuid(parent_session.into_uuid()),
+            parent_turn_id: wire_uuid(parent_turn.into_uuid()),
+            content: InputContent::new(content.clone()),
+        },
         ProcessTurnState::ActiveRunning {
             current_attempt,
             current_model_call,
