@@ -1467,6 +1467,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       }
       if case .queued = turn.state {
         queuedTurnIDs.insert(turn.turnID)
+      } else if case .queuedDelegated = turn.state {
+        queuedTurnIDs.insert(turn.turnID)
       }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
@@ -1678,7 +1680,7 @@ extension SignalboxTranscriptTurnState {
 
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued: return .impossible
+    case .queued, .queuedDelegated: return .impossible
     case .unknown: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
@@ -1714,7 +1716,7 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+    case .queued, .queuedDelegated, .activeRunning, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
       .toolReconciliationRequired:
@@ -1725,6 +1727,8 @@ extension SignalboxTranscriptTurnState {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .queued(_, let content):
+      return UInt(content.utf8.count)
+    case .queuedDelegated(_, _, _, let content):
       return UInt(content.utf8.count)
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
@@ -2050,7 +2054,8 @@ extension SignalboxTranscriptTurnState {
         kind: "transcript_turn.state.\(kind)",
         decodingDiagnostic: nil
       )
-    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+    case .queued, .queuedDelegated, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return nil

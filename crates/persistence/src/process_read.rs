@@ -339,6 +339,17 @@ pub enum ProcessTurnState {
         /// Exact accepted user text.
         content: String,
     },
+    /// Delegated work has not activated.
+    QueuedDelegated {
+        /// Tool request that spawned the delegated session.
+        spawning_request: ToolRequestId,
+        /// Parent session that issued the spawn request.
+        parent_session: SessionId,
+        /// Parent turn that issued the spawn request.
+        parent_turn: TurnId,
+        /// Exact delegated task text.
+        content: String,
+    },
     /// The current attempt is running.
     ActiveRunning {
         /// Current live attempt.
@@ -1776,6 +1787,20 @@ struct DecodedTurn {
     latest_frontier: Option<ContextFrontierId>,
 }
 
+#[derive(Debug)]
+enum DecodedTurnOrigin {
+    AcceptedInput {
+        accepted_input: AcceptedInputId,
+        content: String,
+    },
+    DelegatedTask {
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DecodedStartLineage {
     FirstInSession,
@@ -2051,6 +2076,7 @@ async fn load_next_transcript_turn(
         "SELECT
             turn.turn_id,
             turn.acceptance_position,
+            turn.origin_kind,
             turn.origin_accepted_input_id,
             turn.state_kind,
             turn.start_lineage_kind,
@@ -2075,6 +2101,10 @@ async fn load_next_transcript_turn(
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
             accepted.content_text AS accepted_content,
+            task.spawning_tool_request_id AS delegated_spawning_tool_request_id,
+            task.task_content AS delegated_task_content,
+            relation.parent_session_id AS delegated_parent_session_id,
+            relation.parent_turn_id AS delegated_parent_turn_id,
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
@@ -2084,6 +2114,12 @@ async fn load_next_transcript_turn(
            LEFT JOIN accepted_input AS accepted
              ON accepted.accepted_input_id = turn.origin_accepted_input_id
             AND accepted.session_id = turn.session_id
+           LEFT JOIN session_delegation_initial_task AS task
+             ON task.turn_id = turn.turn_id
+            AND task.child_session_id = turn.session_id
+           LEFT JOIN session_delegation AS relation
+             ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+            AND relation.child_session_id = task.child_session_id
            LEFT JOIN model_call AS current_call
              ON current_call.turn_attempt_id = turn.current_attempt_id
             AND current_call.turn_id = turn.turn_id
@@ -2150,28 +2186,109 @@ fn decode_database_count(
     u64::try_from(count).map_err(|_| ProcessReadCorruption::InvalidOrdinal(field).into())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn decode_transcript_turn_origin(
+    origin_kind: String,
+    origin_accepted_input: Option<Uuid>,
+    accepted_input: Option<Uuid>,
+    accepted_position: Option<Decimal>,
+    accepted_origin: Option<Uuid>,
+    accepted_content: Option<String>,
+    delegated_spawning_request: Option<Uuid>,
+    delegated_parent_session: Option<Uuid>,
+    delegated_parent_turn: Option<Uuid>,
+    delegated_task_content: Option<String>,
+    turn: TurnId,
+    acceptance_position: u64,
+) -> Result<DecodedTurnOrigin, ProcessReadError> {
+    match (
+        origin_kind.as_str(),
+        origin_accepted_input,
+        accepted_input,
+        accepted_position,
+        accepted_origin,
+        accepted_content,
+        delegated_spawning_request,
+        delegated_parent_session,
+        delegated_parent_turn,
+        delegated_task_content,
+    ) {
+        (
+            "accepted_input",
+            Some(origin_accepted_input),
+            Some(accepted_input),
+            Some(accepted_position),
+            Some(accepted_origin),
+            Some(content),
+            None,
+            None,
+            None,
+            None,
+        ) => {
+            let accepted_position = decode_positive(accepted_position, "accepted input position")?;
+            if origin_accepted_input != accepted_input
+                || accepted_position != acceptance_position
+                || accepted_origin != turn.into_uuid()
+                || content.is_empty()
+            {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into(),
+                );
+            }
+            Ok(DecodedTurnOrigin::AcceptedInput {
+                accepted_input: AcceptedInputId::from_uuid(accepted_input),
+                content,
+            })
+        }
+        (
+            "delegation",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(spawning_request),
+            Some(parent_session),
+            Some(parent_turn),
+            Some(content),
+        ) if !content.is_empty() => Ok(DecodedTurnOrigin::DelegatedTask {
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            parent_session: SessionId::from_uuid(parent_session),
+            parent_turn: TurnId::from_uuid(parent_turn),
+            content,
+        }),
+        ("accepted_input" | "delegation", ..) => {
+            Err(ProcessReadCorruption::Inconsistent("turn origin correlation").into())
+        }
+        (value, ..) => Err(ProcessReadCorruption::Unsupported {
+            field: "turn origin kind",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
 fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
         required(row, "acceptance_position")?,
         "turn acceptance position",
     )?;
-    let origin_accepted_input =
-        AcceptedInputId::from_uuid(required(row, "origin_accepted_input_id")?);
-    let accepted_input = AcceptedInputId::from_uuid(required(row, "accepted_input_id")?);
-    let accepted_position = decode_positive(
-        required(row, "accepted_position")?,
-        "accepted input position",
+    let origin_kind: String = required(row, "origin_kind")?;
+    let origin = decode_transcript_turn_origin(
+        origin_kind,
+        row.try_get("origin_accepted_input_id")?,
+        row.try_get("accepted_input_id")?,
+        row.try_get("accepted_position")?,
+        row.try_get("origin_turn_id")?,
+        row.try_get("accepted_content")?,
+        row.try_get("delegated_spawning_tool_request_id")?,
+        row.try_get("delegated_parent_session_id")?,
+        row.try_get("delegated_parent_turn_id")?,
+        row.try_get("delegated_task_content")?,
+        turn,
+        acceptance_position,
     )?;
-    let accepted_origin = TurnId::from_uuid(required(row, "origin_turn_id")?);
-    let accepted_content: String = required(row, "accepted_content")?;
-    if origin_accepted_input != accepted_input
-        || accepted_position != acceptance_position
-        || accepted_origin != turn
-        || accepted_content.is_empty()
-    {
-        return Err(ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into());
-    }
     let state_kind: String = required(row, "state_kind")?;
     let start_lineage_kind: Option<String> = row.try_get("start_lineage_kind")?;
     let immediate_predecessor: Option<Uuid> = row.try_get("immediate_predecessor_turn_id")?;
@@ -2502,13 +2619,29 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         terminal_call_disposition.as_deref(),
         current_model_call,
     ) {
-        ("queued", None, None, None, None, None, None, None, None, None, None) => (
-            ProcessTurnState::Queued {
-                accepted_input,
-                content: accepted_content,
-            },
-            None,
-        ),
+        ("queued", None, None, None, None, None, None, None, None, None, None) => {
+            let state = match origin {
+                DecodedTurnOrigin::AcceptedInput {
+                    accepted_input,
+                    content,
+                } => ProcessTurnState::Queued {
+                    accepted_input,
+                    content,
+                },
+                DecodedTurnOrigin::DelegatedTask {
+                    spawning_request,
+                    parent_session,
+                    parent_turn,
+                    content,
+                } => ProcessTurnState::QueuedDelegated {
+                    spawning_request,
+                    parent_session,
+                    parent_turn,
+                    content,
+                },
+            };
+            (state, None)
+        }
         (
             "active",
             Some(frontier),
@@ -3513,12 +3646,12 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
 
 #[cfg(test)]
 mod tests {
-    use signalbox_domain::TurnId;
+    use signalbox_domain::{SessionId, ToolRequestId, TurnId};
     use sqlx::types::Uuid;
 
     use super::{
-        ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
-        decode_execution_lineage_tip,
+        DecodedTurnOrigin, ProcessModelCallInputTokenSemantics, ProcessModelCallUsageProvenance,
+        decode_execution_lineage_tip, decode_transcript_turn_origin,
     };
 
     fn turn(value: u128) -> TurnId {
@@ -3543,6 +3676,63 @@ mod tests {
     #[test]
     fn inv032_latest_frontier_rejects_branched_execution_lineage() {
         assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
+    }
+
+    #[test]
+    fn delegated_transcript_origin_retains_exact_spawn_provenance() {
+        let current_turn = turn(1);
+        let spawning_request = Uuid::from_u128(2);
+        let parent_session = Uuid::from_u128(3);
+        let parent_turn = Uuid::from_u128(4);
+        let content = String::from("delegated task");
+        let decoded = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(spawning_request),
+            Some(parent_session),
+            Some(parent_turn),
+            Some(content.clone()),
+            current_turn,
+            1,
+        )
+        .expect("a complete delegated task origin is readable");
+        let DecodedTurnOrigin::DelegatedTask {
+            spawning_request: decoded_request,
+            parent_session: decoded_session,
+            parent_turn: decoded_turn,
+            content: decoded_content,
+        } = decoded
+        else {
+            panic!("the delegated fixture retains its origin family")
+        };
+        assert_eq!(decoded_request, ToolRequestId::from_uuid(spawning_request));
+        assert_eq!(decoded_session, SessionId::from_uuid(parent_session));
+        assert_eq!(decoded_turn, TurnId::from_uuid(parent_turn));
+        assert_eq!(decoded_content, content);
+    }
+
+    #[test]
+    fn delegated_transcript_origin_rejects_missing_spawn_provenance() {
+        let error = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Uuid::from_u128(3)),
+            Some(Uuid::from_u128(4)),
+            Some(String::from("delegated task")),
+            turn(1),
+            1,
+        )
+        .expect_err("delegated origin provenance is all-or-nothing");
+        assert!(error.to_string().contains("turn origin correlation"));
     }
 
     #[test]

@@ -32,14 +32,15 @@ PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 and the session-placement event, current head, and creation transaction were
 verified through PR #415 (`agent/scoped-visibility-creation`); and the exact
-stop-command descendant scopes were verified through PR #416
-(`agent/delegation`); and the exact delegation update and wake obligations were
-verified through this PR (`agent/delegation-persistence-schema`). This page
-covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
+stop-command descendant scopes, delegated transcript origins, foreground-result
+closure, pre-outbox cascade locks, typed delegation wake origins, and the exact
+delegation update and wake obligations were verified through this PR
+(`agent/delegation-persistence-schema`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -1029,7 +1030,10 @@ relationships. Foreground results stay ordered by their exact awaiting request
 and do not consume an inbox sequence. Their semantic entry repeats that awaiting
 request as the ordinary logical tool-result correlation, so the unchanged
 proposal-order and single-result checks admit it as the `await_session` result
-without admitting a second result for the same request.
+without admitting a second result for the same request. Tool-batch outbox
+decoding and context-compaction evidence count that foreground correlation as
+one tool result; a background result has no tool-result correlation and counts
+as neither one.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous
@@ -1041,15 +1045,19 @@ every typed message or background-result semantic entry in delivery order, with
 the final delivery as the lifecycle origin entry. The schema admits at most one
 queued delegation-origin turn per recipient.
 
-Parent-and-descendants termination locks relationship rows in stable spawning
-request order before it writes any disposition. The command and every evaluated
-edge commit together; a crash can leave all prior durable state or the complete
-typed evaluation, never an unrecorded partial cascade. Parent-alone takes no
-descendant authority. Background and bound-keep-running edges still receive a
-continue-running event when evaluated. An already-terminal edge receives its
-typed already-terminal event and traversal continues through that child's
-outgoing relationships, so a terminal intermediate session cannot hide live
-descendants.
+Parent-and-descendants termination locks the root and complete reachable session
+frontier before inserting the applied parent command and therefore before any
+outbox allocation. It re-evaluates after a lock wait, then locks relationship
+rows in stable spawning-request order before it writes any disposition. Spawn
+admission takes the same parent-session lock, so spawn and cascade transactions
+do not invert the session/outbox lock order or omit an edge that committed while
+the cascade waited. The command and every evaluated edge commit together; a
+crash can leave all prior durable state or the complete typed evaluation, never
+an unrecorded partial cascade. Parent-alone takes no descendant authority.
+Background and bound-keep-running edges still receive a continue-running event
+when evaluated. An already-terminal edge receives its typed already-terminal
+event and traversal continues through that child's outgoing relationships, so a
+terminal intermediate session cannot hide live descendants.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Every result

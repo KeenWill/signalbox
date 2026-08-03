@@ -1137,7 +1137,8 @@ async fn load_event(
                                            AND result.payload_kind IN (
                                                 'tool_execution_result',
                                                 'tool_denied',
-                                                'tool_closed_by_turn_end'
+                                                'tool_closed_by_turn_end',
+                                                'delegation_result'
                                            )
                                            AND (
                                                 result.tool_result_request_id =

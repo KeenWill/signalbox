@@ -1910,7 +1910,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         if let currentModelCall, case .unknown = currentModelCall.state {
           blocks[turn.turnID] = .unknownNestedState
         }
-      case .queued:
+      case .queued, .queuedDelegated:
         break
       case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
@@ -2282,7 +2282,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         case .failed, .completed, .refused, .cancelled, .reconciliationRequired,
           .toolReconciliationRequired:
           return turn.turnID
-        case .queued, .activeRunning, .activeAwaitingToolApproval,
+        case .queued, .queuedDelegated, .activeRunning, .activeAwaitingToolApproval,
           .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .unknown:
           return nil
         }
@@ -2300,7 +2300,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .activeRunning, .activeAwaitingToolApproval,
         .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery:
         return turn.turnID
-      case .queued, .failed, .completed, .refused, .cancelled,
+      case .queued, .queuedDelegated, .failed, .completed, .refused, .cancelled,
         .reconciliationRequired, .toolReconciliationRequired, .unknown:
         return nil
       }
