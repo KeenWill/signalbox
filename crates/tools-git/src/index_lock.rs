@@ -693,7 +693,17 @@ fn remove_displaced_index_if_current(
     expected: IndexSnapshotIdentity,
     after_remove: impl FnOnce(),
 ) -> Result<(), LocalGitFailure> {
-    let quarantine = QuarantineDirectory::create(parent)?;
+    remove_displaced_index_if_current_with_hook(parent, name, expected, |_| {}, after_remove)
+}
+
+fn remove_displaced_index_if_current_with_hook(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: IndexSnapshotIdentity,
+    after_quarantine: impl FnOnce(&QuarantineDirectory),
+    after_remove: impl FnOnce(),
+) -> Result<(), LocalGitFailure> {
+    let mut quarantine = QuarantineDirectory::create(parent)?;
     let quarantined_name = OsStr::new("displaced");
     renameat_with(
         parent,
@@ -703,22 +713,37 @@ fn remove_displaced_index_if_current(
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| LocalGitFailure::Operation)?;
+    after_quarantine(&quarantine);
     let quarantined_is_expected =
         index_snapshot_identity_at(quarantine.descriptor(), quarantined_name) == Ok(Some(expected));
     if !quarantined_is_expected {
-        let _ = renameat_with(
+        if renameat_with(
             quarantine.descriptor(),
             quarantined_name,
             parent,
             name,
             RenameFlags::NOREPLACE,
-        );
+        )
+        .is_err()
+        {
+            quarantine.keep();
+        }
         return Err(LocalGitFailure::Operation);
     }
     unlinkat(quarantine.descriptor(), quarantined_name, AtFlags::empty())
         .map_err(|_| LocalGitFailure::Operation)?;
     after_remove();
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn remove_displaced_index_with_test_hook(
+    parent: &OwnedFd,
+    name: &OsStr,
+    after_quarantine: impl FnOnce(&QuarantineDirectory),
+) -> Result<(), LocalGitFailure> {
+    let expected = index_snapshot_identity_at(parent, name)?.ok_or(LocalGitFailure::Operation)?;
+    remove_displaced_index_if_current_with_hook(parent, name, expected, after_quarantine, || {})
 }
 
 fn rollback_index_exchange_if_current(

@@ -176,7 +176,8 @@ pub(super) fn checkout_snapshot(
         .target_dir(destination)
         .update_index(false)
         .refresh(false)
-        .disable_filters(true);
+        .disable_filters(true)
+        .disable_pathspec_match(true);
     for path in checkout_paths {
         checkout.path(path);
     }

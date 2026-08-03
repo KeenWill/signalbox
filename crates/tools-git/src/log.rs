@@ -1,18 +1,14 @@
-use std::{collections::HashSet, fs, io::Read};
+use std::collections::HashSet;
 
 use git2::Repository;
-use rustix::fs::{Mode, OFlags, openat};
 
 use crate::arguments::GitLogArguments;
 use crate::bounded::{
     bounded_bytes, find_bounded_commit, resolve_bounded_commit, validate_object_header,
 };
 use crate::failure::LocalGitFailure;
-use crate::layout::parse_full_object_id;
-use crate::limits::{
-    MAX_LOG_IDENTITY_BYTES, MAX_LOG_MESSAGE_BYTES, MAX_SHALLOW_BYTES, MAX_SHALLOW_ENTRIES,
-    MAX_WORKTREE_INSPECTIONS,
-};
+use crate::layout::validate_live_shallow;
+use crate::limits::{MAX_LOG_IDENTITY_BYTES, MAX_LOG_MESSAGE_BYTES, MAX_WORKTREE_INSPECTIONS};
 use crate::pinning::PinnedRepository;
 use crate::result::{LogEntry, LogResult};
 
@@ -24,7 +20,8 @@ pub(super) fn log(
     let (start, revision_snapshot) =
         resolve_bounded_commit(repository, authority, &arguments.revision)?;
     let start = start.id();
-    let shallow = read_shallow_boundaries(authority)?;
+    validate_live_shallow(&authority.git_directory, authority.object_format)?;
+    let shallow = HashSet::new();
     let (ordered, truncated) =
         bounded_topological_page(repository, start, arguments.max_entries, &shallow)?;
     let mut commits = Vec::new();
@@ -49,47 +46,8 @@ pub(super) fn log(
     }
     let result = LogResult { commits, truncated };
     revision_snapshot.validate(authority)?;
+    validate_live_shallow(&authority.git_directory, authority.object_format)?;
     Ok(result)
-}
-
-pub(super) fn read_shallow_boundaries(
-    authority: &PinnedRepository,
-) -> Result<HashSet<git2::Oid>, LocalGitFailure> {
-    let descriptor = match openat(
-        &authority.git_directory,
-        "shallow",
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(descriptor) => descriptor,
-        Err(error) if error == rustix::io::Errno::NOENT => return Ok(HashSet::new()),
-        Err(_) => return Err(LocalGitFailure::Repository),
-    };
-    let mut file = fs::File::from(descriptor);
-    let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-    if !metadata.is_file() || metadata.len() > MAX_SHALLOW_BYTES as u64 {
-        return Err(LocalGitFailure::Repository);
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    Read::by_ref(&mut file)
-        .take((MAX_SHALLOW_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| LocalGitFailure::Repository)?;
-    let mut boundaries = HashSet::new();
-    for line in bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        if boundaries.len() == MAX_SHALLOW_ENTRIES {
-            return Err(LocalGitFailure::Repository);
-        }
-        let value = std::str::from_utf8(line).map_err(|_| LocalGitFailure::Repository)?;
-        boundaries.insert(
-            parse_full_object_id(value, authority.object_format)
-                .ok_or(LocalGitFailure::Repository)?,
-        );
-    }
-    Ok(boundaries)
 }
 
 pub(super) fn bounded_topological_page(

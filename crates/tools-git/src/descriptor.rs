@@ -59,6 +59,7 @@ pub(super) struct QuarantineDirectory {
     name: OsString,
     identity: FileIdentity,
     directory: OwnedFd,
+    clear_on_drop: bool,
 }
 
 impl QuarantineDirectory {
@@ -118,6 +119,7 @@ impl QuarantineDirectory {
             name,
             identity,
             directory,
+            clear_on_drop: true,
         })
     }
 
@@ -135,6 +137,10 @@ impl QuarantineDirectory {
 
     pub(super) fn name(&self) -> &OsStr {
         &self.name
+    }
+
+    pub(super) fn keep(&mut self) {
+        self.clear_on_drop = false;
     }
 }
 
@@ -240,6 +246,9 @@ fn restore_or_remove_quarantined_entry(
 
 impl Drop for QuarantineDirectory {
     fn drop(&mut self) {
+        if !self.clear_on_drop {
+            return;
+        }
         let _ = clear_pinned_directory(&self.directory);
         let current = openat(
             &self.parent,
