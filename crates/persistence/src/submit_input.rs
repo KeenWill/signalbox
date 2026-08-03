@@ -245,10 +245,18 @@ mod tests {
         let error =
             map_model_settings_resolution_error(OriginModelSettingsError::Unsupported(unsupported));
 
-        assert!(matches!(
-            error,
-            SubmitInputRepositoryError::UnsupportedModelSetting(actual) if actual == unsupported
-        ));
+        assert_unsupported_model_setting(error, &unsupported);
+    }
+
+    #[track_caller]
+    fn assert_unsupported_model_setting(
+        error: SubmitInputRepositoryError,
+        expected: &UnsupportedModelSetting,
+    ) {
+        let SubmitInputRepositoryError::UnsupportedModelSetting(actual) = error else {
+            panic!("expected unsupported model setting, got {error}");
+        };
+        assert_eq!(&actual, expected);
     }
 }
 
