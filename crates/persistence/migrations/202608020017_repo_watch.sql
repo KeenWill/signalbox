@@ -1,5 +1,19 @@
 -- Append-only repository-watch cursors and closed version-one event facts.
 
+CREATE FUNCTION repo_watch_repository_is_valid(candidate text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT octet_length(candidate) BETWEEN 1 AND 201
+       AND candidate = lower(candidate)
+       AND candidate COLLATE "C" ~ '^[a-z0-9_.-]+/[a-z0-9_.-]+$'
+       AND split_part(candidate, '/', 1) NOT IN ('.', '..')
+       AND split_part(candidate, '/', 2) NOT IN ('.', '..')
+$$;
+
 CREATE TABLE repo_watch_cursor (
     repository text NOT NULL,
     generation bigint NOT NULL,
@@ -8,14 +22,14 @@ CREATE TABLE repo_watch_cursor (
     recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
 
     PRIMARY KEY (repository, generation),
-    CHECK (octet_length(repository) BETWEEN 1 AND 201),
-    CHECK (repository = lower(repository)),
+    CHECK (repo_watch_repository_is_valid(repository)),
     CHECK (generation > 0),
     CHECK (storage_version = 1),
     CHECK (jsonb_typeof(cursor_payload) = 'object'),
     CHECK (cursor_payload ? 'storage_version'),
     CHECK (jsonb_typeof(cursor_payload -> 'storage_version') = 'number'),
-    CHECK ((cursor_payload ->> 'storage_version')::bigint = storage_version)
+    CHECK ((cursor_payload ->> 'storage_version') ~ '^[0-9]+$'),
+    CHECK ((cursor_payload ->> 'storage_version')::numeric = storage_version)
 );
 
 CREATE FUNCTION repo_watch_labels_are_valid(candidate text[])
@@ -143,8 +157,7 @@ CREATE TABLE repo_watch_event (
         ON DELETE RESTRICT,
     CHECK (event_ordinal > 0),
     CHECK (event_version = 1),
-    CHECK (octet_length(repository) BETWEEN 1 AND 201),
-    CHECK (repository = lower(repository)),
+    CHECK (repo_watch_repository_is_valid(repository)),
     CHECK (target_kind IN ('pull_request', 'branch')),
     CHECK (
         event_kind IN (
@@ -200,7 +213,7 @@ CREATE TABLE repo_watch_event (
     CHECK (current_sha IS NULL OR current_sha ~ '^[0-9a-f]{40}$'),
     CHECK (previous_sha IS NULL OR previous_sha ~ '^[0-9a-f]{40}$'),
     CHECK (review_commit IS NULL OR review_commit ~ '^[0-9a-f]{40}$'),
-    CHECK (head_repository IS NULL OR head_repository = lower(head_repository)),
+    CHECK (head_repository IS NULL OR repo_watch_repository_is_valid(head_repository)),
     CHECK (author IS NULL OR repo_watch_login_is_valid(author)),
     CHECK (review_reviewer IS NULL OR repo_watch_login_is_valid(review_reviewer)),
     CHECK (reaction_reactor IS NULL OR repo_watch_login_is_valid(reaction_reactor)),
@@ -256,7 +269,6 @@ CREATE TABLE repo_watch_event (
     CHECK (labels IS NULL OR repo_watch_labels_are_valid(labels)),
     CHECK (event_kind <> 'labeled' OR label_name = ANY(labels)),
     CHECK (event_kind <> 'unlabeled' OR NOT (label_name = ANY(labels))),
-    CHECK (head_repository IS NULL OR octet_length(head_repository) BETWEEN 1 AND 201),
     CHECK (base_branch IS NULL OR repo_watch_branch_is_valid(base_branch)),
     CHECK (head_branch IS NULL OR repo_watch_branch_is_valid(head_branch)),
     CHECK (title IS NULL OR octet_length(title) BETWEEN 1 AND 1024),
