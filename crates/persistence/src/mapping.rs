@@ -9,11 +9,12 @@ use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, CodexCliServiceTier, DangerousToolAutoApproval,
     DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode,
     GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
-    GoalUserAction, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
-    OpenAiServiceTier, ReasoningLevel, ServiceTier, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture,
-    ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
-    UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
+    GoalUserAction, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
+    ModelSettingsPrecedence, OpenAiServiceTier, ReasoningLevel, ServiceTier,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
+    ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
+    ValidatedModelSettings,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -680,6 +681,22 @@ enum StoredModelSettingSource {
     GlobalDefault,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredModelChangeAdjustment {
+    ReasoningLevelClamped {
+        from: StoredReasoningLevel,
+        to: StoredReasoningLevel,
+    },
+    ReasoningLevelCleared {
+        from: StoredReasoningLevel,
+    },
+    FastModeDisabled,
+    ServiceTierCleared {
+        from: StoredServiceTier,
+    },
+}
+
 pub(crate) fn model_settings_to_json(settings: ValidatedModelSettings) -> Value {
     let precedence = settings.precedence();
     let resolved = settings.resolved();
@@ -764,6 +781,43 @@ pub(crate) fn model_settings_overlay_from_json(
     let stored: StoredModelSettingsOverlay =
         serde_json::from_value(value).map_err(StoredModelSettingsError::Json)?;
     Ok(stored.into_domain())
+}
+
+pub(crate) fn model_change_adjustments_to_json(adjustments: &[ModelChangeAdjustment]) -> Value {
+    Value::Array(
+        adjustments
+            .iter()
+            .map(|adjustment| match *adjustment {
+                ModelChangeAdjustment::ReasoningLevelClamped { from, to } => json!({
+                    "kind": "reasoning_level_clamped",
+                    "from": reasoning_level_to_json(from),
+                    "to": reasoning_level_to_json(to),
+                }),
+                ModelChangeAdjustment::ReasoningLevelCleared { from } => json!({
+                    "kind": "reasoning_level_cleared",
+                    "from": reasoning_level_to_json(from),
+                }),
+                ModelChangeAdjustment::FastModeDisabled => {
+                    json!({ "kind": "fast_mode_disabled" })
+                }
+                ModelChangeAdjustment::ServiceTierCleared { from } => json!({
+                    "kind": "service_tier_cleared",
+                    "from": service_tier_to_json(from),
+                }),
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn model_change_adjustments_from_json(
+    value: Value,
+) -> Result<Vec<ModelChangeAdjustment>, StoredModelSettingsError> {
+    let stored: Vec<StoredModelChangeAdjustment> =
+        serde_json::from_value(value).map_err(StoredModelSettingsError::Json)?;
+    Ok(stored
+        .into_iter()
+        .map(StoredModelChangeAdjustment::into_domain)
+        .collect())
 }
 
 fn setting_to_json<T: Copy>(
@@ -911,6 +965,26 @@ impl StoredModelSettingSource {
             Self::Session => ModelSettingSource::Session,
             Self::Profile => ModelSettingSource::Profile,
             Self::GlobalDefault => ModelSettingSource::GlobalDefault,
+        }
+    }
+}
+
+impl StoredModelChangeAdjustment {
+    const fn into_domain(self) -> ModelChangeAdjustment {
+        match self {
+            Self::ReasoningLevelClamped { from, to } => {
+                ModelChangeAdjustment::ReasoningLevelClamped {
+                    from: from.into_domain(),
+                    to: to.into_domain(),
+                }
+            }
+            Self::ReasoningLevelCleared { from } => ModelChangeAdjustment::ReasoningLevelCleared {
+                from: from.into_domain(),
+            },
+            Self::FastModeDisabled => ModelChangeAdjustment::FastModeDisabled,
+            Self::ServiceTierCleared { from } => ModelChangeAdjustment::ServiceTierCleared {
+                from: from.into_domain(),
+            },
         }
     }
 }
