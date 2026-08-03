@@ -166,8 +166,9 @@ through the selected head against each event's typed receipt and durable-command
 registry claim and rejects a head when immutable history contains a later event.
 Equal native and imported-frontier creation replay likewise rejects a missing or
 lagging current head while reconstituting its immutable creation receipt. A
-placement-update replay rejects that same lagging-head state before
-reconstituting either applied or stateful-rejection evidence. A missing or
+placement-update replay authenticates the current head event and rejects either
+a head that selects no authenticated event or a head that lags later history
+before reconstituting applied or stateful-rejection evidence. A missing or
 lagging head, cross-wired history, or invalid command fact fails closed as typed
 storage corruption.
 

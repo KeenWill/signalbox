@@ -748,6 +748,21 @@ async fn load_record(
         return Ok(None);
     };
     let session = session_id_from_uuid(row.try_get("session_id")?);
+    let current_head_version = row
+        .try_get::<Option<Decimal>, _>("current_placement_version")?
+        .map(decode_version)
+        .transpose()?;
+    let authenticated_head_version = match current_head_version {
+        Some(version) => load_authenticated_version(connection, session, version)
+            .await?
+            .map(|placement| placement.version()),
+        None => None,
+    };
+    if authenticated_head_version != current_head_version {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement head event",
+        ));
+    }
     let history_head_state = PlacementHistoryHeadState::from_later_event_exists(
         row.try_get("current_placement_later_event_exists")?,
     );

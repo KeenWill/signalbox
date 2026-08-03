@@ -56,6 +56,7 @@ const ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED: u128 = 0x12d;
 const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
 const ARBITRARY_LAGGING_HEAD_READ_REJECTION_COMMAND_ID_SEED: u128 = 0x135;
 const ARBITRARY_LAGGING_HEAD_READ_LATER_UPDATE_COMMAND_ID_SEED: u128 = 0x136;
+const DANGLING_PLACEMENT_HEAD_VERSION: i64 = 4;
 const ARBITRARY_INITIAL_EVENT_SHAPE_SESSION_ID_SEED: u128 = 0x232;
 const ARBITRARY_INITIAL_EVENT_SHAPE_CREATION_COMMAND_ID_SEED: u128 = 0x137;
 const ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED: u128 = 0x223;
@@ -854,8 +855,8 @@ async fn s36_public_placement_read_rejects_cross_wired_creation_provenance()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_creation_replay_rejects_cross_wired_placement_provenance() -> Result<(), Box<dyn Error>>
-{
+async fn s36_inv012_creation_replay_rejects_cross_wired_placement_provenance()
+-> Result<(), Box<dyn Error>> {
     let fixture = corrupt_creation_placement_provenance_fixture().await?;
     let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
         .handle(fixture.creation)
@@ -1326,6 +1327,57 @@ async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture,
         applied_update,
         rejected_update,
     })
+}
+
+async fn dangling_placement_head_fixture() -> Result<LaggingPlacementHeadFixture, Box<dyn Error>> {
+    let fixture = lagging_placement_head_fixture().await?;
+    sqlx::query(
+        "UPDATE session_current_placement SET current_version = $2
+          WHERE session_id = $1",
+    )
+    .bind(*fixture.session.as_uuid())
+    .bind(DANGLING_PLACEMENT_HEAD_VERSION)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(fixture)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_applied_update_replay_rejects_a_head_without_an_event()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dangling_placement_head_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .handle(fixture.applied_update)
+        .await
+        .expect_err("applied update replay authenticates the selected head event");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a dangling placement head fails applied update replay with typed corruption")
+    };
+    assert_eq!(reason, "session placement head event");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_rejected_update_replay_rejects_a_head_without_an_event()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dangling_placement_head_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .handle(fixture.rejected_update)
+        .await
+        .expect_err("rejected update replay authenticates the selected head event");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a dangling placement head fails rejected update replay with typed corruption")
+    };
+    assert_eq!(reason, "session placement head event");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
