@@ -2993,6 +2993,7 @@ private enum ProcessSubmissionFixture {
       from: Data(
         """
         {
+          "type":"input_submitted",
           "session_id":"\(sessionID.rawValue)",
           "accepted_input_id":"\(acceptedInputID)",
           "acceptance_position":"1",
