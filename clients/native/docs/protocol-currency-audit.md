@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `6f350d9d` on 2026-08-03.
+Verified against repository head `ecbe29e0` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 23 close-now, 16 staged, and 1 report-only.
+variants: 25 close-now, 16 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -67,6 +67,8 @@ variants: 23 close-now, 16 staged, and 1 report-only.
 | C22 | Medium   | An unknown turn-state card used its current transcript anchor as its event identity, so compaction could make a newly observed turn reuse a retained turn's ID and replace that older card.                                                | **close-now** — allocate the stable event ID from turn identity and use the current transcript anchor only for presentation order.                                    |
 | C23 | High     | Side rereads for refusal and model-call reconciliation admitted no semantic rows but accepted a snapshot whose named turn, model call, frontier, or terminal state did not match the trigger.                                             | **close-now** — authenticate the exact terminal turn projection even when the triggering event contributes no semantic timeline entry.                               |
 | C24 | Medium   | Plan tool cards accepted display names, labels, arguments, and outputs as independent public overrides, allowing contradictory visible labels unrelated to the typed presentation state.                                                | **close-now** — represent recognized plan presentation as an internal typed variant and derive all display labels and content from it.                               |
+| C25 | High     | A terminal reconciliation batch containing an attempt-less `tool_closed` for the ambiguous request and an ordinary result for another request was rejected because only the other request supplied an attempt ID.                       | **close-now** — let a source-correlated closed member authenticate the absent attempt while still requiring the complete terminal request set.                        |
+| C26 | High     | Duplicate-member scanning was installed on the repository-wide JSON decoder, so deeply nested non-process template, artifact, or legacy payloads could fail at the process frame's conservative depth bound.                             | **close-now** — keep duplicate validation explicit at process-frame and plan-evidence boundaries while the shared decoder retains ordinary Foundation limits.         |
 
 ## Staged gaps
 
