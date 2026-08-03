@@ -636,10 +636,12 @@ fn decode_complete(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
-        required(&row, "command_tool_auto_approval")?,
-        row.try_get("command_system_prompt")?,
-        stored_model_settings.clone(),
-        typed_version,
+        StoredConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
+            system_prompt: row.try_get("command_system_prompt")?,
+            model_settings: stored_model_settings.clone(),
+            storage_version: typed_version,
+        },
         "command model selection",
     )?;
     let command_template_provenance = decode_template_provenance(
@@ -712,10 +714,12 @@ fn decode_complete(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
-        required(&row, "stored_tool_auto_approval")?,
-        row.try_get("stored_system_prompt")?,
-        stored_model_settings,
-        typed_version,
+        StoredConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "stored_tool_auto_approval")?,
+            system_prompt: row.try_get("stored_system_prompt")?,
+            model_settings: stored_model_settings,
+            storage_version: typed_version,
+        },
         "stored model selection",
     )?;
     let stored_placement_version = placement_version_from_numeric(
@@ -898,14 +902,18 @@ fn decode_provenance(
     ))
 }
 
-fn decode_selection(
-    kind: String,
-    direct: Option<Uuid>,
-    alias: Option<Uuid>,
+struct StoredConfigurationFields {
     dangerous_tool_auto_approval: String,
     system_prompt: Option<String>,
     model_settings: Value,
     storage_version: i16,
+}
+
+fn decode_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    stored: StoredConfigurationFields,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, CreateSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -920,14 +928,16 @@ fn decode_selection(
             return Err(CreateSessionCorruption::Unsupported { field, value: kind }.into());
         }
     };
-    let dangerous_tool_auto_approval =
-        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
-            CreateSessionRepositoryError::from(CreateSessionCorruption::Unsupported {
-                field: "dangerous tool auto approval",
-                value: dangerous_tool_auto_approval,
-            })
-        })?;
-    if storage_version < DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION
+    let dangerous_tool_auto_approval = dangerous_tool_auto_approval_from_str(
+        &stored.dangerous_tool_auto_approval,
+    )
+    .ok_or_else(|| {
+        CreateSessionRepositoryError::from(CreateSessionCorruption::Unsupported {
+            field: "dangerous tool auto approval",
+            value: stored.dangerous_tool_auto_approval,
+        })
+    })?;
+    if stored.storage_version < DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION
         && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
         return Err(CreateSessionCorruption::Inconsistent(
@@ -935,18 +945,20 @@ fn decode_selection(
         )
         .into());
     }
-    if storage_version < SYSTEM_PROMPT_FROM_STORAGE_VERSION && system_prompt.is_some() {
+    if stored.storage_version < SYSTEM_PROMPT_FROM_STORAGE_VERSION && stored.system_prompt.is_some()
+    {
         return Err(
             CreateSessionCorruption::Inconsistent("storage version without system prompt").into(),
         );
     }
-    let system_prompt = system_prompt
+    let system_prompt = stored
+        .system_prompt
         .map(|value| {
             signalbox_domain::SessionSystemPrompt::try_new(value)
                 .map_err(|_| CreateSessionCorruption::Inconsistent("system prompt admission"))
         })
         .transpose()?;
-    let model_settings = model_settings_from_json(model_settings)
+    let model_settings = model_settings_from_json(stored.model_settings)
         .map_err(|_| CreateSessionCorruption::Inconsistent("model settings"))?;
     Ok(SessionConfigurationDefaults::complete_with_model_settings(
         model,

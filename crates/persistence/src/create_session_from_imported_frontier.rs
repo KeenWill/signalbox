@@ -767,10 +767,12 @@ async fn load_creation_from_connection(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
         row.try_get("command_alias_id")?,
-        required(&row, "command_tool_auto_approval")?,
-        row.try_get("command_system_prompt")?,
-        command_model_settings,
-        typed_version,
+        StoredVersionedConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
+            system_prompt: row.try_get("command_system_prompt")?,
+            model_settings: command_model_settings,
+            storage_version: typed_version,
+        },
         "command model selection",
     )?;
     let command = CreateSessionFromImportedFrontier::new(
@@ -790,10 +792,12 @@ async fn load_creation_from_connection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
         row.try_get("stored_alias_id")?,
-        required(&row, "stored_tool_auto_approval")?,
-        row.try_get("stored_system_prompt")?,
-        stored_model_settings,
-        typed_version,
+        StoredVersionedConfigurationFields {
+            dangerous_tool_auto_approval: required(&row, "stored_tool_auto_approval")?,
+            system_prompt: row.try_get("stored_system_prompt")?,
+            model_settings: stored_model_settings,
+            storage_version: typed_version,
+        },
         "stored model selection",
     )?;
     validate_initial_placement_effect(&row)?;
@@ -1299,17 +1303,21 @@ fn decode_selection(
     ))
 }
 
-fn decode_versioned_selection(
-    kind: String,
-    direct: Option<Uuid>,
-    alias: Option<Uuid>,
+struct StoredVersionedConfigurationFields {
     dangerous_tool_auto_approval: String,
     system_prompt: Option<String>,
     model_settings: Value,
     storage_version: i16,
+}
+
+fn decode_versioned_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    stored: StoredVersionedConfigurationFields,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ImportedSessionRepositoryError> {
-    if storage_version <= 2 && system_prompt.is_some() {
+    if stored.storage_version <= 2 && stored.system_prompt.is_some() {
         return Err(
             ImportedSessionCorruption::Inconsistent("pre-version-three system prompt").into(),
         );
@@ -1318,12 +1326,12 @@ fn decode_versioned_selection(
         kind,
         direct,
         alias,
-        dangerous_tool_auto_approval,
-        system_prompt,
-        model_settings,
+        stored.dangerous_tool_auto_approval,
+        stored.system_prompt,
+        stored.model_settings,
         field,
     )?;
-    if storage_version == 1
+    if stored.storage_version == 1
         && defaults.dangerous_tool_auto_approval()
             != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
