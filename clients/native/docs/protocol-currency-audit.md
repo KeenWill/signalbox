@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `a30990d5` on 2026-08-03.
+Verified against repository head `2d48e849` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 17 close-now, 16 staged, and 1 report-only.
+variants: 18 close-now, 16 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -61,6 +61,7 @@ variants: 17 close-now, 16 staged, and 1 report-only.
 | C16 | Medium   | A model-usage row's stable event ID was derived from its current transcript anchor, so compaction and later anchor reuse could give two usage rows one ID and silently replace one.                                                      | **close-now** — allocate stable IDs only by model-call identity and use transcript anchors solely for presentation order.                                            |
 | C17 | Medium   | A `turn_tool_reconciliation_required` side reread rendered only the result carrying the named crash-lost attempt and omitted other results in the same terminal suffix.                                                                  | **close-now** — authenticate the named attempt within the native contiguous terminal-result suffix and render that complete suffix.                                  |
 | C18 | Medium   | Reconciliation suffix discovery started at the end of a side snapshot, so a later turn's semantic entry made the valid triggering-turn result suffix appear absent.                                                                      | **close-now** — authenticate the triggering turn's terminal frontier and anchor its contiguous result suffix on the named terminal tool attempt.                     |
+| C19 | High     | Crash recovery can close an ambiguous tool request without carrying its attempt ID in the transcript entry, so attempt-only reconciliation anchoring rejected genuine terminal evidence.                                                 | **close-now** — use the authenticated frontier and source-qualified request-to-turn correlation to select the triggering turn's last contiguous terminal-result run. |
 
 ## Staged gaps
 
