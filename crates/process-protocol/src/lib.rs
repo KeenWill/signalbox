@@ -9451,7 +9451,7 @@ mod tests {
     fn inv033_session_placement_frames_admit_the_complete_structural_range() {
         let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame = format!(
-            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
+            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"model_settings":{{"reasoning_level":{{"kind":"inherit"}},"fast_mode":{{"kind":"inherit"}},"service_tier":{{"kind":"inherit"}}}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
 "#
         );
 
