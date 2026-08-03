@@ -7636,7 +7636,6 @@ pub enum ReviewState {
     Approved,
     ChangesRequested,
     Commented,
-    Dismissed,
 }
 
 pub enum ReactionChange {
@@ -7790,7 +7789,7 @@ impl RepoWatchTemplateContextDeclaration {
 }
 
 pub enum RepoWatchTemplateContextDeclarationError {
-    NoAcceptedContextShape,
+    NoAcceptedContextShape { template: SessionTemplateName },
 }
 // implements Error.
 

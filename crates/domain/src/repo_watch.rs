@@ -112,7 +112,7 @@ macro_rules! bounded_text {
 pub struct RepositorySlug(String);
 
 impl RepositorySlug {
-    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError> {
+    pub fn try_new(mut value: String) -> Result<Self, RepoWatchTextError> {
         validate_text(&value, MAX_REPOSITORY_BYTES)?;
         let mut parts = value.split('/');
         let namespace = parts.next().unwrap_or_default();
@@ -123,6 +123,7 @@ impl RepositorySlug {
         {
             return Err(RepoWatchTextError::Malformed);
         }
+        value.make_ascii_lowercase();
         Ok(Self(value))
     }
 
@@ -209,8 +210,9 @@ impl LabelName {
 pub struct RepoWatchAuthorLogin(String);
 
 impl RepoWatchAuthorLogin {
-    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError> {
+    pub fn try_new(mut value: String) -> Result<Self, RepoWatchTextError> {
         validate_text(&value, MAX_LOGIN_BYTES)?;
+        value.make_ascii_lowercase();
         let base = value.strip_suffix(BOT_LOGIN_SUFFIX).unwrap_or(&value);
         let valid = !base.is_empty()
             && base.len() <= MAX_LOGIN_BASE_BYTES
@@ -240,8 +242,30 @@ bounded_text!(/// One workflow name.
     WorkflowName, MAX_NAME_BYTES);
 bounded_text!(/// One reaction content spelling retained as event evidence.
     ReactionContent, MAX_REACTION_BYTES);
-bounded_text!(/// One stable operator-defined rule name.
-    RepoWatchRuleId, MAX_RULE_ID_BYTES);
+/// One stable operator-defined rule name.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchRuleId(String);
+
+impl RepoWatchRuleId {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchTextError> {
+        validate_text(&value, MAX_RULE_ID_BYTES)?;
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(RepoWatchTextError::Malformed);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 bounded_text!(/// One stable provider review-thread identifier.
     ReviewThreadId, MAX_NAME_BYTES);
 bounded_text!(/// One exact pull-request title.
@@ -478,7 +502,6 @@ pub enum ReviewState {
     Approved,
     ChangesRequested,
     Commented,
-    Dismissed,
 }
 
 /// Whether a configured reviewer's reaction was added or removed.
@@ -605,6 +628,9 @@ pub struct PullRequestEventContextInput {
 
 impl PullRequestEventContext {
     pub fn new(input: PullRequestEventContextInput) -> Self {
+        let mut labels = input.labels;
+        labels.sort();
+        labels.dedup();
         Self {
             number: input.number,
             head_sha: input.head_sha,
@@ -613,7 +639,7 @@ impl PullRequestEventContext {
             head_branch: input.head_branch,
             title: input.title,
             body: input.body,
-            labels: input.labels.into_boxed_slice(),
+            labels: labels.into_boxed_slice(),
             draft: input.draft,
             author: input.author,
         }
@@ -996,14 +1022,20 @@ pub struct RepoWatchTemplateContextDeclaration {
 }
 
 /// Why a template's repository-watch context declaration was refused.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchTemplateContextDeclarationError {
-    NoAcceptedContextShape,
+    NoAcceptedContextShape { template: SessionTemplateName },
 }
 
 impl fmt::Display for RepoWatchTemplateContextDeclarationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("repository-watch template accepts no dispatch context shape")
+        match self {
+            Self::NoAcceptedContextShape { template } => write!(
+                formatter,
+                "repository-watch template {} accepts no dispatch context shape",
+                template.as_str()
+            ),
+        }
     }
 }
 
@@ -1015,7 +1047,9 @@ impl RepoWatchTemplateContextDeclaration {
         accepted: Vec<RepoWatchDispatchContextShape>,
     ) -> Result<Self, RepoWatchTemplateContextDeclarationError> {
         if accepted.is_empty() {
-            return Err(RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape);
+            return Err(
+                RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape { template },
+            );
         }
         Ok(Self {
             template,
@@ -1385,12 +1419,16 @@ mod tests {
     }
 
     #[test]
-    fn repository_slug_requires_exact_namespace_and_name() {
+    fn repository_slug_requires_exact_namespace_and_name() -> Result<(), RepoWatchTextError> {
         assert_eq!(
             RepositorySlug::try_new(String::from("namespace")),
             Err(RepoWatchTextError::Malformed)
         );
-        assert!(RepositorySlug::try_new(String::from("namespace/repo")).is_ok());
+        assert_eq!(
+            RepositorySlug::try_new(String::from("NameSpace/Repo"))?.as_str(),
+            "namespace/repo"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1413,6 +1451,15 @@ mod tests {
     }
 
     #[test]
+    fn actor_login_canonicalizes_case_insensitive_identity() -> Result<(), RepoWatchTextError> {
+        assert_eq!(
+            RepoWatchAuthorLogin::try_new(String::from("GitHub-Actions[BOT]"))?.as_str(),
+            "github-actions[bot]"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn actor_login_rejects_malformed_provider_values() {
         assert_eq!(
             RepoWatchAuthorLogin::try_new(String::from("bad login")),
@@ -1428,6 +1475,18 @@ mod tests {
         );
         assert_eq!(
             RepoWatchAuthorLogin::try_new(String::from("bad--login")),
+            Err(RepoWatchTextError::Malformed)
+        );
+    }
+
+    #[test]
+    fn rule_identity_rejects_whitespace_and_control_characters() {
+        assert_eq!(
+            RepoWatchRuleId::try_new(String::from("bad rule")),
+            Err(RepoWatchTextError::Malformed)
+        );
+        assert_eq!(
+            RepoWatchRuleId::try_new(String::from("bad\nrule")),
             Err(RepoWatchTextError::Malformed)
         );
     }
@@ -1610,6 +1669,20 @@ mod tests {
 
         assert_eq!(context.head_repository(), &head_repository);
         assert_eq!(context.author(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn pull_request_context_canonicalizes_its_complete_label_set() -> Result<(), Box<dyn Error>> {
+        let first = LabelName::try_new(String::from("first"))?;
+        let second = LabelName::try_new(String::from("second"))?;
+        let context = pull_request_context(
+            CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+            BranchName::try_new(String::from("main"))?,
+            vec![second.clone(), first.clone(), second.clone()],
+        )?;
+
+        assert_eq!(context.labels(), [first, second]);
         Ok(())
     }
 
@@ -1913,8 +1986,17 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("empty-context"))?;
 
         assert_eq!(
-            RepoWatchTemplateContextDeclaration::try_new(template, Vec::new()),
-            Err(RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape)
+            RepoWatchTemplateContextDeclaration::try_new(template.clone(), Vec::new()),
+            Err(
+                RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape {
+                    template: template.clone(),
+                }
+            )
+        );
+        assert!(
+            RepoWatchTemplateContextDeclarationError::NoAcceptedContextShape { template }
+                .to_string()
+                .contains("empty-context")
         );
         Ok(())
     }
