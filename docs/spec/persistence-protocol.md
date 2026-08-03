@@ -1107,13 +1107,12 @@ Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
 disposition, result, or message. Spawn, waiting, lifecycle, and result updates
 go only to the parent stream, and message updates only to the payload recipient.
-Every result and message appends exactly one
-distinct `delegation_wake` record for that same recipient in the same
-transaction, even when the recipient is already active and may ignore the nudge;
-the internal wake subject does not stand in for the client-visible result or
-message update. A guarded transition that changes no durable state appends no
-update. State without its promised update, or an update without its state, is
-therefore unrepresentable.
+Every result and message appends exactly one distinct `delegation_wake` record
+for that same recipient in the same transaction, even when the recipient is
+already active and may ignore the nudge; the internal wake subject does not
+stand in for the client-visible result or message update. A guarded transition
+that changes no durable state appends no update. State without its promised
+update, or an update without its state, is therefore unrepresentable.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by

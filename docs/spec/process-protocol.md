@@ -1577,9 +1577,9 @@ the durable result or message update that caused it, never the wake itself.
 
 Each typed delegation update has one recipient stream: spawn, waiting,
 lifecycle, and result updates go to the parent; messages go to their payload
-recipient. Each event's own `session_id` identifies that stream. Cursor ordering,
-snapshot-first follow, deduplication, and resync rules are unchanged. No event
-embeds or links the child transcript.
+recipient. Each event's own `session_id` identifies that stream. Cursor
+ordering, snapshot-first follow, deduplication, and resync rules are unchanged.
+No event embeds or links the child transcript.
 
 `descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
 client spells omission as `parent_alone` and `--descendants` as
