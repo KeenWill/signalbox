@@ -193,9 +193,7 @@ async fn prepare_raw_delegation(
         parent_turn: parent.turn,
         child,
         initial_turn: TurnId::from_uuid(Uuid::from_u128(seed + 0x201)),
-        initial_semantic_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
-            seed + 0x202,
-        )),
+        initial_semantic_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x202)),
         spawning_request: requests[0],
         awaiting_request: requests[1],
         message_request: requests[2],
@@ -255,8 +253,8 @@ async fn insert_raw_delegation(
          VALUES ($1, 1)",
     )
     .bind(fixture.child.into_uuid())
-        .execute(&mut *connection)
-        .await?;
+    .execute(&mut *connection)
+    .await?;
     sqlx::query("INSERT INTO session_scheduler(session_id) VALUES ($1)")
         .bind(fixture.child.into_uuid())
         .execute(&mut *connection)

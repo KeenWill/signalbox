@@ -17,7 +17,8 @@ input-delivery surface and its user-reachable steering boundary were verified
 through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
 provenance and creation mode were verified through PR #311
 (`agent/session-templates-spec`). Delegated creation provenance and its durable
-mapping were verified through PR #431 (`agent/delegation-creation-provenance`).
+mapping are the foundation proposal at the bottom of the delegation stack and
+become verified only with its implementing child pull requests.
 The append-only context-compaction record and projection were verified through
 PR #312 (`agent/context-compaction-core`); the command path and canonical
 visible-range selection were verified through PR #314
