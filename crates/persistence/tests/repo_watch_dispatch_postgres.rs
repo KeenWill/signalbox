@@ -563,18 +563,11 @@ async fn deactivated_rule_cannot_dispatch_an_already_loaded_event() -> Result<()
 async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
-    let turn: Uuid = sqlx::query_scalar(
-        "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+         VALUES ($1, transaction_timestamp() - interval '2 hours')",
     )
     .bind(fixture.dispatch_id.as_uuid())
-    .fetch_one(&fixture.pool)
-    .await?;
-    sqlx::query(
-        "SELECT repo_watch_release_completed_dispatch_batches_for_turn(
-            $1, $2, transaction_timestamp() - interval '2 hours')",
-    )
-    .bind(turn)
-    .bind(fixture.sessions[0].as_uuid())
     .execute(&fixture.pool)
     .await?;
     let release_age_seconds: f64 = sqlx::query_scalar(
@@ -594,6 +587,53 @@ async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn release_timestamp_is_sampled_after_dispatch_lock_wait() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let turn: Uuid = sqlx::query_scalar(
+        "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let mut dispatch_lock = fixture.pool.begin().await?;
+    sqlx::query("SELECT 1 FROM repo_watch_dispatch_batch WHERE dispatch_id = $1 FOR UPDATE")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&mut *dispatch_lock)
+        .await?;
+    let mut release_connection = fixture.pool.acquire().await?;
+    let release_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *release_connection)
+        .await?;
+    let release = tokio::spawn(async move {
+        sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
+            .bind(turn)
+            .bind(fixture.sessions[0].as_uuid())
+            .execute(&mut *release_connection)
+            .await
+    });
+
+    wait_for_backend_lock(&fixture.pool, release_backend).await?;
+    let serialized_at: f64 =
+        sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::float8")
+            .fetch_one(&fixture.pool)
+            .await?;
+    dispatch_lock.commit().await?;
+    release.await??;
+    let released_at: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM released_at)::float8
+           FROM repo_watch_dispatch_release
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(released_at >= serialized_at);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<(), Box<dyn Error>>
 {
     let fixture = dispatch_fixture().await?;
@@ -607,26 +647,21 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
     .fetch_all(&fixture.pool)
     .await?;
     let mut first = fixture.pool.begin().await?;
-    sqlx::query(
-        "SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2, clock_timestamp())",
-    )
-    .bind(turns[0])
-    .bind(fixture.sessions[0].as_uuid())
-    .execute(&mut *first)
-    .await?;
+    sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
+        .bind(turns[0])
+        .bind(fixture.sessions[0].as_uuid())
+        .execute(&mut *first)
+        .await?;
     let mut second = fixture.pool.acquire().await?;
     let second_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *second)
         .await?;
     let second_check = tokio::spawn(async move {
-        sqlx::query(
-            "SELECT repo_watch_release_completed_dispatch_batches_for_turn(
-                $1, $2, clock_timestamp())",
-        )
-        .bind(turns[1])
-        .bind(fixture.sessions[1].as_uuid())
-        .execute(&mut *second)
-        .await
+        sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
+            .bind(turns[1])
+            .bind(fixture.sessions[1].as_uuid())
+            .execute(&mut *second)
+            .await
     });
 
     wait_for_backend_lock(&fixture.pool, second_backend).await?;
@@ -639,18 +674,11 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn cooldown_clock_is_sampled_after_singleton_lock_wait() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
-    let turn: Uuid = sqlx::query_scalar(
-        "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+         VALUES ($1, clock_timestamp() + interval '2 seconds')",
     )
     .bind(fixture.dispatch_id.as_uuid())
-    .fetch_one(&fixture.pool)
-    .await?;
-    sqlx::query(
-        "SELECT repo_watch_release_completed_dispatch_batches_for_turn(
-            $1, $2, clock_timestamp() + interval '2 seconds')",
-    )
-    .bind(turn)
-    .bind(fixture.sessions[0].as_uuid())
     .execute(&fixture.pool)
     .await?;
     let (loaded, observation) = load_second_conflict(&fixture).await?;

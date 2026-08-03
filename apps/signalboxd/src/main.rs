@@ -1228,12 +1228,6 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
-
-    let scheduler_pool = pool.clone();
-    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let configured_repositories =
         model_configuration
             .repository_watch()
@@ -1257,9 +1251,17 @@ async fn run_hub(
             RuntimePhase::StartupScan,
             SanitizedStartupCause::Static("repository_watch_configuration_reconciliation_failed"),
         );
+        let _ = listener.cleanup();
+        let _ = runner_listener.cleanup();
         let _ = database.close().await;
         return Err(failure);
     }
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
+
+    let scheduler_pool = pool.clone();
+    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let repository_watch_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match RepositoryWatchRuntime::try_new(
             pool.clone(),

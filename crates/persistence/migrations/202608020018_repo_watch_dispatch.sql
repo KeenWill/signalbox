@@ -220,8 +220,7 @@ CREATE TABLE repo_watch_dispatch_release (
 
 CREATE FUNCTION repo_watch_release_completed_dispatch_batches_for_turn(
     completed_turn_id uuid,
-    completed_session_id uuid,
-    completed_at timestamptz
+    completed_session_id uuid
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -241,7 +240,7 @@ BEGIN
            FOR UPDATE;
 
         INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
-        SELECT batch.dispatch_id, completed_at
+        SELECT batch.dispatch_id, clock_timestamp()
           FROM repo_watch_dispatch_batch AS batch
          WHERE batch.dispatch_id = candidate_dispatch_id
            AND NOT EXISTS (
@@ -285,8 +284,7 @@ BEGIN
     END IF;
     PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
         NEW.turn_id,
-        NEW.session_id,
-        statement_timestamp()
+        NEW.session_id
     );
     RETURN NULL;
 END;
