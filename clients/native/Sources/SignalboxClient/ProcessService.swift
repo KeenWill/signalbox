@@ -121,7 +121,6 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
   public let modelSelection: SignalboxModelSelection
-  public let modelSelection: SignalboxModelSelection
 
   public init(
     commandID: SignalboxCommandID,
@@ -237,6 +236,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
   public let activeTurnID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let modelSelection: SignalboxModelSelection
 
   public init(
     commandID: SignalboxCommandID,
