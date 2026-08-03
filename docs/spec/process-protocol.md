@@ -1345,6 +1345,9 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 - `queued_delegated { spawning_request_id, parent_session_id, parent_turn_id, content }`,
   whose identifiers bind the checked delegated-task origin rather than
   fabricating an accepted input;
+- `queued_delegation_wake { first_delivery_sequence, through_delivery_sequence }`,
+  whose positive ordered recipient-wide range identifies the delivered
+  delegation content that will wake an otherwise idle session;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;

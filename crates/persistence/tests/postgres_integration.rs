@@ -15320,6 +15320,83 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
     Ok(())
 }
 
+/// S17 / INV-032: a foreground result remains discoverable by the durable
+/// reconciliation sweep after its best-effort same-process nudge is lost.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session_uuid = insert_outbox_session_fixture(&pool, 0xa900).await?;
+    let turn_uuid = Uuid::from_u128(0xa901);
+    let awaiting_request_uuid = Uuid::from_u128(0xa902);
+    let spawning_request_uuid = Uuid::from_u128(0xa903);
+    let child_uuid = Uuid::from_u128(0xa904);
+    let starting_frontier_uuid = Uuid::from_u128(0xa905);
+    let producing_call_uuid = Uuid::from_u128(0xa906);
+    let origin_input_uuid = Uuid::from_u128(0xa907);
+
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+    )
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .bind(session_uuid)
+    .bind(turn_uuid)
+    .bind(child_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, NULL, NULL)",
+    )
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .bind(session_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id,
+             acceptance_position, state_kind, start_lineage_kind,
+             starting_frontier_id, active_phase_kind,
+             child_wait_request_id, active_tool_round_call_id, origin_kind)
+         VALUES ($1, $2, $3, 1, 'active', 'first_in_session', $4,
+                 'awaiting_child', $5, $6, 'accepted_input')",
+    )
+    .bind(turn_uuid)
+    .bind(session_uuid)
+    .bind(origin_input_uuid)
+    .bind(starting_frontier_uuid)
+    .bind(awaiting_request_uuid)
+    .bind(producing_call_uuid)
+    .execute(&pool)
+    .await?;
+
+    let (candidates, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(!continuation);
+    assert_eq!(candidates, vec![SessionId::from_uuid(session_uuid)]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S01 / INV-009: scheduler-row locking serializes concurrent passes for one
 /// session so exactly one service activates and the other observes the winner.
 #[tokio::test(flavor = "multi_thread")]

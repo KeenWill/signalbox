@@ -378,6 +378,14 @@ pub enum ProcessTurnState {
         /// Exact delegated task text.
         content: String,
     },
+    /// A contiguous range of delivered delegation content is waiting to wake
+    /// an otherwise idle recipient.
+    QueuedDelegationWake {
+        /// First recipient-wide delivery sequence included by the wake.
+        first_delivery_sequence: u64,
+        /// Last recipient-wide delivery sequence included by the wake.
+        through_delivery_sequence: u64,
+    },
     /// The current attempt is running.
     ActiveRunning {
         /// Current live attempt.
@@ -2043,6 +2051,10 @@ enum DecodedTurnOrigin {
         parent_turn: TurnId,
         content: String,
     },
+    DelegationWake {
+        first_delivery_sequence: u64,
+        through_delivery_sequence: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2350,6 +2362,8 @@ async fn load_next_transcript_turn(
             task.task_content AS delegated_task_content,
             relation.parent_session_id AS delegated_parent_session_id,
             relation.parent_turn_id AS delegated_parent_turn_id,
+            wake.first_delivery_sequence AS delegated_wake_first_delivery_sequence,
+            wake.through_delivery_sequence AS delegated_wake_through_delivery_sequence,
             child_wait.spawning_tool_request_id AS child_wait_spawning_request_id,
             child_wait.child_session_id AS child_wait_child_session_id,
             current_call.model_call_id AS current_model_call_id,
@@ -2364,6 +2378,10 @@ async fn load_next_transcript_turn(
            LEFT JOIN session_delegation_initial_task AS task
              ON task.turn_id = turn.turn_id
             AND task.child_session_id = turn.session_id
+           LEFT JOIN session_delegation_wake_turn_origin AS wake
+             ON wake.turn_id = turn.turn_id
+            AND wake.recipient_session_id = turn.session_id
+            AND wake.admission_position = turn.acceptance_position
            LEFT JOIN session_delegation AS relation
              ON relation.spawning_tool_request_id = task.spawning_tool_request_id
             AND relation.child_session_id = task.child_session_id
@@ -2450,6 +2468,8 @@ fn decode_transcript_turn_origin(
     delegated_parent_session: Option<Uuid>,
     delegated_parent_turn: Option<Uuid>,
     delegated_task_content: Option<String>,
+    delegated_wake_first: Option<Decimal>,
+    delegated_wake_through: Option<Decimal>,
     turn: TurnId,
     acceptance_position: u64,
 ) -> Result<DecodedTurnOrigin, ProcessReadError> {
@@ -2464,6 +2484,8 @@ fn decode_transcript_turn_origin(
         delegated_parent_session,
         delegated_parent_turn,
         delegated_task_content,
+        delegated_wake_first,
+        delegated_wake_through,
     ) {
         (
             "accepted_input",
@@ -2472,6 +2494,8 @@ fn decode_transcript_turn_origin(
             Some(accepted_position),
             Some(accepted_origin),
             Some(content),
+            None,
+            None,
             None,
             None,
             None,
@@ -2503,12 +2527,40 @@ fn decode_transcript_turn_origin(
             Some(parent_session),
             Some(parent_turn),
             Some(content),
+            None,
+            None,
         ) if !content.is_empty() => Ok(DecodedTurnOrigin::DelegatedTask {
             spawning_request: ToolRequestId::from_uuid(spawning_request),
             parent_session: SessionId::from_uuid(parent_session),
             parent_turn: TurnId::from_uuid(parent_turn),
             content,
         }),
+        (
+            "delegation",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(first),
+            Some(through),
+        ) => {
+            let first = decode_positive(first, "delegation wake first delivery sequence")?;
+            let through = decode_positive(through, "delegation wake through delivery sequence")?;
+            if first > through {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("delegation wake delivery range").into(),
+                );
+            }
+            Ok(DecodedTurnOrigin::DelegationWake {
+                first_delivery_sequence: first,
+                through_delivery_sequence: through,
+            })
+        }
         ("accepted_input" | "delegation", ..) => {
             Err(ProcessReadCorruption::Inconsistent("turn origin correlation").into())
         }
@@ -2538,6 +2590,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("delegated_parent_session_id")?,
         row.try_get("delegated_parent_turn_id")?,
         row.try_get("delegated_task_content")?,
+        row.try_get("delegated_wake_first_delivery_sequence")?,
+        row.try_get("delegated_wake_through_delivery_sequence")?,
         turn,
         acceptance_position,
     )?;
@@ -2949,6 +3003,13 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     parent_session,
                     parent_turn,
                     content,
+                },
+                DecodedTurnOrigin::DelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                } => ProcessTurnState::QueuedDelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
                 },
             };
             (state, None)
@@ -4222,6 +4283,7 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
     use signalbox_domain::{SessionId, ToolRequestId, TurnId};
     use sqlx::types::Uuid;
 
@@ -4272,6 +4334,8 @@ mod tests {
             Some(parent_session),
             Some(parent_turn),
             Some(content.clone()),
+            None,
+            None,
             current_turn,
             1,
         )
@@ -4304,11 +4368,65 @@ mod tests {
             Some(Uuid::from_u128(3)),
             Some(Uuid::from_u128(4)),
             Some(String::from("delegated task")),
+            None,
+            None,
             turn(1),
             1,
         )
         .expect_err("delegated origin provenance is all-or-nothing");
         assert!(error.to_string().contains("turn origin correlation"));
+    }
+
+    #[test]
+    fn delegation_wake_origin_retains_exact_delivery_range() {
+        let decoded = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Decimal::from(2)),
+            Some(Decimal::from(4)),
+            turn(1),
+            2,
+        )
+        .expect("a complete delegation wake origin is readable");
+        let DecodedTurnOrigin::DelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } = decoded
+        else {
+            panic!("the wake fixture retains its origin family")
+        };
+        assert_eq!(first_delivery_sequence, 2);
+        assert_eq!(through_delivery_sequence, 4);
+    }
+
+    #[test]
+    fn delegation_wake_origin_rejects_reversed_delivery_range() {
+        let error = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Decimal::from(4)),
+            Some(Decimal::from(2)),
+            turn(1),
+            2,
+        )
+        .expect_err("a delegation wake range cannot run backward");
+        assert!(error.to_string().contains("delegation wake delivery range"));
     }
 
     #[test]

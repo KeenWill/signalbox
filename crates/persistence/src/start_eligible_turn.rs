@@ -654,7 +654,11 @@ async fn prepare_delegated_wake_preview(
                 wake.recipient_session_id, wake.turn_id
            )
           AND predecessor.session_id = wake.recipient_session_id
-          AND predecessor.state_kind IN ('completed', 'failed', 'cancelled')
+          AND predecessor.state_kind = 'terminal'
+          AND predecessor.terminal_disposition_kind IN (
+                'failed', 'completed', 'refused', 'cancelled',
+                'reconciliation_required'
+          )
          JOIN session_defaults_version AS defaults
            ON defaults.session_id = wake.recipient_session_id
           AND defaults.version = wake.defaults_version

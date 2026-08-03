@@ -1734,6 +1734,16 @@ impl<'a> Output<'a> {
                 )?;
                 self.text(content.as_str())
             }
+            TurnState::QueuedDelegationWake {
+                first_delivery_sequence,
+                through_delivery_sequence,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=queued_delegation_wake \
+                 deliveries={}-{}",
+                first_delivery_sequence.value(),
+                through_delivery_sequence.value()
+            ),
             TurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -3657,6 +3667,21 @@ mod tests {
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegated spawning_request=00000000-0000-0000-0000-000000000002 parent_session=00000000-0000-0000-0000-000000000003 parent_turn=00000000-0000-0000-0000-000000000004
             delegated task
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn snapshot_renders_queued_delegation_wake_range() {
+        let rendered = render_snapshot_turn(TurnState::QueuedDelegationWake {
+            first_delivery_sequence: CanonicalU64::new(3),
+            through_delivery_sequence: CanonicalU64::new(5),
+        });
+
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegation_wake deliveries=3-5
             usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]

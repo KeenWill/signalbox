@@ -1469,6 +1469,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         queuedTurnIDs.insert(turn.turnID)
       } else if case .queuedDelegated = turn.state {
         queuedTurnIDs.insert(turn.turnID)
+      } else if case .queuedDelegationWake = turn.state {
+        queuedTurnIDs.insert(turn.turnID)
       }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
@@ -1680,7 +1682,7 @@ extension SignalboxTranscriptTurnState {
 
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued, .queuedDelegated: return .impossible
+    case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
     case .unknown: return .permitted
     case .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
@@ -1717,7 +1719,7 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .queuedDelegated, .activeRunning, .activeAwaitingChild,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .activeRunning, .activeAwaitingChild,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
@@ -1732,6 +1734,8 @@ extension SignalboxTranscriptTurnState {
       return UInt(content.utf8.count)
     case .queuedDelegated(_, _, _, let content):
       return UInt(content.utf8.count)
+    case .queuedDelegationWake:
+      return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(let kind, let payload, let diagnostic):
@@ -2061,7 +2065,8 @@ extension SignalboxTranscriptTurnState {
         kind: "transcript_turn.state.\(kind)",
         decodingDiagnostic: nil
       )
-    case .queued, .queuedDelegated, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .activeAwaitingChild,
+      .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:

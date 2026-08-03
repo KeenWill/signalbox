@@ -3720,6 +3720,13 @@ pub enum TurnState {
         /// Exact delegated task text.
         content: InputContent,
     },
+    /// Delivered delegation content is queued to wake an idle recipient.
+    QueuedDelegationWake {
+        /// First recipient-wide delivery sequence included by the wake.
+        first_delivery_sequence: CanonicalU64,
+        /// Last recipient-wide delivery sequence included by the wake.
+        through_delivery_sequence: CanonicalU64,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
@@ -3826,6 +3833,10 @@ enum RawTurnState {
         parent_turn_id: CanonicalUuid,
         content: InputContent,
     },
+    QueuedDelegationWake {
+        first_delivery_sequence: CanonicalU64,
+        through_delivery_sequence: CanonicalU64,
+    },
     ActiveRunning {
         current_attempt_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3906,6 +3917,22 @@ impl<'de> Deserialize<'de> for TurnState {
                 parent_turn_id,
                 content,
             },
+            RawTurnState::QueuedDelegationWake {
+                first_delivery_sequence,
+                through_delivery_sequence,
+            } => {
+                if first_delivery_sequence.value() == 0
+                    || first_delivery_sequence > through_delivery_sequence
+                {
+                    return Err(serde::de::Error::custom(
+                        "delegation wake requires a positive ordered delivery range",
+                    ));
+                }
+                Self::QueuedDelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                }
+            }
             RawTurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -4007,6 +4034,15 @@ impl<'de> Deserialize<'de> for TurnState {
 
 impl TurnState {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::QueuedDelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } = self
+            && (first_delivery_sequence.value() == 0
+                || first_delivery_sequence > through_delivery_sequence)
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
         if let Self::Failed {
             terminal_attempt_id: None,
             terminal_model_call: Some(_),
@@ -7059,6 +7095,33 @@ mod tests {
             },
             r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued_delegated","spawning_request_id":"00000000-0000-0000-0000-000000000002","parent_session_id":"00000000-0000-0000-0000-000000000003","parent_turn_id":"00000000-0000-0000-0000-000000000004","content":"delegated task"}}"#,
         )
+    }
+
+    #[test]
+    fn delegation_wake_queued_turn_round_trips_exact_delivery_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(2),
+                state: TurnState::QueuedDelegationWake {
+                    first_delivery_sequence: CanonicalU64::new(3),
+                    through_delivery_sequence: CanonicalU64::new(5),
+                },
+            },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"3","through_delivery_sequence":"5"}}"#,
+        )
+    }
+
+    #[test]
+    fn delegation_wake_queued_turn_rejects_invalid_delivery_ranges() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"0","through_delivery_sequence":"5"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"5","through_delivery_sequence":"3"}}}"#,
+        );
     }
 
     #[test]

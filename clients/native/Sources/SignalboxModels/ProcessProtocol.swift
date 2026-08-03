@@ -1580,6 +1580,9 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     parentSessionID: SignalboxCanonicalUUID,
     parentTurnID: SignalboxCanonicalUUID,
     content: String)
+  case queuedDelegationWake(
+    firstDeliverySequence: SignalboxCanonicalUInt64,
+    throughDeliverySequence: SignalboxCanonicalUInt64)
   case activeRunning(
     currentAttemptID: SignalboxCanonicalUUID, currentModelCall: SignalboxCurrentModelCall?)
   case activeAwaitingModelCallRecovery(
@@ -1647,6 +1650,24 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           parentSessionID: try decoder.decode("parent_session_id"),
           parentTurnID: try decoder.decode("parent_turn_id"),
           content: try decoder.decode("content"))
+      case "queued_delegation_wake":
+        try tagged.rejectUnadmittedFields(
+          ["type", "first_delivery_sequence", "through_delivery_sequence"],
+          decoder: decoder
+        )
+        let first: SignalboxCanonicalUInt64 = try decoder.decode("first_delivery_sequence")
+        let through: SignalboxCanonicalUInt64 = try decoder.decode("through_delivery_sequence")
+        guard first.rawValue > 0, first <= through else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath,
+              debugDescription: "A delegation wake requires a positive ordered delivery range."
+            )
+          )
+        }
+        self = .queuedDelegationWake(
+          firstDeliverySequence: first,
+          throughDeliverySequence: through)
       case "active_running":
         try tagged.rejectUnadmittedFields(
           ["type", "current_attempt_id", "current_model_call"],

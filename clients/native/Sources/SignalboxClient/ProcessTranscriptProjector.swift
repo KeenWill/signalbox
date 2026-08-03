@@ -125,6 +125,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           // A queued successor does not prove that an unknown earlier turn is terminal.
         } else if case .queuedDelegated = turn.state {
           // A queued successor does not prove that an unknown earlier turn is terminal.
+        } else if case .queuedDelegationWake = turn.state {
+          // A queued successor does not prove that an unknown earlier turn is terminal.
         } else {
           unknownTurnActivity = nil
         }
@@ -511,7 +513,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
       .toolReconciliationRequired:
       return true
-    case .queued, .queuedDelegated, .failed, .completed, .refused, .cancelled, .unknown:
+    case .queued, .queuedDelegated, .queuedDelegationWake, .failed, .completed, .refused,
+      .cancelled, .unknown:
       return false
     }
   }
@@ -763,7 +766,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for state: SignalboxTranscriptTurnState
   ) -> SignalboxProcessActivity {
     switch state {
-    case .queued, .queuedDelegated:
+    case .queued, .queuedDelegated, .queuedDelegationWake:
       return .init(state: .queued, label: "Queued")
     case .activeRunning(_, let currentModelCall):
       if let currentModelCall, case .unknown = currentModelCall.state {

@@ -10076,6 +10076,13 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             parent_turn_id: wire_uuid(parent_turn.into_uuid()),
             content: InputContent::new(content.clone()),
         },
+        ProcessTurnState::QueuedDelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } => TurnState::QueuedDelegationWake {
+            first_delivery_sequence: CanonicalU64::new(*first_delivery_sequence),
+            through_delivery_sequence: CanonicalU64::new(*through_delivery_sequence),
+        },
         ProcessTurnState::ActiveRunning {
             current_attempt,
             current_model_call,

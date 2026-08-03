@@ -3006,7 +3006,11 @@ async fn load_delegated_live_wake_turn(
          JOIN turn_lifecycle AS predecessor
            ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
           AND predecessor.session_id = lifecycle.session_id
-          AND predecessor.state_kind IN ('completed', 'failed', 'cancelled')
+          AND predecessor.state_kind = 'terminal'
+          AND predecessor.terminal_disposition_kind IN (
+                'failed', 'completed', 'refused', 'cancelled',
+                'reconciliation_required'
+          )
          JOIN turn_attempt AS attempt
            ON attempt.turn_attempt_id = lifecycle.current_attempt_id
           AND attempt.turn_id = lifecycle.turn_id
