@@ -1682,6 +1682,7 @@ extension SignalboxTranscriptTurnState {
     switch self {
     case .queued, .queuedDelegated: return .impossible
     case .unknown: return .permitted
+    case .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1716,8 +1717,9 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .queuedDelegated, .activeRunning, .activeAwaitingModelCallRecovery,
-      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
+    case .queued, .queuedDelegated, .activeRunning, .activeAwaitingChild,
+      .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
       .toolReconciliationRequired:
       return false
@@ -1735,8 +1737,8 @@ extension SignalboxTranscriptTurnState {
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
+    case .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return 0
     }
@@ -2059,7 +2061,7 @@ extension SignalboxTranscriptTurnState {
         kind: "transcript_turn.state.\(kind)",
         decodingDiagnostic: nil
       )
-    case .queued, .queuedDelegated, .activeAwaitingModelCallRecovery,
+    case .queued, .queuedDelegated, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
