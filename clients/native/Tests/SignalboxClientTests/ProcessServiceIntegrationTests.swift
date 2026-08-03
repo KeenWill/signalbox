@@ -410,6 +410,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
+  func testCompletionSideProjectionRejectsImportedAssistantCollision() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedAssistantCollision()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testCompletedTurnSideProjectionExcludesPriorToolEvidence() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnAndPriorToolResult()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -506,6 +521,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(message.text, ProcessProjectionFixture.proposedAssistantText)
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
+  }
+
+  func testProposedToolSideProjectionExcludesImportedSourceCollision() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithSourceQualifiedReusedToolRequest()
+    let trigger = try ProcessProjectionFixture.proposedToolTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.terminalFailureToolNames
+    )
   }
 
   func testProposedToolSideProjectionExcludesLaterUsageForExactModelCall() throws {
@@ -9901,6 +9929,66 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"1"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithImportedAssistantCollision() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(reusedToolSourceSession)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"2"
         }
         """,
       ]

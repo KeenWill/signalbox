@@ -1109,7 +1109,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch selection {
     case .all:
       return true
-    case .trigger(let trigger, _, _):
+    case .trigger(let trigger, let nativeSourceSessionID, _):
+      guard message.sourceSessionID == nativeSourceSessionID else {
+        return false
+      }
       switch message.entry {
       case .user:
         return false
@@ -1172,6 +1175,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     nativeSourceSessionID: SignalboxCanonicalUUID,
     terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
   ) -> Bool {
+    guard message.sourceSessionID == nativeSourceSessionID else {
+      return false
+    }
     if case .modelIdentityChanged = message.entry {
       return false
     }
@@ -1336,6 +1342,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .proposed:
         return snapshot.records.contains { record in
           guard case .entry(let message) = record,
+            message.sourceSessionID == snapshot.sessionID,
             case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
               message.entry
           else {
@@ -1347,7 +1354,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         let expectedCorrelations = Set(
           toolContextsByIdentity.compactMap {
             identity, context -> ToolCorrelation? in
-            guard context.turnID == turnID, context.modelCallID == modelCallID else {
+            guard identity.sourceSessionID == snapshot.sessionID.rawValue,
+              context.turnID == turnID,
+              context.modelCallID == modelCallID
+            else {
               return nil
             }
             return identity.correlation
@@ -1358,7 +1368,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         let projectedCorrelations = Set(
           snapshot.records.compactMap {
             record -> ToolCorrelation? in
-            guard case .entry(let message) = record else {
+            guard case .entry(let message) = record,
+              message.sourceSessionID == snapshot.sessionID
+            else {
               return nil
             }
             switch message.entry {
@@ -1381,6 +1393,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .contextCompacted(_, let modelCallID, _, let summaryEntryID, _):
       return snapshot.records.contains {
         guard case .textEntry(let message) = $0,
+          message.sourceSessionID == snapshot.sessionID,
           message.entryID == summaryEntryID,
           case .contextSummary(let entryModelCallID, _, _, _, _) = message.entry
         else {
@@ -1391,6 +1404,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnCompleted(let turnID, let modelCallID, _, _):
       let hasAssistantText = snapshot.records.contains {
         guard case .textEntry(let message) = $0,
+          message.sourceSessionID == snapshot.sessionID,
           case .assistant(let entryTurnID, let entryModelCallID) = message.entry
         else {
           return false
@@ -1433,6 +1447,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
       return snapshot.records.contains {
         guard case .entry(let message) = $0,
+          message.sourceSessionID == snapshot.sessionID,
           case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
           let identity = toolIdentitiesByCorrelation[
             ToolCorrelation(
