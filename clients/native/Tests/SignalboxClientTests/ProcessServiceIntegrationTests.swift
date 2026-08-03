@@ -2476,6 +2476,36 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(error, ProcessDriverFixture.mismatchedSubmissionSessionError)
   }
 
+  func testStopReceiptRejectsSettingsForAnotherDirectModel() async throws {
+    let expectedSelection = try SignalboxCanonicalUUID(
+      validating: ProcessDriverFixture.modelCall
+    )
+    let prepared = SignalboxPreparedTurnStop(
+      commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
+      sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
+      activeTurnID: try SignalboxCanonicalUUID(
+        validating: ProcessSubmissionFixture.acceptedTurnID
+      ),
+      content: ProcessSubmissionFixture.content,
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .direct(selectionID: expectedSelection)
+    )
+    let requester = StaticProcessRequester(
+      frames: [
+        try ProcessDriverFixture.inputSubmitted(
+          validatedForSelectionID: ProcessDriverFixture.metadataSessionA
+        )
+      ]
+    )
+    let service = SignalboxProcessService(requester: requester, policy: .nativeDefault)
+
+    let error = await capturedServiceError {
+      _ = try await service.stopTurn(prepared)
+    }
+
+    XCTAssertEqual(error, ProcessDriverFixture.mismatchedStopSettingsError)
+  }
+
   func testMetadataReadRejectsDuplicateTagsBeforeReplacement() async throws {
     let sessions = try await makeService().listSessions(includeArchived: true)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -3569,7 +3599,8 @@ private actor AmbiguousThenAcceptingStopProcessService: SignalboxProcessServiceP
       sessionID: session.id,
       activeTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3789,7 +3820,8 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
       sessionID: session.id,
       activeTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -4383,6 +4415,9 @@ private enum ProcessDriverFixture {
   static let mismatchedSubmissionSessionError = SignalboxProcessServiceError.unexpectedMessage(
     "The input-submission receipt named a different session."
   )
+  static let mismatchedStopSettingsError = SignalboxProcessServiceError.unexpectedMessage(
+    "The stop receipt settings named a different direct model."
+  )
   static let invalidMetadataReadError = SignalboxProcessServiceError.unexpectedMessage(
     "The metadata read violated the metadata contract."
   )
@@ -4777,9 +4812,11 @@ private enum ProcessDriverFixture {
   }
 
   static func inputSubmitted(
-    sessionID: String = session
+    sessionID: String = session,
+    validatedForSelectionID: String? = nil
   ) throws -> SignalboxProcessServerFrame {
-    try frame(
+    let validationIdentity = validatedForSelectionID.map { "\"\($0)\"" } ?? "null"
+    return try frame(
       """
       {
         "type":"input_submitted",
@@ -4798,7 +4835,7 @@ private enum ProcessDriverFixture {
           "reasoning_source":null,
           "fast_mode_source":null,
           "service_tier_source":null,
-          "validated_for_selection_id":null
+          "validated_for_selection_id":\(validationIdentity)
         }
       }
       """

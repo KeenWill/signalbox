@@ -1232,11 +1232,13 @@ async fn replace_session_model(
             session_id: replaced_session,
             defaults_version: installed_version,
             model_selection,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt: receipt_system_prompt,
             ..
         } if replaced_session == session_id
             && model_selection == selection
+            && replacement_receipt_settings_match(observed.model_settings, &model_settings)
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
             && receipt_system_prompt.value() == Some(&replacement_system_prompt)
             && observed
@@ -1261,6 +1263,13 @@ async fn replace_session_model(
             ClientError::Protocol("model replacement returned an unexpected response").mutation(),
         ),
     }
+}
+
+fn replacement_receipt_settings_match(
+    requested: ModelSettingsOverlay,
+    returned: &signalbox_process_protocol::ModelSettingsSnapshot,
+) -> bool {
+    returned.precedence.session == requested
 }
 
 async fn read_session_defaults(
@@ -4609,13 +4618,13 @@ mod tests {
         model_call_recovery_transition, open_scanned_import_source,
         placement_update_receipt_matches, placement_update_rejection_matches, read_goal_text_file,
         read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, replace_session_model, review, review_concern_state_is_coherent,
-        review_finding_event_status, review_judgment_effect_state_is_coherent,
-        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
-        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
-        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
-        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition,
+        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
+        review_concern_state_is_coherent, review_finding_event_status,
+        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
+        review_pass_completion_is_coherent, review_publication_state_is_coherent,
+        review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
+        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
 
@@ -6960,6 +6969,20 @@ mod tests {
         );
         server.await??;
         Ok(())
+    }
+
+    #[test]
+    fn model_replacement_rejects_a_receipt_with_another_session_settings_layer() {
+        let prior_selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let expected_session_settings = session_reasoning_model_settings(prior_selection_id)
+            .precedence
+            .session;
+        let returned = provider_default_model_settings();
+
+        assert!(!replacement_receipt_settings_match(
+            expected_session_settings,
+            &returned
+        ));
     }
 
     #[tokio::test]

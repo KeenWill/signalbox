@@ -121,6 +121,7 @@ public struct SignalboxPreparedInputSubmission: Equatable, Sendable {
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
   public let modelSelection: SignalboxModelSelection
+  public let modelSelection: SignalboxModelSelection
 
   public init(
     commandID: SignalboxCommandID,
@@ -242,13 +243,15 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     sessionID: SignalboxCanonicalUUID,
     activeTurnID: SignalboxCanonicalUUID,
     content: String,
-    expectedDefaultsVersion: SignalboxCanonicalUInt64
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    modelSelection: SignalboxModelSelection
   ) {
     self.commandID = commandID
     self.sessionID = sessionID
     self.activeTurnID = activeTurnID
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
+    self.modelSelection = modelSelection
   }
 
   fileprivate var request: SignalboxProcessClientRequest {
@@ -960,7 +963,8 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       sessionID: session.id,
       activeTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -979,6 +983,11 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     guard submitted.sessionID == prepared.sessionID else {
       throw SignalboxProcessServiceError.unexpectedMessage(
         "The stop receipt named a different session."
+      )
+    }
+    guard submitted.modelSettings.matches(prepared.modelSelection) else {
+      throw SignalboxProcessServiceError.unexpectedMessage(
+        "The stop receipt settings named a different direct model."
       )
     }
     return submitted
