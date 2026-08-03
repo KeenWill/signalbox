@@ -548,6 +548,19 @@ where
                             }
                             match turn_effect {
                                 TurnEventEffect::Activated(turn_id) => output.chat_activated(turn_id)?,
+                                TurnEventEffect::ApprovalDecided => {
+                                    if !refresh_approval_after_decision(
+                                        client,
+                                        output,
+                                        &mut interrupts,
+                                        &mut turns,
+                                        session_id,
+                                    )
+                                    .await?
+                                    {
+                                        return Ok(());
+                                    }
+                                }
                                 TurnEventEffect::Ready => {
                                     interrupts.reset();
                                     match turns.status() {
@@ -1156,6 +1169,7 @@ async fn replace_model(
 enum TurnEventEffect {
     None,
     Activated(CanonicalUuid),
+    ApprovalDecided,
     Ready,
 }
 
@@ -1191,10 +1205,10 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
                 TurnEventEffect::None
             }
         }
+        SessionEvent::ToolApprovalDecided { .. } => TurnEventEffect::ApprovalDecided,
         SessionEvent::SessionCreated {}
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
-        | SessionEvent::ToolApprovalDecided { .. }
         | SessionEvent::ContextCompacted { .. } => TurnEventEffect::None,
     }
 }
@@ -1771,6 +1785,30 @@ mod tests {
                 turn_id,
                 tool_request_id: second_request,
             })
+        );
+    }
+
+    #[test]
+    fn external_approval_decision_requests_authoritative_chat_refresh() {
+        const TURN_IDENTITY: u128 = 44;
+        const REQUEST_IDENTITY: u128 = 45;
+        const COMMAND_IDENTITY: u128 = 46;
+        let mut turns = ChatTurns::default();
+
+        assert_eq!(
+            update_turns_from_event(
+                &mut turns,
+                &SessionEvent::ToolApprovalDecided {
+                    turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(TURN_IDENTITY)),
+                    tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(REQUEST_IDENTITY)),
+                    decision: signalbox_process_protocol::ToolApprovalEventDecision::Approve {},
+                    decider: signalbox_process_protocol::ToolApprovalEventDecider::User {
+                        command_id: CanonicalUuid::from_uuid(Uuid::from_u128(COMMAND_IDENTITY)),
+                    },
+                    rationale: None,
+                },
+            ),
+            TurnEventEffect::ApprovalDecided
         );
     }
 
