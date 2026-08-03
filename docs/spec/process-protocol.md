@@ -259,16 +259,16 @@ place of a delivery object, and every other correlation of delivery with the
 nullable defaults member are malformed.
 
 The session-placement object is exactly `pathless {}`, `scoped { path }`, or
-`root_global_read { path, intent: "acknowledged" }`. A newly submitted path is
-one through 64 nonempty dot-separated ASCII label segments, at most 4,000 bytes
-total; each segment is at most 64 bytes and admits only letters, digits, hyphen,
-and underscore. `scoped` requires at least two segments. A one-segment root path
-is legal only in the loud `root_global_read` variant: its explicit intent
-records that the session gains global conversation read. Creation defaults an
-omitted object to `pathless`; updates always carry the complete replacement
-object. A `session_summary` can carry the full structurally valid 64-by-64
-legacy range so an upgraded daemon can still list placement rows admitted by the
-immutable migration before the 4,000-byte submission limit existed.
+`root_global_read { path, intent: "acknowledged" }`. A path is one through 64
+nonempty dot-separated ASCII label segments; each segment is at most 64 bytes
+and admits only letters, digits, hyphen, and underscore, so the complete maximum
+is 4,159 bytes including separators. `scoped` requires at least two segments. A
+one-segment root path is legal only in the loud `root_global_read` variant: its
+explicit intent records that the session gains global conversation read.
+Creation defaults an omitted object to `pathless`; updates always carry the
+complete replacement object. Requests, update receipts, and `session_summary`
+admit that same complete structural range, preserving exact durable-command
+replay and previously stored placement rows.
 
 The review-workflow requests have these shapes. Every `*_id` is a canonical UUID
 string, ordinal and count values are canonical decimal strings, and every

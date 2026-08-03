@@ -362,7 +362,7 @@ fn selected_native_read_returns_typed_out_of_scope_evidence() {
         panic!("scoped refusal is a known failure")
     };
 
-    assert_eq!(detail.as_str(), format!("o:{expected_directory}"));
+    assert_eq!(detail.as_str(), format!("o{expected_directory}"));
 }
 
 #[test]

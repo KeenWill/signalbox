@@ -996,7 +996,7 @@ where
                 let detail = ToolExecutionErrorDetail::try_new(value)
                     .or_else(|_| {
                         ToolExecutionErrorDetail::try_new(format!(
-                            "{compact_reason}:{}",
+                            "{compact_reason}{}",
                             refusal.requesting_directory().as_str()
                         ))
                     })

@@ -90,9 +90,6 @@ pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
 /// Maximum exact required tags in one metadata-list filter.
 pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
-/// Maximum ASCII bytes in one newly submitted dotted session-placement path.
-pub const MAX_SESSION_PLACEMENT_PATH_BYTES: usize = 4000;
-
 /// Maximum UTF-8 bytes in one session system prompt.
 pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
@@ -1381,8 +1378,7 @@ impl SessionPlacement {
     /// Constructs and validates a non-root placement.
     pub fn try_scoped(path: String) -> Result<Self, CanonicalValueError> {
         let placement = Self::Scoped { path };
-        validate_submitted_session_placement(&placement)
-            .map_err(|_| CanonicalValueError::Placement)?;
+        validate_session_placement_shape(&placement).map_err(|_| CanonicalValueError::Placement)?;
         Ok(placement)
     }
 
@@ -1392,8 +1388,7 @@ impl SessionPlacement {
             path,
             intent: RootPlacementGlobalReadIntent::Acknowledged,
         };
-        validate_submitted_session_placement(&placement)
-            .map_err(|_| CanonicalValueError::Placement)?;
+        validate_session_placement_shape(&placement).map_err(|_| CanonicalValueError::Placement)?;
         Ok(placement)
     }
 }
@@ -1412,6 +1407,9 @@ fn validate_session_placement_shape(
         SessionPlacement::Scoped { path } => (path, false),
         SessionPlacement::RootGlobalRead { path, .. } => (path, true),
     };
+    if path.len() > 64 * 64 + 63 {
+        return Err(FrameValidationError::PlacementShape);
+    }
     let segment_count = path.split('.').try_fold(0_usize, |count, segment| {
         let next_count = count + 1;
         (next_count <= 64
@@ -1428,21 +1426,6 @@ fn validate_session_placement_shape(
     } else {
         Err(FrameValidationError::PlacementShape)
     }
-}
-
-fn validate_submitted_session_placement(
-    placement: &SessionPlacement,
-) -> Result<(), FrameValidationError> {
-    let within_submission_bound = match placement {
-        SessionPlacement::Pathless {} => true,
-        SessionPlacement::Scoped { path } | SessionPlacement::RootGlobalRead { path, .. } => {
-            path.len() <= MAX_SESSION_PLACEMENT_PATH_BYTES
-        }
-    };
-    if !within_submission_bound {
-        return Err(FrameValidationError::PlacementShape);
-    }
-    validate_session_placement_shape(placement)
 }
 
 /// One exact complete session-metadata object.
@@ -2850,7 +2833,7 @@ impl ClientRequest {
             | Self::UpdateSessionPlacement {
                 replacement: placement,
                 ..
-            } => validate_submitted_session_placement(placement)?,
+            } => validate_session_placement_shape(placement)?,
             _ => {}
         }
         if let Self::UpdateSessionPlacement {
@@ -5006,7 +4989,7 @@ impl ServerMessage {
                 if placement_version.value() == 0 {
                     return Err(FrameValidationError::PlacementShape);
                 }
-                validate_submitted_session_placement(placement)?;
+                validate_session_placement_shape(placement)?;
             }
             Self::ConversationPageEnd {
                 conversation_count,
@@ -8978,14 +8961,11 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_constructor_rejects_paths_over_the_total_byte_bound() {
-        let segment_valid_path_over_total_bound = vec!["x".repeat(64); 63].join(".");
+    fn inv033_session_placement_constructor_rejects_paths_over_the_structural_byte_bound() {
+        let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame_sized_empty_segments = ".".repeat(super::MAX_FRAME_BYTES - 1);
 
-        assert_eq!(
-            super::SessionPlacement::try_scoped(segment_valid_path_over_total_bound),
-            Err(super::CanonicalValueError::Placement)
-        );
+        assert!(super::SessionPlacement::try_scoped(maximum_structural_path).is_ok());
         assert_eq!(
             super::SessionPlacement::try_scoped(frame_sized_empty_segments),
             Err(super::CanonicalValueError::Placement)
@@ -8993,13 +8973,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_frames_separate_submission_and_legacy_summary_bounds() {
-        let segment_valid_path_over_total_bound = vec!["x".repeat(64); 64].join(".");
+    fn inv033_session_placement_frames_admit_the_complete_structural_range() {
+        let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
         let frame = format!(
-            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{segment_valid_path_over_total_bound}"}}}}}}"#
+            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
+"#
         );
 
-        assert_client_malformed(&frame);
+        decode_client_line(frame.as_bytes()).expect("complete structural path is request-admitted");
         let response = ServerFrame::try_new(
             request(2).expect("fixture request identity is admitted"),
             ServerMessage::SessionSummary {
@@ -9008,7 +8989,7 @@ mod tests {
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
                 placement_version: CanonicalU64::new(1),
                 placement: super::SessionPlacement::Scoped {
-                    path: segment_valid_path_over_total_bound,
+                    path: maximum_structural_path,
                 },
             },
         )
