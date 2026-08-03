@@ -1256,8 +1256,6 @@ async fn run_hub(
         let _ = database.close().await;
         return Err(failure);
     }
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
-
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -1277,12 +1275,15 @@ async fn run_hub(
                     RuntimePhase::Configuration,
                     SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
                 );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
                 let _ = database.close().await;
                 return Err(failure);
             }
         },
         None => None,
     };
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
