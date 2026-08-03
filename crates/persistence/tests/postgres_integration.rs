@@ -6506,6 +6506,7 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert!(cascade_frontier.contains("LEFT JOIN session_child_result"));
     assert!(cascade_frontier.contains("parent.effective_parent_kind"));
+    assert!(cascade_frontier.contains("visited_session_ids"));
     let empty_cascade_count: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM delegation_cascade_expected_frontier($1, 'stopped')",
@@ -6564,6 +6565,18 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     assert!(wait_purpose.contains("effect_class = 'effect_free'"));
     assert!(wait_purpose.contains("session_await_registered"));
     assert!(wait_purpose.contains("tool_request_id"));
+    assert!(wait_purpose.contains("result_text::jsonb"));
+
+    let spawn_purpose: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_delegation_initial_task_purpose()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(spawn_purpose.contains("JOIN tool_attempt"));
+    assert!(spawn_purpose.contains("terminal_disposition_kind = 'completed'"));
+    assert!(spawn_purpose.contains("session_spawned"));
 
     let late_wait: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef('require_delegation_wait_update()'::regprocedure)",
@@ -6605,6 +6618,48 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert!(model_boundary.contains("origin_kind = 'delegation'"));
     assert!(model_boundary.contains("session_delegation_initial_task"));
+    assert!(model_boundary.contains("session_delegation_wake_turn_origin"));
+
+    let wake_origin: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_delegation_wake_turn_origin()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(wake_origin.contains("first_delivery_sequence"));
+    assert!(wake_origin.contains("through_delivery_sequence"));
+    assert!(wake_origin.contains("delegation_delivery_semantic_entry"));
+    assert!(wake_origin.contains("starting_frontier_id"));
+
+    let origin_projection: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'turn_lifecycle_origin_semantic_entry(uuid,uuid,uuid)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(origin_projection.contains("session_delegation_wake_turn_origin"));
+
+    let queue_eligibility: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'accepted_input_turn_is_first_nonterminal(uuid,uuid)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(queue_eligibility.contains("session_delegation_initial_task"));
+    assert!(queue_eligibility.contains("session_delegation_wake_turn_origin"));
+
+    let cascade_chain_trigger_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_trigger
+          WHERE tgname = 'session_delegation_cascade_requires_parent_chains'
+            AND tgrelid = 'session_delegation_termination_cascade'::regclass",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cascade_chain_trigger_count, 1);
 
     let event_semantics: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef(
@@ -6617,6 +6672,8 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     assert!(event_semantics.contains("terminal_disposition_kind = 'cancelled'"));
     assert!(event_semantics.contains("payload_kind = 'turn_cancelled'"));
     assert!(event_semantics.contains("turn_cancelled_outbox_event"));
+    assert!(event_semantics.contains("JOIN tool_attempt"));
+    assert!(event_semantics.contains("session_message_sent"));
 
     let result_shape: String = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(oid)
