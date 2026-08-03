@@ -7,5 +7,6 @@ mod operation_review;
 mod pack_install;
 mod packed_reference;
 mod reference;
+mod regression_properties;
 mod status_reference;
 mod support;

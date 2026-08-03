@@ -22,7 +22,10 @@ reading individual objects from the captured object database, and hashing or
 decoding Git objects. It is given an isolated temporary bare repository, a
 pinned configuration snapshot, and descriptor-captured object data. It is never
 allowed to discover a repository or open the live workspace administration tree
-by an ambient or caller-selected path. The bounded pack-index reader enumerates
+by an ambient or caller-selected path. Packed-object capture admits only
+complete `pack-<full-object-id>.pack` and `pack-<full-object-id>.idx` pairs
+whose filename, index trailer, and pack checksum agree; auxiliary pack artifacts
+and incomplete pairs are unsupported. The bounded pack-index reader enumerates
 exact-width object IDs from the descriptor-captured index snapshot before `git2`
 verifies and decodes each object; this keeps object-format selection and
 enumeration inside the pinned-read boundary instead of relying on a path-based

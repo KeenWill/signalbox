@@ -48,6 +48,7 @@ pub(super) struct ReferenceLock {
     operation_guard: RepositoryOperationGuard,
     prepared: Option<ReferenceSnapshotIdentity>,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
+    _created_directories: CreatedReferenceDirectories,
     committed: bool,
 }
 
@@ -62,7 +63,7 @@ pub(super) struct ReferenceParent {
     pub(super) directory: OwnedFd,
     pub(super) leaf: OsString,
     hierarchy: Vec<(PathBuf, FileIdentity)>,
-    created_directories: Vec<CreatedReferenceDirectory>,
+    created_directories: CreatedReferenceDirectories,
     creation_file_mode: Option<Mode>,
 }
 
@@ -129,10 +130,9 @@ impl ReferenceLock {
         if name.starts_with("refs/") && packed_reference_namespace_conflicts(authority, name)? {
             return Err(LocalGitFailure::Operation);
         }
-        let mut bound = open_reference_parent(authority, name, ReferenceParentMode::CreateMissing)?;
+        let bound = open_reference_parent(authority, name, ReferenceParentMode::CreateMissing)?;
         after_parent();
         if name.starts_with("refs/") && packed_reference_namespace_conflicts(authority, name)? {
-            bound.remove_created_directories();
             return Err(LocalGitFailure::Operation);
         }
         let creation_file_mode = bound.creation_file_mode;
@@ -159,6 +159,7 @@ impl ReferenceLock {
             operation_guard,
             prepared: None,
             hierarchy: bound.hierarchy,
+            _created_directories: bound.created_directories,
             committed: false,
         };
         let permissions = reference_permissions(&guard.parent, &guard.leaf)?
@@ -657,19 +658,6 @@ impl ReferenceLock {
     }
 }
 
-impl ReferenceParent {
-    fn remove_created_directories(&mut self) {
-        for created in self.created_directories.drain(..).rev() {
-            let _ = remove_entry_if_identity(
-                &created.parent,
-                &created.name,
-                created.identity,
-                AtFlags::REMOVEDIR,
-            );
-        }
-    }
-}
-
 impl CreatedReferenceDirectories {
     pub(super) fn keep(&mut self) {
         self.0.clear();
@@ -1076,7 +1064,7 @@ pub(super) fn open_reference_parent(
         ReferenceParentMode::CreateMissing | ReferenceParentMode::ExistingOnly => None,
     };
     let mut directory = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
-    let mut created_directories = Vec::new();
+    let mut created_directories = CreatedReferenceDirectories::default();
     let mut relative = PathBuf::new();
     let mut hierarchy = vec![(
         relative.clone(),
@@ -1099,7 +1087,7 @@ pub(super) fn open_reference_parent(
                         creation_modes.directory,
                     )?;
                     if let Some(identity) = opened.created_identity {
-                        created_directories.push(CreatedReferenceDirectory {
+                        created_directories.0.push(CreatedReferenceDirectory {
                             parent: dup(&directory).map_err(|_| LocalGitFailure::Operation)?,
                             name: component.to_owned(),
                             identity,

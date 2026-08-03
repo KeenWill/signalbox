@@ -8,7 +8,7 @@ use crate::limits::{GITLINK_MODE, MAX_OBJECT_DATABASE_BYTES, MAX_WORKTREE_INSPEC
 use crate::pack_install::{
     ObjectPublicationLock, install_packed_object_pair, pack_installation_mode,
 };
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository, live_object_database_bytes};
 
 #[derive(Clone, Copy)]
 pub(super) enum PackRoot {
@@ -90,8 +90,8 @@ pub(super) fn persist_objects(
         .ok_or(LocalGitFailure::Operation)?;
     pinned_objects.validate_live(authority)?;
     let publication = ObjectPublicationLock::acquire(pinned_objects)?;
-    pinned_objects
-        .compressed_bytes()
+    live_object_database_bytes(authority)
+        .map_err(|_| LocalGitFailure::Operation)?
         .checked_add(generated_bytes)
         .filter(|bytes| *bytes <= MAX_OBJECT_DATABASE_BYTES as u64)
         .ok_or(LocalGitFailure::Operation)?;

@@ -210,7 +210,6 @@ impl ReferenceLogLock {
         )
         .map_err(|_| LocalGitFailure::Operation)?;
         self.committed = true;
-        self.created_directories.keep();
         Ok(())
     }
 
