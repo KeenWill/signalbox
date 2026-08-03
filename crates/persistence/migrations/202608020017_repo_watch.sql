@@ -27,12 +27,70 @@ PARALLEL SAFE
 AS $$
     SELECT COALESCE(array_ndims(candidate), 1) = 1
        AND COALESCE(array_lower(candidate, 1), 1) = 1
+       AND candidate = ARRAY(
+            SELECT DISTINCT label.value COLLATE "C"
+            FROM unnest(candidate) AS label(value)
+            ORDER BY label.value COLLATE "C"
+       )
        AND NOT EXISTS (
             SELECT 1
             FROM unnest(candidate) AS label(value)
             WHERE value IS NULL
                OR octet_length(value) NOT BETWEEN 1 AND 200
                OR char_length(value) > 50
+       )
+$$;
+
+CREATE FUNCTION repo_watch_login_is_valid(candidate text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT candidate = lower(candidate)
+       AND octet_length(candidate) BETWEEN 1 AND 44
+       AND octet_length(normalized.base) BETWEEN 1 AND 39
+       AND normalized.base ~ '^[a-z0-9_-]+$'
+       AND left(normalized.base, 1) <> '-'
+       AND right(normalized.base, 1) <> '-'
+       AND strpos(normalized.base, '--') = 0
+    FROM (
+        SELECT CASE
+            WHEN right(candidate, 5) = '[bot]'
+                THEN left(candidate, length(candidate) - 5)
+            ELSE candidate
+        END AS base
+    ) AS normalized
+$$;
+
+CREATE FUNCTION repo_watch_branch_is_valid(candidate text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT octet_length(candidate) BETWEEN 1 AND 255
+       AND candidate <> '@'
+       AND left(candidate, 1) <> '-'
+       AND right(candidate, 1) <> '.'
+       AND strpos(candidate, '..') = 0
+       AND strpos(candidate, '@{') = 0
+       AND NOT EXISTS (
+            SELECT 1
+            FROM generate_series(1, length(candidate)) AS character(position)
+            WHERE ascii(substr(candidate, character.position, 1)) <= 32
+               OR ascii(substr(candidate, character.position, 1)) = 127
+               OR substr(candidate, character.position, 1)
+                    = ANY (ARRAY['~', '^', ':', '?', '*', '[', chr(92)])
+       )
+       AND NOT EXISTS (
+            SELECT 1
+            FROM unnest(string_to_array(candidate, '/')) AS part(value)
+            WHERE part.value = ''
+               OR left(part.value, 1) = '.'
+               OR right(part.value, 5) = '.lock'
        )
 $$;
 
@@ -143,9 +201,9 @@ CREATE TABLE repo_watch_event (
     CHECK (previous_sha IS NULL OR previous_sha ~ '^[0-9a-f]{40}$'),
     CHECK (review_commit IS NULL OR review_commit ~ '^[0-9a-f]{40}$'),
     CHECK (head_repository IS NULL OR head_repository = lower(head_repository)),
-    CHECK (author IS NULL OR author = lower(author)),
-    CHECK (review_reviewer IS NULL OR review_reviewer = lower(review_reviewer)),
-    CHECK (reaction_reactor IS NULL OR reaction_reactor = lower(reaction_reactor)),
+    CHECK (author IS NULL OR repo_watch_login_is_valid(author)),
+    CHECK (review_reviewer IS NULL OR repo_watch_login_is_valid(review_reviewer)),
+    CHECK (reaction_reactor IS NULL OR repo_watch_login_is_valid(reaction_reactor)),
     CHECK (mergeable_state IS NULL OR mergeable_state IN ('mergeable', 'conflicting', 'unknown')),
     CHECK (checks_outcome IS NULL OR checks_outcome IN ('success', 'failure')),
     CHECK (
@@ -199,8 +257,8 @@ CREATE TABLE repo_watch_event (
     CHECK (event_kind <> 'labeled' OR label_name = ANY(labels)),
     CHECK (event_kind <> 'unlabeled' OR NOT (label_name = ANY(labels))),
     CHECK (head_repository IS NULL OR octet_length(head_repository) BETWEEN 1 AND 201),
-    CHECK (base_branch IS NULL OR octet_length(base_branch) BETWEEN 1 AND 255),
-    CHECK (head_branch IS NULL OR octet_length(head_branch) BETWEEN 1 AND 255),
+    CHECK (base_branch IS NULL OR repo_watch_branch_is_valid(base_branch)),
+    CHECK (head_branch IS NULL OR repo_watch_branch_is_valid(head_branch)),
     CHECK (title IS NULL OR octet_length(title) BETWEEN 1 AND 1024),
     CHECK (body IS NULL OR octet_length(body) <= 262144),
     CHECK (
@@ -213,6 +271,7 @@ CREATE TABLE repo_watch_event (
     CHECK (thread_id IS NULL OR octet_length(thread_id) BETWEEN 1 AND 256),
     CHECK (check_run_name IS NULL OR octet_length(check_run_name) BETWEEN 1 AND 256),
     CHECK (workflow_name IS NULL OR octet_length(workflow_name) BETWEEN 1 AND 256),
+    CHECK (workflow_branch IS NULL OR repo_watch_branch_is_valid(workflow_branch)),
     CHECK (reaction_content IS NULL OR octet_length(reaction_content) BETWEEN 1 AND 64)
 );
 
