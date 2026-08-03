@@ -388,6 +388,12 @@ impl ModelSettingsPrecedence {
         self.global_default
     }
 
+    /// Replaces only the per-call layer while retaining the copied durable
+    /// session, profile, and global layers.
+    pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self {
+        Self { per_call, ..self }
+    }
+
     /// Resolves each knob independently through the fixed precedence chain.
     pub fn resolve(self) -> ResolvedModelSettings {
         let layers = [
@@ -407,6 +413,72 @@ impl ModelSettingsPrecedence {
             reasoning_source,
             fast_mode_source,
             service_tier_source,
+        }
+    }
+
+    fn with_effective_adjustment(
+        mut self,
+        prior: ResolvedModelSettings,
+        adjusted: EffectiveModelSettings,
+    ) -> Self {
+        if prior.effective.reasoning_level != adjusted.reasoning_level {
+            self.set_reasoning_at_source(prior.reasoning_source, adjusted.reasoning_level);
+        }
+        if prior.effective.fast_mode != adjusted.fast_mode {
+            self.set_fast_mode_at_source(prior.fast_mode_source, adjusted.fast_mode);
+        }
+        if prior.effective.service_tier != adjusted.service_tier {
+            self.set_service_tier_at_source(prior.service_tier_source, adjusted.service_tier);
+        }
+        self
+    }
+
+    fn set_reasoning_at_source(
+        &mut self,
+        source: Option<ModelSettingSource>,
+        value: Option<ReasoningLevel>,
+    ) {
+        let overlay = match value {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match source {
+            Some(ModelSettingSource::PerCall) => self.per_call.reasoning_level = overlay,
+            Some(ModelSettingSource::Session) => self.session.reasoning_level = overlay,
+            Some(ModelSettingSource::Profile) => self.profile.reasoning_level = overlay,
+            Some(ModelSettingSource::GlobalDefault) => {
+                self.global_default.reasoning_level = overlay
+            }
+            None => {}
+        }
+    }
+
+    fn set_fast_mode_at_source(&mut self, source: Option<ModelSettingSource>, value: FastMode) {
+        let overlay = SettingOverlay::Value(value);
+        match source {
+            Some(ModelSettingSource::PerCall) => self.per_call.fast_mode = overlay,
+            Some(ModelSettingSource::Session) => self.session.fast_mode = overlay,
+            Some(ModelSettingSource::Profile) => self.profile.fast_mode = overlay,
+            Some(ModelSettingSource::GlobalDefault) => self.global_default.fast_mode = overlay,
+            None => {}
+        }
+    }
+
+    fn set_service_tier_at_source(
+        &mut self,
+        source: Option<ModelSettingSource>,
+        value: Option<ServiceTier>,
+    ) {
+        let overlay = match value {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match source {
+            Some(ModelSettingSource::PerCall) => self.per_call.service_tier = overlay,
+            Some(ModelSettingSource::Session) => self.session.service_tier = overlay,
+            Some(ModelSettingSource::Profile) => self.profile.service_tier = overlay,
+            Some(ModelSettingSource::GlobalDefault) => self.global_default.service_tier = overlay,
+            None => {}
         }
     }
 }
@@ -575,6 +647,26 @@ impl ModelCapabilities {
         }
     }
 
+    /// Validates the caller-owned layer and adjusts only incompatibility that
+    /// remains because inherited layers were carried across a model change.
+    pub fn validate_model_change(
+        &self,
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+        caller_overlay: ModelSettingsOverlay,
+    ) -> Result<AdjustedModelSettings, UnsupportedModelSetting> {
+        self.validate_explicit(selection, caller_overlay)?;
+        let prior = precedence.resolve();
+        let compatible = self.adjust_for_model_change(prior.effective());
+        let (effective, adjustments) = compatible.into_parts();
+        let precedence = precedence.with_effective_adjustment(prior, effective);
+        let resolved = precedence.resolve();
+        Ok(AdjustedModelSettings {
+            settings: ValidatedModelSettings::for_selection(precedence, resolved, selection),
+            adjustments,
+        })
+    }
+
     /// Selects the capability-authorized serving target for fast mode.
     pub const fn serving_target(
         &self,
@@ -588,6 +680,30 @@ impl ModelCapabilities {
             (FastMode::Enabled, FastModeSupport::AlternateTarget(target)) => Some(target),
             (FastMode::Enabled, FastModeSupport::Unsupported) => None,
         }
+    }
+}
+
+/// Complete validated settings plus ordered model-change adjustment evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdjustedModelSettings {
+    settings: ValidatedModelSettings,
+    adjustments: Box<[ModelChangeAdjustment]>,
+}
+
+impl AdjustedModelSettings {
+    /// Returns the complete validated settings after adjustment.
+    pub const fn settings(&self) -> ValidatedModelSettings {
+        self.settings
+    }
+
+    /// Borrows adjustments in reasoning, fast, service-tier order.
+    pub fn adjustments(&self) -> &[ModelChangeAdjustment] {
+        &self.adjustments
+    }
+
+    /// Returns the validated snapshot and ordered adjustment evidence.
+    pub fn into_parts(self) -> (ValidatedModelSettings, Box<[ModelChangeAdjustment]>) {
+        (self.settings, self.adjustments)
     }
 }
 
@@ -1091,6 +1207,76 @@ mod tests {
                 from: ReasoningLevel::Minimal,
                 to: ReasoningLevel::Medium,
             }]
+        );
+    }
+
+    /// S37 / INV-052: inherited incompatibility rewrites the inherited source
+    /// in the validated snapshot while preserving ordered adjustment evidence.
+    #[test]
+    fn s37_inv052_model_change_installs_a_self_consistent_adjusted_snapshot() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
+        let session = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            SettingOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            session,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+
+        let adjusted = supported
+            .validate_model_change(selected, precedence, ModelSettingsOverlay::inherit_all())
+            .expect("the incompatible value is inherited across the model change");
+
+        assert_eq!(
+            adjusted.settings().effective().reasoning_level(),
+            Some(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            adjusted.settings().precedence().session().reasoning_level(),
+            SettingOverlay::Value(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            adjusted.adjustments(),
+            [ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }]
+        );
+    }
+
+    /// S37 / INV-051: the same unsupported value remains an error when the
+    /// model-change caller explicitly supplies it.
+    #[test]
+    fn s37_inv051_model_change_does_not_adjust_an_explicit_unsupported_value() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
+        let caller = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            SettingOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            caller,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+
+        let error = supported
+            .validate_model_change(selected, precedence, caller)
+            .expect_err("the caller-owned unsupported value is not adjusted");
+
+        assert_eq!(
+            error,
+            UnsupportedModelSetting::ReasoningLevel {
+                selection: selected,
+                requested: ReasoningLevel::High,
+            }
         );
     }
 

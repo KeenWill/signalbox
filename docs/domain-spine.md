@@ -225,6 +225,13 @@ impl ImportedSourceMetadata {
         metadata: ImportedSourceAttestation<bool>,
         message_role: ImportedSourceAttestation<ImportedSpeaker>,
     ) -> Self;
+    pub const fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+    ) -> Self;
     // accessors: record_id(), parent_record_id(), source_session_id(),
     //   timestamp(), sidechain(), metadata(), message_role()
 }
@@ -1585,6 +1592,12 @@ impl VersionedSessionConfigurationDefaults {
         expected: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
     ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
+    pub fn derive_request_with_model_settings(
+        &self,
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        per_call_model_settings: ModelSettingsOverlay,
+    ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
     // accessors: version(), defaults()
 }
 // reconstitution pairing of an arbitrary version with a defaults value is
@@ -1599,7 +1612,7 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest { /* private */ }
 // sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
 impl ConfigurationRequest {
-    // accessors: model(), dangerous_tool_auto_approval(), model_settings()
+    // accessors: model(), dangerous_tool_auto_approval(), model_settings(), per_call_model_settings()
 }
 
 pub struct VersionCheckedConfigurationRequest { /* private */ }
@@ -1620,7 +1633,18 @@ impl OriginConfiguration {
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<Self, UnknownModelAlias>;
-    // accessors: requested(), session_defaults_version(), effective()
+    pub fn freeze_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<Self, OriginModelSettingsError>;
+    // accessors: requested(), session_defaults_version(), effective(), model_settings_adjustments()
+}
+
+pub enum OriginModelSettingsError {
+    UnknownAlias(UnknownModelAlias),
+    MissingCapabilities { selection: DirectModelSelection },
+    Unsupported(UnsupportedModelSetting),
 }
 
 pub struct OriginConfigurationReconstitutionInput { /* private */ }
@@ -1727,6 +1751,7 @@ impl ModelSettingsPrecedence {
         profile: ModelSettingsOverlay,
         global_default: ModelSettingsOverlay,
     ) -> Self;
+    pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self;
     pub fn resolve(self) -> ResolvedModelSettings;
     // accessors: per_call(), session(), profile(), global_default()
 }
@@ -1758,6 +1783,12 @@ impl ModelCapabilities {
         &self,
         inherited: EffectiveModelSettings,
     ) -> CompatibleModelSettings;
+    pub fn validate_model_change(
+        &self,
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+        caller_overlay: ModelSettingsOverlay,
+    ) -> Result<AdjustedModelSettings, UnsupportedModelSetting>;
     pub const fn serving_target(
         &self,
         selected: ResolvedProviderTarget,
@@ -1784,6 +1815,13 @@ pub struct CompatibleModelSettings { /* private */ }
 impl CompatibleModelSettings {
     pub fn into_parts(self) -> (EffectiveModelSettings, Box<[ModelChangeAdjustment]>);
     // accessors: effective(), adjustments()
+}
+
+pub struct AdjustedModelSettings { /* private */ }
+// sealed: ModelCapabilities::validate_model_change
+impl AdjustedModelSettings {
+    pub fn into_parts(self) -> (ValidatedModelSettings, Box<[ModelChangeAdjustment]>);
+    // accessors: settings(), adjustments()
 }
 
 pub struct SessionModelSettingsChanged { /* private */ }
@@ -1970,12 +2008,29 @@ impl SubmitInput {
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_when_no_active_turn_with_model_settings(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     pub fn prepare_with_active_turn(
         self,
         scheduling: &AcceptedInputSchedulingProjection,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn_with_model_settings(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
 }
@@ -1999,6 +2054,7 @@ impl SubmitInputAppliedResult {
 pub struct SubmitInputTurnOriginAppliedResult { /* private */ }
 // sealed: SubmitInput preparation or checked applied reconstitution
 impl SubmitInputTurnOriginAppliedResult {
+    pub fn model_settings_event(&self) -> Option<TurnModelSettingsResolved>;
     // accessors: accepted_input(), session(), turn(), disposition(),
     // queue_order(), acceptance_position(), origin_configuration(),
     // applied_interrupt()
@@ -2079,6 +2135,7 @@ pub enum SubmitInputPreparationFailure {
     },
     ActiveTurnProjectionMissing,
     InterruptQueueOrderInvalid,
+    ModelSettingsResolution(OriginModelSettingsError),
 }
 
 pub struct GoalTurnOriginConstructionInput {
@@ -4539,7 +4596,8 @@ impl ReplaceSessionDefaults {
     pub const fn prepare_session_not_found(self) -> PreparedReplaceSessionDefaults;
     pub fn prepare_against(self, current: &Session)
         -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
-    // accessors: command_id(), session(), expected_current_version(), replacement()
+    // accessors: command_id(), session(), expected_current_version(), replacement(),
+    // caller_model_settings()
 }
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
@@ -5859,8 +5917,16 @@ impl ReplaceSessionDefaultsRequest {
         replacement: SessionConfigurationDefaults,
         prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId>;
     // accessors: command_id(), session(), expected_current_version(), replacement(),
-    // prompt_member()
+    // caller_model_settings(), prompt_member()
 }
 
 pub enum PromptMemberStatement {
@@ -8934,8 +9000,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session                                    | 22                   |
 | domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
-| domain: configuration                              | 23                   |
-| domain: model_settings                             | 23                   |
+| domain: configuration                              | 24                   |
+| domain: model_settings                             | 24                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
@@ -8962,7 +9028,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **733 (+7 free fn)** |
+| **signalbox-domain total**                         | **735 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
