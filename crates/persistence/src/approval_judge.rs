@@ -16,7 +16,13 @@ use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
-    mapping::{session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid},
+    mapping::{
+        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
+        session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
+    },
     model_execution::{lock_session, resolve_session_credential},
     tool_loop::{ToolLoopRepositoryError, load_active_batch_from_connection},
 };
@@ -97,17 +103,6 @@ pub enum FailedApprovalJudgeDisposition {
     Ambiguous,
 }
 
-impl FailedApprovalJudgeDisposition {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::KnownFailed => "known_failed",
-            Self::Refused => "refused",
-            Self::Cancelled => "cancelled",
-            Self::Ambiguous => "ambiguous",
-        }
-    }
-}
-
 /// PostgreSQL-backed delegated approval-judge lifecycle.
 #[derive(Clone, Debug)]
 pub struct PostgresApprovalJudgeRepository {
@@ -174,16 +169,17 @@ impl PostgresApprovalJudgeRepository {
             return Ok(PrepareApprovalJudgeOutcome::NoWork);
         }
         if let Some(row) = load_judge(&mut transaction, request.id()).await? {
-            let state: String = required(&row, "state_kind")?;
+            let state = decode_state(required(&row, "state_kind")?)?;
             let prepared = decode_prepared(row, request.clone())?;
             transaction.rollback().await?;
-            return match state.as_str() {
-                "prepared" => Ok(PrepareApprovalJudgeOutcome::Ready(Box::new(prepared))),
-                "in_flight" => Ok(PrepareApprovalJudgeOutcome::InFlightAfterRestart(Box::new(
-                    prepared,
-                ))),
-                "terminal" => Ok(PrepareApprovalJudgeOutcome::NoWork),
-                value => Err(ApprovalJudgeCorruption::UnsupportedState(value.to_owned()).into()),
+            return match state {
+                ApprovalJudgeStateStorageKind::Prepared => {
+                    Ok(PrepareApprovalJudgeOutcome::Ready(Box::new(prepared)))
+                }
+                ApprovalJudgeStateStorageKind::InFlight => Ok(
+                    PrepareApprovalJudgeOutcome::InFlightAfterRestart(Box::new(prepared)),
+                ),
+                ApprovalJudgeStateStorageKind::Terminal => Ok(PrepareApprovalJudgeOutcome::NoWork),
             };
         }
         let judged_selection =
@@ -209,7 +205,7 @@ impl PostgresApprovalJudgeRepository {
                 (model_call_id, request_id, session_id, turn_id,
                  direct_model_selection_id, resolved_provider_model_identity_id,
                  credential_reference, usage_input_includes_cache_tokens, state_kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'prepared')",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(call.into_uuid())
         .bind(tool_request_id_to_uuid(request.id()))
@@ -219,6 +215,9 @@ impl PostgresApprovalJudgeRepository {
         .bind(target.identity().into_uuid())
         .bind(credential.as_str())
         .bind(input_includes_cache_tokens)
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Prepared,
+        ))
         .execute(&mut *transaction)
         .await;
         if let Err(error) = inserted {
@@ -250,19 +249,25 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
-        if state == "in_flight" {
+        if state == ApprovalJudgeStateStorageKind::InFlight {
             transaction.rollback().await?;
             return Ok(());
         }
-        if state != "prepared" {
+        if state != ApprovalJudgeStateStorageKind::Prepared {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge authorization state").into());
         }
         let rows = sqlx::query(
-            "UPDATE tool_approval_judge_model_call SET state_kind = 'in_flight'
-              WHERE model_call_id = $1 AND session_id = $2 AND state_kind = 'prepared'",
+            "UPDATE tool_approval_judge_model_call SET state_kind = $1
+              WHERE model_call_id = $2 AND session_id = $3 AND state_kind = $4",
         )
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::InFlight,
+        ))
         .bind(prepared.call.into_uuid())
         .bind(session_id_to_uuid(prepared.request.session()))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Prepared,
+        ))
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -287,7 +292,7 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
-        if state == "terminal" {
+        if state == ApprovalJudgeStateStorageKind::Terminal {
             let outcome = exact_completed(
                 &mut transaction,
                 prepared,
@@ -301,7 +306,7 @@ impl PostgresApprovalJudgeRepository {
                 ApprovalJudgeCorruption::Inconsistent("completed judge replay").into()
             });
         }
-        if state != "in_flight" {
+        if state != ApprovalJudgeStateStorageKind::InFlight {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge completion state").into());
         }
         let batch = load_active_batch_from_connection(
@@ -335,13 +340,19 @@ impl PostgresApprovalJudgeRepository {
         let encoded = encode_usage(usage);
         let rows = sqlx::query(
             "UPDATE tool_approval_judge_model_call
-                SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
-                    recommendation_kind = $1, rationale = $2,
-                    input_tokens = $3, output_tokens = $4,
-                    cache_creation_input_tokens = $5, cache_read_input_tokens = $6
-              WHERE model_call_id = $7 AND session_id = $8 AND state_kind = 'in_flight'",
+                SET state_kind = $1, terminal_disposition_kind = $2,
+                    recommendation_kind = $3, rationale = $4,
+                    input_tokens = $5, output_tokens = $6,
+                    cache_creation_input_tokens = $7, cache_read_input_tokens = $8
+              WHERE model_call_id = $9 AND session_id = $10 AND state_kind = $11",
         )
-        .bind(encode_recommendation(recommendation))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Terminal,
+        ))
+        .bind(approval_judge_terminal_disposition_to_str(
+            ApprovalJudgeTerminalDispositionStorageKind::Completed,
+        ))
+        .bind(approval_judge_recommendation_to_str(recommendation))
         .bind(decision.approval().rationale().as_str())
         .bind(encoded.input)
         .bind(encoded.output)
@@ -349,6 +360,9 @@ impl PostgresApprovalJudgeRepository {
         .bind(encoded.cache_read)
         .bind(prepared.call.into_uuid())
         .bind(session_id_to_uuid(prepared.request.session()))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::InFlight,
+        ))
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -400,7 +414,7 @@ impl PostgresApprovalJudgeRepository {
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
         let encoded = encode_usage(usage);
-        if state == "terminal" {
+        if state == ApprovalJudgeStateStorageKind::Terminal {
             let exact: bool = sqlx::query_scalar(
                 "SELECT terminal_disposition_kind = $1
                         AND recommendation_kind IS NULL AND rationale IS NULL
@@ -410,7 +424,9 @@ impl PostgresApprovalJudgeRepository {
                         AND cache_read_input_tokens IS NOT DISTINCT FROM $5
                    FROM tool_approval_judge_model_call WHERE model_call_id = $6",
             )
-            .bind(disposition.as_str())
+            .bind(approval_judge_terminal_disposition_to_str(
+                ApprovalJudgeTerminalDispositionStorageKind::Failed(disposition),
+            ))
             .bind(encoded.input)
             .bind(encoded.output)
             .bind(encoded.cache_creation)
@@ -425,29 +441,45 @@ impl PostgresApprovalJudgeRepository {
                 Err(ApprovalJudgeCorruption::Inconsistent("failed judge replay").into())
             };
         }
-        if !matches!(state.as_str(), "prepared" | "in_flight") {
+        if !matches!(
+            state,
+            ApprovalJudgeStateStorageKind::Prepared | ApprovalJudgeStateStorageKind::InFlight
+        ) {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge failure state").into());
         }
-        if state == "prepared" && usage != ProviderReportedTokenUsage::unreported() {
+        if state == ApprovalJudgeStateStorageKind::Prepared
+            && usage != ProviderReportedTokenUsage::unreported()
+        {
             return Err(
                 ApprovalJudgeCorruption::Inconsistent("judge usage before authorization").into(),
             );
         }
         let rows = sqlx::query(
             "UPDATE tool_approval_judge_model_call
-                SET state_kind = 'terminal', terminal_disposition_kind = $1,
-                    input_tokens = $2, output_tokens = $3,
-                    cache_creation_input_tokens = $4, cache_read_input_tokens = $5
-              WHERE model_call_id = $6 AND session_id = $7
-                AND state_kind IN ('prepared', 'in_flight')",
+                SET state_kind = $1, terminal_disposition_kind = $2,
+                    input_tokens = $3, output_tokens = $4,
+                    cache_creation_input_tokens = $5, cache_read_input_tokens = $6
+              WHERE model_call_id = $7 AND session_id = $8
+                AND (state_kind = $9 OR state_kind = $10)",
         )
-        .bind(disposition.as_str())
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Terminal,
+        ))
+        .bind(approval_judge_terminal_disposition_to_str(
+            ApprovalJudgeTerminalDispositionStorageKind::Failed(disposition),
+        ))
         .bind(encoded.input)
         .bind(encoded.output)
         .bind(encoded.cache_creation)
         .bind(encoded.cache_read)
         .bind(prepared.call.into_uuid())
         .bind(session_id_to_uuid(prepared.request.session()))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::Prepared,
+        ))
+        .bind(approval_judge_state_to_str(
+            ApprovalJudgeStateStorageKind::InFlight,
+        ))
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -501,7 +533,8 @@ async fn persist_successor_phase(
             .bind(session_id_to_uuid(decision.batch().session()))
             .bind(predecessor)
             .execute(&mut *connection)
-            .await?;
+            .await
+            .map_err(classify_insert)?;
             let rows = sqlx::query(
                 "UPDATE turn_lifecycle
                     SET active_phase_kind = 'running', current_attempt_id = $1,
@@ -581,7 +614,7 @@ async fn load_producing_selection(
 async fn require_exact_judge(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
-) -> Result<String, ApprovalJudgeRepositoryError> {
+) -> Result<ApprovalJudgeStateStorageKind, ApprovalJudgeRepositoryError> {
     let row = sqlx::query(
         "SELECT request_id, direct_model_selection_id,
                 resolved_provider_model_identity_id, credential_reference,
@@ -604,7 +637,14 @@ async fn require_exact_judge(
     {
         return Err(ApprovalJudgeCorruption::Inconsistent("approval judge binding").into());
     }
-    required(&row, "state_kind")
+    decode_state(required(&row, "state_kind")?)
+}
+
+fn decode_state(
+    value: String,
+) -> Result<ApprovalJudgeStateStorageKind, ApprovalJudgeRepositoryError> {
+    approval_judge_state_from_str(&value)
+        .ok_or_else(|| ApprovalJudgeCorruption::UnsupportedState(value).into())
 }
 
 async fn exact_completed(
@@ -615,24 +655,26 @@ async fn exact_completed(
     usage: ProviderReportedTokenUsage,
 ) -> Result<Option<CompleteApprovalJudgeOutcome>, ApprovalJudgeRepositoryError> {
     let encoded = encode_usage(usage);
-    let exact: bool = sqlx::query_scalar(
-        "SELECT terminal_disposition_kind = 'completed'
-                AND recommendation_kind = $1 AND rationale = $2
-                AND input_tokens IS NOT DISTINCT FROM $3
-                AND output_tokens IS NOT DISTINCT FROM $4
-                AND cache_creation_input_tokens IS NOT DISTINCT FROM $5
-                AND cache_read_input_tokens IS NOT DISTINCT FROM $6
-           FROM tool_approval_judge_model_call WHERE model_call_id = $7",
+    let row = sqlx::query(
+        "SELECT terminal_disposition_kind, recommendation_kind, rationale,
+                input_tokens, output_tokens, cache_creation_input_tokens,
+                cache_read_input_tokens
+           FROM tool_approval_judge_model_call WHERE model_call_id = $1",
     )
-    .bind(encode_recommendation(recommendation))
-    .bind(rationale.as_str())
-    .bind(encoded.input)
-    .bind(encoded.output)
-    .bind(encoded.cache_creation)
-    .bind(encoded.cache_read)
     .bind(prepared.call.into_uuid())
     .fetch_one(connection)
     .await?;
+    let terminal_disposition: String = required(&row, "terminal_disposition_kind")?;
+    let stored_recommendation: String = required(&row, "recommendation_kind")?;
+    let exact = approval_judge_terminal_disposition_from_str(&terminal_disposition)
+        == Some(ApprovalJudgeTerminalDispositionStorageKind::Completed)
+        && approval_judge_recommendation_from_str(&stored_recommendation) == Some(recommendation)
+        && required::<String>(&row, "rationale")? == rationale.as_str()
+        && row.try_get::<Option<Decimal>, _>("input_tokens")? == encoded.input
+        && row.try_get::<Option<Decimal>, _>("output_tokens")? == encoded.output
+        && row.try_get::<Option<Decimal>, _>("cache_creation_input_tokens")?
+            == encoded.cache_creation
+        && row.try_get::<Option<Decimal>, _>("cache_read_input_tokens")? == encoded.cache_read;
     Ok(exact.then_some(match recommendation {
         DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny => {
             CompleteApprovalJudgeOutcome::Decided
@@ -641,14 +683,6 @@ async fn exact_completed(
             CompleteApprovalJudgeOutcome::EscalatedToHuman
         }
     }))
-}
-
-fn encode_recommendation(recommendation: DelegateApprovalRecommendation) -> &'static str {
-    match recommendation {
-        DelegateApprovalRecommendation::Approve => "approve",
-        DelegateApprovalRecommendation::Deny => "deny",
-        DelegateApprovalRecommendation::EscalateToHuman => "escalate_to_human",
-    }
 }
 
 struct EncodedUsage {
@@ -696,7 +730,9 @@ fn classify_insert(error: sqlx::Error) -> ApprovalJudgeRepositoryError {
         .is_some_and(|constraint| {
             matches!(
                 constraint,
-                "tool_approval_judge_model_call_pkey" | "model_call_identity_pkey"
+                "tool_approval_judge_model_call_pkey"
+                    | "model_call_identity_pkey"
+                    | "turn_attempt_pkey"
             )
         })
     {

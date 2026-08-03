@@ -163,9 +163,11 @@ where
                 .runtime
                 .execute(prepared, &mut observations, CancellationSignal::never())
                 .await;
+            let usage = terminal_usage(&report.evidence);
             if report.correlation != request.call {
-                return Err(ApprovalJudgeModelError::CorrelationMismatch);
+                return Err(ApprovalJudgeModelError::CorrelationMismatch(usage));
             }
+            require_observation_correlations(&observations, request.call, usage)?;
             for reported in observations.iter().filter_map(|observation| {
                 let signalbox_model_runtime::ObservationFact::ProviderModelReported(reported) =
                     &observation.fact
@@ -174,7 +176,7 @@ where
                 };
                 Some(reported)
             }) {
-                require_same_target(&resolved, reported)?;
+                require_same_target(&resolved, reported, usage)?;
             }
             let reported_model = match &report.evidence {
                 TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
@@ -187,13 +189,15 @@ where
                 TerminalEvidence::ProvenUnsent(_) => None,
             };
             if let Some(reported) = reported_model {
-                require_same_target(&resolved, reported)?;
+                require_same_target(&resolved, reported, usage)?;
             }
             let completed = match report.evidence {
                 TerminalEvidence::Completed(completed) => completed,
-                TerminalEvidence::Refused(_) => return Err(ApprovalJudgeModelError::Refused),
-                TerminalEvidence::ProviderError(_) => {
-                    return Err(ApprovalJudgeModelError::ProviderError);
+                TerminalEvidence::Refused(evidence) => {
+                    return Err(ApprovalJudgeModelError::Refused(evidence.usage));
+                }
+                TerminalEvidence::ProviderError(evidence) => {
+                    return Err(ApprovalJudgeModelError::ProviderError(evidence.usage));
                 }
                 TerminalEvidence::CancellationConfirmed(_) => {
                     return Err(ApprovalJudgeModelError::CancellationConfirmed);
@@ -209,22 +213,18 @@ where
                         }
                     });
                 }
-                TerminalEvidence::BoundaryLoss(_) => {
-                    return Err(ApprovalJudgeModelError::BoundaryLoss);
+                TerminalEvidence::BoundaryLoss(evidence) => {
+                    return Err(ApprovalJudgeModelError::BoundaryLoss(evidence.usage));
                 }
             };
-            if !matches!(
-                completed.finish,
-                CompletionFinish::ToolUse
-                    | CompletionFinish::EndTurn
-                    | CompletionFinish::StopSequence { .. }
-            ) {
-                return Err(ApprovalJudgeModelError::IncompleteDecision);
+            if completed.finish != CompletionFinish::ToolUse {
+                return Err(ApprovalJudgeModelError::IncompleteDecision(completed.usage));
             }
             let decoded: Value =
                 decode_structured(&completed.content, &contract, &NoDomainConstraints)
-                    .map_err(|_| ApprovalJudgeModelError::InvalidDecision)?;
-            let (recommendation, rationale) = decode_decision(decoded)?;
+                    .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
+            let (recommendation, rationale) = decode_decision(decoded)
+                .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
             Ok(ApprovalJudgeModelResult {
                 recommendation,
                 rationale,
@@ -246,12 +246,12 @@ fn output_contract() -> Result<StructuredOutputContract, ApprovalJudgeModelError
 
 fn decode_decision(
     value: Value,
-) -> Result<(DelegateApprovalRecommendation, ToolDecisionRationale), ApprovalJudgeModelError> {
+) -> Result<(DelegateApprovalRecommendation, ToolDecisionRationale), InvalidDecision> {
     let Value::Object(mut fields) = value else {
-        return Err(ApprovalJudgeModelError::InvalidDecision);
+        return Err(InvalidDecision);
     };
     if fields.len() != 2 {
-        return Err(ApprovalJudgeModelError::InvalidDecision);
+        return Err(InvalidDecision);
     }
     let recommendation = take_string(&mut fields, "recommendation")?;
     let rationale = take_string(&mut fields, "rationale")?;
@@ -259,22 +259,24 @@ fn decode_decision(
         "approve" => DelegateApprovalRecommendation::Approve,
         "deny" => DelegateApprovalRecommendation::Deny,
         "escalate_to_human" => DelegateApprovalRecommendation::EscalateToHuman,
-        _ => return Err(ApprovalJudgeModelError::InvalidDecision),
+        _ => return Err(InvalidDecision),
     };
-    let rationale = ToolDecisionRationale::try_new(rationale)
-        .map_err(|_| ApprovalJudgeModelError::InvalidDecision)?;
+    let rationale = ToolDecisionRationale::try_new(rationale).map_err(|_| InvalidDecision)?;
     Ok((recommendation, rationale))
 }
 
 fn take_string(
     fields: &mut Map<String, Value>,
     field: &'static str,
-) -> Result<String, ApprovalJudgeModelError> {
+) -> Result<String, InvalidDecision> {
     match fields.remove(field) {
         Some(Value::String(value)) => Ok(value),
-        Some(_) | None => Err(ApprovalJudgeModelError::InvalidDecision),
+        Some(_) | None => Err(InvalidDecision),
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InvalidDecision;
 
 fn render_selection(selection: DirectModelSelection) -> String {
     format!("direct:{}", selection.into_uuid())
@@ -283,13 +285,38 @@ fn render_selection(selection: DirectModelSelection) -> String {
 fn require_same_target(
     configured: &ResolvedTarget,
     reported: &ProviderReportedModel,
+    usage: TokenUsage,
 ) -> Result<(), ApprovalJudgeModelError> {
     match relate_provider_target(configured, reported) {
         ProviderTargetRelation::Exact | ProviderTargetRelation::AliasConcretion => Ok(()),
         ProviderTargetRelation::DifferentLineage => {
-            Err(ApprovalJudgeModelError::ProviderTargetSubstituted)
+            Err(ApprovalJudgeModelError::ProviderTargetSubstituted(usage))
         }
     }
+}
+
+fn terminal_usage(evidence: &TerminalEvidence) -> TokenUsage {
+    match evidence {
+        TerminalEvidence::Completed(value) => value.usage,
+        TerminalEvidence::Refused(value) => value.usage,
+        TerminalEvidence::ProviderError(value) => value.usage,
+        TerminalEvidence::BoundaryLoss(value) => value.usage,
+        TerminalEvidence::CancellationConfirmed(_) | TerminalEvidence::ProvenUnsent(_) => {
+            TokenUsage::default()
+        }
+    }
+}
+
+fn require_observation_correlations(
+    observations: &[Observation<ModelCallId>],
+    expected: ModelCallId,
+    usage: TokenUsage,
+) -> Result<(), ApprovalJudgeModelError> {
+    observations
+        .iter()
+        .all(|observation| observation.correlation == expected)
+        .then_some(())
+        .ok_or(ApprovalJudgeModelError::CorrelationMismatch(usage))
 }
 
 /// Sanitized failure of one dedicated approval-judge call.
@@ -306,23 +333,50 @@ pub enum ApprovalJudgeModelError {
     /// Adapter request construction was defective.
     PreparationDefect,
     /// Runtime correlation differed from the durable call.
-    CorrelationMismatch,
+    CorrelationMismatch(TokenUsage),
     /// The provider returned an explicit refusal.
-    Refused,
+    Refused(TokenUsage),
     /// A complete, correlated provider error response was observed.
-    ProviderError,
+    ProviderError(TokenUsage),
     /// The provider definitively confirmed cancellation.
     CancellationConfirmed,
     /// The request provably never reached an acceptance-capable boundary.
     ProvenUnsent,
     /// Provider acceptance or completion remained uncertain.
-    BoundaryLoss,
+    BoundaryLoss(TokenUsage),
     /// The provider reported a different model lineage.
-    ProviderTargetSubstituted,
+    ProviderTargetSubstituted(TokenUsage),
     /// The completion stopped before a complete decision.
-    IncompleteDecision,
+    IncompleteDecision(TokenUsage),
     /// The completion lacked exactly one valid typed decision.
-    InvalidDecision,
+    InvalidDecision(TokenUsage),
+}
+
+impl ApprovalJudgeModelError {
+    /// Provider-reported usage observed before the call failed.
+    pub const fn usage(self) -> TokenUsage {
+        match self {
+            Self::CorrelationMismatch(usage)
+            | Self::Refused(usage)
+            | Self::ProviderError(usage)
+            | Self::BoundaryLoss(usage)
+            | Self::ProviderTargetSubstituted(usage)
+            | Self::IncompleteDecision(usage)
+            | Self::InvalidDecision(usage) => usage,
+            Self::UnconfiguredTarget
+            | Self::InvalidContract
+            | Self::CancelledBeforeSend
+            | Self::PreparationFailed
+            | Self::PreparationDefect
+            | Self::CancellationConfirmed
+            | Self::ProvenUnsent => TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            },
+        }
+    }
 }
 
 impl fmt::Display for ApprovalJudgeModelError {
@@ -340,9 +394,9 @@ mod tests {
         ResolvedProviderTarget, SessionId,
     };
     use signalbox_model_runtime::{
-        AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
-        Script, ScriptedModel, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-        ToolName,
+        AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, Observation,
+        ObservationFact, ProviderReportedModel, Script, ScriptedModel, TerminalEvidence,
+        TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
     use uuid::Uuid;
 
@@ -386,23 +440,31 @@ mod tests {
     }
 
     fn completion(arguments: &str) -> Script {
+        completion_with_finish(arguments, CompletionFinish::ToolUse)
+    }
+
+    fn completion_with_finish(arguments: &str, finish: CompletionFinish) -> Script {
         Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new(PROVIDER_MODEL)),
-            finish: CompletionFinish::ToolUse,
+            finish,
             content: vec![AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new("judge_call"),
                 name: ToolName::new(super::OUTPUT_NAME),
                 arguments_json: arguments.to_owned(),
             })],
-            usage: TokenUsage {
-                input_tokens: Some(INPUT_TOKENS),
-                output_tokens: Some(OUTPUT_TOKENS),
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: Some(CACHE_READ_INPUT_TOKENS),
-            },
+            usage: reported_usage(),
         }))
+    }
+
+    const fn reported_usage() -> TokenUsage {
+        TokenUsage {
+            input_tokens: Some(INPUT_TOKENS),
+            output_tokens: Some(OUTPUT_TOKENS),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(CACHE_READ_INPUT_TOKENS),
+        }
     }
 
     fn approval_completion() -> Script {
@@ -454,6 +516,54 @@ mod tests {
             .await
             .expect_err("an open recommendation vocabulary is rejected");
 
-        assert_eq!(error, ApprovalJudgeModelError::InvalidDecision);
+        assert_eq!(
+            error,
+            ApprovalJudgeModelError::InvalidDecision(reported_usage())
+        );
+    }
+
+    #[tokio::test]
+    async fn non_tool_finish_fails_closed_for_structured_judge_decision() {
+        let model = RuntimeApprovalJudgeModel::new(
+            ScriptedModel::<ModelCallId>::single(completion_with_finish(
+                &serde_json::json!({
+                    "recommendation": "approve",
+                    "rationale": APPROVAL_RATIONALE,
+                })
+                .to_string(),
+                CompletionFinish::EndTurn,
+            )),
+            catalog(),
+        );
+
+        let error = model
+            .execute(request())
+            .await
+            .expect_err("a tool decision requires a tool-use finish");
+
+        assert_eq!(
+            error,
+            ApprovalJudgeModelError::IncompleteDecision(reported_usage())
+        );
+    }
+
+    #[test]
+    fn mismatched_observation_correlation_fails_closed() {
+        let expected = request().call;
+        let observation = Observation {
+            correlation: ModelCallId::from_uuid(Uuid::from_u128(99)),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new(
+                PROVIDER_MODEL,
+            )),
+        };
+
+        let error =
+            super::require_observation_correlations(&[observation], expected, reported_usage())
+                .expect_err("an unrelated observation is rejected before its facts are read");
+
+        assert_eq!(
+            error,
+            ApprovalJudgeModelError::CorrelationMismatch(reported_usage())
+        );
     }
 }
