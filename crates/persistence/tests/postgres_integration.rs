@@ -6471,6 +6471,99 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// The delegation migration retains the reviewed lock, result, wake, and
+/// cascade predicates after PostgreSQL parses every definition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let spawn_lock: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('lock_delegation_parent_for_spawn()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(spawn_lock.contains("FOR NO KEY UPDATE"));
+
+    let delivery_lock: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('guard_session_pending_delivery_append()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(delivery_lock.contains("FOR NO KEY UPDATE"));
+
+    let cascade_frontier: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'delegation_cascade_expected_frontier(uuid,text)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(cascade_frontier.contains("LEFT JOIN session_child_result"));
+    assert!(cascade_frontier.contains("parent.effective_parent_kind"));
+    let empty_cascade_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM delegation_cascade_expected_frontier($1, 'stopped')",
+    )
+    .bind(Uuid::nil())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(empty_cascade_count, 0);
+
+    let delivery_shape: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = 'session_child_result_delivery_sequence_shape'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(delivery_shape.contains("delivery_kind IS NOT NULL"));
+
+    let lifecycle_update: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_lifecycle_update()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(lifecycle_update.contains("parent_turn_command"));
+    assert!(lifecycle_update.contains("parent_goal_command"));
+
+    let late_wait: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_wait_update()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(late_wait.contains("wake.event_sequence > waiting_update_sequence"));
+    assert!(late_wait.contains("wake.awaiting_tool_request_id"));
+
+    let continued_call: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'assert_model_call_steering_final_state(uuid)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(continued_call.contains("delegation_result"));
+    let extended_validator_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_proc
+          WHERE proname IN (
+                'assert_tool_request_single_result',
+                'assert_tool_loop_turn_final_state_pre_delegation',
+                'assert_reconciliation_required_turn_final_state',
+                'continuation_frontier_closes_predecessor_tool_round'
+          )
+            AND pg_get_functiondef(oid) LIKE '%delegation_result%'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(extended_validator_count, 4);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-014: the credential-reference column is total; the migrated schema
 /// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
