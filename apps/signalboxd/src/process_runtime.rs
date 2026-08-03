@@ -138,9 +138,9 @@ use signalbox_process_protocol::{
     SessionPlacement as WireSessionPlacement, SystemPromptMember, SystemPromptText,
     ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, content_fragments,
-    decode_client_line, encode_server_line, recover_bounded_client_protocol_version,
-    recover_bounded_client_request_id,
+    TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnState, UsageProvenance,
+    content_fragments, decode_client_line, encode_server_line,
+    recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -9322,6 +9322,7 @@ where
             request,
             name,
             arguments,
+            approval,
         } => {
             write_message(
                 writer,
@@ -9337,6 +9338,36 @@ where
                         tool_request_id: wire_uuid(request.into_uuid()),
                         tool_name: name.clone(),
                         arguments: arguments.clone(),
+                        approval: approval.as_ref().map(|approval| TranscriptToolApproval {
+                            decision: match approval.decision() {
+                                ToolApprovalDecision::Approve => {
+                                    WireToolApprovalEventDecision::Approve {}
+                                }
+                                ToolApprovalDecision::Deny { reason } => {
+                                    WireToolApprovalEventDecision::Deny {
+                                        reason: reason
+                                            .as_ref()
+                                            .map(|reason| reason.as_str().to_owned()),
+                                    }
+                                }
+                            },
+                            decider: match approval.decider() {
+                                signalbox_domain::ToolApprovalDecider::User { command } => {
+                                    WireToolApprovalEventDecider::User {
+                                        command_id: wire_uuid(command.into_uuid()),
+                                    }
+                                }
+                                signalbox_domain::ToolApprovalDecider::Delegate { model, call } => {
+                                    WireToolApprovalEventDecider::Delegate {
+                                        model_selection_id: wire_uuid(model.into_uuid()),
+                                        model_call_id: wire_uuid(call.into_uuid()),
+                                    }
+                                }
+                            },
+                            rationale: approval
+                                .rationale()
+                                .map(|rationale| rationale.as_str().to_owned()),
+                        }),
                     },
                 },
             )

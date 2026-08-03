@@ -536,6 +536,30 @@ public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
   }
 }
 
+public struct SignalboxTranscriptToolApproval: Decodable, Equatable, Sendable {
+  public let decision: SignalboxToolApprovalEventDecision
+  public let decider: SignalboxToolApprovalEventDecider
+  public let rationale: String?
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["decision", "decider", "rationale"],
+      decoder: decoder
+    )
+    try payload.requireFields(["decision", "decider", "rationale"], decoder: decoder)
+    decision = try decoder.decode("decision")
+    decider = try decoder.decode("decider")
+    rationale = try decoder.decode("rationale")
+    try SignalboxProcessSessionEvent.validateToolApprovalDecision(
+      decision: decision,
+      decider: decider,
+      rationale: rationale,
+      decoder: decoder
+    )
+  }
+}
+
 public enum SignalboxConversationOriginFilter: String, Codable, Equatable, Sendable {
   case native
   case imported
@@ -1933,7 +1957,8 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
   )
   case assistantToolUse(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
-    toolRequestID: SignalboxCanonicalUUID, toolName: String, arguments: String)
+    toolRequestID: SignalboxCanonicalUUID, toolName: String, arguments: String,
+    approval: SignalboxTranscriptToolApproval?)
   case toolExecutionResult(
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
   case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
@@ -1976,7 +2001,10 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         )
       case "assistant_tool_use":
         try tagged.rejectUnadmittedFields(
-          ["type", "turn_id", "model_call_id", "tool_request_id", "tool_name", "arguments"],
+          [
+            "type", "turn_id", "model_call_id", "tool_request_id", "tool_name", "arguments",
+            "approval",
+          ],
           decoder: decoder
         )
         self = .assistantToolUse(
@@ -1984,7 +2012,8 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           modelCallID: try decoder.decode("model_call_id"),
           toolRequestID: try decoder.decode("tool_request_id"),
           toolName: try decoder.decode("tool_name"),
-          arguments: try decoder.decode("arguments")
+          arguments: try decoder.decode("arguments"),
+          approval: try decoder.decodeIfPresent("approval")
         )
       case "tool_execution_result":
         try tagged.rejectUnadmittedFields(
@@ -2450,7 +2479,7 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     }
   }
 
-  private static func validateToolApprovalDecision(
+  fileprivate static func validateToolApprovalDecision(
     decision: SignalboxToolApprovalEventDecision,
     decider: SignalboxToolApprovalEventDecider,
     rationale: String?,
@@ -2487,8 +2516,12 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
     !reason.isEmpty
       && reason.utf8.count <= 1_024
       && reason.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
-      && reason.first.map { !$0.isWhitespace } == true
-      && reason.last.map { !$0.isWhitespace } == true
+      && reason.unicodeScalars.first.map { !isPOSIXWhitespace($0) } == true
+      && reason.unicodeScalars.last.map { !isPOSIXWhitespace($0) } == true
+  }
+
+  private static func isPOSIXWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+    scalar.value == 0x20 || (0x09...0x0D).contains(scalar.value)
   }
 
   private static func validRationale(_ rationale: String) -> Bool {

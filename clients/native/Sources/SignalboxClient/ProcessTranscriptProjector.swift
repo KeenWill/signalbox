@@ -29,17 +29,20 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
   public let pendingInputs: [SignalboxProcessPendingInput]
   public let activity: SignalboxProcessActivity
   public let materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
+  public let toolApprovalDecisionsByRequestID: [String: SignalboxTranscriptToolApproval]
 
   public init(
     records: [SignalboxStoredEvent],
     pendingInputs: [SignalboxProcessPendingInput],
     activity: SignalboxProcessActivity,
-    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
+    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>,
+    toolApprovalDecisionsByRequestID: [String: SignalboxTranscriptToolApproval]
   ) {
     self.records = records
     self.pendingInputs = pendingInputs
     self.activity = activity
     self.materializedAcceptedInputIDs = materializedAcceptedInputIDs
+    self.toolApprovalDecisionsByRequestID = toolApprovalDecisionsByRequestID
   }
 }
 
@@ -185,7 +188,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
       activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
-      materializedAcceptedInputIDs: materializedAcceptedInputIDs
+      materializedAcceptedInputIDs: materializedAcceptedInputIDs,
+      toolApprovalDecisionsByRequestID: toolApprovalDecisions(in: snapshot)
+    )
+  }
+
+  private func toolApprovalDecisions(
+    in snapshot: SignalboxSynchronizationSnapshot
+  ) -> [String: SignalboxTranscriptToolApproval] {
+    Dictionary(
+      snapshot.records.compactMap { record in
+        guard case .entry(let message) = record,
+          case .assistantToolUse(_, _, let requestID, _, _, let approval) = message.entry,
+          let approval
+        else {
+          return nil
+        }
+        return (requestID.rawValue, approval)
+      },
+      uniquingKeysWith: { first, _ in first }
     )
   }
 
@@ -256,7 +277,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let modelCallID,
       let requestID,
       let toolName,
-      let arguments
+      let arguments,
+      _
     ):
       let request = requestID.rawValue
       let event = SignalboxProcessToolEvent(
@@ -503,7 +525,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       switch state {
       case .proposed:
         guard
-          case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+          case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
             message.entry
         else {
           return false
@@ -572,7 +594,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .proposed:
         return snapshot.records.contains { record in
           guard case .entry(let message) = record,
-            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
               message.entry
           else {
             return false

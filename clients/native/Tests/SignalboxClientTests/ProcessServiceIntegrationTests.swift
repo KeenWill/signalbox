@@ -5787,7 +5787,9 @@ private enum ProcessProjectionFixture {
     return snapshot
   }
 
-  static func snapshotWithProposedTool() throws -> SignalboxSynchronizationSnapshot {
+  static func snapshotWithProposedTool(
+    approvalMember: String = ""
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -5832,7 +5834,7 @@ private enum ProcessProjectionFixture {
             "model_call_id":"\(ProcessDriverFixture.modelCall)",
             "tool_request_id":"\(proposedToolRequest)",
             "tool_name":"\(proposedToolName)",
-            "arguments":"{}"
+            "arguments":"{}"\(approvalMember)
           }
         }
         """,
@@ -5846,6 +5848,23 @@ private enum ProcessProjectionFixture {
         }
         """,
       ]
+    )
+  }
+
+  static func snapshotWithDelegateDenial() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(
+      approvalMember:
+        """
+        ,"approval":{
+          "decision":{"type":"deny","reason":null},
+          "decider":{
+            "type":"delegate",
+            "model_selection_id":"\(delegateModelSelection)",
+            "model_call_id":"\(delegateModelCall)"
+          },
+          "rationale":"\(delegateRationale)"
+        }
+        """
     )
   }
 
@@ -6763,6 +6782,24 @@ extension ProcessServiceIntegrationTests {
     )
 
     viewModel.apply(.event(try ProcessProjectionFixture.delegateDenialEvent()))
+
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
+    XCTAssertEqual(tool.status, .denied)
+    XCTAssertEqual(tool.decisionReason, nil)
+    XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
+    XCTAssertEqual(tool.approvalRationale, ProcessProjectionFixture.delegateRationale)
+    XCTAssertFalse(tool.decisionAvailable)
+  }
+
+  @MainActor
+  func testAuthoritativeSnapshotPresentsHistoricalDelegateDecision() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial())
+    )
 
     let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
     XCTAssertEqual(tool.status, .denied)

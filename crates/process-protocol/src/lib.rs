@@ -4144,6 +4144,9 @@ pub enum TranscriptEntry {
         tool_name: String,
         /// Exact normalized or scrubbed-undecodable arguments.
         arguments: String,
+        /// Explicit decision provenance, absent while pending and for automatic policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval: Option<TranscriptToolApproval>,
     },
     /// One physical tool attempt produced the logical result.
     ToolExecutionResult {
@@ -4322,6 +4325,19 @@ pub enum ToolApprovalEventDecider {
         /// Exact recorded judge model call.
         model_call_id: CanonicalUuid,
     },
+}
+
+/// One explicit approval decision retained in an authoritative transcript.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptToolApproval {
+    /// Exact recorded decision.
+    pub decision: ToolApprovalEventDecision,
+    /// Exact user or delegate provenance.
+    pub decider: ToolApprovalEventDecider,
+    /// Exact judge rationale, absent for a user decision.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub rationale: Option<String>,
 }
 
 /// Closed durable update event family.
@@ -4965,6 +4981,18 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::TranscriptEntry {
+                entry:
+                    TranscriptEntry::AssistantToolUse {
+                        approval: Some(approval),
+                        ..
+                    },
+                ..
+            } => validate_tool_approval_event_shape(
+                &approval.decision,
+                &approval.decider,
+                &approval.rationale,
+            )?,
             Self::SessionEvent {
                 event:
                     SessionEvent::ToolApprovalDecided {
@@ -5907,8 +5935,8 @@ mod tests {
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
         ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, decode_client_line,
-        decode_server_line, encode_client_line, encode_server_line,
+        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnState, UsageProvenance,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -9410,6 +9438,35 @@ mod tests {
                 },
             },
             r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+        )
+    }
+
+    #[test]
+    fn transcript_tool_approval_round_trips_historical_delegate_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(16)?,
+            ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(2),
+                source_session_id: uuid(6),
+                entry_id: uuid(7),
+                entry: TranscriptEntry::AssistantToolUse {
+                    turn_id: uuid(8),
+                    model_call_id: uuid(9),
+                    tool_request_id: uuid(10),
+                    tool_name: String::from("publish"),
+                    arguments: String::from("{}"),
+                    approval: Some(TranscriptToolApproval {
+                        decision: ToolApprovalEventDecision::Deny { reason: None },
+                        decider: ToolApprovalEventDecider::Delegate {
+                            model_selection_id: uuid(11),
+                            model_call_id: uuid(12),
+                        },
+                        rationale: Some(String::from("request exceeds the stated scope")),
+                    }),
+                },
+            },
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"request exceeds the stated scope"}}}"#,
         )
     }
 

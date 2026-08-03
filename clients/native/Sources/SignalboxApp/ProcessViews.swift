@@ -1720,6 +1720,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .authoritativeSnapshot(let snapshot):
         let projection = try projector.projectAuthoritativeSnapshot(snapshot)
         try normalizer.replaceAll(with: projection.records)
+        toolApprovalDecisionsByRequestID = retainedToolApprovalDecisions(
+          projection.toolApprovalDecisionsByRequestID
+        )
         refreshTimeline()
         pendingInputs = projection.pendingInputs
         acceptedInputsAwaitingTranscript.removeAll {
@@ -1739,6 +1742,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       case .sideSnapshot(let snapshot, let trigger):
         let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
         normalizer.upsert(contentsOf: projection.records)
+        toolApprovalDecisionsByRequestID.merge(
+          retainedToolApprovalDecisions(projection.toolApprovalDecisionsByRequestID),
+          uniquingKeysWith: { _, latest in latest }
+        )
         refreshTimeline()
         let snapshotTerminalTurnIDs = terminalTurnIDs(in: snapshot)
         let snapshotActiveTurnID = activeTurnID(in: snapshot)
@@ -1889,6 +1896,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           let turnID,
           let modelCallID,
           let entryRequestID,
+          _,
           _,
           _
         ) = entry.entry
@@ -2129,6 +2137,18 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     unrecognizedLiveTimelineUTF8Bytes += retainedBytes
     timelinePresentationOrder.append(.unrecognized(cursor.rawValue))
     refreshTimeline()
+  }
+
+  private func retainedToolApprovalDecisions(
+    _ decisions: [String: SignalboxTranscriptToolApproval]
+  ) -> [String: RetainedToolApprovalDecision] {
+    decisions.mapValues { approval in
+      RetainedToolApprovalDecision(
+        decision: approval.decision,
+        decider: approval.decider,
+        rationale: approval.rationale
+      )
+    }
   }
 
   /// Evicts the oldest unknown-event cards so a future-event stream cannot exhaust

@@ -1381,12 +1381,17 @@ Each non-text native frontier member is one `transcript_entry` with
 `entry_index`, `source_session_id`, `entry_id`, and one closed `entry` object:
 `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
 `turn_cancelled { turn_id }`. The tool-bearing vocabulary also admits
-`assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
+`assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments, approval? }`,
 `tool_execution_result { tool_request_id, tool_attempt_id, content }`,
 `tool_denied { tool_request_id, content }`, and
 `tool_closed { tool_request_id, content }`. The vocabulary also admits
 `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
 naming the first started turn bound to a changed frozen direct selection. The
+optional `approval` object repeats the exact `decision`, `decider`, and nullable
+`rationale` shape of `tool_approval_decided`; it is absent while the request is
+pending and when automatic policy decided without an explicit event. This makes
+explicit provenance available from an authoritative snapshot after its event
+cursor has passed. The
 vocabulary additionally admits the text-bearing
 `context_summary { model_call_id, first_source_session_id, first_entry_id, through_source_session_id, through_entry_id }`;
 its content follows through the ordinary `transcript_content` sequence, and its

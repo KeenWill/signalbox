@@ -1861,15 +1861,47 @@ impl<'a> Output<'a> {
                 tool_request_id,
                 tool_name,
                 arguments,
-            }) => writeln!(
-                self.stdout,
-                "assistant_tool_use turn={turn_id} call={model_call_id} \
-                 request={tool_request_id} name={} arguments={} source={} entry={}",
-                self.render(tool_name),
-                self.render(arguments),
-                entry.source_session_id,
-                entry.entry_id
-            ),
+                approval,
+            }) => {
+                writeln!(
+                    self.stdout,
+                    "assistant_tool_use turn={turn_id} call={model_call_id} \
+                     request={tool_request_id} name={} arguments={} source={} entry={}",
+                    self.render(tool_name),
+                    self.render(arguments),
+                    entry.source_session_id,
+                    entry.entry_id
+                )?;
+                if let Some(approval) = approval {
+                    let (decision, reason) = match &approval.decision {
+                        ToolApprovalEventDecision::Approve {} => ("approve", None),
+                        ToolApprovalEventDecision::Deny { reason } => ("deny", reason.as_deref()),
+                    };
+                    match &approval.decider {
+                        ToolApprovalEventDecider::User { command_id } => writeln!(
+                            self.stdout,
+                            "tool_approval request={tool_request_id} decision={decision} \
+                             decider=user command={command_id}"
+                        )?,
+                        ToolApprovalEventDecider::Delegate {
+                            model_selection_id,
+                            model_call_id,
+                        } => writeln!(
+                            self.stdout,
+                            "tool_approval request={tool_request_id} decision={decision} \
+                             decider=delegate model_selection={model_selection_id} \
+                             call={model_call_id}"
+                        )?,
+                    }
+                    if let Some(reason) = reason {
+                        self.text_field("denial_reason", reason)?;
+                    }
+                    if let Some(rationale) = &approval.rationale {
+                        self.text_field("rationale", rationale)?;
+                    }
+                }
+                Ok(())
+            }
             SnapshotEntryKind::Marker(TranscriptEntry::ToolExecutionResult {
                 tool_request_id,
                 tool_attempt_id,
@@ -3164,6 +3196,7 @@ mod tests {
                         tool_request_id: selected_request,
                         tool_name: String::from("selected"),
                         arguments: String::from("{}"),
+                        approval: None,
                     },
                 },
                 ServerMessage::TranscriptEntry {
@@ -3185,6 +3218,7 @@ mod tests {
                         tool_request_id: later_request,
                         tool_name: String::from("later"),
                         arguments: String::from("{}"),
+                        approval: None,
                     },
                 },
                 ServerMessage::TranscriptEntry {

@@ -93,7 +93,7 @@ use signalbox_persistence::{
         ProcessModelCallUsageProvenance, ProcessModelSelection,
         ProcessProviderModelCallFailureCause, ProcessReadCorruption, ProcessReadError,
         ProcessReadRepository, ProcessReconciliationOperation, ProcessSessionDefaultsRead,
-        ProcessTranscriptEntry, ProcessTurnState,
+        ProcessToolApproval, ProcessTranscriptEntry, ProcessTranscriptSnapshot, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -5018,10 +5018,33 @@ async fn explicit_tool_decision_dispatches_full_user_provenance() -> Result<(), 
         Some(&ToolApprovalDecider::User { command })
     );
     assert_eq!(approval.rationale(), None);
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the decided session has a transcript");
+    let projected = process_tool_approval(&snapshot, request)
+        .expect("the assistant tool entry retains the explicit decision");
+    assert_eq!(projected.decision(), &ToolApprovalDecision::Approve);
+    assert_eq!(projected.decider(), ToolApprovalDecider::User { command });
+    assert_eq!(projected.rationale(), None);
 
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+fn process_tool_approval(
+    snapshot: &ProcessTranscriptSnapshot,
+    request: ToolRequestId,
+) -> Option<&ProcessToolApproval> {
+    snapshot.entries().iter().find_map(|entry| match entry {
+        ProcessTranscriptEntry::AssistantToolUse {
+            request: entry_request,
+            approval,
+            ..
+        } if *entry_request == request => approval.as_ref(),
+        _ => None,
+    })
 }
 
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool

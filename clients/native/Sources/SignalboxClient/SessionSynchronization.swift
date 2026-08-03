@@ -1830,8 +1830,20 @@ extension SignalboxTranscriptEntry {
 
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .assistantToolUse(_, _, _, let toolName, let arguments):
-      return UInt(toolName.utf8.count).saturatedAdding(UInt(arguments.utf8.count))
+    case .assistantToolUse(_, _, _, let toolName, let arguments, let approval):
+      let approvalBytes: UInt
+      switch approval?.decision {
+      case .deny(let reason):
+        approvalBytes = UInt(reason?.utf8.count ?? 0)
+          .saturatedAdding(UInt(approval?.rationale?.utf8.count ?? 0))
+      case .approve:
+        approvalBytes = UInt(approval?.rationale?.utf8.count ?? 0)
+      case nil:
+        approvalBytes = 0
+      }
+      return UInt(toolName.utf8.count)
+        .saturatedAdding(UInt(arguments.utf8.count))
+        .saturatedAdding(approvalBytes)
     case .toolExecutionResult(_, _, let content),
       .toolDenied(_, let content),
       .toolClosed(_, let content):
