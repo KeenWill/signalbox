@@ -234,10 +234,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var unknownTurnActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
-    let modelCallAnchors = modelCallAnchors(in: snapshot.records)
-    let turnEntryAnchors = turnEntryAnchors(in: snapshot.records)
+    let modelCallAnchors = modelCallAnchors(
+      in: snapshot.records,
+      nativeSourceSessionID: snapshot.sessionID
+    )
+    let turnEntryAnchors = turnEntryAnchors(
+      in: snapshot.records,
+      nativeSourceSessionID: snapshot.sessionID
+    )
     let sessionTurnAcceptancePositions = sessionTurnAcceptancePositions(in: snapshot.records)
-    let sessionToolRequestPositions = sessionToolRequestPositions(in: snapshot.records)
+    let sessionToolRequestPositions = sessionToolRequestPositions(
+      in: snapshot.records,
+      nativeSourceSessionID: snapshot.sessionID
+    )
     let trailingModelCallUsageIDs = trailingModelCallUsageIDs(in: snapshot.records)
     var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
     var unanchoredUsage: [SignalboxStoredEvent] = []
@@ -285,11 +294,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           let trailsTranscript = trailingModelCallUsageIDs.contains(
             evidence.modelCallID.rawValue
           )
-          let eventID = try claimModelCallUsagePresentationID(
-            evidence,
-            anchorEntryIndex: anchor?.entryIndex,
-            trailingWhenUnanchored: trailsTranscript
-          )
+          let eventID = try claimModelCallUsagePresentationID(evidence)
           let usageRecord = SignalboxStoredEvent(
             eventID: eventID,
             presentationOrder: try modelCallUsagePresentationOrder(
@@ -368,7 +373,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private func modelCallAnchors(
-    in records: [SignalboxSynchronizationSnapshot.Record]
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    nativeSourceSessionID: SignalboxCanonicalUUID
   ) -> [String: ModelCallAnchor] {
     var anchors: [String: ModelCallAnchor] = [:]
     var modelCallsByToolCorrelation:
@@ -385,6 +391,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for (index, record) in records.enumerated() {
       switch record {
       case .textEntry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          textModelCall = nil
+          continue
+        }
         switch message.entry {
         case .assistant(let turnID, let modelCallID):
           textModelCall = (modelCallID.rawValue, message.entryIndex, turnID)
@@ -406,6 +416,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         textModelCall = nil
       case .entry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
         switch message.entry {
         case .assistantToolUse(let turnID, let modelCallID, let requestID, _, _):
           let rawModelCallID = modelCallID.rawValue
@@ -454,13 +467,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private func turnEntryAnchors(
-    in records: [SignalboxSynchronizationSnapshot.Record]
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    nativeSourceSessionID: SignalboxCanonicalUUID
   ) -> [String: SignalboxCanonicalUInt64] {
     var anchors: [String: SignalboxCanonicalUInt64] = [:]
     for record in records {
       let anchor: (turnID: SignalboxCanonicalUUID, entryIndex: SignalboxCanonicalUInt64)?
       switch record {
       case .textEntry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
         switch message.entry {
         case .user(_, let turnID), .assistant(let turnID, _):
           anchor = (turnID, message.entryIndex)
@@ -468,6 +485,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           anchor = nil
         }
       case .entry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
         switch message.entry {
         case .modelIdentityChanged(let turnID, _, _),
           .assistantToolUse(let turnID, _, _, _, _), .turnCompleted(let turnID),
@@ -503,13 +523,15 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private func sessionToolRequestPositions(
-    in records: [SignalboxSynchronizationSnapshot.Record]
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    nativeSourceSessionID: SignalboxCanonicalUUID
   ) -> [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition] {
     var resultAttemptIDs: [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
     var resultOutputs: [SignalboxCanonicalUUID: String] = [:]
     var ambiguousResultRequestIDs: Set<SignalboxCanonicalUUID> = []
     for case .entry(let message) in records {
-      guard case .toolExecutionResult(let requestID, let attemptID, let output) = message.entry
+      guard message.sourceSessionID == nativeSourceSessionID,
+        case .toolExecutionResult(let requestID, let attemptID, let output) = message.entry
       else {
         continue
       }
@@ -524,6 +546,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     return records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
+        message.sourceSessionID == nativeSourceSessionID,
         case .assistantToolUse(let turnID, _, let requestID, let toolName, _) = message.entry
       else {
         return
@@ -922,26 +945,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private mutating func claimModelCallUsagePresentationID(
-    _ evidence: SignalboxTranscriptModelCallUsage,
-    anchorEntryIndex: SignalboxCanonicalUInt64?,
-    trailingWhenUnanchored: Bool
+    _ evidence: SignalboxTranscriptModelCallUsage
   ) throws -> SignalboxEventID {
     let identity = PresentationIdentity.modelCallUsage(evidence.modelCallID.rawValue)
     if let existing = presentationIDs[identity] {
       return existing
-    }
-    if let anchorEntryIndex {
-      guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
-        throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
-      }
-      let claimed = SignalboxEventID(
-        rawValue: Int(anchorEntryIndex.rawValue) * Self.presentationLaneStride + 2
-      )
-      presentationIDs[identity] = claimed
-      return claimed
-    }
-    if trailingWhenUnanchored {
-      return try claimTrailingPresentationID(identity)
     }
     guard nextModelCallUsageEventID < 0 else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted

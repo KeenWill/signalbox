@@ -604,6 +604,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       Set(normalizer.timelineItems.map(\.id)).count,
       ProcessProjectionFixture.sourceQualifiedToolSummaries.count
     )
+    XCTAssertEqual(
+      try ProcessProjectionFixture.nativeToolRequestPositionName(in: projection),
+      ProcessProjectionFixture.proposedToolName
+    )
   }
 
   func testImportedSemanticMarkersProjectAsTypedTimelineNotices() throws {
@@ -706,6 +710,43 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
       ProcessProjectionFixture.reanchoredUsageNoticeTitles
+    )
+  }
+
+  func testModelUsageIDsStayDistinctWhenAnchorsAreReused() throws {
+    var projector = SignalboxProcessTranscriptProjector()
+    let initial = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotBeforeUsageAnchorReuse()
+    )
+    let updated = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotAfterUsageAnchorReuse()
+    )
+
+    XCTAssertEqual(
+      Set(ProcessProjectionFixture.modelCallUsageEventIDs(in: updated)).count,
+      ProcessProjectionFixture.anchorReuseUsageCount
+    )
+    XCTAssertEqual(
+      try ProcessProjectionFixture.modelCallUsageEventID(
+        ProcessDriverFixture.modelCall,
+        in: updated
+      ),
+      try ProcessProjectionFixture.modelCallUsageEventID(
+        ProcessDriverFixture.modelCall,
+        in: initial
+      )
+    )
+  }
+
+  func testImportedModelCallIdentityCannotReplaceNativeUsageAnchor() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedModelCallAnchorCollision()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.modelCallUsageIDs(in: projection),
+      ProcessProjectionFixture.triggeredModelCallUsageIDs
     )
   }
 
@@ -5982,6 +6023,7 @@ private enum ProcessProjectionFixture {
   static let modelCostLabel = "real"
   static let earlierModelCall = "11111111-2222-4222-8222-222222222222"
   static let orderedModelCallUsageIDs = [earlierModelCall, ProcessDriverFixture.modelCall]
+  static let anchorReuseUsageCount = orderedModelCallUsageIDs.count
   static let adjacentUsageAndTurnStateTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .processEvidence, .unknown, .message,
   ]
@@ -7949,6 +7991,160 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotBeforeUsageAnchorReuse() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try anchoredUsageSnapshot(
+      evidence: [
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall)
+      ],
+      transcriptEntries: assistantTextMessages(
+        index: 0,
+        entryID: completedAssistantEntry,
+        modelCallID: ProcessDriverFixture.modelCall,
+        text: completedAssistantText
+      ),
+      entryCount: 1
+    )
+  }
+
+  static func snapshotAfterUsageAnchorReuse() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try anchoredUsageSnapshot(
+      evidence: [
+        modelUsageMessage(index: 0, modelCallID: earlierModelCall),
+        modelUsageMessage(index: 1, modelCallID: ProcessDriverFixture.modelCall),
+      ],
+      transcriptEntries: assistantTextMessages(
+        index: 0,
+        entryID: proposedAssistantEntry,
+        modelCallID: earlierModelCall,
+        text: proposedAssistantText
+      ) + assistantTextMessages(
+        index: 1,
+        entryID: completedAssistantEntry,
+        modelCallID: ProcessDriverFixture.modelCall,
+        text: completedAssistantText
+      ),
+      entryCount: 2
+    )
+  }
+
+  static func snapshotWithImportedModelCallAnchorCollision() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try anchoredUsageSnapshot(
+      evidence: [
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall)
+      ],
+      transcriptEntries: assistantTextMessages(
+        index: 0,
+        entryID: completedAssistantEntry,
+        modelCallID: ProcessDriverFixture.modelCall,
+        text: completedAssistantText
+      ) + [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(reusedToolSourceSession)",
+          "entry_id":"\(reusedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(crossTurn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(reusedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """
+      ],
+      entryCount: 2
+    )
+  }
+
+  private static func anchoredUsageSnapshot(
+    evidence: [String],
+    transcriptEntries: [String],
+    entryCount: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+      ] + evidence + [
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"\(evidence.count)"
+        }
+        """
+      ] + transcriptEntries + [
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"\(entryCount)"
+        }
+        """
+      ]
+    )
+  }
+
+  private static func assistantTextMessages(
+    index: UInt64,
+    entryID: String,
+    modelCallID: String,
+    text: String
+  ) -> [String] {
+    [
+      """
+      {
+        "type":"transcript_text_entry",
+        "entry_index":"\(index)",
+        "source_session_id":"\(ProcessDriverFixture.session)",
+        "entry_id":"\(entryID)",
+        "entry":{
+          "type":"assistant",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(modelCallID)"
+        }
+      }
+      """,
+      """
+      {
+        "type":"transcript_content",
+        "entry_index":"\(index)",
+        "fragment_index":"0",
+        "final_fragment":true,
+        "content_fragment":"\(text)"
+      }
+      """,
+    ]
+  }
+
   static func snapshotWithAnchoredUsageAndLaterMessage() throws
     -> SignalboxSynchronizationSnapshot
   {
@@ -9259,6 +9455,23 @@ private enum ProcessProjectionFixture {
     }
   }
 
+  static func nativeToolRequestPositionName(
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> String {
+    let requestID = try SignalboxCanonicalUUID(validating: proposedToolRequest)
+    guard let tool = projection.records.compactMap({ record -> SignalboxProcessToolEvent? in
+      guard case .processTool(let event) = record.event else {
+        return nil
+      }
+      return event
+    }).first,
+      let position = tool.sessionToolRequestPositions?[requestID]
+    else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureTool
+    }
+    return position.toolName
+  }
+
   static func modelCallUsageIDs(
     in timeline: [SignalboxTimelineItem]
   ) -> [String] {
@@ -9285,6 +9498,17 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureEvent
     }
     return record.eventID
+  }
+
+  static func modelCallUsageEventIDs(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [SignalboxEventID] {
+    projection.records.compactMap { record in
+      guard case .processModelCallUsage = record.event else {
+        return nil
+      }
+      return record.eventID
+    }
   }
 
   static func unknownKinds(in timeline: [SignalboxTimelineItem]) -> [String] {
