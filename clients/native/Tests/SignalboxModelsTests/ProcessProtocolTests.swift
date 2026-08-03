@@ -559,6 +559,7 @@ final class ProcessProtocolTests: XCTestCase {
             "selected_direct_id":"\(turnID)",
             "per_call_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
             "settings":\(settings),
+            "adjusted_from_selection_id":null,
             "adjustments":[]
           }
         }
@@ -608,18 +609,42 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
   }
 
-  func testTurnSettingsSessionEventRejectsAdjustmentOnDirectSelection() throws {
+  func testTurnSettingsSessionEventRejectsUnchangedAdjustmentSource() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.turnModelSettingsEventFrame(
         sessionID: sessionID,
         turnID: turnID,
         requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
         selectedDirectID: turnID,
+        adjustedFromSelectionID: "\"\(turnID)\"",
         adjustments: #"[{"type":"reasoning_level_cleared","from":"high"}]"#
       )
     )
 
     XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventAcceptsDistinctAdjustmentSource() throws {
+    let settings = ProcessProtocolFixture.modelSettingsSnapshot(
+      sessionReasoning: #"{"kind":"value","value":"low"}"#,
+      effectiveReasoning: "\"low\"",
+      reasoningSource: "\"session\"",
+      validatedForSelectionID: "\"\(turnID)\""
+    )
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.turnModelSettingsEventFrame(
+        sessionID: sessionID,
+        turnID: turnID,
+        requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
+        selectedDirectID: turnID,
+        settings: settings,
+        adjustedFromSelectionID: "\"\(sessionID)\"",
+        adjustments:
+          #"[{"type":"reasoning_level_clamped","from":"high","to":"low"}]"#
+      )
+    )
+
+    XCTAssertNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
   }
 
   func testSettingsChangeSessionEventRejectsUnknownMembers() throws {
@@ -682,6 +707,7 @@ final class ProcessProtocolTests: XCTestCase {
             "selected_direct_id":"\(turnID)",
             "per_call_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
             "settings":\(settings),
+            "adjusted_from_selection_id":"\(sessionID)",
             "adjustments":[{"type":"reasoning_level_clamped","from":"high"}]
           }
         }
@@ -1905,11 +1931,13 @@ private enum ProcessProtocolFixture {
     turnID: String,
     requestedModel: String,
     selectedDirectID: String,
+    settings: Data? = nil,
     perCallOverride: String =
       #"{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}"#,
+    adjustedFromSelectionID: String = "null",
     adjustments: String = "[]"
   ) -> Data {
-    let settings = String(decoding: modelSettingsSnapshot(), as: UTF8.self)
+    let settings = String(decoding: settings ?? modelSettingsSnapshot(), as: UTF8.self)
     return Data(
       """
       {
@@ -1928,6 +1956,7 @@ private enum ProcessProtocolFixture {
             "selected_direct_id":"\(selectedDirectID)",
             "per_call_override":\(perCallOverride),
             "settings":\(settings),
+            "adjusted_from_selection_id":\(adjustedFromSelectionID),
             "adjustments":\(adjustments)
           }
         }
