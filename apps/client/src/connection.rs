@@ -212,6 +212,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::ListSessionMetadata { .. }
         | ClientRequest::ListConversations { .. }
         | ClientRequest::ListModelAliases {}
+        | ClientRequest::ListModelCapabilities {}
         | ClientRequest::ReadSessionMetadata { .. }
         | ClientRequest::ReplaceSessionMetadata { .. }
         | ClientRequest::ReplaceSessionDefaults { .. }
