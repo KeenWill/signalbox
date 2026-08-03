@@ -11447,6 +11447,9 @@ impl ProcessUpdateEvent {
                 selected_direct_id: wire_uuid(event.selection().selected_direct().into_uuid()),
                 per_call_override: wire_model_settings_overlay(event.per_call_override()),
                 settings: wire_model_settings(event.settings()),
+                adjusted_from_selection_id: event
+                    .adjusted_from_selection()
+                    .map(|selection| wire_uuid(selection.into_uuid())),
                 adjustments: event
                     .adjustments()
                     .iter()
@@ -14162,6 +14165,7 @@ context_window_tokens = 200000
         let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
         let turn = TurnId::from_uuid(Uuid::from_u128(6));
         let requested_alias = ModelAlias::from_uuid(Uuid::from_u128(3));
+        let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(2));
         let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
         let installed_version = SessionConfigurationDefaultsVersion::first();
         let caller_override = ModelSettingsOverlay::inherit_all();
@@ -14193,6 +14197,7 @@ context_window_tokens = 200000
             },
             caller_override,
             settings,
+            Some(prior_selection),
             vec![ModelChangeAdjustment::ReasoningLevelCleared {
                 from: ReasoningLevel::High,
             }],
@@ -14216,6 +14221,9 @@ context_window_tokens = 200000
                 selected_direct_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
                 per_call_override: wire_model_settings_overlay(caller_override),
                 settings: wire_model_settings(settings),
+                adjusted_from_selection_id: Some(CanonicalUuid::from_uuid(
+                    prior_selection.into_uuid(),
+                )),
                 adjustments: vec![
                     signalbox_process_protocol::ModelChangeAdjustment::ReasoningLevelCleared {
                         from: signalbox_process_protocol::ReasoningLevel::High,

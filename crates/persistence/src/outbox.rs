@@ -616,6 +616,7 @@ async fn load_event(
                         settings.selected_direct_model_id,
                         settings.per_call_model_settings,
                         settings.resolved_model_settings,
+                        settings.adjusted_from_selection_id,
                         settings.adjustments,
                         queued.requested_model_kind,
                         queued.requested_direct_model_selection_id,
@@ -663,6 +664,8 @@ async fn load_event(
                 .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
                 model_settings_from_json(row.try_get::<Value, _>("resolved_model_settings")?)
                     .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                row.try_get::<Option<Uuid>, _>("adjusted_from_selection_id")?
+                    .map(DirectModelSelection::from_uuid),
                 model_change_adjustments_from_json(row.try_get::<Value, _>("adjustments")?)
                     .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
             )
