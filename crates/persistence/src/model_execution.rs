@@ -325,6 +325,20 @@ impl PostgresModelCallRepository {
         .with_session_credentials(self.credential_families.clone())
     }
 
+    /// Derives approval-judge storage from this repository's exact database
+    /// and model configuration.
+    pub fn approval_judge_repository(
+        &self,
+    ) -> crate::approval_judge::PostgresApprovalJudgeRepository {
+        crate::approval_judge::PostgresApprovalJudgeRepository::new(
+            self.pool.clone(),
+            self.targets.clone(),
+            self.credential_reference.clone(),
+            self.credential_families.clone(),
+            self.cache_inclusive_input_targets.clone(),
+        )
+    }
+
     /// Reconstitutes the exact first-call operation for one read-only activation preview.
     pub async fn preview_activation_operation(
         &self,
@@ -1337,7 +1351,7 @@ where
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
 }
 
-async fn resolve_session_credential(
+pub(crate) async fn resolve_session_credential(
     connection: &mut PgConnection,
     session: SessionId,
     target: ResolvedProviderTarget,
