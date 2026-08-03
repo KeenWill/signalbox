@@ -725,6 +725,9 @@ impl GitHubRepositoryPoller {
         &mut self,
         number: u64,
     ) -> Result<Vec<RepoWatchReactionObservation>, RepositoryWatchAttemptError> {
+        if self.signal_reviewers.is_empty() {
+            return Ok(Vec::new());
+        }
         let number_text = number.to_string();
         let mut observations = self
             .fetch_reaction_pages(
@@ -2176,6 +2179,15 @@ mod tests {
     fn poller_fixture(
         rest_base: Url,
     ) -> Result<PollerFixture, RepositoryWatchRuntimeConstructionError> {
+        let reviewer = RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+            .expect("reviewer fixture is valid");
+        poller_fixture_with_signal_reviewers(rest_base, vec![reviewer])
+    }
+
+    fn poller_fixture_with_signal_reviewers(
+        rest_base: Url,
+        signal_reviewers: Vec<RepoWatchAuthorLogin>,
+    ) -> Result<PollerFixture, RepositoryWatchRuntimeConstructionError> {
         let credential_directory = TempDir::new().expect("credential directory is created");
         let credential_file: PathBuf = credential_directory.path().join(CREDENTIAL_FILE_NAME);
         fs::write(&credential_file, format!("{CREDENTIAL_VALUE}\n"))
@@ -2188,11 +2200,9 @@ mod tests {
         );
         let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
             .expect("repository fixture is valid");
-        let reviewer = RepoWatchAuthorLogin::try_new("signal-reviewer".to_owned())
-            .expect("reviewer fixture is valid");
         let poller = GitHubRepositoryPoller::try_new_with_rest_base(
             repository,
-            vec![reviewer],
+            signal_reviewers,
             credentials,
             credential_reference,
             rest_base,
@@ -2595,6 +2605,22 @@ mod tests {
 
         assert_eq!(pull.reactions().len(), SIGNAL_REACTION_CONTENTS.len());
         assert_eq!(pull.reactions()[0].reactor().as_str(), REVIEWER);
+    }
+
+    #[tokio::test]
+    async fn no_signal_reviewers_skip_every_reaction_request() {
+        let server = ScriptedServer::start(Vec::new()).await;
+        let mut fixture = poller_fixture_with_signal_reviewers(server.base_url.clone(), Vec::new())
+            .expect("poller is constructed");
+
+        let reactions = fixture
+            .poller
+            .fetch_reactions(PULL_NUMBER)
+            .await
+            .expect("empty signal-reviewer policy needs no reaction request");
+        server.finish().await;
+
+        assert!(reactions.is_empty());
     }
 
     #[tokio::test]
