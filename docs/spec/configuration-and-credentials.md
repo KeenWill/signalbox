@@ -489,13 +489,15 @@ Committed unimplemented functionality: `delegated` will park with delegated
 authority for the approval-judge wiring. That wiring must not expose a delegated
 request to the ordinary user-decision path before escalation.
 
-Committed unimplemented functionality: the optional `[approval_judge]` table has
-exactly one `selection_id`, and the configuration parser requires it to name a
-configured direct selection. No present runtime consumes this selection or
-dispatches an approval-judge call. The implementing daemon-wiring slice must use
-the selected model through the ordinary adapter, credential-profile, and
-target-resolution machinery; when the table is absent, it must use the judged
-session call's direct selection unchanged, never a hardcoded lower tier.
+The optional `[approval_judge]` table has exactly one `selection_id`, and the
+configuration parser requires it to name a configured direct selection.
+
+Committed unimplemented functionality: no present runtime consumes the
+approval-judge selection or dispatches an approval-judge call. The implementing
+daemon-wiring slice must use the selected model through the ordinary adapter,
+credential-profile, and target-resolution machinery; when the table is absent,
+it must use the judged session call's direct selection unchanged, never a
+hardcoded lower tier.
 
 When no explicit posture is configured, composition preserves each compiled
 declaration's permission default and feeds it unchanged into the existing

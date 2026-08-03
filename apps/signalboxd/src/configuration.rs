@@ -1550,6 +1550,13 @@ cache_read_input_usd_per_million_tokens = "4"
         DirectModelSelection::from_uuid(Uuid::from_u128(2))
     }
 
+    fn configured_judge_selection_fixture() -> DirectModelSelection {
+        DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001")
+                .expect("configured judge fixture UUID is valid"),
+        )
+    }
+
     #[test]
     fn configured_tool_postures_are_typed() {
         let configured = HubModelConfiguration::parse(&format!(
@@ -1585,14 +1592,12 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 "#
         ))
         .expect("judge setting is valid");
-        let selected = configured
-            .model_aliases()
-            .next()
-            .expect("fixture has one alias")
-            .1;
         let judged = judged_direct_selection_fixture();
 
-        assert_eq!(configured.approval_judge_selection(judged), selected);
+        assert_eq!(
+            configured.approval_judge_selection(judged),
+            configured_judge_selection_fixture()
+        );
     }
 
     #[test]

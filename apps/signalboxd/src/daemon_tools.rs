@@ -504,6 +504,15 @@ pub struct DaemonToolCatalog {
     entries: BTreeMap<ToolName, DaemonToolCatalogEntry>,
 }
 
+/// Statically selected daemon tool families available before runtime assembly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonToolComposition {
+    /// Process-local and always-compiled tool families only.
+    Base,
+    /// Base tools plus families enabled by complete deployment mappings.
+    WithMappedFamilies,
+}
+
 impl DaemonToolCatalog {
     fn try_new(
         catalogs: impl IntoIterator<Item = CompiledToolCatalog>,
@@ -533,10 +542,10 @@ impl DaemonToolCatalog {
     /// composition before database-backed tool dependencies are constructed.
     pub fn validate_approval_postures_for_composition(
         postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
-        includes_mapped_families: bool,
+        composition: DaemonToolComposition,
     ) -> Result<(), ConfiguredApprovalPostureError> {
         for (name, posture) in postures {
-            if !configured_composition_contains(&name, includes_mapped_families) {
+            if !configured_composition_contains(&name, composition) {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             }
             if posture == ToolApprovalPosture::Delegated {
@@ -564,8 +573,17 @@ impl DaemonToolCatalog {
     }
 }
 
-fn configured_composition_contains(name: &ToolName, includes_mapped_families: bool) -> bool {
+fn configured_composition_contains(name: &ToolName, composition: DaemonToolComposition) -> bool {
     let name = name.as_str();
+    let mapped_family_contains = match composition {
+        DaemonToolComposition::Base => false,
+        DaemonToolComposition::WithMappedFamilies => {
+            GITHUB_TOOL_NAMES.contains(&name)
+                || WORKSPACE_READ_TOOL_NAMES.contains(&name)
+                || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
+                || CONVERSATION_TOOL_NAMES.contains(&name)
+        }
+    };
     name == CURRENT_TIME_NAME
         || name == ECHO_NAME
         || name == WEB_FETCH_NAME
@@ -573,11 +591,7 @@ fn configured_composition_contains(name: &ToolName, includes_mapped_families: bo
         || name == GOAL_DECLARE_NAME
         || CODE_HOST_TOOL_NAMES.contains(&name)
         || PLAN_TOOL_NAMES.contains(&name)
-        || (includes_mapped_families
-            && (GITHUB_TOOL_NAMES.contains(&name)
-                || WORKSPACE_READ_TOOL_NAMES.contains(&name)
-                || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
-                || CONVERSATION_TOOL_NAMES.contains(&name)))
+        || mapped_family_contains
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1056,7 +1070,7 @@ mod tests {
             .expect("mapped fixture name is valid");
         let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
             [(mapped.clone(), ToolApprovalPosture::Human)],
-            false,
+            DaemonToolComposition::Base,
         )
         .expect_err("base composition excludes mapped families");
 
@@ -1073,7 +1087,7 @@ mod tests {
 
         DaemonToolCatalog::validate_approval_postures_for_composition(
             [(mapped, ToolApprovalPosture::Human)],
-            true,
+            DaemonToolComposition::WithMappedFamilies,
         )
         .expect("mapped composition includes configured families");
     }
@@ -1083,7 +1097,7 @@ mod tests {
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
         let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
             [(echo.clone(), ToolApprovalPosture::Delegated)],
-            false,
+            DaemonToolComposition::Base,
         )
         .expect_err("delegated posture fails before database construction");
 

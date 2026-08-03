@@ -898,9 +898,13 @@ async fn run_hub(
             )
         })?;
     let daemon_tool_configuration = model_configuration.daemon_tools();
+    let tool_composition = match daemon_tool_configuration {
+        Some(_) => daemon_tools::DaemonToolComposition::WithMappedFamilies,
+        None => daemon_tools::DaemonToolComposition::Base,
+    };
     DaemonToolCatalog::validate_approval_postures_for_composition(
         model_configuration.tool_approval_postures(),
-        daemon_tool_configuration.is_some(),
+        tool_composition,
     )
     .map_err(|error| {
         erase_startup_cause(
