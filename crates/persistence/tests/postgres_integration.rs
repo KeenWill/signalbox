@@ -6517,6 +6517,46 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert_eq!(empty_cascade_count, 0);
 
+    let cascade_lock: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'lock_delegation_termination_frontier(uuid,text)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(cascade_lock.contains("prior_edge_count"));
+    assert!(cascade_lock.contains("FOR NO KEY UPDATE"));
+    assert!(cascade_lock.contains("FOR UPDATE"));
+    let early_cascade_lock_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_trigger
+          WHERE tgname IN (
+                'goal_command_locks_delegation_frontier',
+                'submit_input_command_locks_delegation_frontier'
+          )
+            AND NOT tgdeferrable
+            AND pg_get_triggerdef(oid) LIKE '% BEFORE INSERT ON %'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(early_cascade_lock_count, 2);
+
+    let compaction_evidence: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_context_compaction_exact_evidence()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        compaction_evidence
+            .matches(
+                "entry.payload_kind = 'delegation_result' AND entry.tool_result_request_id IS NOT NULL"
+            )
+            .count(),
+        2
+    );
+
     let delivery_shape: String = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(oid)
            FROM pg_constraint
@@ -6839,6 +6879,145 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
     assert_eq!(
         wake_outcome,
         OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A foreground delegated result occupies its await request's ordinary
+/// tool-result position, so the durable tool-batch outbox event remains
+/// dispatchable instead of wedging the global cursor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn foreground_delegation_result_decodes_in_tool_batch_outbox() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session_uuid = insert_outbox_session_fixture(&pool, 0xd350).await?;
+    drain_outbox(&pool, |_| {}).await?;
+
+    let turn_uuid = Uuid::from_u128(0xd351);
+    let call_uuid = Uuid::from_u128(0xd352);
+    let request_uuid = Uuid::from_u128(0xd353);
+    let spawning_request_uuid = Uuid::from_u128(0xd354);
+    let boundary_uuid = Uuid::from_u128(0xd355);
+    let result_frontier_uuid = Uuid::from_u128(0xd356);
+    let result_entry_uuid = Uuid::from_u128(0xd357);
+
+    sqlx::raw_sql(
+        "ALTER TABLE tool_round DISABLE TRIGGER ALL;
+         ALTER TABLE tool_request DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier DISABLE TRIGGER ALL;
+         ALTER TABLE context_frontier_delta DISABLE TRIGGER ALL;
+         ALTER TABLE tool_batch_transition_outbox_event DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0), ($1, $3, 1)",
+    )
+    .bind(session_uuid)
+    .bind(boundary_uuid)
+    .bind(result_frontier_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_round
+            (producing_model_call_id, session_id, turn_id, boundary_kind,
+             boundary_frontier_id, response_part_count, request_count)
+         VALUES ($1, $2, $3, 'continuing', $4, 1, 1)",
+    )
+    .bind(call_uuid)
+    .bind(session_uuid)
+    .bind(turn_uuid)
+    .bind(boundary_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ($1, $2, $3, $4, 0, 'await_session', 'json', '{}')",
+    )
+    .bind(request_uuid)
+    .bind(session_uuid)
+    .bind(turn_uuid)
+    .bind(call_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id,
+             delegation_result_awaiting_tool_request_id,
+             delegation_result_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegation_result', $3, $3, $4)",
+    )
+    .bind(session_uuid)
+    .bind(result_entry_uuid)
+    .bind(request_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session_uuid)
+    .bind(result_frontier_uuid)
+    .bind(result_entry_uuid)
+    .execute(&pool)
+    .await?;
+    let mut outbox_transaction = pool.begin().await?;
+    let event_sequence: Decimal = sqlx::query_scalar(
+        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+         VALUES ('tool_batch_transition', 1, $1)
+         RETURNING event_sequence",
+    )
+    .bind(session_uuid)
+    .fetch_one(&mut *outbox_transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_batch_transition_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, producing_model_call_id, transition_kind, frontier_id)
+         VALUES ($1, 'tool_batch_transition', 1, $2, $3, $4,
+                 'results_projected', $5)",
+    )
+    .bind(event_sequence)
+    .bind(session_uuid)
+    .bind(turn_uuid)
+    .bind(call_uuid)
+    .bind(result_frontier_uuid)
+    .execute(&mut *outbox_transaction)
+    .await?;
+    outbox_transaction.commit().await?;
+
+    let outcome = OutboxDispatcher::new(pool.clone())
+        .dispatch_next(|event| {
+            assert_eq!(
+                event.kind(),
+                &DispatchedOutboxEventKind::ToolBatchTransition {
+                    turn: TurnId::from_uuid(turn_uuid),
+                    producing_call: ModelCallId::from_uuid(call_uuid),
+                    state: DispatchedToolBatchState::ResultsProjected {
+                        frontier: ContextFrontierId::from_uuid(result_frontier_uuid),
+                    },
+                }
+            );
+            OutboxDeliveryDecision::Delivered
+        })
+        .await?;
+    assert_eq!(
+        outcome,
+        OutboxDispatchOutcome::Delivered {
+            sequence: u64::try_from(event_sequence)?
+        }
     );
 
     pool.close().await;

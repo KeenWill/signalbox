@@ -3582,6 +3582,17 @@ pub enum TurnState {
         /// Exact accepted user text.
         content: InputContent,
     },
+    /// Delegated work has not activated.
+    QueuedDelegated {
+        /// Tool request that spawned the delegated session.
+        spawning_request_id: CanonicalUuid,
+        /// Parent session that issued the spawn request.
+        parent_session_id: CanonicalUuid,
+        /// Parent turn that issued the spawn request.
+        parent_turn_id: CanonicalUuid,
+        /// Exact delegated task text.
+        content: InputContent,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
@@ -3673,6 +3684,12 @@ enum RawTurnState {
         accepted_input_id: CanonicalUuid,
         content: InputContent,
     },
+    QueuedDelegated {
+        spawning_request_id: CanonicalUuid,
+        parent_session_id: CanonicalUuid,
+        parent_turn_id: CanonicalUuid,
+        content: InputContent,
+    },
     ActiveRunning {
         current_attempt_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3735,6 +3752,17 @@ impl<'de> Deserialize<'de> for TurnState {
                 content,
             } => Self::Queued {
                 accepted_input_id,
+                content,
+            },
+            RawTurnState::QueuedDelegated {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            } => Self::QueuedDelegated {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
                 content,
             },
             RawTurnState::ActiveRunning {
@@ -6494,6 +6522,25 @@ mod tests {
             FrameDecodeErrorKind::MalformedFrame
         );
         assert_eq!(duplicate_payload.request_id().value(), 9);
+    }
+
+    #[test]
+    fn delegated_queued_turn_round_trips_exact_origin_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::QueuedDelegated {
+                    spawning_request_id: uuid(2),
+                    parent_session_id: uuid(3),
+                    parent_turn_id: uuid(4),
+                    content: InputContent::new(String::from("delegated task")),
+                },
+            },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued_delegated","spawning_request_id":"00000000-0000-0000-0000-000000000002","parent_session_id":"00000000-0000-0000-0000-000000000003","parent_turn_id":"00000000-0000-0000-0000-000000000004","content":"delegated task"}}"#,
+        )
     }
 
     #[test]

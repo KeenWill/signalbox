@@ -14,10 +14,10 @@ the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
 import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
-delegation session-follow events against this PR (`agent/delegation`). This page
-is the normative boundary between a local client process and `signalboxd`;
-domain values, PostgreSQL records, and wire messages remain distinct
-representations.
+delegation session-follow events and queued task-origin projection against this
+PR (`agent/delegation`). This page is the normative boundary between a local
+client process and `signalboxd`; domain values, PostgreSQL records, and wire
+messages remain distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1306,6 +1306,9 @@ exact reservation is owned by this contract.
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
 - `queued { accepted_input_id, content }`;
+- `queued_delegated { spawning_request_id, parent_session_id, parent_turn_id, content }`,
+  whose identifiers bind the checked delegated-task origin rather than
+  fabricating an accepted input;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
