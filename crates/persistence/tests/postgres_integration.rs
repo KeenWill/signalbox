@@ -55,12 +55,13 @@ use signalbox_domain::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolDecisionRationale, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
+    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDispatchAuthority,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -1407,6 +1408,22 @@ where
     }
 }
 
+async fn dispatched_tool_approval_decision(
+    pool: &PgPool,
+    expected_request: ToolRequestId,
+) -> Result<Option<(TurnId, ToolApprovalResolution)>, OutboxDispatchError> {
+    let mut found = None;
+    drain_outbox(pool, |event| {
+        if let DispatchedOutboxEventKind::ToolApprovalDecided { turn, approval, .. } = event.kind()
+            && approval.request() == expected_request
+        {
+            found = Some((*turn, approval.clone()));
+        }
+    })
+    .await?;
+    Ok(found)
+}
+
 async fn corrupt_ended_attempt_disposition(
     pool: &PgPool,
     attempt: TurnAttemptId,
@@ -2441,6 +2458,25 @@ async fn persist_delegated_denial_fixture(
     .bind(fixture.session.into_uuid())
     .bind(request.into_uuid())
     .bind(fixture.call.into_uuid())
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ('tool_approval_decided', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_approval_decided_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, $3
+           FROM header",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(request.into_uuid())
     .execute(&mut *connection)
     .await?;
     Ok(judge_call)
@@ -3812,6 +3848,22 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     assert_eq!(stored.delegate_model_call_id, prepared.call().into_uuid());
     assert_eq!(stored.rationale, APPROVAL_JUDGE_RATIONALE);
     assert_eq!(stored.active_phase, "running");
+    let (event_turn, approval) = dispatched_tool_approval_decision(&pool, request)
+        .await?
+        .expect("the delegate decision appends its typed outbox event");
+    assert_eq!(event_turn, fixture.turn);
+    assert_eq!(approval.decision(), &ToolApprovalDecision::Approve);
+    assert_eq!(
+        approval.decider(),
+        Some(&ToolApprovalDecider::Delegate {
+            model: prepared.selection(),
+            call: prepared.call(),
+        })
+    );
+    assert_eq!(
+        approval.rationale().map(ToolDecisionRationale::as_str),
+        Some(APPROVAL_JUDGE_RATIONALE)
+    );
 
     pool.close().await;
     drop(container);
@@ -4383,6 +4435,113 @@ async fn approval_guard_completed_judge_requires_atomic_decision_effect()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_delegate_decision_requires_event_and_lifecycle_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let request = requests[0];
+    let mut transaction = pool.begin().await?;
+    let (selection, call) = insert_completed_judge(
+        &mut transaction,
+        &fixture,
+        request,
+        APPROVAL_JUDGE_SEED,
+        APPROVAL_RECOMMENDATION,
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             delegate_model_selection_id, delegate_model_call_id, rationale)
+         VALUES ($1, 'approve', 'delegate', $2, $3, $4)",
+    )
+    .bind(request.into_uuid())
+    .bind(selection)
+    .bind(call)
+    .bind(APPROVAL_JUDGE_RATIONALE)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("delegate approval requires its event and advanced lifecycle");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_explicit_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    let command = Uuid::from_u128(APPROVAL_COMMAND_SEED);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, owner_command_id)
+         VALUES ($1, 'approve', 'owner_command', $2)",
+    )
+    .bind(request.into_uuid())
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("user approval requires its event and advanced lifecycle");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_explicit_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_unsent_judge_call_rejects_usage() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
@@ -4573,6 +4732,42 @@ async fn approval_guard_user_cannot_decide_delegated_request_before_escalation()
         database_constraint(&source),
         Some("tool_approval_user_requires_human_authority")
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn explicit_tool_decision_dispatches_full_user_provenance() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(APPROVAL_COMMAND_SEED));
+    PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            decide_tool_request(command, request, ToolApprovalDecision::Approve),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(APPROVAL_NEXT_ATTEMPT_SEED)),
+        )
+        .await?;
+
+    let (event_turn, approval) = dispatched_tool_approval_decision(&pool, request)
+        .await?
+        .expect("the explicit decision appends its typed outbox event");
+    assert_eq!(event_turn, fixture.turn);
+    assert_eq!(approval.request(), request);
+    assert_eq!(approval.decision(), &ToolApprovalDecision::Approve);
+    assert_eq!(
+        approval.decider(),
+        Some(&ToolApprovalDecider::User { command })
+    );
+    assert_eq!(approval.rationale(), None);
 
     pool.close().await;
     drop(container);

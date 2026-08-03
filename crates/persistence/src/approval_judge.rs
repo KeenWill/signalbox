@@ -25,6 +25,7 @@ use crate::{
         session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
     },
     model_execution::{lock_session, resolve_session_credential},
+    outbox::{self, OutboxEvent},
     tool_loop::{ToolLoopRepositoryError, load_active_batch_from_connection},
 };
 
@@ -450,6 +451,15 @@ impl PostgresApprovalJudgeRepository {
                 .execute(&mut *transaction)
                 .await?;
                 persist_successor_phase(&mut transaction, &decision).await?;
+                outbox::append(
+                    &mut transaction,
+                    OutboxEvent::ToolApprovalDecided {
+                        session: prepared.request.session(),
+                        turn: prepared.request.turn(),
+                        request: resolution.request(),
+                    },
+                )
+                .await?;
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => CompleteApprovalJudgeOutcome::EscalatedToHuman,
