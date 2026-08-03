@@ -29,7 +29,7 @@ another contract are summarized, the owning sibling page is linked inline.
 
 The path-scoped session-placement domain and persistence paragraphs were
 verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
-current-head authentication was additionally verified through PR #395
+current-head authentication is additionally verified against this PR
 (`agent/scoped-visibility`). The read-scope enforcement paragraphs become
 verified only with their read-introspection and process-surface child pull
 request.
