@@ -432,23 +432,19 @@ fn decode_hex_fixture(bytes: &[u8]) -> Vec<u8> {
         .copied()
         .filter(u8::is_ascii_hexdigit)
         .collect::<Vec<_>>();
-    assert_eq!(
-        digits.len() % 2,
-        0,
-        "real Git hex fixture contains complete byte pairs"
-    );
     digits
         .chunks_exact(2)
-        .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
-        .collect()
+        .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
+        .collect::<Option<Vec<_>>>()
+        .expect("real Git hex fixture contains complete byte pairs")
 }
 
-fn hex_nibble(value: u8) -> u8 {
+fn hex_nibble(value: u8) -> Option<u8> {
     match value {
-        b'0'..=b'9' => value - b'0',
-        b'a'..=b'f' => value - b'a' + 10,
-        b'A'..=b'F' => value - b'A' + 10,
-        _ => unreachable!("hex fixture was filtered to ASCII hexadecimal digits"),
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
