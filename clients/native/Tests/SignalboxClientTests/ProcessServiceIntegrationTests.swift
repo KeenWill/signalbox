@@ -589,6 +589,23 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolProjectionQualifiesReusedRequestBySourceEntry() throws {
+    var projector = SignalboxProcessTranscriptProjector()
+    let projection = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithSourceQualifiedReusedToolRequest()
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolSummaries(in: projection),
+      ProcessProjectionFixture.sourceQualifiedToolSummaries
+    )
+    XCTAssertEqual(
+      Set(normalizer.timelineItems.map(\.id)).count,
+      ProcessProjectionFixture.sourceQualifiedToolSummaries.count
+    )
+  }
+
   func testImportedSemanticMarkersProjectAsTypedTimelineNotices() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithImportedMarkers()
     var projector = SignalboxProcessTranscriptProjector()
@@ -5885,6 +5902,16 @@ private enum ProcessProjectionFixture {
   static let modelIdentityEntry = "99999999-1111-4111-8111-111111111111"
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
   static let proposedToolRequest = "bbbbbbbb-1111-4111-8111-111111111111"
+  static let reusedToolSourceSession = "aaaaaaaa-5555-4555-8555-555555555555"
+  static let reusedToolEntry = "bbbbbbbb-5555-4555-8555-555555555555"
+  static let reusedToolResultEntry = "cccccccc-5555-4555-8555-555555555555"
+  static let reusedToolAttempt = "dddddddd-5555-4555-8555-555555555555"
+  static let reusedToolName = "inspect_imported_fixture"
+  static let reusedToolOutput = "Imported fixture inspected."
+  static let sourceQualifiedToolSummaries = [
+    "\(proposedToolName): \(reconciliationOutput)",
+    "\(reusedToolName): \(reusedToolOutput)",
+  ]
   static let crossTurn = "cccccccc-3333-4333-8333-333333333333"
   static let reconciliationAttempt = "dddddddd-3333-4333-8333-333333333333"
   static let reconciliationResultEntry = "eeeeeeee-3333-4333-8333-333333333333"
@@ -7611,6 +7638,64 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithSourceQualifiedReusedToolRequest() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        toolRequestMessage(index: 0),
+        toolResultMessage(index: 1),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(reusedToolSourceSession)",
+          "entry_id":"\(reusedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(reusedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(reusedToolSourceSession)",
+          "entry_id":"\(reusedToolResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_attempt_id":"\(reusedToolAttempt)",
+            "content":"\(reusedToolOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"4"
+        }
+        """,
+      ]
+    )
+  }
+
   private static func toolRequestMessage(index: UInt64) -> String {
     """
     {
@@ -9160,6 +9245,17 @@ private enum ProcessProjectionFixture {
         return nil
       }
       return tool.toolName
+    }
+  }
+
+  static func toolSummaries(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [String] {
+    projection.records.compactMap { record in
+      guard case .processTool(let tool) = record.event else {
+        return nil
+      }
+      return "\(tool.toolName): \(tool.output ?? "")"
     }
   }
 

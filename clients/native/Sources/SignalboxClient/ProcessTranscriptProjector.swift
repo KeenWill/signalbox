@@ -53,9 +53,27 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
 public struct SignalboxProcessTranscriptProjector: Sendable {
   private enum PresentationIdentity: Hashable, Sendable {
     case semantic(sourceSessionID: String, entryID: String)
-    case toolRequest(String)
     case modelCallUsage(String)
     case turnState(String)
+  }
+
+  private struct ToolCorrelation: Hashable, Sendable {
+    let sourceSessionID: String
+    let requestID: String
+  }
+
+  private struct ToolIdentity: Hashable, Sendable {
+    let sourceSessionID: String
+    let entryID: String
+    let requestID: String
+
+    var correlation: ToolCorrelation {
+      ToolCorrelation(sourceSessionID: sourceSessionID, requestID: requestID)
+    }
+
+    var presentationIdentity: PresentationIdentity {
+      .semantic(sourceSessionID: sourceSessionID, entryID: entryID)
+    }
   }
 
   private struct ToolContext: Sendable {
@@ -86,8 +104,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private static let firstTrailingUsagePresentationOrder = (Int.max / 4) * 3
 
   private var presentationIDs: [PresentationIdentity: SignalboxEventID] = [:]
-  private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
-  private var toolContextsByRequestID: [String: ToolContext] = [:]
+  private var toolsByIdentity: [ToolIdentity: SignalboxProcessToolEvent] = [:]
+  private var toolContextsByIdentity: [ToolIdentity: ToolContext] = [:]
+  private var toolIdentitiesByCorrelation: [ToolCorrelation: ToolIdentity] = [:]
   private var nextSemanticEventID = Self.firstSemanticEventID
   private var nextSyntheticEventID = Self.firstTurnStateEventID
   private var nextModelCallUsageEventID = Int.min / 4
@@ -98,8 +117,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ snapshot: SignalboxSynchronizationSnapshot
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
-    candidate.toolsByRequestID = [:]
-    candidate.toolContextsByRequestID = [:]
+    candidate.toolsByIdentity = [:]
+    candidate.toolContextsByIdentity = [:]
+    candidate.toolIdentitiesByCorrelation = [:]
     let projection = try candidate.project(snapshot, selection: .all)
     self = candidate
     return projection
@@ -313,6 +333,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .entry(let message):
         let projected = try projectEntry(
           message,
+          nativeSourceSessionID: snapshot.sessionID,
           awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
           sessionTurnAcceptancePositions: sessionTurnAcceptancePositions,
           sessionToolRequestPositions: sessionToolRequestPositions,
@@ -350,7 +371,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     in records: [SignalboxSynchronizationSnapshot.Record]
   ) -> [String: ModelCallAnchor] {
     var anchors: [String: ModelCallAnchor] = [:]
-    var modelCallsByToolRequestID: [String: (id: String, turnID: SignalboxCanonicalUUID)] = [:]
+    var modelCallsByToolCorrelation:
+      [ToolCorrelation: (id: String, turnID: SignalboxCanonicalUUID)] = [:]
     var terminalModelCallIDsByTurnID: [String: String] = [:]
     var textModelCall: (
       id: String, entryIndex: SignalboxCanonicalUInt64, turnID: SignalboxCanonicalUUID?
@@ -387,7 +409,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         switch message.entry {
         case .assistantToolUse(let turnID, let modelCallID, let requestID, _, _):
           let rawModelCallID = modelCallID.rawValue
-          modelCallsByToolRequestID[requestID.rawValue] = (rawModelCallID, turnID)
+          let correlation = ToolCorrelation(
+            sourceSessionID: message.sourceSessionID.rawValue,
+            requestID: requestID.rawValue
+          )
+          modelCallsByToolCorrelation[correlation] = (rawModelCallID, turnID)
           anchors[rawModelCallID] = ModelCallAnchor(
             recordIndex: index,
             entryIndex: message.entryIndex,
@@ -395,7 +421,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           )
         case .toolExecutionResult(let requestID, _, _),
           .toolDenied(let requestID, _), .toolClosed(let requestID, _):
-          if let modelCall = modelCallsByToolRequestID[requestID.rawValue] {
+          let correlation = ToolCorrelation(
+            sourceSessionID: message.sourceSessionID.rawValue,
+            requestID: requestID.rawValue
+          )
+          if let modelCall = modelCallsByToolCorrelation[correlation] {
             anchors[modelCall.id] = ModelCallAnchor(
               recordIndex: index,
               entryIndex: message.entryIndex,
@@ -594,6 +624,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private mutating func projectEntry(
     _ message: SignalboxTranscriptEntryMessage,
+    nativeSourceSessionID: SignalboxCanonicalUUID,
     awaitingToolDecisionRequestID: String?,
     sessionTurnAcceptancePositions: [SignalboxCanonicalUUID: SignalboxCanonicalUInt64],
     sessionToolRequestPositions:
@@ -623,6 +654,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let arguments
     ):
       let request = requestID.rawValue
+      let identity = ToolIdentity(
+        sourceSessionID: message.sourceSessionID.rawValue,
+        entryID: message.entryID.rawValue,
+        requestID: request
+      )
       let event = SignalboxProcessToolEvent(
         toolRequestID: SignalboxToolInvocationID(rawValue: request),
         turnID: turnID,
@@ -633,22 +669,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         output: nil,
         status: .proposed
       )
-      toolsByRequestID[request] = event
+      toolsByIdentity[identity] = event
       let presentationOrder = try semanticPresentationOrder(message.entryIndex)
-      toolContextsByRequestID[request] = ToolContext(
+      toolContextsByIdentity[identity] = ToolContext(
         turnID: turnID,
         modelCallID: modelCallID,
         presentationOrder: presentationOrder
       )
-      let eventID = try claimSemanticEventID(.toolRequest(request))
+      toolIdentitiesByCorrelation[identity.correlation] = identity
+      let eventID = try claimSemanticEventID(identity.presentationIdentity)
       return toolRecord(
         event,
-        awaitsDecision: request == awaitingToolDecisionRequestID,
+        awaitsDecision: message.sourceSessionID == nativeSourceSessionID
+          && request == awaitingToolDecisionRequestID,
         eventID: eventID,
         presentationOrder: presentationOrder
       )
     case .toolExecutionResult(let requestID, let toolAttemptID, let content):
       return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
         toolAttemptID: toolAttemptID,
         output: content,
@@ -656,6 +695,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       )
     case .toolDenied(let requestID, let content):
       return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
         toolAttemptID: nil,
         output: content,
@@ -663,6 +703,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       )
     case .toolClosed(let requestID, let content):
       return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
         toolAttemptID: nil,
         output: content,
@@ -724,12 +765,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private mutating func updateTool(
+    sourceSessionID: String,
     requestID: String,
     toolAttemptID: SignalboxCanonicalUUID?,
     output: String,
     status: SignalboxProcessToolStatus
   ) throws -> SignalboxStoredEvent {
-    guard let prior = toolsByRequestID[requestID] else {
+    let correlation = ToolCorrelation(
+      sourceSessionID: sourceSessionID,
+      requestID: requestID
+    )
+    guard let identity = toolIdentitiesByCorrelation[correlation],
+      let prior = toolsByIdentity[identity]
+    else {
       throw SignalboxProcessTranscriptProjectionError.orphanedToolResult(requestID)
     }
     let updated = SignalboxProcessToolEvent(
@@ -743,9 +791,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       output: output,
       status: status
     )
-    toolsByRequestID[requestID] = updated
-    guard let eventID = presentationIDs[.toolRequest(requestID)],
-      let presentationOrder = toolContextsByRequestID[requestID]?.presentationOrder
+    toolsByIdentity[identity] = updated
+    guard let eventID = presentationIDs[identity.presentationIdentity],
+      let presentationOrder = toolContextsByIdentity[identity]?.presentationOrder
     else {
       throw SignalboxProcessTranscriptProjectionError.orphanedToolResult(requestID)
     }
@@ -1133,7 +1181,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID && entryModelCallID == modelCallID
       case .resultsProjected:
-        return toolEntry(message.entry, belongsTo: turnID, modelCallID: modelCallID)
+        return toolEntry(message, belongsTo: turnID, modelCallID: modelCallID)
       case .recoveryRequired, .unknown:
         return false
       }
@@ -1155,7 +1203,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
       guard
         case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
-        let context = toolContextsByRequestID[requestID.rawValue]
+        let identity = toolIdentitiesByCorrelation[
+          ToolCorrelation(
+            sourceSessionID: message.sourceSessionID.rawValue,
+            requestID: requestID.rawValue
+          )
+        ],
+        let context = toolContextsByIdentity[identity]
       else {
         return false
       }
@@ -1167,12 +1221,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private func toolEntry(
-    _ entry: SignalboxTranscriptEntry,
+    _ message: SignalboxTranscriptEntryMessage,
     belongsTo turnID: SignalboxCanonicalUUID,
     modelCallID: SignalboxCanonicalUUID?
   ) -> Bool {
     let requestID: String
-    switch entry {
+    switch message.entry {
     case .toolExecutionResult(let request, _, _),
       .toolDenied(let request, _),
       .toolClosed(let request, _):
@@ -1182,7 +1236,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
-    guard let context = toolContextsByRequestID[requestID],
+    let correlation = ToolCorrelation(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      requestID: requestID
+    )
+    guard let identity = toolIdentitiesByCorrelation[correlation],
+      let context = toolContextsByIdentity[identity],
       context.turnID == turnID
     else {
       return false
@@ -1221,7 +1280,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for record in snapshot.records[..<markerIndex].reversed() {
       guard case .entry(let message) = record,
         message.sourceSessionID == snapshot.sessionID,
-        toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
+        toolEntry(message, belongsTo: turnID, modelCallID: nil)
       else {
         break
       }
@@ -1279,34 +1338,37 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           return entryTurnID == turnID && entryModelCallID == modelCallID
         }
       case .resultsProjected:
-        let expectedRequestIDs = Set(
-          toolContextsByRequestID.compactMap {
-            requestID, context -> String? in
+        let expectedCorrelations = Set(
+          toolContextsByIdentity.compactMap {
+            identity, context -> ToolCorrelation? in
             guard context.turnID == turnID, context.modelCallID == modelCallID else {
               return nil
             }
-            return requestID
+            return identity.correlation
           })
-        guard !expectedRequestIDs.isEmpty else {
+        guard !expectedCorrelations.isEmpty else {
           return false
         }
-        let projectedRequestIDs = Set(
+        let projectedCorrelations = Set(
           snapshot.records.compactMap {
-            record -> String? in
+            record -> ToolCorrelation? in
             guard case .entry(let message) = record else {
               return nil
             }
             switch message.entry {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
               .toolClosed(let requestID, _):
-              return requestID.rawValue
+              return ToolCorrelation(
+                sourceSessionID: message.sourceSessionID.rawValue,
+                requestID: requestID.rawValue
+              )
             case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
               .turnCancelled, .imported,
               .unknown:
               return nil
             }
           })
-        return expectedRequestIDs.isSubset(of: projectedRequestIDs)
+        return expectedCorrelations.isSubset(of: projectedCorrelations)
       case .recoveryRequired, .unknown:
         return true
       }
@@ -1366,7 +1428,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return snapshot.records.contains {
         guard case .entry(let message) = $0,
           case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
-          let context = toolContextsByRequestID[requestID.rawValue]
+          let identity = toolIdentitiesByCorrelation[
+            ToolCorrelation(
+              sourceSessionID: message.sourceSessionID.rawValue,
+              requestID: requestID.rawValue
+            )
+          ],
+          let context = toolContextsByIdentity[identity]
         else {
           return false
         }

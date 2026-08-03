@@ -12,7 +12,7 @@ public enum SignalboxTimelineItem: Identifiable, Equatable, Sendable {
         case .message(let message):
             return "message-\(message.eventID.rawValue)"
         case .tool(let tool):
-            return "tool-\(tool.invocationID.rawValue)"
+            return "tool-\(tool.eventID.rawValue)"
         case .processEvidence(let notice):
             return "notice-\(notice.eventID.rawValue)"
         case .turnFailure(let failure):
@@ -98,7 +98,7 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         self.presentationOutput = presentationOutput
     }
 
-    public var id: SignalboxToolInvocationID { invocationID }
+    public var id: SignalboxEventID { eventID }
 
     public var displayName: String { presentationName ?? toolName }
 
