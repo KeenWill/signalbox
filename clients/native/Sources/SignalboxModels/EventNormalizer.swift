@@ -1554,6 +1554,8 @@ public final class SignalboxIncrementalEventNormalizer {
     private(set) var metrics = SignalboxEventNormalizationMetrics()
 
     private var recordsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
+    private var presentationOrdersByID: [SignalboxEventID: SignalboxEventID] = [:]
+    private var timelineEventIDs: Set<SignalboxEventID> = []
     private var invocationEventIDsByFunctionCallEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
     private var invocationEventIDsByFunctionResponseEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
 
@@ -1574,14 +1576,20 @@ public final class SignalboxIncrementalEventNormalizer {
     ///   that case, so the previously loaded history stays renderable while the
     ///   caller fails the refresh.
     public func replaceAll(with records: [SignalboxStoredEvent]) throws {
-        let sortedRecords = records.sorted { $0.eventID < $1.eventID }
         // Index before storing anything: a snapshot cannot be applied halfway,
         // and only the index can tell a duplicate ID from a fresh one.
-        let recordsByID = try Self.eventsByID(in: sortedRecords)
+        let recordsByID = try Self.eventsByID(in: records)
+        let sortedRecords = records.sorted(by: Self.recordSortsBefore)
 
         self.records = sortedRecords
         self.recordsByID = recordsByID
+        presentationOrdersByID = Dictionary(
+            uniqueKeysWithValues: sortedRecords.map {
+                ($0.eventID, $0.presentationOrder ?? $0.eventID)
+            }
+        )
         timeline.items = []
+        timelineEventIDs = []
         metrics = SignalboxEventNormalizationMetrics()
         invocationEventIDsByFunctionCallEventID = [:]
         invocationEventIDsByFunctionResponseEventID = [:]
@@ -1594,24 +1602,21 @@ public final class SignalboxIncrementalEventNormalizer {
         }
     }
 
-    /// Indexes a snapshot sorted by event ID, rejecting any repeated ID.
+    /// Indexes a snapshot, rejecting any repeated ID.
     private static func eventsByID(
-        in sortedRecords: [SignalboxStoredEvent]
+        in records: [SignalboxStoredEvent]
     ) throws -> [SignalboxEventID: SignalboxConversationEvent] {
         var eventsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
-        eventsByID.reserveCapacity(sortedRecords.count)
-        var duplicateEventIDs: [SignalboxEventID] = []
-        for record in sortedRecords {
+        eventsByID.reserveCapacity(records.count)
+        var duplicateEventIDs: Set<SignalboxEventID> = []
+        for record in records {
             guard eventsByID.updateValue(record.event, forKey: record.eventID) != nil else {
                 continue
             }
-            // The sort groups repeats, so reporting each ID once needs no set.
-            if duplicateEventIDs.last != record.eventID {
-                duplicateEventIDs.append(record.eventID)
-            }
+            duplicateEventIDs.insert(record.eventID)
         }
         guard duplicateEventIDs.isEmpty else {
-            throw SignalboxEventNormalizerError.duplicateEventIDs(duplicateEventIDs)
+            throw SignalboxEventNormalizerError.duplicateEventIDs(duplicateEventIDs.sorted())
         }
         return eventsByID
     }
@@ -1630,12 +1635,12 @@ public final class SignalboxIncrementalEventNormalizer {
         addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
         removeInvocationLinks(for: oldEvent, invocationEventID: eventID)
 
-        let index = recordInsertionIndex(for: eventID)
-        if index < records.count, records[index].eventID == eventID {
-            records[index] = record
-        } else {
-            records.insert(record, at: index)
+        if let oldIndex = records.firstIndex(where: { $0.eventID == eventID }) {
+            records.remove(at: oldIndex)
         }
+        presentationOrdersByID[eventID] = record.presentationOrder ?? eventID
+        let index = recordInsertionIndex(for: record)
+        records.insert(record, at: index)
         recordsByID[eventID] = record.event
         addInvocationLinks(for: record.event, invocationEventID: eventID)
         addLinkedEventIDs(from: record.event, to: &affectedEventIDs)
@@ -1661,11 +1666,11 @@ public final class SignalboxIncrementalEventNormalizer {
         addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
         removeInvocationLinks(for: removedEvent, invocationEventID: eventID)
 
-        let index = recordInsertionIndex(for: eventID)
-        if index < records.count, records[index].eventID == eventID {
+        if let index = records.firstIndex(where: { $0.eventID == eventID }) {
             records.remove(at: index)
         }
         setTimelineItem(nil, for: eventID)
+        presentationOrdersByID.removeValue(forKey: eventID)
         for affectedEventID in affectedEventIDs.sorted() {
             reevaluate(affectedEventID)
         }
@@ -1677,7 +1682,11 @@ public final class SignalboxIncrementalEventNormalizer {
             return
         }
         metrics.recordEvaluationCount += 1
-        let record = SignalboxStoredEvent(eventID: eventID, event: event)
+        let record = SignalboxStoredEvent(
+            eventID: eventID,
+            presentationOrder: presentationOrdersByID[eventID],
+            event: event
+        )
         let item = SignalboxEventNormalizer.normalize(
             record,
             recordsByID: recordsByID,
@@ -1759,22 +1768,42 @@ public final class SignalboxIncrementalEventNormalizer {
         }
     }
 
-    private func recordInsertionIndex(for eventID: SignalboxEventID) -> Int {
-        if let lastRecord = records.last, lastRecord.eventID < eventID {
+    private static func recordSortsBefore(
+        _ lhs: SignalboxStoredEvent,
+        _ rhs: SignalboxStoredEvent
+    ) -> Bool {
+        let lhsOrder = lhs.presentationOrder ?? lhs.eventID
+        let rhsOrder = rhs.presentationOrder ?? rhs.eventID
+        return lhsOrder == rhsOrder ? lhs.eventID < rhs.eventID : lhsOrder < rhsOrder
+    }
+
+    private func recordInsertionIndex(for record: SignalboxStoredEvent) -> Int {
+        if let lastRecord = records.last, Self.recordSortsBefore(lastRecord, record) {
             return records.count
         }
         return insertionIndex(count: records.count) { index in
-            records[index].eventID < eventID
+            Self.recordSortsBefore(records[index], record)
         }
     }
 
     private func timelineInsertionIndex(for eventID: SignalboxEventID) -> Int {
-        if let lastItem = timeline.last, timelineEventID(lastItem) < eventID {
+        if let lastItem = timeline.last,
+            timelineSortsBefore(timelineEventID(lastItem), eventID)
+        {
             return timeline.count
         }
         return insertionIndex(count: timeline.count) { index in
-            timelineEventID(timeline[index]) < eventID
+            timelineSortsBefore(timelineEventID(timeline[index]), eventID)
         }
+    }
+
+    private func timelineSortsBefore(
+        _ lhs: SignalboxEventID,
+        _ rhs: SignalboxEventID
+    ) -> Bool {
+        let lhsOrder = presentationOrdersByID[lhs] ?? lhs
+        let rhsOrder = presentationOrdersByID[rhs] ?? rhs
+        return lhsOrder == rhsOrder ? lhs < rhs : lhsOrder < rhsOrder
     }
 
     private func insertionIndex(
@@ -1798,17 +1827,17 @@ public final class SignalboxIncrementalEventNormalizer {
         _ item: SignalboxTimelineItem?,
         for eventID: SignalboxEventID
     ) {
-        let index = timelineInsertionIndex(for: eventID)
-        let itemExists = index < timeline.count && timelineEventID(timeline[index]) == eventID
-        if let item {
-            if itemExists {
-                timeline.items[index] = item
-            } else {
-                timeline.items.insert(item, at: index)
+        if timelineEventIDs.remove(eventID) != nil {
+            if let oldIndex = timeline.items.firstIndex(where: { timelineEventID($0) == eventID }) {
+                timeline.items.remove(at: oldIndex)
             }
-        } else if itemExists {
-            timeline.items.remove(at: index)
         }
+        guard let item else {
+            return
+        }
+        let index = timelineInsertionIndex(for: eventID)
+        timeline.items.insert(item, at: index)
+        timelineEventIDs.insert(eventID)
     }
 
     private func timelineEventID(_ item: SignalboxTimelineItem) -> SignalboxEventID {

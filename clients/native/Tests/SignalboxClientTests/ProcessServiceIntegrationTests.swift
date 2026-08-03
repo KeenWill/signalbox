@@ -551,6 +551,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     let initial = try projector.projectAuthoritativeSnapshot(initialSnapshot)
     let updated = try projector.projectAuthoritativeSnapshot(updatedSnapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: initial.records)
+    try normalizer.replaceAll(with: updated.records)
 
     XCTAssertEqual(
       try ProcessProjectionFixture.modelCallUsageEventID(
@@ -566,6 +568,37 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.modelCallUsageIDs(in: updated),
       ProcessProjectionFixture.orderedModelCallUsageIDs
     )
+    XCTAssertEqual(
+      ProcessProjectionFixture.modelCallUsageIDs(in: normalizer.timelineItems),
+      ProcessProjectionFixture.orderedModelCallUsageIDs
+    )
+  }
+
+  func testAnchoredUsageAndAdjacentTurnStateKeepDistinctTimelineRows() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithAdjacentUsageAndUnknownTurnState()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.adjacentUsageAndTurnStateTimelineKinds
+    )
+  }
+
+  func testCrossTurnModelUsageAnchorIsRejected() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCrossTurnModelUsageAnchor()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    XCTAssertThrowsError(
+      try projector.projectAuthoritativeSnapshot(snapshot)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .mismatchedModelCallUsageTurn
+      )
+    }
   }
 
   func testUnknownFollowedEventProjectsAsConservativeEvidence() throws {
@@ -5513,7 +5546,9 @@ private enum ProcessProjectionFixture {
   static let importedAttestedAbsentAttribution =
     SignalboxProcessMessageSourceAttribution.importedSpeakerAbsent
   static let importedAttestedAbsentLabel = importedAttestedAbsentAttribution.presentationLabel
-  static let modelNoticeTitles = ["Model changed", "Model usage"]
+  static let modelUsageNoticeTitle = "Model usage"
+  static let modelCallDetailLabel = "Model call"
+  static let modelNoticeTitles = ["Model changed", modelUsageNoticeTitle]
   static let noNoticeTitles: [String] = []
   static let modelPresentationEventKinds = [
     "process_model_identity", "process_message", "process_message",
@@ -5529,6 +5564,9 @@ private enum ProcessProjectionFixture {
   static let modelCostLabel = "real"
   static let earlierModelCall = "11111111-2222-4222-8222-222222222222"
   static let orderedModelCallUsageIDs = [earlierModelCall, ProcessDriverFixture.modelCall]
+  static let adjacentUsageAndTurnStateTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .message, .processEvidence, .unknown, .message,
+  ]
   static let modelNoticeDetailValues = [
     ProcessDriverFixture.turn,
     ProcessDriverFixture.modelCall,
@@ -5805,7 +5843,7 @@ private enum ProcessProjectionFixture {
     message: "Fixture transport diagnostic."
   )
   static let neutralToolCardStatus = SignalboxToolCardStatus.completed
-  static let orderedPresentationIDs = [1, 3]
+  static let orderedPresentationIDs = [1, 5]
   static let anchoredUsageTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .processEvidence, .message,
   ]
@@ -7197,6 +7235,129 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithAdjacentUsageAndUnknownTurnState() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(crossTurn)",
+          "acceptance_position":"2",
+          "state":{"type":"\(futureTurnStateKind)","retained":"fixture"}
+        }
+        """,
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall),
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedUserEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(crossTurn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"1",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"2",
+          "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCrossTurnModelUsageAnchor() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    let snapshot = try snapshotWithAnchoredUsageAndLaterMessage()
+    let usageMessage = try message(
+      modelUsageMessage(
+        index: 0,
+        modelCallID: ProcessDriverFixture.modelCall,
+        turnID: crossTurn
+      )
+    )
+    guard case .transcriptModelCallUsage(let usage) = usageMessage else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    return SignalboxSynchronizationSnapshot(
+      sessionID: snapshot.sessionID,
+      cursor: snapshot.cursor,
+      records: snapshot.records.compactMap { record in
+        guard case .modelCallUsage = record else {
+          return record
+        }
+        return nil
+      } + [.modelCallUsage(usage)]
+    )
+  }
+
   static func snapshotWithFailedUsageAndMarker() throws
     -> SignalboxSynchronizationSnapshot
   {
@@ -7463,13 +7624,14 @@ private enum ProcessProjectionFixture {
 
   private static func modelUsageMessage(
     index: UInt64,
-    modelCallID: String
+    modelCallID: String,
+    turnID: String = ProcessDriverFixture.turn
   ) -> String {
     """
     {
       "type":"transcript_model_call_usage",
       "model_call_index":"\(index)",
-      "turn_id":"\(ProcessDriverFixture.turn)",
+      "turn_id":"\(turnID)",
       "model_call_id":"\(modelCallID)",
       "usage_provenance":"\(modelUsageProvenance)",
       "usage":{
@@ -8062,6 +8224,19 @@ private enum ProcessProjectionFixture {
       }
       return event.modelCallID.rawValue
     }.sorted()
+  }
+
+  static func modelCallUsageIDs(
+    in timeline: [SignalboxTimelineItem]
+  ) -> [String] {
+    timeline.compactMap { item in
+      guard case .processEvidence(let notice) = item,
+        notice.title == modelUsageNoticeTitle
+      else {
+        return nil
+      }
+      return notice.details.first { $0.label == modelCallDetailLabel }?.value
+    }
   }
 
   static func modelCallUsageEventID(
@@ -9398,8 +9573,8 @@ extension ProcessServiceIntegrationTests {
 
 extension ProcessProjectionFixture {
   static let futureSessionEventKind = "fixture_future_session_event"
-  static let formerUsageCollisionEntryIndex = UInt64((Int.max / 4 - 1) / 2)
-  static let disjointUsageAndSemanticPresentationIDs = [Int.max / 4, Int.min / 4]
+  static let formerUsageCollisionEntryIndex = UInt64(7)
+  static let disjointUsageAndSemanticPresentationIDs = [29, Int.min / 4]
   static let disjointUsageAndSemanticEventKinds = [
     "process_conservative", "process_model_call_usage",
   ]

@@ -2,11 +2,19 @@ import Foundation
 
 public struct SignalboxStoredEvent: Codable, Identifiable, Equatable, Sendable {
     public let eventID: SignalboxEventID
+    /// Optional display ordering independent of the stable event identity. It
+    /// is projection-local and intentionally absent from the stored encoding.
+    public var presentationOrder: SignalboxEventID? = nil
     public var event: SignalboxConversationEvent
     public var id: SignalboxEventID { eventID }
 
-    public init(eventID: SignalboxEventID, event: SignalboxConversationEvent) {
+    public init(
+        eventID: SignalboxEventID,
+        presentationOrder: SignalboxEventID? = nil,
+        event: SignalboxConversationEvent
+    ) {
         self.eventID = eventID
+        self.presentationOrder = presentationOrder
         self.event = event
     }
 
