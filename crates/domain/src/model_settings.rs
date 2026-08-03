@@ -886,7 +886,6 @@ impl SessionModelSettingsChanged {
             (prior_validation, installed_validation),
             (Some(prior), Some(installed)) if prior != installed
         );
-        let model_changed = prior_model != installed_model || validation_changed;
         let prior_model_matches = match (prior_model, prior_validation) {
             (ModelSelectionRequest::Direct(expected), Some(validated)) => expected == validated,
             (ModelSelectionRequest::Direct(_), None) | (ModelSelectionRequest::Alias(_), _) => true,
@@ -925,7 +924,7 @@ impl SessionModelSettingsChanged {
             installed_settings.precedence() == expected
                 && installed_settings.resolved() == expected.resolve()
         });
-        let adjustments_match_model_change = adjustments.is_empty() || model_changed;
+        let adjustments_match_model_change = adjustments.is_empty() || validation_changed;
         (is_successor
             && records_change
             && prior_model_matches
@@ -1818,6 +1817,65 @@ mod tests {
         );
 
         assert!(event.is_some());
+    }
+
+    /// INV-053: changing only the alias request spelling cannot justify an
+    /// automatic compatibility adjustment when the direct selection stayed fixed.
+    #[test]
+    fn inv053_defaults_event_rejects_adjustment_for_alias_spelling_change() {
+        let selection = direct(1);
+        let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::High),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the prior level is supported");
+        let installed = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the installed level is supported");
+        let prior_version = SessionConfigurationDefaultsVersion::first();
+        let installed_version = prior_version
+            .checked_next()
+            .expect("the first version has a successor");
+
+        let event = SessionModelSettingsChanged::try_new(
+            session_id(1),
+            command_id(1),
+            prior_version,
+            installed_version,
+            ModelSelectionRequest::Alias(crate::ModelAlias::from_uuid(Uuid::from_u128(3))),
+            ModelSelectionRequest::Alias(crate::ModelAlias::from_uuid(Uuid::from_u128(4))),
+            prior,
+            installed,
+            ModelSettingsOverlay::inherit_all(),
+            vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }],
+        );
+
+        assert_eq!(event, None);
     }
 
     /// S37 / INV-053: a replacement model contributes its newly copied
