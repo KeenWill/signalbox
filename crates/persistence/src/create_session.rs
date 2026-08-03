@@ -24,7 +24,7 @@ use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
     defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-    session_id_to_uuid, session_placement_event_kind_to_str,
+    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -575,10 +575,18 @@ async fn load_from_connection(
             v.dangerous_tool_auto_approval AS stored_tool_auto_approval,
             v.system_prompt AS stored_system_prompt
             ,pe.version AS stored_placement_version
+            ,pe.prior_version AS stored_placement_prior_version
+            ,pe.event_kind AS stored_placement_event_kind
             ,pe.placement_path AS stored_placement_path
             ,pe.root_global_read_intent AS stored_root_intent
             ,placement_head.current_version AS current_placement_head_version
             ,current_placement.version AS current_placement_event_version
+            ,EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+             ) AS current_placement_later_event_exists
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -715,6 +723,22 @@ fn decode_complete(
         required(&row, "stored_placement_version")?,
         "stored placement version",
     )?;
+    let stored_placement_prior: Option<Decimal> = row.try_get("stored_placement_prior_version")?;
+    let stored_placement_event_kind_spelling: String =
+        required(&row, "stored_placement_event_kind")?;
+    let stored_placement_event_kind = session_placement_event_kind_from_str(
+        &stored_placement_event_kind_spelling,
+    )
+    .ok_or(CreateSessionCorruption::Unsupported {
+        field: "stored placement event kind",
+        value: stored_placement_event_kind_spelling,
+    })?;
+    if stored_placement_version != SessionPlacementVersion::INITIAL
+        || stored_placement_prior.is_some()
+        || stored_placement_event_kind != SessionPlacementEventKind::Created
+    {
+        return Err(CreateSessionCorruption::Inconsistent("initial placement effect").into());
+    }
     let stored_placement = decode_placement(
         row.try_get("stored_placement_path")?,
         required(&row, "stored_root_intent")?,
@@ -730,6 +754,20 @@ fn decode_complete(
     )?;
     if placement_head != current_placement_event {
         return Err(CreateSessionCorruption::Inconsistent("current placement head event").into());
+    }
+    let history_head_state =
+        crate::session_placement::PlacementHistoryHeadState::from_later_event_exists(required(
+            &row,
+            "current_placement_later_event_exists",
+        )?);
+    match history_head_state {
+        crate::session_placement::PlacementHistoryHeadState::MatchesLatestEvent => {}
+        crate::session_placement::PlacementHistoryHeadState::BehindLaterEvent => {
+            return Err(CreateSessionCorruption::Inconsistent(
+                "session placement head behind event history",
+            )
+            .into());
+        }
     }
 
     CreateSessionReconstitutionInput::new_with_template_and_placement(
