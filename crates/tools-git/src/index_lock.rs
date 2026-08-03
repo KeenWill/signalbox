@@ -40,7 +40,17 @@ pub(super) struct IndexLock {
 }
 
 pub(super) struct IndexSnapshot {
+    parent: OwnedFd,
+    index_name: OsString,
+    expected: Option<IndexSnapshotIdentity>,
     _file: fs::File,
+}
+
+#[derive(Debug)]
+pub(super) struct PublishedIndex {
+    parent: OwnedFd,
+    index_name: OsString,
+    expected: IndexSnapshotIdentity,
 }
 
 #[derive(Clone, Copy)]
@@ -63,20 +73,52 @@ pub(super) struct IndexContentIdentity {
 }
 
 impl IndexSnapshot {
-    pub(super) fn acquire(
-        index_path: &Path,
-        object_format: ObjectFormat,
+    pub(super) fn acquire_for_repository(
+        authority: &PinnedRepository,
     ) -> Result<(Self, Index), LocalGitFailure> {
+        let parent = dup(&authority.git_directory).map_err(|_| LocalGitFailure::Operation)?;
+        let index_name = OsString::from("index");
         let mut file = tempfile::tempfile().map_err(|_| LocalGitFailure::Operation)?;
-        copy_index_snapshot(
-            index_path,
+        let (expected, _) = copy_index_snapshot_at(
+            &parent,
+            &index_name,
             &mut file,
             IndexSnapshotPermissions::RetainDestination,
-            object_format,
+            authority.object_format,
         )?;
-        let index = Index::open_ext(&descriptor_path(&file), object_format)
+        let index = Index::open_ext(&descriptor_path(&file), authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
-        Ok((Self { _file: file }, index))
+        Ok((
+            Self {
+                parent,
+                index_name,
+                expected,
+                _file: file,
+            },
+            index,
+        ))
+    }
+
+    pub(super) fn validate(&self) -> Result<(), LocalGitFailure> {
+        if index_snapshot_identity_at(&self.parent, &self.index_name)? == self.expected {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
+    }
+}
+
+impl PublishedIndex {
+    pub(super) fn validate(&self) -> Result<(), LocalGitFailure> {
+        if index_snapshot_identity_at(&self.parent, &self.index_name)? == Some(self.expected) {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
+    }
+
+    pub(super) fn file_identity(&self) -> FileIdentity {
+        self.expected.file
     }
 }
 
@@ -339,6 +381,14 @@ impl IndexLock {
         Ok(bytes)
     }
 
+    pub(super) fn validate_source(&self) -> Result<(), LocalGitFailure> {
+        if index_snapshot_identity_at(&self.parent, &self.index_name)? == self.expected_index {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
+    }
+
     pub(super) fn write_raw(&mut self, bytes: &[u8]) -> Result<(), LocalGitFailure> {
         self.write_raw_with_hook(bytes, || {})
     }
@@ -411,7 +461,7 @@ impl IndexLock {
         self.record_prepared_index(expected)
     }
 
-    pub(super) fn commit(self) -> Result<FileIdentity, LocalGitFailure> {
+    pub(super) fn commit(self) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, || {}, || {}, || {})
     }
 
@@ -419,7 +469,7 @@ impl IndexLock {
     pub(super) fn commit_with_test_hook<Hook: FnOnce()>(
         self,
         before_publish: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(before_publish, || {}, || {}, || {}, || {})
     }
 
@@ -427,7 +477,7 @@ impl IndexLock {
     pub(super) fn commit_with_pre_exchange_test_hook<Hook: FnOnce()>(
         self,
         before_exchange: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, before_exchange, || {}, || {}, || {})
     }
 
@@ -435,7 +485,7 @@ impl IndexLock {
     pub(super) fn commit_with_exchange_test_hook<Hook: FnOnce()>(
         self,
         after_exchange: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, after_exchange, || {}, || {})
     }
 
@@ -443,7 +493,7 @@ impl IndexLock {
     pub(super) fn commit_with_cleanup_test_hook<Hook: FnOnce()>(
         self,
         before_cleanup: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, || {}, before_cleanup, || {})
     }
 
@@ -451,7 +501,7 @@ impl IndexLock {
     pub(super) fn commit_with_post_cleanup_test_hook<Hook: FnOnce()>(
         self,
         after_displaced_remove: Hook,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.commit_with_hooks(|| {}, || {}, || {}, || {}, after_displaced_remove)
     }
 
@@ -468,9 +518,14 @@ impl IndexLock {
         after_exchange: AfterExchange,
         before_cleanup: BeforeCleanup,
         after_displaced_remove: AfterDisplacedRemove,
-    ) -> Result<FileIdentity, LocalGitFailure> {
+    ) -> Result<PublishedIndex, LocalGitFailure> {
         self.validate_supported_layout()?;
         let prepared_index = self.prepared_index.ok_or(LocalGitFailure::Operation)?;
+        let published_index = PublishedIndex {
+            parent: dup(&self.parent).map_err(|_| LocalGitFailure::Operation)?,
+            index_name: self.index_name.clone(),
+            expected: prepared_index,
+        };
         before_publish();
         self.validate_supported_layout()?;
         if self.lock_snapshot_identity()? != prepared_index
@@ -509,7 +564,7 @@ impl IndexLock {
                                     == Ok(Some(prepared_index));
                             if publication_is_current && self.validate_supported_layout().is_ok() {
                                 self.committed = true;
-                                return Ok(self.identity);
+                                return Ok(published_index);
                             }
                             return Err(LocalGitFailure::Operation);
                         }
@@ -601,7 +656,7 @@ impl IndexLock {
             }
         }
         self.committed = true;
-        Ok(self.identity)
+        Ok(published_index)
     }
 
     fn record_prepared_index(
@@ -638,7 +693,17 @@ fn remove_displaced_index_if_current(
     expected: IndexSnapshotIdentity,
     after_remove: impl FnOnce(),
 ) -> Result<(), LocalGitFailure> {
-    let quarantine = QuarantineDirectory::create(parent)?;
+    remove_displaced_index_if_current_with_hook(parent, name, expected, |_| {}, after_remove)
+}
+
+fn remove_displaced_index_if_current_with_hook(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: IndexSnapshotIdentity,
+    after_quarantine: impl FnOnce(&QuarantineDirectory),
+    after_remove: impl FnOnce(),
+) -> Result<(), LocalGitFailure> {
+    let mut quarantine = QuarantineDirectory::create(parent)?;
     let quarantined_name = OsStr::new("displaced");
     renameat_with(
         parent,
@@ -648,22 +713,37 @@ fn remove_displaced_index_if_current(
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| LocalGitFailure::Operation)?;
+    after_quarantine(&quarantine);
     let quarantined_is_expected =
         index_snapshot_identity_at(quarantine.descriptor(), quarantined_name) == Ok(Some(expected));
     if !quarantined_is_expected {
-        let _ = renameat_with(
+        if renameat_with(
             quarantine.descriptor(),
             quarantined_name,
             parent,
             name,
             RenameFlags::NOREPLACE,
-        );
+        )
+        .is_err()
+        {
+            quarantine.keep();
+        }
         return Err(LocalGitFailure::Operation);
     }
     unlinkat(quarantine.descriptor(), quarantined_name, AtFlags::empty())
         .map_err(|_| LocalGitFailure::Operation)?;
     after_remove();
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn remove_displaced_index_with_test_hook(
+    parent: &OwnedFd,
+    name: &OsStr,
+    after_quarantine: impl FnOnce(&QuarantineDirectory),
+) -> Result<(), LocalGitFailure> {
+    let expected = index_snapshot_identity_at(parent, name)?.ok_or(LocalGitFailure::Operation)?;
+    remove_displaced_index_if_current_with_hook(parent, name, expected, after_quarantine, || {})
 }
 
 fn rollback_index_exchange_if_current(
