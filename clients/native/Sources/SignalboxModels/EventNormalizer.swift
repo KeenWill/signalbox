@@ -1018,7 +1018,8 @@ public enum SignalboxEventNormalizer {
                     event.provenance.requestID
                 ],
                 eventRequestPosition.turnID == event.provenance.turnID,
-                eventRequestPosition.toolName == "plan_write"
+                eventRequestPosition.toolName == "plan_write",
+                eventRequestPosition.toolAttemptID == event.provenance.attemptID
             else {
                 return false
             }

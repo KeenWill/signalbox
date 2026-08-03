@@ -977,6 +977,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testPlanReadWithMismatchedHistoryAttemptKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.mismatchedAttemptPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.planReadRawOutputPreview
+    )
+  }
+
   func testExpandedPlanWriteOutputKeepsRawEvidenceVisible() throws {
     let record = ProcessProjectionFixture.expandedPlanWriteOutputToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -3645,6 +3656,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
         )
       ]?.toolName,
       MockProcessProtocolFixtures.completedToolName
+    )
+    XCTAssertEqual(
+      tool.sessionToolRequestPositions?[
+        try SignalboxCanonicalUUID(
+          validating: MockProcessProtocolFixtures.completedToolRequestID
+        )
+      ]?.toolAttemptID?.rawValue,
+      MockProcessProtocolFixtures.completedToolAttemptID
     )
     XCTAssertEqual(
       tool.toolAttemptID?.rawValue,
@@ -8301,8 +8320,8 @@ private enum ProcessProjectionFixture {
       requestID: planReadRequestID,
       sessionTurnAcceptancePositions: [crossTurn: 1, planTurnID: 2],
       sessionToolRequestPositions: [
-        planProvenanceRequestID: (crossTurn, 1, "plan_write"),
-        planReadRequestID: (planTurnID, 2, "plan_read"),
+        planProvenanceRequestID: (crossTurn, 1, "plan_write", planAttemptID),
+        planReadRequestID: (planTurnID, 2, "plan_read", planAttemptID),
       ],
       toolName: "plan_read",
       arguments: planReadArguments,
@@ -8316,8 +8335,8 @@ private enum ProcessProjectionFixture {
       requestID: planReadRequestID,
       sessionTurnAcceptancePositions: [planTurnID: 1, crossTurn: 2],
       sessionToolRequestPositions: [
-        planReadRequestID: (planTurnID, 1, "plan_read"),
-        planProvenanceRequestID: (crossTurn, 2, "plan_write"),
+        planReadRequestID: (planTurnID, 1, "plan_read", planAttemptID),
+        planProvenanceRequestID: (crossTurn, 2, "plan_write", planAttemptID),
       ],
       toolName: "plan_read",
       arguments: planReadArguments,
@@ -8330,8 +8349,8 @@ private enum ProcessProjectionFixture {
     planToolRecord(
       requestID: planReadRequestID,
       sessionToolRequestPositions: [
-        planReadRequestID: (planTurnID, 1, "plan_read"),
-        planProvenanceRequestID: (planTurnID, 2, "plan_write"),
+        planReadRequestID: (planTurnID, 1, "plan_read", planAttemptID),
+        planProvenanceRequestID: (planTurnID, 2, "plan_write", planAttemptID),
       ],
       toolName: "plan_read",
       arguments: planReadArguments,
@@ -8344,8 +8363,24 @@ private enum ProcessProjectionFixture {
     planToolRecord(
       requestID: planReadRequestID,
       sessionToolRequestPositions: [
-        planProvenanceRequestID: (planTurnID, 1, "save_report"),
-        planReadRequestID: (planTurnID, 2, "plan_read"),
+        planProvenanceRequestID: (planTurnID, 1, "save_report", planAttemptID),
+        planReadRequestID: (planTurnID, 2, "plan_read", planAttemptID),
+      ],
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: planReadOutput,
+      status: .completed
+    )
+  }
+
+  static func mismatchedAttemptPlanHistoryToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      sessionToolRequestPositions: [
+        planProvenanceRequestID: (
+          planTurnID, 1, "plan_write", planIssuingAttemptID
+        ),
+        planReadRequestID: (planTurnID, 2, "plan_read", planAttemptID),
       ],
       toolName: "plan_read",
       arguments: planReadArguments,
@@ -8487,7 +8522,8 @@ private enum ProcessProjectionFixture {
   private typealias ToolRequestFixturePosition = (
     turnID: String,
     entryIndex: UInt64,
-    toolName: String
+    toolName: String,
+    toolAttemptID: String?
   )
 
   private static func planToolRecord(
@@ -8505,8 +8541,8 @@ private enum ProcessProjectionFixture {
     let requestPositions = sessionToolRequestPositions
       ?? (toolName == "plan_read"
         ? [
-          planProvenanceRequestID: (turnID, 1, "plan_write"),
-          requestID: (turnID, 2, "plan_read"),
+          planProvenanceRequestID: (turnID, 1, "plan_write", planAttemptID),
+          requestID: (turnID, 2, "plan_read", planAttemptID),
         ]
         : [:])
     return SignalboxStoredEvent(
@@ -8529,7 +8565,10 @@ private enum ProcessProjectionFixture {
                 SignalboxProcessToolRequestPosition(
                   turnID: try! SignalboxCanonicalUUID(validating: $0.value.turnID),
                   entryIndex: SignalboxCanonicalUInt64(rawValue: $0.value.entryIndex),
-                  toolName: $0.value.toolName
+                  toolName: $0.value.toolName,
+                  toolAttemptID: $0.value.toolAttemptID.map {
+                    try! SignalboxCanonicalUUID(validating: $0)
+                  }
                 )
               )
             }),

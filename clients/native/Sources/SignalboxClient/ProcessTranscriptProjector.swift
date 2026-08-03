@@ -470,7 +470,22 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private func sessionToolRequestPositions(
     in records: [SignalboxSynchronizationSnapshot.Record]
   ) -> [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition] {
-    records.reduce(into: [:]) { positions, record in
+    var resultAttemptIDs: [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
+    var ambiguousResultRequestIDs: Set<SignalboxCanonicalUUID> = []
+    for case .entry(let message) in records {
+      guard case .toolExecutionResult(let requestID, let attemptID, _) = message.entry
+      else {
+        continue
+      }
+      if let previousAttemptID = resultAttemptIDs[requestID],
+        previousAttemptID != attemptID
+      {
+        ambiguousResultRequestIDs.insert(requestID)
+      } else {
+        resultAttemptIDs[requestID] = attemptID
+      }
+    }
+    return records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
         case .assistantToolUse(let turnID, _, let requestID, let toolName, _) = message.entry
       else {
@@ -479,7 +494,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       positions[requestID] = SignalboxProcessToolRequestPosition(
         turnID: turnID,
         entryIndex: message.entryIndex,
-        toolName: toolName
+        toolName: toolName,
+        toolAttemptID: ambiguousResultRequestIDs.contains(requestID)
+          ? nil : resultAttemptIDs[requestID]
       )
     }
   }
