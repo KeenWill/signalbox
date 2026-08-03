@@ -49,8 +49,8 @@ pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
 };
 pub use daemon_tools::{
-    DaemonToolCatalog, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
-    DaemonToolsConstructionError, PinnedWorkspaceFileSystem,
+    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonToolExecutor,
+    DaemonToolExecutorError, DaemonTools, DaemonToolsConstructionError, PinnedWorkspaceFileSystem,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};

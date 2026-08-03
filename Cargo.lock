@@ -3209,6 +3209,7 @@ dependencies = [
  "divan",
  "expect-test",
  "gungraun",
+ "regex",
  "rpds",
  "serde",
  "serde_json",

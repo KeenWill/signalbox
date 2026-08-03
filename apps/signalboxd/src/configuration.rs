@@ -1,7 +1,7 @@
 //! Deployment-owned model mappings and credential delivery.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -13,6 +13,7 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelSelectionRequest,
     ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
+    ToolApprovalPosture, ToolName,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -264,6 +265,8 @@ pub struct HubModelConfiguration {
     conversation_import_max_source_bytes: usize,
     web_fetch_egress_policy: WebFetchEgressPolicy,
     daemon_tools: Option<DaemonToolConfiguration>,
+    tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
+    approval_judge_selection: Option<DirectModelSelection>,
 }
 
 impl HubModelConfiguration {
@@ -290,6 +293,8 @@ impl HubModelConfiguration {
                 "conversation_import",
                 "web_fetch",
                 "tool_mappings",
+                "tool_approval_postures",
+                "approval_judge",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -378,6 +383,9 @@ impl HubModelConfiguration {
                 });
             }
         }
+        let tool_approval_postures =
+            parse_tool_approval_postures(document.get("tool_approval_postures"))?;
+        let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -556,6 +564,11 @@ impl HubModelConfiguration {
             );
         }
 
+        if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
+        {
+            return Err(HubModelConfigurationError::DanglingApprovalJudgeSelection);
+        }
+
         let mut aliases = HashMap::new();
         if let Some(alias_tables) = document
             .get("aliases")
@@ -620,6 +633,8 @@ impl HubModelConfiguration {
             conversation_import_max_source_bytes,
             web_fetch_egress_policy,
             daemon_tools,
+            tool_approval_postures,
+            approval_judge_selection,
         })
     }
 
@@ -781,6 +796,18 @@ impl HubModelConfiguration {
         self.web_fetch_egress_policy.clone()
     }
 
+    /// Iterates explicit per-tool posture overrides in canonical name order.
+    pub fn tool_approval_postures(&self) -> impl Iterator<Item = (ToolName, ToolApprovalPosture)> {
+        self.tool_approval_postures
+            .iter()
+            .map(|(name, posture)| (name.clone(), *posture))
+    }
+
+    /// Resolves the selection reserved for the committed daemon judge wiring.
+    pub fn approval_judge_selection(&self, judged: DirectModelSelection) -> DirectModelSelection {
+        self.approval_judge_selection.unwrap_or(judged)
+    }
+
     /// Returns explicitly configured daemon tool dependencies, when present.
     pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
         self.daemon_tools.as_ref()
@@ -803,6 +830,46 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn parse_tool_approval_postures(
+    item: Option<&Item>,
+) -> Result<BTreeMap<ToolName, ToolApprovalPosture>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(BTreeMap::new());
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidToolApprovalPostures)?;
+    let mut postures = BTreeMap::new();
+    for (name, value) in table {
+        let name = ToolName::try_new(name.to_owned())
+            .map_err(|_| HubModelConfigurationError::InvalidToolApprovalPostures)?;
+        let posture = match value.as_str() {
+            Some("auto") => ToolApprovalPosture::Auto,
+            Some("delegated") => ToolApprovalPosture::Delegated,
+            Some("human") => ToolApprovalPosture::Human,
+            _ => return Err(HubModelConfigurationError::InvalidToolApprovalPostures),
+        };
+        postures.insert(name, posture);
+    }
+    Ok(postures)
+}
+
+fn parse_approval_judge(
+    item: Option<&Item>,
+) -> Result<Option<DirectModelSelection>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidApprovalJudge)?;
+    reject_unknown_fields(table, &["selection_id"])
+        .map_err(|_| HubModelConfigurationError::InvalidApprovalJudge)?;
+    let selection = required_uuid(table, "selection_id")
+        .map_err(|_| HubModelConfigurationError::InvalidApprovalJudge)?;
+    Ok(Some(DirectModelSelection::from_uuid(selection)))
 }
 
 fn parse_model_billing_rates(
@@ -1072,6 +1139,12 @@ pub enum HubModelConfigurationError {
     InvalidBillingKind,
     /// The daemon tool mapping registry was incomplete or malformed.
     InvalidToolMappings,
+    /// The per-tool approval posture table was malformed.
+    InvalidToolApprovalPostures,
+    /// The approval-judge selection table was malformed.
+    InvalidApprovalJudge,
+    /// The configured approval judge names no direct model selection.
+    DanglingApprovalJudgeSelection,
     /// One daemon tool family appeared more than once.
     DuplicateToolFamily,
     /// The required compaction configuration table is absent.
@@ -1148,6 +1221,15 @@ impl fmt::Display for HubModelConfigurationError {
             Self::UnsupportedVersion => "model configuration version is unsupported",
             Self::MissingModels => "model configuration has no model definitions",
             Self::MissingAdapterMappings => "model configuration has no adapter mappings",
+            Self::InvalidToolApprovalPostures => {
+                "model configuration contains invalid tool approval postures"
+            }
+            Self::InvalidApprovalJudge => {
+                "model configuration contains invalid approval judge settings"
+            }
+            Self::DanglingApprovalJudgeSelection => {
+                "model configuration contains a dangling approval judge selection"
+            }
             Self::MissingCredentialProfiles => {
                 "model configuration has no credential profile billing registry"
             }
@@ -1322,10 +1404,13 @@ mod tests {
     };
 
     use rust_decimal::Decimal;
-    use signalbox_domain::{DirectModelSelection, ModelAlias, ModelSelectionRequest};
+    use signalbox_domain::{
+        DirectModelSelection, ModelAlias, ModelSelectionRequest, ToolApprovalPosture,
+    };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
-    use signalbox_tools_web::WebFetchEgressPolicy;
+    use signalbox_tools_basic::{CURRENT_TIME_NAME, ECHO_NAME};
+    use signalbox_tools_web::{WEB_FETCH_NAME, WebFetchEgressPolicy};
     use uuid::Uuid;
 
     use super::{
@@ -1459,6 +1544,167 @@ cache_read_input_usd_per_million_tokens = "4"
             .find("[[models]]")
             .expect("fixture has model definitions");
         format!("{}{}", &CONFIGURATION[..start], &CONFIGURATION[end..])
+    }
+
+    fn judged_direct_selection_fixture() -> DirectModelSelection {
+        DirectModelSelection::from_uuid(Uuid::from_u128(2))
+    }
+
+    fn configured_judge_selection_fixture() -> DirectModelSelection {
+        DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-000000000001")
+                .expect("configured judge fixture UUID is valid"),
+        )
+    }
+
+    #[test]
+    fn configured_tool_postures_are_typed() {
+        let configured = HubModelConfiguration::parse(&format!(
+            r#"{CONFIGURATION}
+
+[tool_approval_postures]
+{echo} = "auto"
+{current_time} = "delegated"
+{web_fetch} = "human"
+"#,
+            echo = ECHO_NAME,
+            current_time = CURRENT_TIME_NAME,
+            web_fetch = WEB_FETCH_NAME
+        ))
+        .expect("posture settings are valid");
+        let postures = configured.tool_approval_postures().collect::<Vec<_>>();
+
+        assert_eq!(postures[0].0.as_str(), CURRENT_TIME_NAME);
+        assert_eq!(postures[0].1, ToolApprovalPosture::Delegated);
+        assert_eq!(postures[1].0.as_str(), ECHO_NAME);
+        assert_eq!(postures[1].1, ToolApprovalPosture::Auto);
+        assert_eq!(postures[2].0.as_str(), WEB_FETCH_NAME);
+        assert_eq!(postures[2].1, ToolApprovalPosture::Human);
+    }
+
+    #[test]
+    fn configured_judge_selection_is_typed() {
+        let configured = HubModelConfiguration::parse(&format!(
+            r#"{CONFIGURATION}
+
+[approval_judge]
+selection_id = "10000000-0000-4000-8000-000000000001"
+"#
+        ))
+        .expect("judge setting is valid");
+        let judged = judged_direct_selection_fixture();
+
+        assert_eq!(
+            configured.approval_judge_selection(judged),
+            configured_judge_selection_fixture()
+        );
+    }
+
+    #[test]
+    fn absent_tool_postures_preserve_legacy_policy() {
+        let configured =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+
+        assert_eq!(configured.tool_approval_postures().count(), 0);
+    }
+
+    #[test]
+    fn absent_judge_selection_preserves_the_judged_model() {
+        let configured =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let judged = judged_direct_selection_fixture();
+
+        assert_eq!(configured.approval_judge_selection(judged), judged);
+    }
+
+    #[test]
+    fn tool_approval_postures_reject_a_non_table_shape() {
+        let configured = CONFIGURATION.replacen(
+            "version = 1",
+            "version = 1\ntool_approval_postures = \"delegated\"",
+            1,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidToolApprovalPostures)
+        );
+    }
+
+    #[test]
+    fn tool_approval_postures_reject_an_invalid_tool_name_key() {
+        let configured = format!("{CONFIGURATION}\n[tool_approval_postures]\n\"\" = \"auto\"\n");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidToolApprovalPostures)
+        );
+    }
+
+    #[test]
+    fn tool_approval_postures_reject_an_unknown_posture() {
+        let configured = format!("{CONFIGURATION}\n[tool_approval_postures]\necho = \"ask\"\n");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidToolApprovalPostures)
+        );
+    }
+
+    #[test]
+    fn tool_approval_postures_reject_a_non_string_posture() {
+        let configured = format!("{CONFIGURATION}\n[tool_approval_postures]\necho = true\n");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidToolApprovalPostures)
+        );
+    }
+
+    #[test]
+    fn approval_judge_rejects_a_non_table_shape() {
+        let configured =
+            CONFIGURATION.replacen("version = 1", "version = 1\napproval_judge = \"same\"", 1);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidApprovalJudge)
+        );
+    }
+
+    #[test]
+    fn approval_judge_rejects_an_unknown_field() {
+        let configured = format!(
+            "{CONFIGURATION}\n[approval_judge]\nselection_id = \"10000000-0000-4000-8000-000000000001\"\nextra = true\n"
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidApprovalJudge)
+        );
+    }
+
+    #[test]
+    fn approval_judge_rejects_a_malformed_selection_identity() {
+        let configured =
+            format!("{CONFIGURATION}\n[approval_judge]\nselection_id = \"not-a-uuid\"\n");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidApprovalJudge)
+        );
+    }
+
+    #[test]
+    fn approval_judge_rejects_an_unconfigured_direct_selection() {
+        let configured = format!(
+            "{CONFIGURATION}\n[approval_judge]\nselection_id = \"10000000-0000-4000-8000-000000000002\"\n"
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DanglingApprovalJudgeSelection)
+        );
     }
 
     #[test]
