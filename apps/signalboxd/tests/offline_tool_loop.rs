@@ -1900,6 +1900,7 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<dyn Error>> {
     const TOOL_NAME: &str = "delegated";
+    const RECOMMENDATION: &str = "approve";
     const RATIONALE: &str = "The effect-free fixture request is bounded.";
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
@@ -1909,7 +1910,7 @@ async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<
             tool_use_script(&[(TOOL_NAME, "{}")]),
             completion_script("delegated result observed"),
         ],
-        approval_judge_script("approve", RATIONALE),
+        approval_judge_script(RECOMMENDATION, RATIONALE),
         tool_catalog,
         executor.clone(),
     );
@@ -1934,10 +1935,10 @@ async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<
     .await?;
 
     assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
-    assert_eq!(decision.decision_kind, "approve");
+    assert_eq!(decision.decision_kind, RECOMMENDATION);
     assert_eq!(decision.decision_source, "delegate");
     assert_eq!(decision.rationale, RATIONALE);
-    assert_eq!(decision.recommendation, "approve");
+    assert_eq!(decision.recommendation, RECOMMENDATION);
     assert!(decision.model_call_matches);
     assert_eq!(
         decision.model_selection_id,
@@ -1957,6 +1958,7 @@ async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), Box<dyn Error>> {
     const TOOL_NAME: &str = "delegated";
+    const RECOMMENDATION: &str = "deny";
     const RATIONALE: &str = "The requested action is unnecessary.";
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
@@ -1966,7 +1968,7 @@ async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), 
             tool_use_script(&[(TOOL_NAME, "{}")]),
             completion_script("delegated denial observed"),
         ],
-        approval_judge_script("deny", RATIONALE),
+        approval_judge_script(RECOMMENDATION, RATIONALE),
         tool_catalog,
         executor.clone(),
     );
@@ -1991,10 +1993,10 @@ async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), 
     .await?;
 
     assert!(executor.events().is_empty());
-    assert_eq!(decision.decision_kind, "deny");
+    assert_eq!(decision.decision_kind, RECOMMENDATION);
     assert_eq!(decision.decision_source, "delegate");
     assert_eq!(decision.rationale, RATIONALE);
-    assert_eq!(decision.recommendation, "deny");
+    assert_eq!(decision.recommendation, RECOMMENDATION);
     assert!(decision.model_call_matches);
     assert_eq!(
         decision.model_selection_id,
@@ -2015,6 +2017,7 @@ async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), 
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), Box<dyn Error>> {
     const TOOL_NAME: &str = "delegated";
+    const RECOMMENDATION: &str = "escalate_to_human";
     const RATIONALE: &str = "Human context is required.";
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
@@ -2024,7 +2027,7 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
             tool_use_script(&[(TOOL_NAME, "{}")]),
             completion_script("human-approved result observed"),
         ],
-        approval_judge_script("escalate_to_human", RATIONALE),
+        approval_judge_script(RECOMMENDATION, RATIONALE),
         tool_catalog,
         executor.clone(),
     );
@@ -2052,7 +2055,7 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
 
     assert_eq!(parked.active_phase, "awaiting_tool_approval");
     assert_eq!(parked.approval_request_id, request.into_uuid());
-    assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.recommendation, RECOMMENDATION);
     assert_eq!(parked.rationale, RATIONALE);
     assert_eq!(parked.decision_count, 0);
     assert!(executor.events().is_empty());
