@@ -12,8 +12,8 @@ use crate::arguments::{
 use crate::contracts::LocalToolKind;
 use crate::layout::{parse_full_object_id, valid_reference_name};
 use crate::limits::{
-    MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REVISION_BYTES,
-    MAX_STAGE_PATHS,
+    MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REFERENCE_BYTES,
+    MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
 
 pub(super) fn decode_operation(
@@ -101,8 +101,10 @@ pub(super) fn validate_revision(
     object_format: ObjectFormat,
 ) -> Result<(), InvalidGitArguments> {
     let exact_object = parse_full_object_id(value, object_format).is_some();
-    let exact_reference =
-        value == "HEAD" || (value.starts_with("refs/") && valid_reference_name(value.as_bytes()));
+    let exact_reference = value == "HEAD"
+        || (value.len() <= MAX_REFERENCE_BYTES
+            && value.starts_with("refs/")
+            && valid_reference_name(value.as_bytes()));
     (value.len() <= MAX_REVISION_BYTES && (exact_object || exact_reference))
         .then_some(())
         .ok_or(InvalidGitArguments)

@@ -86,12 +86,14 @@ struct QuarantinedCheckoutDirectory {
 
 struct BranchSwitchHooks<
     BeforeReferenceLocks,
+    BeforeQuarantineSnapshot,
     PostQuarantine,
     PostCheckout,
     PostIndexPublish,
     BeforeHeadPublish,
 > {
     before_reference_locks: BeforeReferenceLocks,
+    before_quarantine_snapshot: BeforeQuarantineSnapshot,
     post_quarantine: PostQuarantine,
     post_checkout: PostCheckout,
     post_index_publish: PostIndexPublish,
@@ -820,12 +822,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         }
     }
 
-    fn quarantine_checkout_directories(
+    fn quarantine_checkout_directories<BeforeSnapshot: FnMut()>(
         &self,
         repository: &Repository,
         checkout_paths: &BTreeSet<PathBuf>,
         current_index: &Index,
         target_tree: &git2::Tree<'_>,
+        before_snapshot: &mut BeforeSnapshot,
     ) -> Result<Vec<QuarantinedCheckoutDirectory>, LocalGitFailure> {
         let mut quarantined = Vec::new();
         let candidates = checkout_paths
@@ -856,7 +859,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &descriptor_path_from_fd(target_snapshot.descriptor()),
                 )?;
                 let target_snapshot_identity = target_snapshot.snapshot()?;
-                let quarantine = QuarantineDirectory::create(&root)?;
+                let mut quarantine = QuarantineDirectory::create(&root)?;
                 let quarantined_name = OsStr::new("entry");
                 let (parent, leaf) = open_worktree_parent(&self.repository_authority.root, &path)?;
                 let (target_parent, target_leaf) =
@@ -880,7 +883,24 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     RenameFlags::NOREPLACE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
-                let quarantine_snapshot = quarantine.snapshot()?;
+                quarantine.keep();
+                before_snapshot();
+                let quarantine_snapshot = match quarantine.snapshot() {
+                    Ok(snapshot) => snapshot,
+                    Err(failure) => {
+                        let restoration = renameat_with(
+                            quarantine.descriptor(),
+                            quarantined_name,
+                            &parent,
+                            &leaf,
+                            RenameFlags::NOREPLACE,
+                        )
+                        .map_err(|_| LocalGitFailure::Operation);
+                        let cleanup =
+                            restoration.and_then(|()| quarantine.remove_if_empty_and_current());
+                        return Err(cleanup.err().unwrap_or(failure));
+                    }
+                };
                 Ok(QuarantinedCheckoutDirectory {
                     quarantine,
                     quarantine_snapshot,
@@ -1024,6 +1044,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
                 post_quarantine: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
@@ -1044,6 +1065,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
                 post_quarantine: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
@@ -1073,6 +1095,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
                 post_quarantine: || {},
                 post_checkout,
                 post_index_publish: || {},
@@ -1102,7 +1125,38 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
                 post_quarantine,
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn branch_switch_with_quarantine_snapshot_hook<Hook: FnMut()>(
+        &self,
+        arguments: GitBranchSwitchArguments,
+        before_quarantine_snapshot: Hook,
+    ) -> Result<BranchResult, LocalGitFailure> {
+        self.validate_current_repository()?;
+        let repository = self.repository_authority.repository()?;
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.branch_switch_with_hooks(
+            &repository,
+            &pinned_objects,
+            arguments,
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                before_quarantine_snapshot,
+                post_quarantine: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1124,6 +1178,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks,
+                before_quarantine_snapshot: || {},
                 post_quarantine: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
@@ -1146,6 +1201,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
                 post_quarantine: || {},
                 post_checkout: || {},
                 post_index_publish,
@@ -1175,6 +1231,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             arguments,
             BranchSwitchHooks {
                 before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
                 post_quarantine: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
@@ -1185,6 +1242,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
 
     fn branch_switch_with_hooks<
         BeforeLocks: FnOnce(),
+        BeforeQuarantineSnapshot: FnMut(),
         PostQuarantine: FnOnce(),
         PostCheckout: FnOnce(),
         PostIndexPublish: FnOnce(),
@@ -1196,6 +1254,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         hooks: BranchSwitchHooks<
             BeforeLocks,
+            BeforeQuarantineSnapshot,
             PostQuarantine,
             PostCheckout,
             PostIndexPublish,
@@ -1204,6 +1263,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     ) -> Result<BranchResult, LocalGitFailure> {
         let BranchSwitchHooks {
             before_reference_locks,
+            mut before_quarantine_snapshot,
             post_quarantine,
             post_checkout,
             post_index_publish,
@@ -1403,6 +1463,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &checkout_paths,
             &current_index,
             &target_tree,
+            &mut before_quarantine_snapshot,
         )?;
         post_quarantine();
         let checkout_result = checkout_tree_with_rollback(

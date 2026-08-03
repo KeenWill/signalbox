@@ -5,6 +5,7 @@ use std::{fs, path::Path};
 use git2::Repository;
 
 use crate::arguments::{GitBranchSwitchArguments, LocalOperation};
+use crate::descriptor::MAX_QUARANTINE_DEPTH;
 use crate::executor::clone_index_entry;
 use crate::failure::LocalGitFailure;
 use crate::limits::{INDEX_ASSUME_VALID, INDEX_SKIP_WORKTREE};
@@ -582,6 +583,69 @@ fn failed_branch_switch_preserves_a_foreign_entry_in_a_restored_quarantine() {
         fs::read(retained_foreign).expect("foreign quarantine entry reads"),
         foreign_content
     );
+}
+
+#[test]
+fn quarantine_snapshot_failure_restores_the_original_directory() {
+    let fixture = Fixture::new();
+    let original_content = b"original directory\n";
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::create_dir(fixture.root().join("src")).expect("source fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), original_content)
+        .expect("source fixture file writes");
+    let current = commit_all(&repository, "directory source");
+    let current_tree = repository
+        .find_commit(current)
+        .expect("current fixture commit exists")
+        .tree()
+        .expect("current fixture tree opens");
+    let target_blob = repository
+        .blob(b"target file\n")
+        .expect("target fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&current_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", target_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, current);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_quarantine_snapshot_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let quarantined_source = fs::read_dir(fixture.root())
+                    .expect("fixture root reads")
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path().join("entry"))
+                    .find(|path| path.join("main.txt").is_file())
+                    .expect("quarantined source exists");
+                let _deepest =
+                    (0..=MAX_QUARANTINE_DEPTH).fold(quarantined_source, |parent, index| {
+                        let child = parent.join(format!("d{index}"));
+                        fs::create_dir(&child).expect("over-depth quarantine directory creates");
+                        child
+                    });
+            },
+        )
+        .expect_err("over-depth quarantine snapshot rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join("src/main.txt")).expect("restored source fixture reads"),
+        original_content
+    );
+    assert!(fixture.root().join("src/d0").is_dir());
 }
 
 #[test]

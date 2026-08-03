@@ -18,7 +18,7 @@ use rustix::{
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_WORKTREE_INSPECTIONS};
 
-const MAX_QUARANTINE_DEPTH: usize = 128;
+pub(super) const MAX_QUARANTINE_DEPTH: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FileIdentity {
@@ -192,9 +192,7 @@ impl QuarantineDirectory {
     }
 
     pub(super) fn clear_on_drop_only_if_unchanged(&mut self, expected: &QuarantineSnapshot) {
-        if self.snapshot().as_ref() != Ok(expected) {
-            self.keep();
-        }
+        self.clear_on_drop = self.snapshot().as_ref() == Ok(expected);
     }
 }
 
