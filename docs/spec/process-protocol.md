@@ -14,10 +14,10 @@ the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
 import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
-delegation session-follow events and queued task-origin projection against this
-PR (`agent/delegation`). This page is the normative boundary between a local
-client process and `signalboxd`; domain values, PostgreSQL records, and wire
-messages remain distinct representations.
+delegation session-follow events, queued task-origin projection, and delivered
+delegation transcript entries against this PR (`agent/delegation`). This page is
+the normative boundary between a local client process and `signalboxd`; domain
+values, PostgreSQL records, and wire messages remain distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1435,7 +1435,7 @@ imported content and verbatim raw source remain authoritative only in the
 immutable imported-conversation aggregate; the wire snapshot neither fabricates
 native evidence nor replaces that authority.
 
-**Session-delegation foundation proposal.** The delegation stack adds three
+**Session-delegation transcript entries.** The process surface emits three
 non-text `transcript_entry` arms:
 
 - `delegated_task { spawning_request_id, parent_session_id, parent_turn_id, content }`;
@@ -1485,15 +1485,15 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-The session-follow event shapes and internal-wake exclusion in this section are
-implemented. The mutation request and receipt shapes remain the foundation
-proposal at the bottom of the delegation stack. The model-facing tool names and
-arguments are owned by [tool-loop](tool-loop.md#session-delegation-tool-family).
-The process surface admits their exact already-issued work for terminal
-operation and recovery; it does not let a client fabricate model provenance.
-`spawn_session`, `await_session`, and `send_session_message` therefore each
-carry the invoking session, turn, and `tool_request_id`, which must reconstitute
-one matching logical request before any mutation occurs.
+The session-follow event shapes, internal-wake exclusion, and mutation request
+and receipt shapes in this section are implemented. The model-facing tool names
+and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). The process surface
+admits their exact already-issued work for terminal operation and recovery; it
+does not let a client fabricate model provenance. `spawn_session`,
+`await_session`, and `send_session_message` therefore each carry the invoking
+session, turn, and `tool_request_id`, which must reconstitute one matching
+logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable

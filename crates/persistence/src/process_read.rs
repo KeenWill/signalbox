@@ -8,16 +8,22 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
-    ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+    AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+    ImportedConversationId, ImportedSourceAttestation, ImportedTranscriptContent,
+    ImportedTranscriptEntryId, ModelAlias, ModelCallId, ProviderModelIdentity,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
     mapping::{session_id_from_uuid, session_id_to_uuid},
+    outbox::{
+        DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
+        DispatchedDelegationWaitMode, decode_delegation_outcome, decode_delegation_provenance,
+        decode_delegation_reason, decode_wait_mode,
+    },
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -626,6 +632,73 @@ pub enum ProcessImportedContentKind {
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
+    /// Exact delegated task that opened one child session.
+    DelegatedTask {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Tool request that spawned the child.
+        spawning_request: ToolRequestId,
+        /// Parent session that issued the spawn request.
+        parent_session: SessionId,
+        /// Parent turn that issued the spawn request.
+        parent_turn: TurnId,
+        /// Exact delegated task text.
+        content: String,
+    },
+    /// Exact bidirectional delegation message delivered to this frontier.
+    DelegationMessage {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Immutable message identity.
+        message: DelegationMessageId,
+        /// Sending session.
+        sender: SessionId,
+        /// Receiving session.
+        recipient: SessionId,
+        /// Relationship-local message ordinal.
+        ordinal: u64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: u64,
+        /// Exact delivered content.
+        content: String,
+    },
+    /// Exact child result delivered through one registered wait.
+    DelegationResult {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Await request receiving this result.
+        awaiting_request: ToolRequestId,
+        /// Relationship identity.
+        spawning_request: ToolRequestId,
+        /// Terminal child session.
+        child: SessionId,
+        /// Foreground or background delivery mode.
+        mode: DispatchedDelegationWaitMode,
+        /// Recipient-wide position for background delivery only.
+        delivery_sequence: Option<u64>,
+        /// Typed terminal result outcome.
+        outcome: DispatchedDelegationOutcome,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+        /// Typed lifecycle reason.
+        reason: DispatchedDelegationReason,
+        /// Exact child-turn or parent-command proof.
+        provenance: DispatchedDelegationProvenance,
+    },
     /// Injected boundary declaring the model identity newly in force.
     ModelIdentityChanged {
         /// Zero-based position in the projected frontier.
@@ -1498,6 +1571,33 @@ impl ProcessReadRepository {
                 entry.context_summary_first_entry_id,
                 entry.context_summary_through_source_session_id,
                 entry.context_summary_through_entry_id,
+                entry.delegated_task_spawning_tool_request_id,
+                entry.delegation_message_id,
+                entry.delegation_result_awaiting_tool_request_id,
+                entry.delegation_result_spawning_tool_request_id,
+                delegated_task.task_content AS delegated_task_content,
+                task_relation.parent_session_id AS delegated_task_parent_session_id,
+                task_relation.parent_turn_id AS delegated_task_parent_turn_id,
+                delegated_message.spawning_tool_request_id AS delegation_message_spawning_request_id,
+                delegated_message.event_ordinal AS delegation_message_ordinal,
+                delegated_message.content_text AS delegation_message_content,
+                message_delivery.recipient_session_id AS delegation_message_recipient_session_id,
+                message_delivery.delivery_sequence AS delegation_message_delivery_sequence,
+                CASE delegated_message.direction
+                    WHEN 'parent_to_child' THEN message_relation.parent_session_id
+                    WHEN 'child_to_parent' THEN message_relation.child_session_id
+                END AS delegation_message_sender_session_id,
+                delegated_wait.child_session_id AS delegation_result_child_session_id,
+                delegated_wait.wait_mode AS delegation_result_wait_mode,
+                result_delivery.delivery_sequence AS delegation_result_delivery_sequence,
+                delegated_result.outcome_kind AS delegation_result_outcome_kind,
+                delegated_result.content_text AS delegation_result_content,
+                result_event.reason_kind AS delegation_result_reason_kind,
+                result_event.provenance_kind,
+                result_event.provenance_session_id,
+                result_event.provenance_turn_id,
+                result_event.provenance_goal_generation,
+                result_event.provenance_command_id,
                 imported.source_speaker_kind AS imported_source_speaker_kind,
                 imported.content_encoding AS imported_content_encoding,
                 accepted.content_text AS origin_content,
@@ -1545,6 +1645,44 @@ impl ProcessReadRepository {
                         entry.imported_conversation_id
                 AND imported.imported_transcript_entry_id =
                         entry.imported_transcript_entry_id
+               LEFT JOIN session_delegation_initial_task AS delegated_task
+                 ON delegated_task.spawning_tool_request_id =
+                        entry.delegated_task_spawning_tool_request_id
+                AND delegated_task.child_session_id = entry.source_session_id
+                AND delegated_task.semantic_entry_id = entry.semantic_entry_id
+               LEFT JOIN session_delegation AS task_relation
+                 ON task_relation.spawning_tool_request_id =
+                        delegated_task.spawning_tool_request_id
+               LEFT JOIN session_message_delivery AS message_delivery
+                 ON message_delivery.message_id = entry.delegation_message_id
+                AND message_delivery.recipient_session_id = entry.source_session_id
+               LEFT JOIN session_message AS delegated_message
+                 ON delegated_message.message_id = message_delivery.message_id
+                AND delegated_message.spawning_tool_request_id =
+                        message_delivery.spawning_tool_request_id
+               LEFT JOIN session_delegation AS message_relation
+                 ON message_relation.spawning_tool_request_id =
+                        delegated_message.spawning_tool_request_id
+               LEFT JOIN session_child_result_delivery AS result_delivery
+                 ON result_delivery.awaiting_tool_request_id =
+                        entry.delegation_result_awaiting_tool_request_id
+                AND result_delivery.spawning_tool_request_id =
+                        entry.delegation_result_spawning_tool_request_id
+                AND result_delivery.parent_session_id = entry.source_session_id
+               LEFT JOIN session_delegation_wait AS delegated_wait
+                 ON delegated_wait.awaiting_tool_request_id =
+                        result_delivery.awaiting_tool_request_id
+                AND delegated_wait.spawning_tool_request_id =
+                        result_delivery.spawning_tool_request_id
+                AND delegated_wait.parent_session_id = result_delivery.parent_session_id
+               LEFT JOIN session_child_result AS delegated_result
+                 ON delegated_result.spawning_tool_request_id =
+                        result_delivery.spawning_tool_request_id
+               LEFT JOIN session_delegation_event AS result_event
+                 ON result_event.spawning_tool_request_id =
+                        delegated_result.spawning_tool_request_id
+                AND result_event.event_ordinal = delegated_result.event_ordinal
+                AND result_event.event_kind = delegated_result.event_kind
               ORDER BY selected.selected_ordinal",
         )
         .bind(&stored_positions)
@@ -2930,6 +3068,33 @@ async fn open_transcript_entry_cursor(
             entry.context_summary_first_entry_id,
             entry.context_summary_through_source_session_id,
             entry.context_summary_through_entry_id,
+            entry.delegated_task_spawning_tool_request_id,
+            entry.delegation_message_id,
+            entry.delegation_result_awaiting_tool_request_id,
+            entry.delegation_result_spawning_tool_request_id,
+            delegated_task.task_content AS delegated_task_content,
+            task_relation.parent_session_id AS delegated_task_parent_session_id,
+            task_relation.parent_turn_id AS delegated_task_parent_turn_id,
+            delegated_message.spawning_tool_request_id AS delegation_message_spawning_request_id,
+            delegated_message.event_ordinal AS delegation_message_ordinal,
+            delegated_message.content_text AS delegation_message_content,
+            message_delivery.recipient_session_id AS delegation_message_recipient_session_id,
+            message_delivery.delivery_sequence AS delegation_message_delivery_sequence,
+            CASE delegated_message.direction
+                WHEN 'parent_to_child' THEN message_relation.parent_session_id
+                WHEN 'child_to_parent' THEN message_relation.child_session_id
+            END AS delegation_message_sender_session_id,
+            delegated_wait.child_session_id AS delegation_result_child_session_id,
+            delegated_wait.wait_mode AS delegation_result_wait_mode,
+            result_delivery.delivery_sequence AS delegation_result_delivery_sequence,
+            delegated_result.outcome_kind AS delegation_result_outcome_kind,
+            delegated_result.content_text AS delegation_result_content,
+            result_event.reason_kind AS delegation_result_reason_kind,
+            result_event.provenance_kind,
+            result_event.provenance_session_id,
+            result_event.provenance_turn_id,
+            result_event.provenance_goal_generation,
+            result_event.provenance_command_id,
             imported.source_speaker_kind AS imported_source_speaker_kind,
             imported.content_encoding AS imported_content_encoding,
             accepted.content_text AS origin_content,
@@ -2976,6 +3141,44 @@ async fn open_transcript_entry_cursor(
                     entry.imported_conversation_id
             AND imported.imported_transcript_entry_id =
                     entry.imported_transcript_entry_id
+           LEFT JOIN session_delegation_initial_task AS delegated_task
+             ON delegated_task.spawning_tool_request_id =
+                    entry.delegated_task_spawning_tool_request_id
+            AND delegated_task.child_session_id = entry.source_session_id
+            AND delegated_task.semantic_entry_id = entry.semantic_entry_id
+           LEFT JOIN session_delegation AS task_relation
+             ON task_relation.spawning_tool_request_id =
+                    delegated_task.spawning_tool_request_id
+           LEFT JOIN session_message_delivery AS message_delivery
+             ON message_delivery.message_id = entry.delegation_message_id
+            AND message_delivery.recipient_session_id = entry.source_session_id
+           LEFT JOIN session_message AS delegated_message
+             ON delegated_message.message_id = message_delivery.message_id
+            AND delegated_message.spawning_tool_request_id =
+                    message_delivery.spawning_tool_request_id
+           LEFT JOIN session_delegation AS message_relation
+             ON message_relation.spawning_tool_request_id =
+                    delegated_message.spawning_tool_request_id
+           LEFT JOIN session_child_result_delivery AS result_delivery
+             ON result_delivery.awaiting_tool_request_id =
+                    entry.delegation_result_awaiting_tool_request_id
+            AND result_delivery.spawning_tool_request_id =
+                    entry.delegation_result_spawning_tool_request_id
+            AND result_delivery.parent_session_id = entry.source_session_id
+           LEFT JOIN session_delegation_wait AS delegated_wait
+             ON delegated_wait.awaiting_tool_request_id =
+                    result_delivery.awaiting_tool_request_id
+            AND delegated_wait.spawning_tool_request_id =
+                    result_delivery.spawning_tool_request_id
+            AND delegated_wait.parent_session_id = result_delivery.parent_session_id
+           LEFT JOIN session_child_result AS delegated_result
+             ON delegated_result.spawning_tool_request_id =
+                    result_delivery.spawning_tool_request_id
+           LEFT JOIN session_delegation_event AS result_event
+             ON result_event.spawning_tool_request_id =
+                    delegated_result.spawning_tool_request_id
+            AND result_event.event_ordinal = delegated_result.event_ordinal
+            AND result_event.event_kind = delegated_result.event_kind
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
@@ -3071,6 +3274,206 @@ fn decode_transcript_entry(
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+    let delegated_task_spawning_request: Option<Uuid> =
+        row.try_get("delegated_task_spawning_tool_request_id")?;
+    let delegation_message: Option<Uuid> = row.try_get("delegation_message_id")?;
+    let delegation_result_awaiting_request: Option<Uuid> =
+        row.try_get("delegation_result_awaiting_tool_request_id")?;
+    let delegation_result_spawning_request: Option<Uuid> =
+        row.try_get("delegation_result_spawning_tool_request_id")?;
+    let delegated_task_content: Option<String> = row.try_get("delegated_task_content")?;
+    let delegated_task_parent_session: Option<Uuid> =
+        row.try_get("delegated_task_parent_session_id")?;
+    let delegated_task_parent_turn: Option<Uuid> = row.try_get("delegated_task_parent_turn_id")?;
+    let delegation_message_spawning_request: Option<Uuid> =
+        row.try_get("delegation_message_spawning_request_id")?;
+    let delegation_message_ordinal: Option<Decimal> = row.try_get("delegation_message_ordinal")?;
+    let delegation_message_content: Option<String> = row.try_get("delegation_message_content")?;
+    let delegation_message_sender: Option<Uuid> =
+        row.try_get("delegation_message_sender_session_id")?;
+    let delegation_message_recipient: Option<Uuid> =
+        row.try_get("delegation_message_recipient_session_id")?;
+    let delegation_message_delivery_sequence: Option<Decimal> =
+        row.try_get("delegation_message_delivery_sequence")?;
+    let delegation_result_child: Option<Uuid> =
+        row.try_get("delegation_result_child_session_id")?;
+    let delegation_result_wait_mode: Option<String> = row.try_get("delegation_result_wait_mode")?;
+    let delegation_result_delivery_sequence: Option<Decimal> =
+        row.try_get("delegation_result_delivery_sequence")?;
+    let delegation_result_outcome: Option<String> =
+        row.try_get("delegation_result_outcome_kind")?;
+    let delegation_result_content: Option<String> = row.try_get("delegation_result_content")?;
+    let delegation_result_reason: Option<String> = row.try_get("delegation_result_reason_kind")?;
+
+    let legacy_payload_present = origin.is_some()
+        || steering_source_turn.is_some()
+        || failed_turn.is_some()
+        || assistant_text.is_some()
+        || producing_call.is_some()
+        || tool_request.is_some()
+        || tool_result_attempt.is_some()
+        || completed_turn.is_some()
+        || cancelled_turn.is_some()
+        || imported_conversation.is_some()
+        || imported_entry.is_some()
+        || model_identity_turn.is_some()
+        || model_identity_defaults_version.is_some()
+        || model_identity_direct_selection.is_some()
+        || context_summary_value.is_some()
+        || context_summary_call.is_some()
+        || context_summary_first_source_session.is_some()
+        || context_summary_first_entry.is_some()
+        || context_summary_through_source_session.is_some()
+        || context_summary_through_entry.is_some();
+
+    if payload_kind == "delegated_task" {
+        let (Some(spawning_request), Some(parent_session), Some(parent_turn), Some(content)) = (
+            delegated_task_spawning_request,
+            delegated_task_parent_session,
+            delegated_task_parent_turn,
+            delegated_task_content,
+        ) else {
+            return Err(ProcessReadCorruption::Inconsistent("delegated-task entry shape").into());
+        };
+        if legacy_payload_present
+            || tool_result_request.is_some()
+            || delegation_message.is_some()
+            || delegation_result_awaiting_request.is_some()
+            || delegation_result_spawning_request.is_some()
+            || content.is_empty()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("delegated-task entry shape").into());
+        }
+        return Ok(ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            parent_session: SessionId::from_uuid(parent_session),
+            parent_turn: TurnId::from_uuid(parent_turn),
+            content,
+        });
+    }
+
+    if payload_kind == "delegation_message" {
+        let (
+            Some(message),
+            Some(spawning_request),
+            Some(sender),
+            Some(recipient),
+            Some(ordinal),
+            Some(delivery_sequence),
+            Some(content),
+        ) = (
+            delegation_message,
+            delegation_message_spawning_request,
+            delegation_message_sender,
+            delegation_message_recipient,
+            delegation_message_ordinal,
+            delegation_message_delivery_sequence,
+            delegation_message_content,
+        )
+        else {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-message entry shape").into(),
+            );
+        };
+        if legacy_payload_present
+            || tool_result_request.is_some()
+            || delegated_task_spawning_request.is_some()
+            || delegation_result_awaiting_request.is_some()
+            || delegation_result_spawning_request.is_some()
+            || recipient != source_session.into_uuid()
+            || content.is_empty()
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-message entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            message: DelegationMessageId::from_uuid(message),
+            sender: SessionId::from_uuid(sender),
+            recipient: SessionId::from_uuid(recipient),
+            ordinal: decode_positive(ordinal, "delegation message ordinal")?,
+            delivery_sequence: decode_positive(
+                delivery_sequence,
+                "delegation message delivery sequence",
+            )?,
+            content,
+        });
+    }
+
+    if payload_kind == "delegation_result" {
+        let (
+            Some(awaiting_request),
+            Some(spawning_request),
+            Some(child),
+            Some(wait_mode),
+            Some(outcome),
+            Some(reason),
+        ) = (
+            delegation_result_awaiting_request,
+            delegation_result_spawning_request,
+            delegation_result_child,
+            delegation_result_wait_mode.as_deref(),
+            delegation_result_outcome.as_deref(),
+            delegation_result_reason.as_deref(),
+        )
+        else {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-result entry shape").into(),
+            );
+        };
+        let mode = decode_wait_mode(wait_mode)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result wait mode"))?;
+        let delivery_sequence = delegation_result_delivery_sequence
+            .map(|value| decode_positive(value, "delegation result delivery sequence"))
+            .transpose()?;
+        let foreground_correlation = tool_result_request == Some(awaiting_request);
+        if legacy_payload_present
+            || delegated_task_spawning_request.is_some()
+            || delegation_message.is_some()
+            || (mode == DispatchedDelegationWaitMode::Foreground
+                && (!foreground_correlation || delivery_sequence.is_some()))
+            || (mode == DispatchedDelegationWaitMode::Background
+                && (tool_result_request.is_some() || delivery_sequence.is_none()))
+        {
+            return Err(
+                ProcessReadCorruption::Inconsistent("delegation-result entry shape").into(),
+            );
+        }
+        return Ok(ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            source_session,
+            entry,
+            awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+            spawning_request: ToolRequestId::from_uuid(spawning_request),
+            child: SessionId::from_uuid(child),
+            mode,
+            delivery_sequence,
+            outcome: decode_delegation_outcome(outcome)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result outcome"))?,
+            content: delegation_result_content,
+            reason: decode_delegation_reason(reason)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result reason"))?,
+            provenance: decode_delegation_provenance(row)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("delegation-result provenance"))?,
+        });
+    }
+
+    if delegated_task_spawning_request.is_some()
+        || delegation_message.is_some()
+        || delegation_result_awaiting_request.is_some()
+        || delegation_result_spawning_request.is_some()
+    {
+        return Err(
+            ProcessReadCorruption::Inconsistent("non-delegation semantic entry fields").into(),
+        );
+    }
 
     if payload_kind == "context_summary" {
         let (

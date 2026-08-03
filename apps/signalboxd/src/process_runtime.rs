@@ -5410,7 +5410,22 @@ fn transcript_entry_reference(
     entry: &ProcessTranscriptEntry,
 ) -> signalbox_domain::SemanticTranscriptEntryRef {
     let (source_session, entry) = match entry {
-        ProcessTranscriptEntry::ModelIdentityChanged {
+        ProcessTranscriptEntry::DelegatedTask {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::DelegationMessage {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::DelegationResult {
+            source_session,
+            entry,
+            ..
+        }
+        | ProcessTranscriptEntry::ModelIdentityChanged {
             source_session,
             entry,
             ..
@@ -5488,6 +5503,76 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
     match entry {
+        ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            spawning_request,
+            parent_session,
+            parent_turn,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "delegated_task",
+            "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
+            "parent_session_id": parent_session.into_uuid().hyphenated().to_string(),
+            "parent_turn_id": parent_turn.into_uuid().hyphenated().to_string(),
+            "content": content,
+        }),
+        ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            ordinal,
+            delivery_sequence,
+            content,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "delegation_message",
+            "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
+            "message_id": message.into_uuid().hyphenated().to_string(),
+            "sender_session_id": sender.into_uuid().hyphenated().to_string(),
+            "recipient_session_id": recipient.into_uuid().hyphenated().to_string(),
+            "ordinal": ordinal,
+            "delivery_sequence": delivery_sequence,
+            "content": content,
+        }),
+        ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            awaiting_request,
+            spawning_request,
+            child,
+            mode,
+            delivery_sequence,
+            outcome,
+            content,
+            reason,
+            provenance,
+            ..
+        } => serde_json::json!({
+            "position": entry_index + 1,
+            "source_session_id": source_session_id,
+            "entry_id": entry_id,
+            "type": "delegation_result",
+            "await_request_id": awaiting_request.into_uuid().hyphenated().to_string(),
+            "spawning_request_id": spawning_request.into_uuid().hyphenated().to_string(),
+            "child_session_id": child.into_uuid().hyphenated().to_string(),
+            "mode": match mode {
+                DispatchedDelegationWaitMode::Foreground => WireDelegationWaitMode::Foreground,
+                DispatchedDelegationWaitMode::Background => WireDelegationWaitMode::Background,
+            },
+            "delivery_sequence": delivery_sequence,
+            "outcome": wire_delegation_outcome(*outcome),
+            "content": content,
+            "reason": wire_delegation_reason(*reason),
+            "provenance": wire_delegation_provenance(*provenance),
+        }),
         ProcessTranscriptEntry::ModelIdentityChanged {
             entry_index,
             turn,
@@ -9006,6 +9091,110 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match entry {
+        ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request,
+            parent_session,
+            parent_turn,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::DelegatedTask {
+                        spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+                        parent_session_id: wire_uuid(parent_session.into_uuid()),
+                        parent_turn_id: wire_uuid(parent_turn.into_uuid()),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            source_session,
+            entry,
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            ordinal,
+            delivery_sequence,
+            content,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::DelegationMessage {
+                        spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+                        message_id: wire_uuid(message.into_uuid()),
+                        sender_session_id: wire_uuid(sender.into_uuid()),
+                        recipient_session_id: wire_uuid(recipient.into_uuid()),
+                        ordinal: CanonicalU64::new(*ordinal),
+                        delivery_sequence: CanonicalU64::new(*delivery_sequence),
+                        content: content.clone(),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            source_session,
+            entry,
+            awaiting_request,
+            spawning_request,
+            child,
+            mode,
+            delivery_sequence,
+            outcome,
+            content,
+            reason,
+            provenance,
+        } => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::DelegationResult {
+                        await_request_id: wire_uuid(awaiting_request.into_uuid()),
+                        spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+                        child_session_id: wire_uuid(child.into_uuid()),
+                        mode: match mode {
+                            DispatchedDelegationWaitMode::Foreground => {
+                                WireDelegationWaitMode::Foreground
+                            }
+                            DispatchedDelegationWaitMode::Background => {
+                                WireDelegationWaitMode::Background
+                            }
+                        },
+                        delivery_sequence: delivery_sequence.map(CanonicalU64::new),
+                        outcome: wire_delegation_outcome(*outcome),
+                        content: content.clone(),
+                        reason: wire_delegation_reason(*reason),
+                        provenance: wire_delegation_provenance(*provenance),
+                    },
+                },
+            )
+            .await
+        }
         ProcessTranscriptEntry::ModelIdentityChanged {
             entry_index,
             source_session,

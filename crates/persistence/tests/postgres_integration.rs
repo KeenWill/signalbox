@@ -41,26 +41,27 @@ use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices,
+    DecideToolRequestResult, DelegationMessageId, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
-    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal, ToolDispatchAuthority,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -77,10 +78,12 @@ use signalbox_persistence::{
         PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     outbox::{
-        DispatchedDelegationPolicy, DispatchedDelegationUpdate, DispatchedDelegationWake,
-        DispatchedModelCallState, DispatchedOutboxEvent, DispatchedOutboxEventKind,
-        DispatchedReconciliationOperation, DispatchedToolBatchState, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
+        DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
+        DispatchedDelegationWake, DispatchedModelCallState, DispatchedOutboxEvent,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
+        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
+        OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -7018,6 +7021,295 @@ async fn foreground_delegation_result_decodes_in_tool_batch_outbox() -> Result<(
         OutboxDispatchOutcome::Delivered {
             sequence: u64::try_from(event_sequence)?
         }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Delegation semantic entries resolve through their immutable relationship,
+/// delivery, wait, result, and lifecycle records instead of degrading to
+/// generic transcript markers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_semantic_entries_decode_exact_delivered_content() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parent_uuid = Uuid::from_u128(0xd360);
+    let child_uuid = Uuid::from_u128(0xd361);
+    let parent_turn_uuid = Uuid::from_u128(0xd362);
+    let child_turn_uuid = Uuid::from_u128(0xd363);
+    let spawning_request_uuid = Uuid::from_u128(0xd364);
+    let awaiting_request_uuid = Uuid::from_u128(0xd365);
+    let task_entry_uuid = Uuid::from_u128(0xd366);
+    let message_entry_uuid = Uuid::from_u128(0xd367);
+    let result_entry_uuid = Uuid::from_u128(0xd368);
+    let message_uuid = Uuid::from_u128(0xd369);
+    let model_selection_uuid = Uuid::from_u128(0xd36a);
+    let background_awaiting_request_uuid = Uuid::from_u128(0xd36b);
+    let background_result_entry_uuid = Uuid::from_u128(0xd36c);
+    let delegated_task_content = "inspect the durable result";
+    let delegation_message_content = "continue with the checked input";
+    let delegation_result_content = "checked result";
+
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_message DISABLE TRIGGER ALL;
+         ALTER TABLE session_message_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(parent_turn_uuid)
+    .bind(child_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, $5, $6)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(child_uuid)
+    .bind(child_turn_uuid)
+    .bind(task_entry_uuid)
+    .bind(model_selection_uuid)
+    .bind(delegated_task_content)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 2, 'message_delivered', 'tool_request', $2, $3, $4)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(parent_turn_uuid)
+    .bind(awaiting_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_message
+            (message_id, spawning_tool_request_id, event_ordinal,
+             event_kind, direction, content_text)
+         VALUES ($1, $2, 2, 'message_delivered', 'parent_to_child', $3)",
+    )
+    .bind(message_uuid)
+    .bind(spawning_request_uuid)
+    .bind(delegation_message_content)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_message_delivery
+            (message_id, spawning_tool_request_id, recipient_session_id,
+             delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, 1, 'message')",
+    )
+    .bind(message_uuid)
+    .bind(spawning_request_uuid)
+    .bind(child_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, 3, 'outcome_recorded', 'result_returned',
+                 'child_completed', 'child_turn', $2, $3)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(child_uuid)
+    .bind(child_turn_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 3, 'outcome_recorded', 'result_returned', $2)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(delegation_result_content)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground'),
+                ($6, $2, $3, $4, $5, 'background')",
+    )
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(parent_turn_uuid)
+    .bind(child_uuid)
+    .bind(background_awaiting_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id, parent_session_id,
+             delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, NULL, NULL),
+                ($4, $2, $3, 2, 'background_result')",
+    )
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(background_awaiting_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(child_uuid)
+    .bind(task_entry_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegation_result_awaiting_tool_request_id,
+             delegation_result_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegation_result', $3, $4)",
+    )
+    .bind(parent_uuid)
+    .bind(background_result_entry_uuid)
+    .bind(background_awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegation_message_id)
+         VALUES ($1, $2, 'delegation_message', $3)",
+    )
+    .bind(child_uuid)
+    .bind(message_entry_uuid)
+    .bind(message_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id,
+             delegation_result_awaiting_tool_request_id,
+             delegation_result_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegation_result', $3, $3, $4)",
+    )
+    .bind(parent_uuid)
+    .bind(result_entry_uuid)
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+
+    let parent = SessionId::from_uuid(parent_uuid);
+    let child = SessionId::from_uuid(child_uuid);
+    let spawning_request = ToolRequestId::from_uuid(spawning_request_uuid);
+    let awaiting_request = ToolRequestId::from_uuid(awaiting_request_uuid);
+    let background_awaiting_request = ToolRequestId::from_uuid(background_awaiting_request_uuid);
+    let task_entry = SemanticTranscriptEntryId::from_uuid(task_entry_uuid);
+    let message_entry = SemanticTranscriptEntryId::from_uuid(message_entry_uuid);
+    let result_entry = SemanticTranscriptEntryId::from_uuid(result_entry_uuid);
+    let background_result_entry =
+        SemanticTranscriptEntryId::from_uuid(background_result_entry_uuid);
+    let entries = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(
+            &[1, 2, 3, 4],
+            &[
+                SemanticTranscriptEntryRef::from_source(child, task_entry),
+                SemanticTranscriptEntryRef::from_source(child, message_entry),
+                SemanticTranscriptEntryRef::from_source(parent, result_entry),
+                SemanticTranscriptEntryRef::from_source(parent, background_result_entry),
+            ],
+        )
+        .await?;
+
+    assert_eq!(
+        entries.as_ref(),
+        &[
+            ProcessTranscriptEntry::DelegatedTask {
+                entry_index: 0,
+                source_session: child,
+                entry: task_entry,
+                spawning_request,
+                parent_session: parent,
+                parent_turn: TurnId::from_uuid(parent_turn_uuid),
+                content: String::from(delegated_task_content),
+            },
+            ProcessTranscriptEntry::DelegationMessage {
+                entry_index: 1,
+                source_session: child,
+                entry: message_entry,
+                spawning_request,
+                message: DelegationMessageId::from_uuid(message_uuid),
+                sender: parent,
+                recipient: child,
+                ordinal: 2,
+                delivery_sequence: 1,
+                content: String::from(delegation_message_content),
+            },
+            ProcessTranscriptEntry::DelegationResult {
+                entry_index: 2,
+                source_session: parent,
+                entry: result_entry,
+                awaiting_request,
+                spawning_request,
+                child,
+                mode: DispatchedDelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: DispatchedDelegationOutcome::ResultReturned,
+                content: Some(String::from(delegation_result_content)),
+                reason: DispatchedDelegationReason::ChildCompleted,
+                provenance: DispatchedDelegationProvenance::ChildTurn {
+                    session: child,
+                    turn: TurnId::from_uuid(child_turn_uuid),
+                },
+            },
+            ProcessTranscriptEntry::DelegationResult {
+                entry_index: 3,
+                source_session: parent,
+                entry: background_result_entry,
+                awaiting_request: background_awaiting_request,
+                spawning_request,
+                child,
+                mode: DispatchedDelegationWaitMode::Background,
+                delivery_sequence: Some(2),
+                outcome: DispatchedDelegationOutcome::ResultReturned,
+                content: Some(String::from(delegation_result_content)),
+                reason: DispatchedDelegationReason::ChildCompleted,
+                provenance: DispatchedDelegationProvenance::ChildTurn {
+                    session: child,
+                    turn: TurnId::from_uuid(child_turn_uuid),
+                },
+            },
+        ]
     );
 
     pool.close().await;

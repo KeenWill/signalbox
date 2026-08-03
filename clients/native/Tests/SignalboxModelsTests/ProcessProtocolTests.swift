@@ -474,6 +474,116 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains(ProcessProtocolFixture.defaultsVersionField))
   }
 
+  func testDelegatedTaskEntryDecodesExactProvenanceAndContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegatedTaskEntryFrame(sessionID: sessionID)
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegatedTask(
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        parentSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentSessionID),
+        parentTurnID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentTurnID),
+        content: ProcessProtocolFixture.delegatedTaskContent
+      )
+    )
+  }
+
+  func testDelegationMessageEntryDecodesExactDelivery() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationMessageEntryFrame(sessionID: sessionID)
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegationMessage(
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        messageID: try SignalboxCanonicalUUID(validating: ProcessProtocolFixture.messageID),
+        senderSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentSessionID),
+        recipientSessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        ordinal: SignalboxCanonicalUInt64(rawValue: 1),
+        deliverySequence: SignalboxCanonicalUInt64(rawValue: 2),
+        content: ProcessProtocolFixture.delegationMessageContent
+      )
+    )
+  }
+
+  func testForegroundDelegationResultEntryDecodesExactLifecycleProof() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null"
+      )
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegationResult(
+        awaitRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.awaitRequestID),
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        childSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.childSessionID),
+        mode: .foreground,
+        deliverySequence: nil,
+        outcome: .returned,
+        content: ProcessProtocolFixture.delegationResultContent,
+        reason: .childCompleted,
+        provenance: .childTurn(
+          childSessionID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childSessionID),
+          childTurnID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childTurnID)
+        )
+      )
+    )
+  }
+
+  func testBackgroundDelegationResultEntryDecodesWakeSequence() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "background",
+        deliverySequence: "\"7\""
+      )
+    )
+    let entry = try ProcessProtocolFixture.transcriptEntry(in: frame.message)
+
+    XCTAssertEqual(
+      entry.entry,
+      .delegationResult(
+        awaitRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.awaitRequestID),
+        spawningRequestID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.spawningRequestID),
+        childSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.childSessionID),
+        mode: .background,
+        deliverySequence: SignalboxCanonicalUInt64(rawValue: 7),
+        outcome: .returned,
+        content: ProcessProtocolFixture.delegationResultContent,
+        reason: .childCompleted,
+        provenance: .childTurn(
+          childSessionID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childSessionID),
+          childTurnID: try SignalboxCanonicalUUID(
+            validating: ProcessProtocolFixture.childTurnID)
+        )
+      )
+    )
+  }
+
   func testFutureProviderFailureCauseRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
@@ -795,6 +905,12 @@ private enum ProcessProtocolFixture {
   static let parentSessionID = "44444444-4444-4444-8444-444444444444"
   static let parentTurnID = "12121212-1212-4212-8212-121212121212"
   static let delegatedTaskContent = "fixture delegated task"
+  static let delegationMessageContent = "fixture delegation message"
+  static let delegationResultContent = "fixture delegation result"
+  static let messageID = "55555555-5555-4555-8555-555555555555"
+  static let awaitRequestID = "66666666-6666-4666-8666-666666666666"
+  static let childSessionID = "77777777-7777-4777-8777-777777777777"
+  static let childTurnID = "99999999-9999-4999-8999-999999999999"
   static let futureProviderFailureCause = "future_provider_failure"
   static let expandedErrorMessage = "fixture error"
   static let expandedRejectionMessage = "fixture rejection"
@@ -870,6 +986,94 @@ private enum ProcessProtocolFixture {
             "turn_id":"\(turnID)",
             "defaults_version":"\(defaultsVersion)",
             "selected_model_id":"\(selectedModelID)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegatedTaskEntryFrame(sessionID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"22222222-2222-4222-8222-222222222222",
+          "entry":{
+            "type":"delegated_task",
+            "spawning_request_id":"\(spawningRequestID)",
+            "parent_session_id":"\(parentSessionID)",
+            "parent_turn_id":"\(parentTurnID)",
+            "content":"\(delegatedTaskContent)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegationMessageEntryFrame(sessionID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"22222222-2222-4222-8222-222222222222",
+          "entry":{
+            "type":"delegation_message",
+            "spawning_request_id":"\(spawningRequestID)",
+            "message_id":"\(messageID)",
+            "sender_session_id":"\(parentSessionID)",
+            "recipient_session_id":"\(sessionID)",
+            "ordinal":"1",
+            "delivery_sequence":"2",
+            "content":"\(delegationMessageContent)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
+  static func delegationResultEntryFrame(
+    sessionID: String,
+    mode: String,
+    deliverySequence: String
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"\(requestID)",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"\(firstEntryIndex)",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"22222222-2222-4222-8222-222222222222",
+          "entry":{
+            "type":"delegation_result",
+            "await_request_id":"\(awaitRequestID)",
+            "spawning_request_id":"\(spawningRequestID)",
+            "child_session_id":"\(childSessionID)",
+            "mode":"\(mode)",
+            "delivery_sequence":\(deliverySequence),
+            "outcome":"returned",
+            "content":"\(delegationResultContent)",
+            "reason":"child_completed",
+            "provenance":{
+              "type":"child_turn",
+              "child_session_id":"\(childSessionID)",
+              "child_turn_id":"\(childTurnID)"
+            }
           }
         }
       }
