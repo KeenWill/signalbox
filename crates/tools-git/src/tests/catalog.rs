@@ -114,11 +114,13 @@ fn catalog_declares_every_local_verb_auto() {
 #[test]
 fn local_catalog_declares_no_remote_verb() {
     assert_eq!(LOCAL_GIT_TOOL_NAMES.len(), 7);
-    assert!(
-        !LOCAL_GIT_TOOL_NAMES
-            .iter()
-            .any(|name| name.contains("push") || name.contains("remote"))
-    );
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[0], GIT_BRANCH_CREATE_NAME);
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[1], GIT_BRANCH_SWITCH_NAME);
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[2], GIT_CREATE_COMMIT_NAME);
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[3], GIT_DIFF_NAME);
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[4], GIT_LOG_NAME);
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[5], GIT_STAGE_NAME);
+    assert_eq!(LOCAL_GIT_TOOL_NAMES[6], GIT_STATUS_NAME);
 }
 
 #[test]
