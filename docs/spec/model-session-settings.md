@@ -125,6 +125,13 @@ lower value exists. A caller that explicitly sets the same incompatible value in
 the model-change command receives the ordinary unsupported-value error;
 `inherit` is what identifies incompatibility as model-change-induced.
 
+The installed snapshot writes an automatically adjusted value back at the
+inherited source layer that supplied it. Its precedence chain therefore resolves
+to its recorded effective value without consulting adjustment history. The
+event retains the prior snapshot, caller overlay, and adjustment list, so this
+normalization does not erase either the caller's provenance or the reason the
+installed inherited contribution differs from its predecessor.
+
 Alias retargeting is a model change for this rule. Because an alias can acquire
 a different immutable definition between inputs without a defaults replacement,
 input acceptance repeats capability resolution and records any automatic

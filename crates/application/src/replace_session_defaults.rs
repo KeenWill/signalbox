@@ -10,7 +10,7 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    DurableCommandId, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
+    DurableCommandId, ModelSettingsOverlay, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
     ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId,
 };
@@ -30,6 +30,7 @@ pub struct ReplaceSessionDefaultsRequest {
     session: SessionId,
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
+    caller_model_settings: ModelSettingsOverlay,
     prompt_member: PromptMemberStatement,
 }
 
@@ -40,6 +41,26 @@ impl ReplaceSessionDefaultsRequest {
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId> {
+        let caller_model_settings = replacement.model_settings().precedence().session();
+        Self::try_new_with_model_settings(
+            command_id,
+            session,
+            expected_current_version,
+            replacement,
+            caller_model_settings,
+            prompt_member,
+        )
+    }
+
+    /// Validates a request while retaining its pre-adjustment caller overlay.
+    pub fn try_new_with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
         prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId> {
         if command_id.as_uuid().is_nil() {
@@ -54,6 +75,7 @@ impl ReplaceSessionDefaultsRequest {
             session,
             expected_current_version,
             replacement,
+            caller_model_settings,
             prompt_member,
         })
     }
@@ -76,6 +98,11 @@ impl ReplaceSessionDefaultsRequest {
     /// Borrows the complete replacement defaults.
     pub const fn replacement(&self) -> &SessionConfigurationDefaults {
         &self.replacement
+    }
+
+    /// Returns the caller's exact session-settings contribution.
+    pub const fn caller_model_settings(&self) -> ModelSettingsOverlay {
+        self.caller_model_settings
     }
 
     /// Returns whether the caller's boundary could state the prompt member.
@@ -172,11 +199,12 @@ where
         &mut self,
         request: ReplaceSessionDefaultsRequest,
     ) -> Result<ReplaceSessionDefaultsOutcome, Transaction::Error> {
-        let command = DomainReplaceSessionDefaults::new(
+        let command = DomainReplaceSessionDefaults::with_model_settings(
             request.command_id,
             request.session,
             request.expected_current_version,
             request.replacement,
+            request.caller_model_settings,
         );
         self.transaction
             .handle(command, request.prompt_member)

@@ -11,8 +11,8 @@
 //! acknowledgement.
 
 use crate::{
-    DurableCommandId, Session, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, VersionedSessionConfigurationDefaults,
+    DurableCommandId, ModelSettingsOverlay, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, VersionedSessionConfigurationDefaults,
 };
 
 /// The canonical caller payload for replacing one session's defaults.
@@ -33,6 +33,7 @@ pub struct ReplaceSessionDefaults {
     session: SessionId,
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
+    caller_model_settings: ModelSettingsOverlay,
 }
 
 impl ReplaceSessionDefaults {
@@ -43,11 +44,31 @@ impl ReplaceSessionDefaults {
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
     ) -> Self {
+        let caller_model_settings = replacement.model_settings().precedence().session();
+        Self::with_model_settings(
+            command_id,
+            session,
+            expected_current_version,
+            replacement,
+            caller_model_settings,
+        )
+    }
+
+    /// Constructs the payload while retaining the caller's exact settings
+    /// overlay separately from any automatic installed adjustment.
+    pub const fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+    ) -> Self {
         Self {
             command_id,
             session,
             expected_current_version,
             replacement,
+            caller_model_settings,
         }
     }
 
@@ -69,6 +90,11 @@ impl ReplaceSessionDefaults {
     /// Borrows the complete replacement defaults.
     pub const fn replacement(&self) -> &SessionConfigurationDefaults {
         &self.replacement
+    }
+
+    /// Returns the caller's provenance-preserving session contribution.
+    pub const fn caller_model_settings(&self) -> ModelSettingsOverlay {
+        self.caller_model_settings
     }
 
     /// Prepares the authoritative rejection for a target proven absent by the
@@ -159,6 +185,7 @@ impl PartialEq for ReplaceSessionDefaults {
         self.session == other.session
             && self.expected_current_version == other.expected_current_version
             && self.replacement == other.replacement
+            && self.caller_model_settings == other.caller_model_settings
     }
 }
 
@@ -169,6 +196,7 @@ impl std::hash::Hash for ReplaceSessionDefaults {
         self.session.hash(state);
         self.expected_current_version.hash(state);
         self.replacement.hash(state);
+        self.caller_model_settings.hash(state);
     }
 }
 
