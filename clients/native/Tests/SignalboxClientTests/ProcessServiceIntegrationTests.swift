@@ -395,27 +395,13 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
-  func testSideProjectionAcceptsCompletionWithoutAssistantText() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithCompletionMarkerOnly()
-    let trigger = try ProcessProjectionFixture.completedTrigger()
-    var projector = SignalboxProcessTranscriptProjector()
-
-    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-
-    XCTAssertTrue(projection.records.isEmpty)
-  }
-
-  func testSideProjectionRejectsCompletionWithoutRequiredAssistantText() throws {
+  func testSideProjectionRejectsCompletionWithoutAssistantText() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletionMarkerOnly()
     let trigger = try ProcessProjectionFixture.completedTrigger()
     var projector = SignalboxProcessTranscriptProjector()
 
     XCTAssertThrowsError(
-      try projector.projectSideSnapshot(
-        snapshot,
-        attributableTo: trigger,
-        requiringAssistantText: true
-      )
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
     ) { error in
       XCTAssertEqual(
         error as? SignalboxProcessTranscriptProjectionError,
@@ -620,7 +606,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testUnknownSnapshotTurnStateStaysAfterEarlierTranscriptEntries() throws {
+  func testUnknownSnapshotTurnStateAnchorsBeforeOwningTranscriptEntries() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithTranscriptBeforeUnknownTurnState()
     var projector = SignalboxProcessTranscriptProjector()
 
@@ -629,7 +615,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(
       ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
-      ProcessProjectionFixture.transcriptThenUnknownTimelineKinds
+      ProcessProjectionFixture.unknownThenTranscriptTimelineKinds
     )
   }
 
@@ -1219,6 +1205,25 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       projection.activity.label.utf8.count,
       SignalboxProcessPresentation.maximumLabelUTF8Bytes
+    )
+  }
+
+  func testUnknownFailedProviderCauseProjectsAsVisibleTimelineCard() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedProviderCause(
+      ProcessProjectionFixture.futureProviderFailureCause
+    )
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
+      [ProcessProjectionFixture.unknownProviderCausePresentationKind]
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownDiagnostics(in: normalizer.timelineItems),
+      [ProcessProjectionFixture.unknownProviderCausePresentationDiagnostic]
     )
   }
 
@@ -5492,7 +5497,8 @@ private enum ProcessProjectionFixture {
   ]
   static let terminalUsageNoticeTitles = ["Imported source event", "Model usage"]
   static let triggeredModelCallUsageIDs = [ProcessDriverFixture.modelCall]
-  static let legacyGenericOutputPreviewLimit = 480
+  static let outputPreviewLimit = 480
+  static let outputPreviewTruncationMarker = "..."
   static let importedSpeakerLabels = [
     SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested.presentationLabel,
     SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
@@ -5552,6 +5558,12 @@ private enum ProcessProjectionFixture {
   static let unknownDispositionPresentationDiagnostic =
     "Turn \(ProcessDriverFixture.turn), model call \(ProcessDriverFixture.modelCall): "
     + "the daemon reported an unrecognized terminal disposition."
+  static let futureProviderFailureCause = "fixture_future_provider_failure"
+  static let unknownProviderCausePresentationKind =
+    "model_call_failure.cause.\(futureProviderFailureCause)"
+  static let unknownProviderCausePresentationDiagnostic =
+    "Turn \(ProcessDriverFixture.turn), model call \(ProcessDriverFixture.modelCall): "
+    + "the snapshot retained an unrecognized provider-failure cause."
   static let futureSnapshotStatePresentationKinds = [
     futureTurnStatePresentationKind, futureCurrentModelStatePresentationKind,
   ]
@@ -5560,8 +5572,8 @@ private enum ProcessProjectionFixture {
     "Turn \(crossTurn), model call \(ProcessDriverFixture.modelCall): "
       + "the snapshot retained an unrecognized current model-call state.",
   ]
-  static let transcriptThenUnknownTimelineKinds: [ProcessTimelineFixtureKind] = [
-    .message, .message, .unknown,
+  static let unknownThenTranscriptTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .unknown, .message, .message,
   ]
   static let planReadRequestID = "ffffffff-5555-4555-8555-555555555551"
   static let planWriteRequestID = "ffffffff-5555-4555-8555-555555555552"
@@ -9333,10 +9345,24 @@ extension ProcessServiceIntegrationTests {
     let typedOutput = try XCTUnwrap(tool.presentationOutput)
     XCTAssertGreaterThan(
       typedOutput.count,
-      ProcessProjectionFixture.legacyGenericOutputPreviewLimit
+      ProcessProjectionFixture.outputPreviewLimit
     )
     XCTAssertNotEqual(typedOutput, ProcessProjectionFixture.denseAcyclicPlanOutput)
-    XCTAssertEqual(tool.outputPreview, typedOutput)
+    XCTAssertEqual(
+      tool.outputPreview.count,
+      ProcessProjectionFixture.outputPreviewLimit
+        + ProcessProjectionFixture.outputPreviewTruncationMarker.count
+    )
+    XCTAssertTrue(
+      tool.outputPreview.hasSuffix(ProcessProjectionFixture.outputPreviewTruncationMarker)
+    )
+    XCTAssertTrue(
+      typedOutput.hasPrefix(
+        tool.outputPreview.dropLast(
+          ProcessProjectionFixture.outputPreviewTruncationMarker.count
+        )
+      )
+    )
   }
 
   func testMultilinePlanTextCannotCreateSummaryLabels() throws {

@@ -94,14 +94,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   public mutating func projectSideSnapshot(
     _ snapshot: SignalboxSynchronizationSnapshot,
-    attributableTo trigger: SignalboxFollowedSessionEvent,
-    requiringAssistantText: Bool = false
+    attributableTo trigger: SignalboxFollowedSessionEvent
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
     guard candidate.containsRequiredEvidence(
       in: snapshot,
-      for: trigger.event,
-      requiringAssistantText: requiringAssistantText
+      for: trigger.event
     ) else {
       throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
     }
@@ -192,6 +190,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
     let modelCallAnchors = modelCallAnchors(in: snapshot.records)
+    let turnEntryAnchors = turnEntryAnchors(in: snapshot.records)
     let trailingModelCallUsageIDs = trailingModelCallUsageIDs(in: snapshot.records)
     var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
     var unanchoredUsage: [SignalboxStoredEvent] = []
@@ -223,7 +222,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           awaitingToolDecisionRequestID = requestID.rawValue
         }
         if selection.includesConservativeSnapshotEvidence,
-          let unrecognized = try projectUnrecognizedTurnState(turn)
+          let unrecognized = try projectUnrecognizedTurnState(
+            turn,
+            anchorEntryIndex: turnEntryAnchors[turn.turnID.rawValue]
+          )
         {
           store(unrecognized, in: &projectedByID, order: &projectedOrder)
         }
@@ -371,6 +373,45 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .turn, .modelCallUsage:
         break
       }
+    }
+    return anchors
+  }
+
+  private func turnEntryAnchors(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> [String: SignalboxCanonicalUInt64] {
+    var anchors: [String: SignalboxCanonicalUInt64] = [:]
+    for record in records {
+      let anchor: (turnID: SignalboxCanonicalUUID, entryIndex: SignalboxCanonicalUInt64)?
+      switch record {
+      case .textEntry(let message):
+        switch message.entry {
+        case .user(_, let turnID), .assistant(let turnID, _):
+          anchor = (turnID, message.entryIndex)
+        case .contextSummary, .imported, .unknown:
+          anchor = nil
+        }
+      case .entry(let message):
+        switch message.entry {
+        case .modelIdentityChanged(let turnID, _, _),
+          .assistantToolUse(let turnID, _, _, _, _), .turnCompleted(let turnID),
+          .turnFailed(let turnID), .turnCancelled(let turnID):
+          anchor = (turnID, message.entryIndex)
+        case .toolExecutionResult, .toolDenied, .toolClosed, .imported, .unknown:
+          anchor = nil
+        }
+      case .turn, .modelCallUsage, .content:
+        anchor = nil
+      }
+      guard let anchor else {
+        continue
+      }
+      if let existing = anchors[anchor.turnID.rawValue],
+        existing.rawValue <= anchor.entryIndex.rawValue
+      {
+        continue
+      }
+      anchors[anchor.turnID.rawValue] = anchor.entryIndex
     }
     return anchors
   }
@@ -677,6 +718,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return claimed
   }
 
+  private mutating func claimTurnStatePresentationID(
+    _ identity: PresentationIdentity,
+    anchorEntryIndex: SignalboxCanonicalUInt64?
+  ) throws -> SignalboxEventID {
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    guard let anchorEntryIndex else {
+      return try claimTrailingPresentationID(identity)
+    }
+    guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: Int(anchorEntryIndex.rawValue) * 2)
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
   private mutating func claimModelCallUsagePresentationID(
     _ evidence: SignalboxTranscriptModelCallUsage,
     anchorEntryIndex: SignalboxCanonicalUInt64?,
@@ -707,7 +766,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private mutating func projectUnrecognizedTurnState(
-    _ turn: SignalboxTranscriptTurn
+    _ turn: SignalboxTranscriptTurn,
+    anchorEntryIndex: SignalboxCanonicalUInt64?
   ) throws -> SignalboxStoredEvent? {
     let content: (kind: String, diagnostic: String)?
     switch turn.state {
@@ -735,20 +795,34 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         content = nil
       }
     case .failed(_, _, let terminalModelCall):
-      guard
-        let terminalModelCall,
-        case .unknown(let disposition) = terminalModelCall.disposition
-      else {
+      guard let terminalModelCall else {
         content = nil
         break
       }
-      content = (
-        SignalboxProcessPresentation.retainedLabel(
-          "model_call_transition.disposition.\(disposition)"
-        ),
-        "Turn \(turn.turnID.rawValue), model call \(terminalModelCall.modelCallID.rawValue): "
-          + "the snapshot retained an unrecognized terminal disposition."
-      )
+      switch terminalModelCall.disposition {
+      case .unknown(let disposition):
+        content = (
+          SignalboxProcessPresentation.retainedLabel(
+            "model_call_transition.disposition.\(disposition)"
+          ),
+          "Turn \(turn.turnID.rawValue), model call \(terminalModelCall.modelCallID.rawValue): "
+            + "the snapshot retained an unrecognized terminal disposition."
+        )
+      case .knownFailed:
+        guard case .unknown(let cause)? = terminalModelCall.cause else {
+          content = nil
+          break
+        }
+        content = (
+          SignalboxProcessPresentation.retainedLabel(
+            "model_call_failure.cause.\(cause)"
+          ),
+          "Turn \(turn.turnID.rawValue), model call \(terminalModelCall.modelCallID.rawValue): "
+            + "the snapshot retained an unrecognized provider-failure cause."
+        )
+      case .cancelled:
+        content = nil
+      }
     case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
@@ -758,7 +832,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     return SignalboxStoredEvent(
-      eventID: try claimTrailingPresentationID(.turnState(turn.turnID.rawValue)),
+      eventID: try claimTurnStatePresentationID(
+        .turnState(turn.turnID.rawValue),
+        anchorEntryIndex: anchorEntryIndex
+      ),
       event: .processConservative(
         SignalboxProcessConservativeEvent(
           kind: content.kind,
@@ -933,8 +1010,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func containsRequiredEvidence(
     in snapshot: SignalboxSynchronizationSnapshot,
-    for trigger: SignalboxProcessSessionEvent,
-    requiringAssistantText: Bool
+    for trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
@@ -1009,7 +1085,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID
       }
-      return hasCompletionMarker && (!requiringAssistantText || hasAssistantText)
+      return hasCompletionMarker && hasAssistantText
     case .turnFailed(let turnID, let failureEntryID, _):
       return snapshot.records.contains {
         guard case .entry(let message) = $0,

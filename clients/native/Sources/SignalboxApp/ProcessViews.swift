@@ -1729,16 +1729,9 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         streamedText = nil
         errorMessage = nil
       case .sideSnapshot(let snapshot, let trigger):
-        let requiresAssistantText = streamedText.map { streamedText in
-          guard case .turnCompleted(let turnID, let modelCallID, _, _) = trigger.event else {
-            return false
-          }
-          return streamedText.turnID == turnID && streamedText.modelCallID == modelCallID
-        } ?? false
         let projection = try projector.projectSideSnapshot(
           snapshot,
-          attributableTo: trigger,
-          requiringAssistantText: requiresAssistantText
+          attributableTo: trigger
         )
         normalizer.upsert(contentsOf: projection.records)
         refreshTimeline()

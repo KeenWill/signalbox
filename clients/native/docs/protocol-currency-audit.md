@@ -41,6 +41,13 @@ Disposition counts are by current gap rows below, not by individual wire
 variants: 13 close-now, 14 staged, and 1 report-only. Resolved findings retained
 for traceability are excluded.
 
+Read-only scale observations covered 1,019 imported conversations. The unified
+list loaded 1,023 conversations in 11 pages and 0.87 seconds; six imported rows
+had `underivable` titles. A 7,713-entry detail read took 0.96 seconds, suggesting
+roughly six seconds at the 50,000-entry application cap if growth remains
+linear. The former 6 MiB single-frame import ceiling rejected 70.8% of a sampled
+corpus by source volume.
+
 ## Close-now gaps
 
 | ID  | Severity | Gap                                                                                                                                                                                                           | Disposition                                                                                                                                           |

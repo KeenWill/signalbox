@@ -119,11 +119,7 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     }
 
     public var outputPreview: String {
-        if let presentationOutput {
-            let trimmed = presentationOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "No output yet" : trimmed
-        }
-        let trimmed = (output ?? "")
+        let trimmed = (presentationOutput ?? output ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return "No output yet"
