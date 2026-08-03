@@ -360,7 +360,7 @@ impl ProcessRuntime {
         let connection_dependencies = ConnectionDependencies {
             recovery_reporter: self.recovery_reporter,
             pool: self.pool.clone(),
-            eligibility_nudge: self.eligibility_nudge,
+            eligibility_nudge: self.eligibility_nudge.clone(),
             tool_dispatch_gate: self.tool_dispatch_gate,
             model_configuration: self.model_configuration,
             context_compaction_model: self.context_compaction_model,
@@ -368,7 +368,13 @@ impl ProcessRuntime {
             fanouts: fanouts.clone(),
         };
         let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
-        let dispatcher = dispatch_updates(self.pool, fanouts, self.metrics, shutdown);
+        let dispatcher = dispatch_updates(
+            self.pool,
+            self.eligibility_nudge,
+            fanouts,
+            self.metrics,
+            shutdown,
+        );
         let result = tokio::try_join!(server, dispatcher);
         let cleanup = self.listener.cleanup();
 
@@ -391,6 +397,7 @@ impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
 
 async fn dispatch_updates(
     pool: PgPool,
+    eligibility_nudge: InProcessEligibilityNudge,
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
     mut shutdown: watch::Receiver<bool>,
@@ -409,6 +416,7 @@ async fn dispatch_updates(
                     event.sequence(),
                     event.kind(),
                 );
+                nudge_delegation_wake(&eligibility_nudge, event.session(), event.kind());
                 if let Some(update) = ProcessUpdate::from_outbox(event) {
                     let _ = fanouts.durable.send(update.clone());
                     let _ = fanouts.streaming.send(update);
@@ -429,6 +437,16 @@ async fn dispatch_updates(
                 return Err(ProcessRuntimeError::UnexpectedDispatcherRetry);
             }
         }
+    }
+}
+
+fn nudge_delegation_wake(
+    eligibility_nudge: &impl EligibilityNudge,
+    session: SessionId,
+    event: &DispatchedOutboxEventKind,
+) {
+    if matches!(event, DispatchedOutboxEventKind::DelegationWake(_)) {
+        let _ = eligibility_nudge.nudge(session);
     }
 }
 
@@ -11517,7 +11535,10 @@ mod tests {
         thread,
     };
 
-    use signalbox_application::{ImportConversationError, ImportedConversationConverter};
+    use signalbox_application::{
+        EligibilityNudge, EligibilityNudgeOutcome, ImportConversationError,
+        ImportedConversationConverter,
+    };
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
@@ -11567,7 +11588,7 @@ mod tests {
         handle_append_conversation_import, handle_begin_conversation_import,
         handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, observe_outbox_metrics_once,
+        internal_protocol_error, map_rejection, nudge_delegation_wake, observe_outbox_metrics_once,
         operational_import_error, read_frame_line, replacement_model_is_admitted,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
@@ -11635,6 +11656,21 @@ mod tests {
             ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
     };
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingEligibilityNudge {
+        sessions: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl EligibilityNudge for RecordingEligibilityNudge {
+        fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome {
+            self.sessions
+                .lock()
+                .expect("recording nudge lock remains available")
+                .push(session);
+            EligibilityNudgeOutcome::Enqueued
+        }
+    }
 
     #[test]
     fn s19_descendant_scope_decode_is_exact() {
@@ -13908,6 +13944,35 @@ context_window_tokens = 200000
                 },
             ))
             .is_none()
+        );
+    }
+
+    /// S17 / INV-032: committing an internal delivery wake makes the exact
+    /// recipient eligible without projecting the wake onto follow streams.
+    #[test]
+    fn s17_inv032_internal_delegation_wake_nudges_exact_recipient() {
+        let recipient = SessionId::from_uuid(Uuid::from_u128(10));
+        let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(11));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_delegation_wake(
+            &nudge,
+            recipient,
+            &DispatchedOutboxEventKind::DelegationWake(
+                signalbox_persistence::outbox::DispatchedDelegationWake::Result {
+                    spawning_request,
+                    awaiting_request: None,
+                },
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[recipient]
         );
     }
 

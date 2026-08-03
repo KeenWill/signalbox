@@ -10,6 +10,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
+    num::NonZeroU64,
     sync::{Arc, Weak},
 };
 
@@ -19,7 +20,8 @@ use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
     AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
     ContextFrontierProjection, ContextFrontierProjectionFailure,
-    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DirectModelSelection,
+    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
@@ -90,6 +92,33 @@ pub enum ModelConversationMessage {
         /// Exact user-owned content.
         content: UserContent,
     },
+    /// Model-authored task injected into one delegated child's first turn.
+    DelegatedTask {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    /// Immutable peer content injected into the exact recipient session.
+    DelegationMessage {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    /// Background child completion injected as a session event, not a tool result.
+    BackgroundDelegationResult {
+        source: SemanticTranscriptEntryRef,
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        delivery_sequence: NonZeroU64,
+        outcome: DelegationOutcome,
+    },
     /// Exact assistant content rendered with the assistant role.
     Assistant {
         /// The source-qualified semantic entry being rendered.
@@ -151,6 +180,8 @@ pub enum ModelToolResultContent {
     },
     /// The turn ended before this request received a decision.
     ClosedByTurnEnd,
+    /// Exact typed terminal child outcome delivered to `await_session`.
+    Delegation(DelegationOutcome),
 }
 
 fn render_frontier_messages<'a>(
@@ -228,6 +259,66 @@ fn render_frontier_messages<'a>(
                     content,
                 });
             }
+            SemanticTranscriptEntryPayload::DelegatedTask {
+                spawning_request,
+                parent_session,
+                parent_turn,
+                content,
+            } => messages.push(ModelConversationMessage::DelegatedTask {
+                source,
+                spawning_request: *spawning_request,
+                parent_session: *parent_session,
+                parent_turn: *parent_turn,
+                content: content.clone(),
+            }),
+            SemanticTranscriptEntryPayload::DelegationMessage {
+                spawning_request,
+                message,
+                sender,
+                recipient,
+                delivery_sequence,
+                content,
+            } => messages.push(ModelConversationMessage::DelegationMessage {
+                source,
+                spawning_request: *spawning_request,
+                message: *message,
+                sender: *sender,
+                recipient: *recipient,
+                delivery_sequence: *delivery_sequence,
+                content: content.clone(),
+            }),
+            SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request,
+                spawning_request,
+                child,
+                mode,
+                delivery_sequence,
+                outcome,
+            } => match (mode, delivery_sequence) {
+                (DelegationWaitMode::Foreground, None) => {
+                    messages.push(ModelConversationMessage::ToolResult {
+                        source,
+                        request: *awaiting_request,
+                        content: ModelToolResultContent::Delegation(outcome.clone()),
+                    });
+                }
+                (DelegationWaitMode::Background, Some(delivery_sequence)) => {
+                    messages.push(ModelConversationMessage::BackgroundDelegationResult {
+                        source,
+                        awaiting_request: *awaiting_request,
+                        spawning_request: *spawning_request,
+                        child: *child,
+                        delivery_sequence: *delivery_sequence,
+                        outcome: outcome.clone(),
+                    });
+                }
+                (DelegationWaitMode::Foreground, Some(_))
+                | (DelegationWaitMode::Background, None) => {
+                    return Err(ModelFrontierRenderingError::InvalidDelegationDelivery {
+                        entry: source,
+                    });
+                }
+            },
             SemanticTranscriptEntryPayload::AssistantText {
                 producing_call,
                 value,
@@ -497,6 +588,11 @@ pub enum ModelFrontierRenderingError {
         /// The absent source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    /// A stored delegation wait mode contradicted its delivery position.
+    InvalidDelegationDelivery {
+        /// Source-qualified delegation-result entry.
+        entry: SemanticTranscriptEntryRef,
+    },
     /// The complete durable frontier carries malformed summary provenance.
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
@@ -521,6 +617,9 @@ impl fmt::Display for ModelFrontierRenderingError {
             }
             Self::MissingProjectedEntry { .. } => {
                 formatter.write_str("context projection entry is missing from its frontier")
+            }
+            Self::InvalidDelegationDelivery { .. } => {
+                formatter.write_str("model frontier delegation delivery is inconsistent")
             }
             Self::InvalidContextProjection(_) => {
                 formatter.write_str("invalid context-compaction projection")

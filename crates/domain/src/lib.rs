@@ -233,11 +233,11 @@ pub use session_delegation::{
     DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
     DelegationEvent, DelegationEventOrdinal, DelegationLifecycle, DelegationMessage,
     DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
-    DelegationRequestFailure, DelegationTransitionError, DelegationTransitionFailure,
-    DelegationWait, DelegationWaitMode, DescendantTerminationScope, ParentTerminationAuthority,
-    ParentTerminationCommandSource, ParentTerminationKind, RejectedDelegationTransition,
-    SessionDelegation, TerminalChildTurn,
+    DelegationOutcomeReason, DelegationProvenance, DelegationProvenanceReconstitutionInput,
+    DelegationRequestError, DelegationRequestFailure, DelegationTransitionError,
+    DelegationTransitionFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
+    ParentTerminationAuthority, ParentTerminationCommandSource, ParentTerminationKind,
+    RejectedDelegationTransition, SessionDelegation, TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,

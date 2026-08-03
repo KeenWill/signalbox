@@ -1485,15 +1485,17 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-The session-follow event shapes, internal-wake exclusion, and mutation request
-and receipt shapes in this section are implemented. The model-facing tool names
-and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). The process surface
-admits their exact already-issued work for terminal operation and recovery; it
-does not let a client fabricate model provenance. `spawn_session`,
-`await_session`, and `send_session_message` therefore each carry the invoking
-session, turn, and `tool_request_id`, which must reconstitute one matching
-logical request before any mutation occurs.
+The session-follow event shapes and internal-wake exclusion in this section are
+implemented. The mutation request and receipt shapes are committed unimplemented
+functionality: no current `ClientRequest`, daemon handler, or client verb
+provides them. Their fixed compatibility constraint is that the future process
+surface admits only exact already-issued model work for terminal operation and
+recovery; it must not let a client fabricate model provenance. The model-facing
+tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). Future
+`spawn_session`, `await_session`, and `send_session_message` requests therefore
+each carry the invoking session, turn, and `tool_request_id`, which must
+reconstitute one matching logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable

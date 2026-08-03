@@ -24,7 +24,8 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
-    FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
+    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, FrozenModelSelection,
+    ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
     ProviderModelCallFailureCause, ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId,
     ToolArgumentsKind, ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind,
     ToolName as DomainToolName, ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId,
@@ -1361,6 +1362,42 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 assistant_call = None;
                 collecting_tool_results = false;
             }
+            ModelConversationMessage::DelegatedTask { content, .. } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "Signalbox delegated task:\n{}",
+                    content.as_str()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::DelegationMessage {
+                sender, content, ..
+            } => {
+                rendered.push(ConversationMessage::user_text(format!(
+                    "Signalbox delegation message from session {}:\n{}",
+                    sender.into_uuid(),
+                    content.as_str()
+                )));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::BackgroundDelegationResult { child, outcome, .. } => {
+                let content = match (outcome.kind(), outcome.content()) {
+                    (DelegationOutcomeKind::ResultReturned, Some(content)) => format!(
+                        "Signalbox background child result from session {}:\n{}",
+                        child.into_uuid(),
+                        content.as_str()
+                    ),
+                    _ => format!(
+                        "Signalbox background child outcome from session {}: {}",
+                        child.into_uuid(),
+                        render_delegation_outcome(outcome)
+                    ),
+                };
+                rendered.push(ConversationMessage::user_text(content));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
             ModelConversationMessage::Assistant {
                 producing_call,
                 content,
@@ -1543,7 +1580,66 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
             .to_string(),
             true,
         ),
+        ModelToolResultContent::Delegation(outcome) => match (outcome.kind(), outcome.content()) {
+            (DelegationOutcomeKind::ResultReturned, Some(content)) => {
+                (content.as_str().to_owned(), false)
+            }
+            _ => (render_delegation_outcome(outcome), true),
+        },
     }
+}
+
+fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
+    let outcome_kind = match outcome.kind() {
+        DelegationOutcomeKind::ResultReturned => "returned",
+        DelegationOutcomeKind::ChildFailed => "failed",
+        DelegationOutcomeKind::ChildStopped => "stopped",
+        DelegationOutcomeKind::ChildCancelled => "cancelled",
+        DelegationOutcomeKind::AlreadyTerminal => "already_terminal",
+        DelegationOutcomeKind::ContinueRunning => "continue_running",
+    };
+    let reason = match outcome.reason() {
+        DelegationOutcomeReason::ChildCompleted => "child_completed",
+        DelegationOutcomeReason::ChildExecutionFailed => "child_execution_failed",
+        DelegationOutcomeReason::ChildResultUnavailable => "child_result_unavailable",
+        DelegationOutcomeReason::ChildCancelled => "child_cancelled",
+        DelegationOutcomeReason::ParentStopped { .. } => "parent_stopped",
+        DelegationOutcomeReason::ParentCancelled { .. } => "parent_cancelled",
+    };
+    let provenance = match outcome.provenance() {
+        provenance if provenance.child_turn().is_some() => {
+            let (session, turn) = provenance
+                .child_turn()
+                .expect("matched child-turn delegation provenance");
+            format!(
+                r#"{{"type":"child_turn","child_session_id":"{}","child_turn_id":"{}"}}"#,
+                session.into_uuid(),
+                turn.into_uuid()
+            )
+        }
+        provenance if provenance.parent_command().is_some() => {
+            let authority = provenance
+                .parent_command()
+                .expect("matched parent-command delegation provenance");
+            match (authority.turn(), authority.goal_generation()) {
+                (Some(turn), None) => format!(
+                    r#"{{"type":"parent_turn_command","parent_session_id":"{}","parent_turn_id":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+                    authority.parent().into_uuid(),
+                    turn.into_uuid(),
+                    authority.command().into_uuid()
+                ),
+                (None, Some(generation)) => format!(
+                    r#"{{"type":"parent_goal_command","parent_session_id":"{}","goal_generation":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+                    authority.parent().into_uuid(),
+                    generation.get(),
+                    authority.command().into_uuid()
+                ),
+                _ => unreachable!("sealed parent-command provenance has one source"),
+            }
+        }
+        _ => unreachable!("delegation outcomes carry terminal or parent-command provenance"),
+    };
+    format!(r#"{{"outcome":"{outcome_kind}","reason":"{reason}","provenance":{provenance}}}"#)
 }
 
 /// One classified terminal outcome plus the sanitized diagnostics that

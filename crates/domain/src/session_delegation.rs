@@ -774,6 +774,25 @@ pub struct DelegationOutcome {
     provenance: DelegationProvenance,
 }
 
+/// Stored proof source supplied to checked delegation-outcome reconstitution.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DelegationProvenanceReconstitutionInput {
+    ChildTurn {
+        session: SessionId,
+        turn: TurnId,
+    },
+    ParentTurnCommand {
+        session: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: SessionId,
+        generation: GoalGeneration,
+        command: DurableCommandId,
+    },
+}
+
 impl DelegationOutcome {
     /// Derives a returned, failed, or child-originated cancelled outcome from
     /// exact terminal child evidence. Stopped is not selectable here.
@@ -826,6 +845,126 @@ impl DelegationOutcome {
             reason: terminal.reason,
             provenance: DelegationProvenance::from_terminal_child(terminal),
         })
+    }
+
+    /// Checks complete stored outcome facts before restoring their sealed proof.
+    pub fn reconstitute(
+        kind: DelegationOutcomeKind,
+        content: Option<DelegationContent>,
+        reason: DelegationOutcomeReason,
+        provenance: DelegationProvenanceReconstitutionInput,
+    ) -> Option<Self> {
+        match provenance {
+            DelegationProvenanceReconstitutionInput::ChildTurn { session, turn } => {
+                let (terminal_kind, result_digest) = match (kind, reason, content.as_ref()) {
+                    (
+                        DelegationOutcomeKind::ResultReturned,
+                        DelegationOutcomeReason::ChildCompleted,
+                        Some(content),
+                    ) => (
+                        TerminalChildTurnKind::Returned,
+                        Some(delegation_content_digest(content)),
+                    ),
+                    (
+                        DelegationOutcomeKind::ChildFailed,
+                        DelegationOutcomeReason::ChildExecutionFailed
+                        | DelegationOutcomeReason::ChildResultUnavailable,
+                        None,
+                    ) => (TerminalChildTurnKind::Failed, None),
+                    (
+                        DelegationOutcomeKind::ChildCancelled,
+                        DelegationOutcomeReason::ChildCancelled,
+                        None,
+                    ) => (TerminalChildTurnKind::Cancelled, None),
+                    _ => return None,
+                };
+                Self::from_terminal_child(
+                    TerminalChildTurn {
+                        session,
+                        turn,
+                        kind: terminal_kind,
+                        reason,
+                        result_digest,
+                    },
+                    content,
+                )
+            }
+            DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                session,
+                turn,
+                command,
+            } => Self::reconstitute_parent_outcome(
+                kind,
+                content,
+                reason,
+                session,
+                ParentTerminationCommandSource::Turn { turn },
+                command,
+            ),
+            DelegationProvenanceReconstitutionInput::ParentGoalCommand {
+                session,
+                generation,
+                command,
+            } => Self::reconstitute_parent_outcome(
+                kind,
+                content,
+                reason,
+                session,
+                ParentTerminationCommandSource::Goal { generation },
+                command,
+            ),
+        }
+    }
+
+    fn reconstitute_parent_outcome(
+        kind: DelegationOutcomeKind,
+        content: Option<DelegationContent>,
+        reason: DelegationOutcomeReason,
+        parent: SessionId,
+        source: ParentTerminationCommandSource,
+        command: DurableCommandId,
+    ) -> Option<Self> {
+        if content.is_some() {
+            return None;
+        }
+        let termination_kind = match reason {
+            DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            } => ParentTerminationKind::Stopped,
+            DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAndDescendants,
+            } => ParentTerminationKind::Cancelled,
+            DelegationOutcomeReason::ChildCompleted
+            | DelegationOutcomeReason::ChildExecutionFailed
+            | DelegationOutcomeReason::ChildResultUnavailable
+            | DelegationOutcomeReason::ChildCancelled
+            | DelegationOutcomeReason::ParentStopped {
+                scope: DescendantTerminationScope::ParentAlone,
+            }
+            | DelegationOutcomeReason::ParentCancelled {
+                scope: DescendantTerminationScope::ParentAlone,
+            } => return None,
+        };
+        let authority = ParentTerminationAuthority {
+            parent,
+            source,
+            command,
+            kind: termination_kind,
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        };
+        match kind {
+            DelegationOutcomeKind::AlreadyTerminal => Self::from_parent_already_terminal(authority),
+            DelegationOutcomeKind::ContinueRunning => {
+                Self::from_parent_policy(authority, BoundChildAction::KeepRunning)
+            }
+            DelegationOutcomeKind::ChildStopped => {
+                Self::from_parent_policy(authority, BoundChildAction::Stop)
+            }
+            DelegationOutcomeKind::ChildCancelled => {
+                Self::from_parent_policy(authority, BoundChildAction::Cancel)
+            }
+            DelegationOutcomeKind::ResultReturned | DelegationOutcomeKind::ChildFailed => None,
+        }
     }
 
     /// Derives a policy disposition from exact applied parent authority.
