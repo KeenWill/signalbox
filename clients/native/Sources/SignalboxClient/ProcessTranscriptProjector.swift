@@ -130,16 +130,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     attributableTo trigger: SignalboxFollowedSessionEvent
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
-    guard candidate.containsRequiredEvidence(
-      in: snapshot,
-      for: trigger.event
-    ) else {
-      throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
-    }
     let terminalResultEntryIDs = candidate.terminalResultSuffixEntryIDs(
       in: snapshot,
       for: trigger.event
     )
+    guard candidate.containsRequiredEvidence(
+      in: snapshot,
+      for: trigger.event,
+      terminalResultEntryIDs: terminalResultEntryIDs
+    ) else {
+      throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
+    }
     let projection = try candidate.project(
       snapshot,
       selection: .trigger(
@@ -1212,20 +1213,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message.sourceSessionID == nativeSourceSessionID
           && terminalResultEntryIDs.contains(message.entryID)
       )
-    case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
-      guard
-        case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
-        let identity = toolIdentitiesByCorrelation[
-          ToolCorrelation(
-            sourceSessionID: message.sourceSessionID.rawValue,
-            requestID: requestID.rawValue
-          )
-        ],
-        let context = toolContextsByIdentity[identity]
-      else {
-        return false
-      }
-      return entryAttemptID == toolAttemptID && context.turnID == turnID
+    case .turnToolReconciliationRequired:
+      return terminalResultEntryIDs.contains(message.entryID)
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
@@ -1266,30 +1255,46 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for trigger: SignalboxProcessSessionEvent
   ) -> Set<SignalboxCanonicalUUID> {
     let turnID: SignalboxCanonicalUUID
+    let requiredAttemptID: SignalboxCanonicalUUID?
+    var eligibleRecords: ArraySlice<SignalboxSynchronizationSnapshot.Record> = []
     switch trigger {
     case .turnFailed(let triggerTurnID, _, _):
       turnID = triggerTurnID
+      requiredAttemptID = nil
     case .turnCancelled(let triggerTurnID, _, _):
       turnID = triggerTurnID
+      requiredAttemptID = nil
+    case .turnToolReconciliationRequired(
+      let triggerTurnID,
+      let toolAttemptID,
+      _
+    ):
+      turnID = triggerTurnID
+      requiredAttemptID = toolAttemptID
+      eligibleRecords = snapshot.records[...]
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .contextCompacted, .turnCompleted, .turnRefused,
-      .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
+      .turnReconciliationRequired, .unknown:
       return []
     }
-    guard let markerIndex = snapshot.records.firstIndex(where: { record in
-      guard case .entry(let message) = record else {
-        return false
+    if requiredAttemptID == nil {
+      guard let markerIndex = snapshot.records.firstIndex(where: { record in
+        guard case .entry(let message) = record else {
+          return false
+        }
+        return isExactTerminalMarker(
+          message,
+          for: trigger,
+          nativeSourceSessionID: snapshot.sessionID
+        )
+      }) else {
+        return []
       }
-      return isExactTerminalMarker(
-        message,
-        for: trigger,
-        nativeSourceSessionID: snapshot.sessionID
-      )
-    }) else {
-      return []
+      eligibleRecords = snapshot.records[..<markerIndex]
     }
     var entryIDs: Set<SignalboxCanonicalUUID> = []
-    for record in snapshot.records[..<markerIndex].reversed() {
+    var includesRequiredAttempt = requiredAttemptID == nil
+    for record in eligibleRecords.reversed() {
       guard case .entry(let message) = record,
         message.sourceSessionID == snapshot.sessionID,
         toolEntry(message, belongsTo: turnID, modelCallID: nil)
@@ -1297,8 +1302,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         break
       }
       entryIDs.insert(message.entryID)
+      if case .toolExecutionResult(_, let attemptID, _) = message.entry,
+        attemptID == requiredAttemptID
+      {
+        includesRequiredAttempt = true
+      }
     }
-    return entryIDs
+    return includesRequiredAttempt ? entryIDs : []
   }
 
   private func isExactTerminalMarker(
@@ -1334,7 +1344,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func containsRequiredEvidence(
     in snapshot: SignalboxSynchronizationSnapshot,
-    for trigger: SignalboxProcessSessionEvent
+    for trigger: SignalboxProcessSessionEvent,
+    terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
   ) -> Bool {
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
@@ -1444,23 +1455,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           nativeSourceSessionID: snapshot.sessionID
         )
       }
-    case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
-      return snapshot.records.contains {
-        guard case .entry(let message) = $0,
-          message.sourceSessionID == snapshot.sessionID,
-          case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
-          let identity = toolIdentitiesByCorrelation[
-            ToolCorrelation(
-              sourceSessionID: message.sourceSessionID.rawValue,
-              requestID: requestID.rawValue
-            )
-          ],
-          let context = toolContextsByIdentity[identity]
-        else {
-          return false
-        }
-        return entryAttemptID == toolAttemptID && context.turnID == turnID
-      }
+    case .turnToolReconciliationRequired:
+      return !terminalResultEntryIDs.isEmpty
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return true

@@ -492,6 +492,20 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
+  func testToolReconciliationSideProjectionIncludesCompleteTerminalResultSuffix() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithReconciliationResultSuffix()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.reconciliationSuffixToolNames
+    )
+  }
+
   func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -5998,6 +6012,15 @@ private enum ProcessProjectionFixture {
   static let reconciliationAttempt = "dddddddd-3333-4333-8333-333333333333"
   static let reconciliationResultEntry = "eeeeeeee-3333-4333-8333-333333333333"
   static let reconciliationOutput = "Fixture cross-turn result."
+  static let reconciliationSuffixToolRequest = "ffffffff-3333-4333-8333-333333333333"
+  static let reconciliationSuffixToolEntry = "99999999-3333-4333-8333-333333333333"
+  static let reconciliationSuffixAttempt = "88888888-3333-4333-8333-333333333333"
+  static let reconciliationSuffixResultEntry = "77777777-3333-4333-8333-333333333333"
+  static let reconciliationSuffixToolName = "inspect_related_fixture"
+  static let reconciliationSuffixOutput = "Related fixture inspected."
+  static let reconciliationSuffixToolNames = [
+    proposedToolName, reconciliationSuffixToolName,
+  ]
   static let completedUserEntry = "aaaaaaaa-2222-4222-8222-222222222222"
   static let completedAssistantEntry = "bbbbbbbb-2222-4222-8222-222222222222"
   static let completedAssistantText = "Fixture terminal assistant response."
@@ -9723,6 +9746,64 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithReconciliationResultSuffix() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        toolRequestMessage(index: 0),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationSuffixToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(reconciliationSuffixToolRequest)",
+            "tool_name":"\(reconciliationSuffixToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        toolResultMessage(index: 2),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationSuffixResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(reconciliationSuffixToolRequest)",
+            "tool_attempt_id":"\(reconciliationSuffixAttempt)",
+            "content":"\(reconciliationSuffixOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"4"
         }
         """,
       ]
