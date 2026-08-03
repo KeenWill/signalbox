@@ -9,11 +9,11 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
     BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationOutcome, DelegationPolicy,
-    DelegationProvenance, DelegationReason, DescendantTerminationScope, FailedModelCallCause,
-    FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
-    GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
-    ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    DelegationProvenance, DelegationReason, DelegationWaitMode, DescendantTerminationScope,
+    FailedModelCallCause, FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
+    ImportedSpeaker, ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor,
+    MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
@@ -1903,6 +1903,69 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::DelegatedTask {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "delegated_task spawning_request={spawning_request_id} \
+                 parent_session={parent_session_id} parent_turn={parent_turn_id} \
+                 content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::DelegationMessage {
+                spawning_request_id,
+                message_id,
+                sender_session_id,
+                recipient_session_id,
+                ordinal,
+                delivery_sequence,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "delegation_message spawning_request={spawning_request_id} message={message_id} \
+                 sender={sender_session_id} recipient={recipient_session_id} \
+                 ordinal={} delivery_sequence={} content={} source={} entry={}",
+                ordinal.value(),
+                delivery_sequence.value(),
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+                mode,
+                delivery_sequence,
+                outcome,
+                content,
+                reason,
+                provenance,
+            }) => writeln!(
+                self.stdout,
+                "delegation_result await_request={await_request_id} \
+                 spawning_request={spawning_request_id} child={child_session_id} mode={} \
+                 delivery_sequence={} outcome={} content={} reason={} provenance={} \
+                 source={} entry={}",
+                delegation_wait_mode(*mode),
+                delivery_sequence
+                    .map(|sequence| sequence.value().to_string())
+                    .unwrap_or_else(|| String::from("none")),
+                delegation_outcome(*outcome),
+                content
+                    .as_deref()
+                    .map(|value| self.render(value))
+                    .unwrap_or_else(|| String::from("none")),
+                delegation_reason(*reason),
+                delegation_provenance(provenance),
+                entry.source_session_id,
+                entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::ModelIdentityChanged {
                 turn_id,
                 defaults_version,
@@ -2253,6 +2316,9 @@ impl SnapshotSelection {
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
+                    | TranscriptEntry::DelegatedTask { .. }
+                    | TranscriptEntry::DelegationMessage { .. }
+                    | TranscriptEntry::DelegationResult { .. }
                     | TranscriptEntry::AssistantToolUse { .. }
                     | TranscriptEntry::ToolExecutionResult { .. }
                     | TranscriptEntry::ToolDenied { .. }
@@ -2381,6 +2447,13 @@ const fn delegation_reason(reason: DelegationReason) -> &'static str {
         DelegationReason::ChildCancelled => "child_cancelled",
         DelegationReason::ParentStopped => "parent_stopped",
         DelegationReason::ParentCancelled => "parent_cancelled",
+    }
+}
+
+const fn delegation_wait_mode(mode: DelegationWaitMode) -> &'static str {
+    match mode {
+        DelegationWaitMode::Foreground => "foreground",
+        DelegationWaitMode::Background => "background",
     }
 }
 
@@ -2592,14 +2665,14 @@ mod tests {
     use signalbox_process_protocol::{
         BillingRateVersion, BoundChildAction, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
         ContentFragment, CurrentModelCall, CurrentModelCallState, DelegationOutcome,
-        DelegationPolicy, DelegationProvenance, DelegationReason, DescendantTerminationScope,
-        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
-        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost,
-        ModelCallState, ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput,
-        ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot,
-        ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-        TurnState, UsageProvenance,
+        DelegationPolicy, DelegationProvenance, DelegationReason, DelegationWaitMode,
+        DescendantTerminationScope, ErrorCode, ErrorDetail, FailedModelCallDisposition,
+        FailedTerminalModelCall, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+        ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
+        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry,
+        TranscriptTextEntry, TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3176,6 +3249,76 @@ mod tests {
         let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
         expect![[r#"
             imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn delegation_snapshot_renders_task_message_and_background_result() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(2),
+                    entry_id: wire_uuid(3),
+                    entry: TranscriptEntry::DelegatedTask {
+                        spawning_request_id: wire_uuid(4),
+                        parent_session_id: wire_uuid(1),
+                        parent_turn_id: wire_uuid(5),
+                        content: String::from("inspect the durable result"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(2),
+                    entry_id: wire_uuid(6),
+                    entry: TranscriptEntry::DelegationMessage {
+                        spawning_request_id: wire_uuid(4),
+                        message_id: wire_uuid(7),
+                        sender_session_id: wire_uuid(1),
+                        recipient_session_id: wire_uuid(2),
+                        ordinal: CanonicalU64::new(2),
+                        delivery_sequence: CanonicalU64::new(1),
+                        content: String::from("continue with the checked input"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(2),
+                    source_session_id: wire_uuid(1),
+                    entry_id: wire_uuid(8),
+                    entry: TranscriptEntry::DelegationResult {
+                        await_request_id: wire_uuid(9),
+                        spawning_request_id: wire_uuid(4),
+                        child_session_id: wire_uuid(2),
+                        mode: DelegationWaitMode::Background,
+                        delivery_sequence: Some(CanonicalU64::new(2)),
+                        outcome: DelegationOutcome::Returned,
+                        content: Some(String::from("checked result")),
+                        reason: DelegationReason::ChildCompleted,
+                        provenance: DelegationProvenance::ChildTurn {
+                            child_session_id: wire_uuid(2),
+                            child_turn_id: wire_uuid(10),
+                        },
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("delegation snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            delegated_task spawning_request=00000000-0000-0000-0000-000000000004 parent_session=00000000-0000-0000-0000-000000000001 parent_turn=00000000-0000-0000-0000-000000000005 content=inspect the durable result source=00000000-0000-0000-0000-000000000002 entry=00000000-0000-0000-0000-000000000003
+            delegation_message spawning_request=00000000-0000-0000-0000-000000000004 message=00000000-0000-0000-0000-000000000007 sender=00000000-0000-0000-0000-000000000001 recipient=00000000-0000-0000-0000-000000000002 ordinal=2 delivery_sequence=1 content=continue with the checked input source=00000000-0000-0000-0000-000000000002 entry=00000000-0000-0000-0000-000000000006
+            delegation_result await_request=00000000-0000-0000-0000-000000000009 spawning_request=00000000-0000-0000-0000-000000000004 child=00000000-0000-0000-0000-000000000002 mode=background delivery_sequence=2 outcome=returned content=checked result reason=child_completed provenance=child_turn:00000000-0000-0000-0000-000000000002:00000000-0000-0000-0000-00000000000a source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000008
             usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]

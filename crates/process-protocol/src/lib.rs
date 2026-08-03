@@ -4010,6 +4010,55 @@ impl ImportedTextPreview {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// Exact delegated task that opened one child session.
+    DelegatedTask {
+        /// Tool request that spawned the child.
+        spawning_request_id: CanonicalUuid,
+        /// Parent session that issued the spawn request.
+        parent_session_id: CanonicalUuid,
+        /// Parent turn that issued the spawn request.
+        parent_turn_id: CanonicalUuid,
+        /// Exact delegated task text.
+        content: String,
+    },
+    /// Exact bidirectional delegation message delivered to this frontier.
+    DelegationMessage {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Immutable message identity.
+        message_id: CanonicalUuid,
+        /// Sending session.
+        sender_session_id: CanonicalUuid,
+        /// Receiving session.
+        recipient_session_id: CanonicalUuid,
+        /// Relationship-local message ordinal.
+        ordinal: CanonicalU64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: CanonicalU64,
+        /// Exact delivered content.
+        content: String,
+    },
+    /// Exact child result delivered through one registered wait.
+    DelegationResult {
+        /// Await request receiving this result.
+        await_request_id: CanonicalUuid,
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Terminal child session.
+        child_session_id: CanonicalUuid,
+        /// Foreground or background delivery mode.
+        mode: DelegationWaitMode,
+        /// Recipient-wide position for background delivery only.
+        delivery_sequence: Option<CanonicalU64>,
+        /// Typed terminal result outcome.
+        outcome: DelegationOutcome,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+        /// Typed lifecycle reason.
+        reason: DelegationReason,
+        /// Exact child-turn or parent-command proof.
+        provenance: DelegationProvenance,
+    },
     /// Injected boundary declaring the model identity newly in force.
     ModelIdentityChanged {
         /// Turn whose start first observes the new model identity.
@@ -4611,6 +4660,65 @@ fn parent_delegation_provenance_is_cascade(
 
 fn delegation_content_is_valid(content: &str) -> bool {
     !content.is_empty() && content.len() <= MAX_CONTENT_FRAGMENT_BYTES && !content.contains('\0')
+}
+
+fn validate_delegation_transcript_entry(
+    source_session_id: CanonicalUuid,
+    entry: &TranscriptEntry,
+) -> Result<(), FrameValidationError> {
+    let valid = match entry {
+        TranscriptEntry::DelegatedTask {
+            parent_session_id,
+            content,
+            ..
+        } => *parent_session_id != source_session_id && delegation_content_is_valid(content),
+        TranscriptEntry::DelegationMessage {
+            sender_session_id,
+            recipient_session_id,
+            ordinal,
+            delivery_sequence,
+            content,
+            ..
+        } => {
+            *recipient_session_id == source_session_id
+                && *sender_session_id != *recipient_session_id
+                && ordinal.value() > 0
+                && delivery_sequence.value() > 0
+                && delegation_content_is_valid(content)
+        }
+        TranscriptEntry::DelegationResult {
+            child_session_id,
+            mode,
+            delivery_sequence,
+            outcome,
+            content,
+            reason,
+            provenance,
+            ..
+        } => {
+            *child_session_id != source_session_id
+                && match mode {
+                    DelegationWaitMode::Foreground => delivery_sequence.is_none(),
+                    DelegationWaitMode::Background => {
+                        delivery_sequence.is_some_and(|sequence| sequence.value() > 0)
+                    }
+                }
+                && child_result_shape_is_valid(
+                    source_session_id,
+                    *child_session_id,
+                    *outcome,
+                    content,
+                    *reason,
+                    provenance,
+                )
+        }
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::DelegationShape)
+    }
 }
 
 /// Closed versioned server message family.
@@ -5242,6 +5350,11 @@ impl ServerMessage {
             {
                 return Err(FrameValidationError::ModelCallUsageShape);
             }
+            Self::TranscriptEntry {
+                source_session_id,
+                entry,
+                ..
+            } => validate_delegation_transcript_entry(*source_session_id, entry)?,
             Self::SessionEvent {
                 session_id, event, ..
             } => validate_delegation_session_event(*session_id, event)?,
@@ -6405,6 +6518,117 @@ mod tests {
             )
         );
         assert_eq!(decode_server_line(&encoded_conservative)?, conservative);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegated_task_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(0),
+            source_session_id: uuid(2),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegatedTask {
+                spawning_request_id: uuid(4),
+                parent_session_id: uuid(1),
+                parent_turn_id: uuid(5),
+                content: String::from("inspect the durable result"),
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(10)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegated_task","spawning_request_id":"00000000-0000-0000-0000-000000000004","parent_session_id":"00000000-0000-0000-0000-000000000001","parent_turn_id":"00000000-0000-0000-0000-000000000005","content":"inspect the durable result"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_message_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(1),
+            source_session_id: uuid(2),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegationMessage {
+                spawning_request_id: uuid(4),
+                message_id: uuid(5),
+                sender_session_id: uuid(1),
+                recipient_session_id: uuid(2),
+                ordinal: CanonicalU64::new(1),
+                delivery_sequence: CanonicalU64::new(2),
+                content: String::from("continue with the checked input"),
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(11)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"1","source_session_id":"00000000-0000-0000-0000-000000000002","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_message","spawning_request_id":"00000000-0000-0000-0000-000000000004","message_id":"00000000-0000-0000-0000-000000000005","sender_session_id":"00000000-0000-0000-0000-000000000001","recipient_session_id":"00000000-0000-0000-0000-000000000002","ordinal":"1","delivery_sequence":"2","content":"continue with the checked input"}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_foreground_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(2),
+            source_session_id: uuid(1),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegationResult {
+                await_request_id: uuid(4),
+                spawning_request_id: uuid(5),
+                child_session_id: uuid(2),
+                mode: DelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("checked result")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: uuid(2),
+                    child_turn_id: uuid(6),
+                },
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(12)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000005","child_session_id":"00000000-0000-0000-0000-000000000002","mode":"foreground","delivery_sequence":null,"outcome":"returned","content":"checked result","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000002","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_background_delegation_result_entries_round_trip_in_the_single_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(3),
+            source_session_id: uuid(1),
+            entry_id: uuid(3),
+            entry: TranscriptEntry::DelegationResult {
+                await_request_id: uuid(4),
+                spawning_request_id: uuid(5),
+                child_session_id: uuid(2),
+                mode: DelegationWaitMode::Background,
+                delivery_sequence: Some(CanonicalU64::new(7)),
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("wake result")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: uuid(2),
+                    child_turn_id: uuid(6),
+                },
+            },
+        };
+
+        assert_server_message_round_trip(
+            request(13)?,
+            message,
+            r#"{"type":"transcript_entry","entry_index":"3","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000005","child_session_id":"00000000-0000-0000-0000-000000000002","mode":"background","delivery_sequence":"7","outcome":"returned","content":"wake result","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000002","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
+        )?;
         Ok(())
     }
 

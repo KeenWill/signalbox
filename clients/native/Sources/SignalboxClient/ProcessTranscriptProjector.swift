@@ -242,6 +242,58 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     switch message.entry {
+    case .delegatedTask(let spawningRequestID, let parentSessionID, let parentTurnID, let content):
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "delegated_task",
+            diagnostic:
+              "Parent session \(parentSessionID.rawValue), turn \(parentTurnID.rawValue), spawned request \(spawningRequestID.rawValue): \(content)"
+          )
+        )
+      )
+    case .delegationMessage(
+      let spawningRequestID,
+      let messageID,
+      let senderSessionID,
+      let recipientSessionID,
+      _,
+      _,
+      let content
+    ):
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "delegation_message",
+            diagnostic:
+              "Delegation \(spawningRequestID.rawValue) message \(messageID.rawValue) from \(senderSessionID.rawValue) to \(recipientSessionID.rawValue): \(content)"
+          )
+        )
+      )
+    case .delegationResult(
+      let awaitRequestID,
+      let spawningRequestID,
+      let childSessionID,
+      let mode,
+      _,
+      let outcome,
+      let content,
+      _,
+      _
+    ):
+      let deliveredContent = content.map { ": \($0)" } ?? ""
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "delegation_result",
+            diagnostic:
+              "Delegation \(spawningRequestID.rawValue) child \(childSessionID.rawValue) delivered \(outcome.rawValue) to \(awaitRequestID.rawValue) in \(mode.rawValue) mode\(deliveredContent)"
+          )
+        )
+      )
     case .modelIdentityChanged(let turnID, let defaultsVersion, let selectedModelID):
       return try semanticRecord(
         message,
@@ -551,7 +603,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       requestID = request.rawValue
     case .assistantToolUse:
       return false
-    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
+    case .delegatedTask, .delegationMessage, .delegationResult, .modelIdentityChanged,
+      .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
     guard let context = toolContextsByRequestID[requestID],
@@ -601,8 +654,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
               .toolClosed(let requestID, _):
               return requestID.rawValue
-            case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
-              .turnCancelled, .imported,
+            case .delegatedTask, .delegationMessage, .delegationResult, .modelIdentityChanged,
+              .assistantToolUse, .turnCompleted, .turnFailed, .turnCancelled, .imported,
               .unknown:
               return nil
             }
