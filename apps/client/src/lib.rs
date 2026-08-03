@@ -6915,6 +6915,7 @@ mod tests {
         let parked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let defaults_version = CanonicalU64::new(1);
         let content = InputContent::new(String::from("continue after reconciliation"));
         let expected_content = content.clone();
         let server = tokio::spawn(async move {
@@ -6930,7 +6931,7 @@ mod tests {
                     session_id,
                     expected_active_turn_id: parked_turn_id,
                     content: expected_content,
-                    expected_defaults_version: CanonicalU64::new(1),
+                    expected_defaults_version: defaults_version,
                 }
             );
             let response = ServerFrame::try_new_for_version(
@@ -6958,7 +6959,7 @@ mod tests {
             session_id,
             parked_turn_id,
             content,
-            CanonicalU64::new(1),
+            defaults_version,
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);
@@ -6978,6 +6979,7 @@ mod tests {
         let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let defaults_version = CanonicalU64::new(1);
         let content = InputContent::new(String::from("continue after the stop"));
         let expected_content = content.clone();
         let server = tokio::spawn(async move {
@@ -6993,7 +6995,7 @@ mod tests {
                     session_id,
                     expected_active_turn_id: active_turn_id,
                     content: expected_content,
-                    expected_defaults_version: CanonicalU64::new(1),
+                    expected_defaults_version: defaults_version,
                 }
             );
             let response = ServerFrame::try_new_for_version(
@@ -7021,7 +7023,7 @@ mod tests {
             session_id,
             active_turn_id,
             content,
-            CanonicalU64::new(1),
+            defaults_version,
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);

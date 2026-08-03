@@ -1404,7 +1404,12 @@ pub enum CodexCliServiceTier {
 
 /// Provider-tagged service tier.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(tag = "provider", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "provider",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ServiceTier {
     Anthropic(AnthropicServiceTier),
     OpenAi(OpenAiServiceTier),
@@ -1413,7 +1418,12 @@ pub enum ServiceTier {
 
 /// One precedence-layer contribution for a setting.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum SettingOverlay<ValueT> {
     Inherit,
     ProviderDefault,
@@ -1422,7 +1432,12 @@ pub enum SettingOverlay<ValueT> {
 
 /// One fast-mode contribution at a precedence layer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum FastModeOverlay {
     Inherit,
     Value(FastMode),
@@ -1525,6 +1540,15 @@ impl ModelSettingsSnapshot {
             return Err(FrameValidationError::ModelSettingsShape);
         }
         Ok(())
+    }
+
+    fn has_provider_default_effective_values(&self) -> bool {
+        self.effective
+            == (EffectiveModelSettings {
+                reasoning_level: None,
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            })
     }
 }
 
@@ -4692,30 +4716,43 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
         SessionEvent::SessionModelSettingsChanged {
             prior_defaults_version,
             installed_defaults_version,
+            prior_model,
+            installed_model,
             prior_settings,
             installed_settings,
+            adjustments,
             ..
         } => {
             prior_settings.validate()?;
             installed_settings.validate()?;
-            if prior_defaults_version.value().checked_add(1)
-                != Some(installed_defaults_version.value())
+            validate_adjustments(adjustments)?;
+            if prior_defaults_version.value() == 0
+                || prior_defaults_version.value().checked_add(1)
+                    != Some(installed_defaults_version.value())
+                || (prior_model == installed_model && prior_settings == installed_settings)
             {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
         }
         SessionEvent::TurnModelSettingsResolved {
             defaults_version,
+            requested_model,
             selected_direct_id,
             settings,
+            adjustments,
             ..
         } => {
             settings.validate()?;
-            if defaults_version.value() == 0
-                || settings
-                    .validated_for_selection_id
-                    .is_some_and(|selection| selection != *selected_direct_id)
-            {
+            validate_adjustments(adjustments)?;
+            let direct_selection_mismatch = matches!(
+                requested_model,
+                ModelSelection::Direct { selection_id } if selection_id != selected_direct_id
+            );
+            let validation_mismatch = match settings.validated_for_selection_id {
+                Some(selection_id) => selection_id != *selected_direct_id,
+                None => !settings.has_provider_default_effective_values(),
+            };
+            if defaults_version.value() == 0 || direct_selection_mismatch || validation_mismatch {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
         }
@@ -4732,6 +4769,26 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
         | SessionEvent::TurnCancelled { .. }
         | SessionEvent::TurnReconciliationRequired { .. }
         | SessionEvent::TurnToolReconciliationRequired { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_adjustments(adjustments: &[ModelChangeAdjustment]) -> Result<(), FrameValidationError> {
+    if adjustments.len() > 3 {
+        return Err(FrameValidationError::ModelSettingsShape);
+    }
+    let mut minimum_rank = 0;
+    for adjustment in adjustments {
+        let rank = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { .. }
+            | ModelChangeAdjustment::ReasoningLevelCleared { .. } => 0,
+            ModelChangeAdjustment::FastModeDisabled {} => 1,
+            ModelChangeAdjustment::ServiceTierCleared { .. } => 2,
+        };
+        if rank < minimum_rank {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        minimum_rank = rank + 1;
     }
     Ok(())
 }
@@ -6214,7 +6271,7 @@ mod tests {
         ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
         SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
         TranscriptTextEntry, TurnState, UsageProvenance, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        encode_client_line, encode_server_line, validate_adjustments,
     };
     use uuid::Uuid;
 
@@ -6253,6 +6310,27 @@ mod tests {
             fast_mode_source: None,
             service_tier_source: Some(ModelSettingSource::PerCall),
             validated_for_selection_id: Some(uuid(4)),
+        }
+    }
+
+    fn provider_default_settings_snapshot_fixture() -> ModelSettingsSnapshot {
+        let inherited = ModelSettingsOverlay::inherit_all();
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: inherited,
+                session: inherited,
+                profile: inherited,
+                global_default: inherited,
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: None,
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: None,
+            fast_mode_source: None,
+            service_tier_source: None,
+            validated_for_selection_id: None,
         }
     }
 
@@ -11190,5 +11268,196 @@ mod tests {
 
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
         Ok(())
+    }
+
+    #[test]
+    fn nested_model_setting_tags_reject_unknown_members() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit","extra":1},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
+        );
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit","extra":1},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":[],"fast_mode_supported":false,"service_tiers":[{"provider":"open_ai","value":"priority","extra":1}]}}}"#,
+        );
+    }
+
+    #[test]
+    fn settings_change_event_rejects_zero_prior_version() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: uuid(2),
+                    prior_defaults_version: CanonicalU64::new(0),
+                    installed_defaults_version: CanonicalU64::new(1),
+                    prior_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    installed_model: ModelSelection::Alias { alias_id: uuid(5) },
+                    prior_settings: settings_snapshot_fixture(),
+                    installed_settings: settings_snapshot_fixture(),
+                    caller_override: ModelSettingsOverlay::inherit_all(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("a settings change cannot precede the initial defaults epoch");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn settings_change_event_rejects_a_no_op() {
+        let model = ModelSelection::Direct {
+            selection_id: uuid(4),
+        };
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: uuid(2),
+                    prior_defaults_version: CanonicalU64::new(1),
+                    installed_defaults_version: CanonicalU64::new(2),
+                    prior_model: model,
+                    installed_model: model,
+                    prior_settings: settings_snapshot_fixture(),
+                    installed_settings: settings_snapshot_fixture(),
+                    caller_override: ModelSettingsOverlay::inherit_all(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("a durable settings-change event must record an actual change");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn turn_settings_event_rejects_a_mismatched_direct_selection() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(5),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings_snapshot_fixture().precedence.per_call,
+                    settings: settings_snapshot_fixture(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("only an alias can resolve to a distinct direct selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn turn_settings_event_admits_model_independent_provider_defaults() {
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings: provider_default_settings_snapshot_fixture(),
+                    adjustments: Vec::new(),
+                },
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn turn_settings_event_requires_validation_for_non_default_settings() {
+        let mut settings = settings_snapshot_fixture();
+        settings.validated_for_selection_id = None;
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("non-default settings require exact validation provenance");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn adjustment_inventory_rejects_duplicates_order_and_excess() {
+        let duplicate = vec![
+            ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::XHigh,
+                to: ReasoningLevel::High,
+            },
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            },
+        ];
+        let reversed = vec![
+            ModelChangeAdjustment::FastModeDisabled {},
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            },
+        ];
+        let excessive = vec![
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            },
+            ModelChangeAdjustment::FastModeDisabled {},
+            ModelChangeAdjustment::ServiceTierCleared {
+                from: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
+            },
+            ModelChangeAdjustment::ServiceTierCleared {
+                from: ServiceTier::OpenAi(OpenAiServiceTier::Flex),
+            },
+        ];
+
+        assert_eq!(
+            validate_adjustments(&duplicate),
+            Err(FrameValidationError::ModelSettingsShape)
+        );
+        assert_eq!(
+            validate_adjustments(&reversed),
+            Err(FrameValidationError::ModelSettingsShape)
+        );
+        assert_eq!(
+            validate_adjustments(&excessive),
+            Err(FrameValidationError::ModelSettingsShape)
+        );
     }
 }

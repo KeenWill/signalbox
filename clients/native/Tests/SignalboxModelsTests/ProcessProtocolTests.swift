@@ -32,6 +32,45 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(frame.message, .sessionsStart)
   }
 
+  func testSessionDefaultsRequireTheModelSettingsSnapshot() {
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
+  func testSessionDefaultsRejectMalformedModelSettings() {
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "model_settings":{},
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
   /// INV-033: imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
