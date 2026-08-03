@@ -291,7 +291,10 @@ impl PostgresApprovalJudgeRepository {
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
-        if state == ApprovalJudgeStateStorageKind::InFlight {
+        if matches!(
+            state,
+            ApprovalJudgeStateStorageKind::InFlight | ApprovalJudgeStateStorageKind::Terminal
+        ) {
             transaction.rollback().await?;
             return Ok(AuthorizeApprovalJudgeOutcome::NoSend);
         }

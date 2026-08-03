@@ -66,7 +66,7 @@ use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
     approval_judge::{
         AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
-        PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+        FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
@@ -3646,6 +3646,48 @@ async fn approval_judge_repeated_authorization_returns_no_send() -> Result<(), B
 
     assert_eq!(retry, AuthorizeApprovalJudgeOutcome::NoSend);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_terminal_authorization_recheck_returns_no_send()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ed8;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+    let authorization = authorized_approval_judge(repository.authorize(&prepared).await?);
+    repository
+        .fail(
+            &prepared,
+            FailedApprovalJudgeDisposition::KnownFailed,
+            ProviderReportedTokenUsage::unreported(),
+        )
+        .await?;
+
+    let retry = repository.authorize(&prepared).await?;
+
+    assert_eq!(retry, AuthorizeApprovalJudgeOutcome::NoSend);
+    drop(authorization);
     pool.close().await;
     drop(container);
     Ok(())
