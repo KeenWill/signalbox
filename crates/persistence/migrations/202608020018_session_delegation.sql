@@ -175,6 +175,10 @@ ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_delegation_origin_key
         UNIQUE (turn_id, session_id, acceptance_position);
 
+CREATE UNIQUE INDEX turn_lifecycle_one_queued_delegation_origin_per_session
+    ON turn_lifecycle(session_id)
+    WHERE state_kind = 'queued' AND origin_kind = 'delegation';
+
 CREATE TABLE session_delegation_initial_task (
     spawning_tool_request_id uuid PRIMARY KEY,
     child_session_id uuid NOT NULL UNIQUE,
@@ -303,6 +307,140 @@ AS $$
      LIMIT 1
 $$;
 
+-- Model-identity boundary validation must recognize the same closed origin
+-- families as configuration resolution. A delegated initial turn has no
+-- accepted-input origin row, so resolving it through queued_input_origin alone
+-- would make the otherwise-valid turn impossible to activate.
+CREATE OR REPLACE FUNCTION turn_start_model_identity_boundary_is_valid(
+    checked_turn_id uuid,
+    checked_frontier_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_defaults_version numeric(20, 0);
+    checked_selection uuid;
+    boundary_required boolean;
+    predecessor_turn uuid;
+    predecessor_selection uuid;
+    starting_member_count numeric(20, 0);
+    boundary_entry_count bigint;
+    boundary_member_count bigint;
+    boundary_member_position numeric(20, 0);
+BEGIN
+    SELECT lifecycle.session_id, lifecycle.model_identity_boundary_required
+      INTO checked_session, boundary_required
+      FROM turn_lifecycle AS lifecycle
+     WHERE lifecycle.turn_id = checked_turn_id
+       AND (
+            (
+                lifecycle.origin_kind = 'accepted_input'
+                AND EXISTS (
+                    SELECT 1
+                      FROM queued_input_origin AS origin
+                     WHERE origin.turn_id = lifecycle.turn_id
+                       AND origin.session_id = lifecycle.session_id
+                )
+            )
+            OR (
+                lifecycle.origin_kind = 'delegation'
+                AND (
+                    EXISTS (
+                        SELECT 1
+                          FROM session_delegation_initial_task AS task
+                         WHERE task.turn_id = lifecycle.turn_id
+                           AND task.child_session_id = lifecycle.session_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM session_delegation_wake_turn_origin AS wake
+                         WHERE wake.turn_id = lifecycle.turn_id
+                           AND wake.recipient_session_id = lifecycle.session_id
+                    )
+                )
+            )
+       );
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    SELECT
+        effective.defaults_version,
+        effective.direct_selection_id
+      INTO checked_defaults_version, checked_selection
+      FROM turn_origin_effective_model_configuration(
+               checked_turn_id,
+               checked_session
+           ) AS effective;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    predecessor_turn := accepted_input_turn_queue_predecessor(
+        checked_session,
+        checked_turn_id
+    );
+    IF predecessor_turn IS NOT NULL THEN
+        SELECT effective.direct_selection_id
+          INTO predecessor_selection
+          FROM turn_origin_effective_model_configuration(
+                   predecessor_turn,
+                   checked_session
+               ) AS effective;
+        IF NOT FOUND THEN
+            RETURN false;
+        END IF;
+    END IF;
+
+    SELECT count(*)
+      INTO boundary_entry_count
+      FROM semantic_transcript_entry AS entry
+     WHERE entry.source_session_id = checked_session
+       AND entry.payload_kind = 'model_identity_changed'
+       AND entry.model_identity_turn_id = checked_turn_id
+       AND entry.model_identity_defaults_version = checked_defaults_version
+       AND entry.model_identity_direct_selection_id = checked_selection;
+
+    IF NOT boundary_required THEN
+        RETURN boundary_entry_count = 0;
+    END IF;
+
+    IF predecessor_turn IS NULL
+       OR predecessor_selection IS NOT DISTINCT FROM checked_selection
+    THEN
+        RETURN boundary_entry_count = 0;
+    END IF;
+
+    SELECT member_count
+      INTO starting_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_frontier_id;
+
+    SELECT count(*), max(member.member_position)
+      INTO boundary_member_count, boundary_member_position
+      FROM semantic_transcript_entry AS entry
+      JOIN context_frontier_member AS member
+        ON member.source_session_id = entry.source_session_id
+       AND member.semantic_entry_id = entry.semantic_entry_id
+     WHERE entry.source_session_id = checked_session
+       AND entry.payload_kind = 'model_identity_changed'
+       AND entry.model_identity_turn_id = checked_turn_id
+       AND member.owning_session_id = checked_session
+       AND member.context_frontier_id = checked_frontier_id;
+
+    RETURN boundary_entry_count = 1
+       AND boundary_member_count = 1
+       AND boundary_member_position IS NOT DISTINCT FROM
+           starting_member_count - 1;
+END;
+$$;
+
 CREATE FUNCTION require_delegation_initial_task_purpose()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -313,6 +451,10 @@ BEGIN
             ON request.request_id = relation.spawning_tool_request_id
            AND request.turn_id = relation.parent_turn_id
            AND request.session_id = relation.parent_session_id
+          JOIN tool_attempt AS attempt
+            ON attempt.request_id = request.request_id
+           AND attempt.turn_id = request.turn_id
+           AND attempt.session_id = request.session_id
           JOIN LATERAL turn_origin_effective_model_configuration(
                 relation.parent_turn_id, relation.parent_session_id
           ) AS frozen ON true
@@ -339,6 +481,23 @@ BEGIN
                     )
                 END,
                 'task', NEW.task_content
+           )
+           AND attempt.state_kind = 'terminal'
+           AND attempt.terminal_disposition_kind = 'completed'
+           AND attempt.effect_class = 'external_effect'
+           AND attempt.result_content_kind = 'text'
+           AND attempt.result_text::jsonb = jsonb_build_object(
+                'result', 'session_spawned',
+                'tool_request_id', relation.spawning_tool_request_id::text,
+                'child_session_id', relation.child_session_id::text,
+                'relationship', CASE relation.policy_kind
+                    WHEN 'background' THEN jsonb_build_object('kind', 'background')
+                    WHEN 'bound' THEN jsonb_build_object(
+                        'kind', 'bound',
+                        'on_parent_stopped', relation.on_parent_stopped,
+                        'on_parent_cancelled', relation.on_parent_cancelled
+                    )
+                END
            )
            AND frozen.direct_selection_id = NEW.frozen_direct_model_selection_id
            AND child_defaults.model_selection_kind =
@@ -1108,29 +1267,26 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION require_delegation_parent_termination_chain()
-RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE
-    cascade session_delegation_termination_cascade%ROWTYPE;
+CREATE FUNCTION assert_delegation_parent_termination_chain(
+    checked session_delegation_parent_termination,
+    cascade session_delegation_termination_cascade
+)
+RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
-    SELECT * INTO cascade FROM session_delegation_termination_cascade
-     WHERE root_command_id = NEW.root_command_id;
-    IF cascade.root_command_id IS NULL THEN
-        RETURN NULL;
-    END IF;
-    IF NEW.command_source_kind <> cascade.root_source_kind
-        OR (NEW.command_source_kind = 'goal_command'
-            AND NEW.parent_goal_generation IS DISTINCT FROM
+    IF checked.command_source_kind <> cascade.root_source_kind
+        OR (checked.command_source_kind = 'goal_command'
+            AND checked.parent_goal_generation IS DISTINCT FROM
                 cascade.root_goal_generation) THEN
         RAISE EXCEPTION 'delegation termination source contradicts its root command'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_parent_termination_chain';
     END IF;
-    IF NEW.source_kind = 'root' THEN
-        IF NEW.parent_session_id <> cascade.root_session_id
-            OR NEW.parent_turn_id IS DISTINCT FROM cascade.root_turn_id
-            OR NEW.parent_goal_generation IS DISTINCT FROM cascade.root_goal_generation
-            OR NEW.termination_kind <> cascade.termination_kind
+    IF checked.source_kind = 'root' THEN
+        IF checked.parent_session_id <> cascade.root_session_id
+            OR checked.parent_turn_id IS DISTINCT FROM cascade.root_turn_id
+            OR checked.parent_goal_generation IS DISTINCT FROM
+                cascade.root_goal_generation
+            OR checked.termination_kind <> cascade.termination_kind
         THEN
             RAISE EXCEPTION 'direct delegation termination contradicts its root command'
                 USING ERRCODE = '23514',
@@ -1149,9 +1305,9 @@ BEGIN
           JOIN session_delegation_parent_termination AS source_authority
             ON source_authority.spawning_tool_request_id =
                 source_event.spawning_tool_request_id
-           AND source_authority.root_command_id = NEW.root_command_id
+           AND source_authority.root_command_id = checked.root_command_id
          WHERE source_event.spawning_tool_request_id =
-                NEW.source_spawning_tool_request_id
+                checked.source_spawning_tool_request_id
            AND source_event.event_kind = 'outcome_recorded'
            AND source_event.outcome_kind IN (
                 'child_stopped', 'child_cancelled', 'already_terminal'
@@ -1160,15 +1316,15 @@ BEGIN
                 WHEN 'turn_command' THEN 'parent_turn_command'
                 WHEN 'goal_command' THEN 'parent_goal_command'
            END
-           AND source_event.provenance_command_id = NEW.root_command_id
+           AND source_event.provenance_command_id = checked.root_command_id
            AND source_event.provenance_turn_id IS NOT DISTINCT FROM
                 source_authority.parent_turn_id
            AND source_event.provenance_goal_generation IS NOT DISTINCT FROM
                 source_authority.parent_goal_generation
-           AND source_relation.child_session_id = NEW.parent_session_id
-           AND (NEW.command_source_kind = 'goal_command'
-                OR source_task.turn_id = NEW.parent_turn_id)
-           AND NEW.termination_kind = CASE source_event.outcome_kind
+           AND source_relation.child_session_id = checked.parent_session_id
+           AND (checked.command_source_kind = 'goal_command'
+                OR source_task.turn_id = checked.parent_turn_id)
+           AND checked.termination_kind = CASE source_event.outcome_kind
                 WHEN 'child_stopped' THEN 'stopped'
                 WHEN 'child_cancelled' THEN 'cancelled'
                 WHEN 'already_terminal' THEN source_authority.termination_kind
@@ -1178,6 +1334,39 @@ BEGIN
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_parent_termination_chain';
     END IF;
+END;
+$$;
+
+CREATE FUNCTION require_delegation_parent_termination_chain()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    cascade session_delegation_termination_cascade%ROWTYPE;
+BEGIN
+    SELECT * INTO cascade FROM session_delegation_termination_cascade
+     WHERE root_command_id = NEW.root_command_id;
+    IF cascade.root_command_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+    PERFORM assert_delegation_parent_termination_chain(NEW, cascade);
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION require_delegation_cascade_parent_termination_chains()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    authority session_delegation_parent_termination%ROWTYPE;
+BEGIN
+    FOR authority IN
+        SELECT stored.*
+          FROM session_delegation_parent_termination AS stored
+         WHERE stored.root_command_id = NEW.root_command_id
+    LOOP
+        PERFORM assert_delegation_parent_termination_chain(
+            authority,
+            NEW
+        );
+    END LOOP;
     RETURN NULL;
 END;
 $$;
@@ -1186,6 +1375,11 @@ CREATE CONSTRAINT TRIGGER session_delegation_termination_cascade_command
 AFTER INSERT ON session_delegation_termination_cascade
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_delegation_termination_cascade_command();
+
+CREATE CONSTRAINT TRIGGER session_delegation_cascade_requires_parent_chains
+AFTER INSERT ON session_delegation_termination_cascade
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_cascade_parent_termination_chains();
 
 CREATE CONSTRAINT TRIGGER session_delegation_parent_termination_chain
 AFTER INSERT ON session_delegation_parent_termination
@@ -1221,7 +1415,13 @@ BEGIN
                 WHEN relation.policy_kind = 'background' THEN 'keep_running'
                 WHEN checked_root_kind = 'stopped' THEN relation.on_parent_stopped
                 ELSE relation.on_parent_cancelled
-            END AS expected_action
+            END AS expected_action,
+            ARRAY[
+                relation.parent_session_id,
+                relation.child_session_id
+            ]::uuid[] AS visited_session_ids,
+            relation.child_session_id <> relation.parent_session_id
+                AS can_descend
           FROM session_delegation AS relation
          WHERE relation.parent_session_id = checked_root_session
 
@@ -1248,17 +1448,35 @@ BEGIN
                     THEN relation.on_parent_cancelled
                 WHEN parent.expected_action = 'stop' THEN relation.on_parent_stopped
                 ELSE relation.on_parent_cancelled
-            END AS expected_action
+            END AS expected_action,
+            CASE
+                WHEN relation.child_session_id = ANY(parent.visited_session_ids)
+                    THEN parent.visited_session_ids
+                ELSE parent.visited_session_ids || relation.child_session_id
+            END AS visited_session_ids,
+            NOT relation.child_session_id = ANY(parent.visited_session_ids)
+                AS can_descend
           FROM frontier AS parent
           JOIN session_delegation AS relation
             ON relation.parent_session_id = parent.child_session_id
           LEFT JOIN session_child_result AS parent_result
             ON parent_result.spawning_tool_request_id =
                 parent.spawning_tool_request_id
-         WHERE parent.expected_action IN ('stop', 'cancel')
-            OR parent_result.spawning_tool_request_id IS NOT NULL
+         WHERE (
+                parent.expected_action IN ('stop', 'cancel')
+                OR parent_result.spawning_tool_request_id IS NOT NULL
+           )
+           AND parent.can_descend
     )
-    SELECT * FROM frontier;
+    SELECT
+        frontier.spawning_tool_request_id,
+        frontier.parent_session_id,
+        frontier.child_session_id,
+        frontier.effective_parent_kind,
+        frontier.source_kind,
+        frontier.source_spawning_tool_request_id,
+        frontier.expected_action
+      FROM frontier;
 END;
 $$;
 
@@ -1686,17 +1904,45 @@ BEGIN
          WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
            AND event_ordinal = NEW.event_ordinal;
         IF NEW.provenance_kind <> 'tool_request'
-            OR NOT EXISTS (SELECT 1 FROM tool_request
-                WHERE request_id = NEW.provenance_tool_request_id
-                  AND tool_name = 'send_session_message'
-                  AND arguments_kind = 'json'
-                  AND arguments_text::jsonb = jsonb_build_object(
-                      'content', stored_content,
-                      'peer_session_id', CASE stored_direction
-                          WHEN 'parent_to_child' THEN relation_child::text
-                          WHEN 'child_to_parent' THEN relation_parent::text
-                      END
-                  ))
+            OR NOT EXISTS (
+                SELECT 1
+                  FROM tool_request AS request
+                  JOIN tool_attempt AS attempt
+                    ON attempt.request_id = request.request_id
+                   AND attempt.turn_id = request.turn_id
+                   AND attempt.session_id = request.session_id
+                  JOIN session_message AS message
+                    ON message.spawning_tool_request_id =
+                        NEW.spawning_tool_request_id
+                   AND message.event_ordinal = NEW.event_ordinal
+                  JOIN session_message_delivery AS delivery
+                    ON delivery.message_id = message.message_id
+                   AND delivery.spawning_tool_request_id =
+                        message.spawning_tool_request_id
+                 WHERE request.request_id = NEW.provenance_tool_request_id
+                   AND request.session_id = NEW.provenance_session_id
+                   AND request.tool_name = 'send_session_message'
+                   AND request.arguments_kind = 'json'
+                   AND request.arguments_text::jsonb = jsonb_build_object(
+                        'content', stored_content,
+                        'peer_session_id', CASE stored_direction
+                            WHEN 'parent_to_child' THEN relation_child::text
+                            WHEN 'child_to_parent' THEN relation_parent::text
+                        END
+                   )
+                   AND attempt.state_kind = 'terminal'
+                   AND attempt.terminal_disposition_kind = 'completed'
+                   AND attempt.effect_class = 'external_effect'
+                   AND attempt.result_content_kind = 'text'
+                   AND attempt.result_text::jsonb = jsonb_build_object(
+                        'result', 'session_message_sent',
+                        'tool_request_id', request.request_id::text,
+                        'message_id', message.message_id::text,
+                        'direction', message.direction,
+                        'ordinal', message.event_ordinal,
+                        'delivery_sequence', delivery.delivery_sequence
+                   )
+            )
             OR (stored_direction = 'parent_to_child'
                 AND NEW.provenance_session_id <> relation_parent)
             OR (stored_direction = 'child_to_parent'
@@ -1881,6 +2127,48 @@ BEGIN
                 RAISE EXCEPTION 'parent disposition contradicts relationship policy'
                     USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
             END IF;
+            IF NEW.outcome_kind IN ('child_stopped', 'child_cancelled')
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM session_delegation_initial_task AS task
+                      JOIN turn_lifecycle AS lifecycle
+                        ON lifecycle.turn_id = task.turn_id
+                       AND lifecycle.session_id = task.child_session_id
+                       AND lifecycle.state_kind = 'terminal'
+                       AND lifecycle.terminal_disposition_kind = 'cancelled'
+                      JOIN semantic_transcript_entry AS marker
+                        ON marker.source_session_id = lifecycle.session_id
+                       AND marker.payload_kind = 'turn_cancelled'
+                       AND marker.cancelled_turn_id = lifecycle.turn_id
+                      JOIN context_frontier AS frontier
+                        ON frontier.owning_session_id = lifecycle.session_id
+                       AND frontier.context_frontier_id =
+                            lifecycle.terminal_frontier_id
+                      JOIN context_frontier_member AS terminal_member
+                        ON terminal_member.owning_session_id =
+                            frontier.owning_session_id
+                       AND terminal_member.context_frontier_id =
+                            frontier.context_frontier_id
+                       AND terminal_member.member_position = frontier.member_count
+                       AND terminal_member.source_session_id =
+                            marker.source_session_id
+                       AND terminal_member.semantic_entry_id =
+                            marker.semantic_entry_id
+                      JOIN turn_cancelled_outbox_event AS cancellation
+                        ON cancellation.session_id = lifecycle.session_id
+                       AND cancellation.turn_id = lifecycle.turn_id
+                       AND cancellation.cancellation_entry_id =
+                            marker.semantic_entry_id
+                       AND cancellation.terminal_frontier_id =
+                            lifecycle.terminal_frontier_id
+                     WHERE task.spawning_tool_request_id =
+                            NEW.spawning_tool_request_id
+                       AND task.child_session_id = relation_child
+                ) THEN
+                RAISE EXCEPTION 'parent disposition lacks exact child terminal evidence'
+                    USING ERRCODE = '23514',
+                        CONSTRAINT = 'session_delegation_event_semantics';
+            END IF;
         ELSE
             RAISE EXCEPTION 'outcome reason is not a delegation descendant event'
                 USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
@@ -1915,10 +2203,11 @@ BEGIN
            AND terminal_disposition_kind = 'completed'
            AND effect_class = 'effect_free'
            AND result_content_kind = 'text'
-           AND result_text = format(
-                '{"result":"session_await_registered","tool_request_id":"%s","child_session_id":"%s","mode":"background"}',
-                NEW.awaiting_tool_request_id,
-                NEW.child_session_id
+           AND result_text::jsonb = jsonb_build_object(
+                'result', 'session_await_registered',
+                'tool_request_id', NEW.awaiting_tool_request_id::text,
+                'child_session_id', NEW.child_session_id::text,
+                'mode', 'background'
            )
     ) THEN
         RAISE EXCEPTION 'background delegation wait requires exact completed registration receipt'
@@ -2139,6 +2428,80 @@ CREATE CONSTRAINT TRIGGER session_pending_delivery_requires_satellite
 AFTER INSERT ON session_pending_delivery DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_session_pending_delivery_satellite();
 
+-- An idle-recipient wake is a distinct typed turn origin. The closed delivery
+-- range is the content appended after the predecessor frontier; the final item
+-- is the logical origin entry used by the generic lifecycle validators.
+CREATE TABLE session_delegation_wake_turn_origin (
+    turn_id uuid PRIMARY KEY,
+    recipient_session_id uuid NOT NULL,
+    admission_position numeric(20, 0) NOT NULL CHECK (
+        admission_position BETWEEN 1 AND 18446744073709551615
+    ),
+    first_delivery_sequence numeric(20, 0) NOT NULL CHECK (
+        first_delivery_sequence BETWEEN 1 AND 18446744073709551615
+    ),
+    through_delivery_sequence numeric(20, 0) NOT NULL CHECK (
+        through_delivery_sequence BETWEEN 1 AND 18446744073709551615
+    ),
+    defaults_version numeric(20, 0) NOT NULL CHECK (
+        defaults_version BETWEEN 1 AND 18446744073709551615
+    ),
+    frozen_direct_model_selection_id uuid NOT NULL,
+    CONSTRAINT session_delegation_wake_delivery_range CHECK (
+        first_delivery_sequence <= through_delivery_sequence
+    ),
+    UNIQUE (turn_id, recipient_session_id, admission_position),
+    UNIQUE (recipient_session_id, through_delivery_sequence),
+    FOREIGN KEY (turn_id, recipient_session_id, admission_position)
+        REFERENCES turn_lifecycle(turn_id, session_id, acceptance_position)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (recipient_session_id, through_delivery_sequence)
+        REFERENCES session_pending_delivery(
+            recipient_session_id, delivery_sequence
+        ) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (recipient_session_id, defaults_version)
+        REFERENCES session_defaults_version(session_id, version)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE FUNCTION guard_session_delegation_wake_turn_origin_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'delegation wake turn origin is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+    IF ROW(
+        OLD.turn_id,
+        OLD.recipient_session_id,
+        OLD.admission_position,
+        OLD.first_delivery_sequence,
+        OLD.defaults_version,
+        OLD.frozen_direct_model_selection_id
+    ) IS DISTINCT FROM ROW(
+        NEW.turn_id,
+        NEW.recipient_session_id,
+        NEW.admission_position,
+        NEW.first_delivery_sequence,
+        NEW.defaults_version,
+        NEW.frozen_direct_model_selection_id
+    ) OR NEW.through_delivery_sequence <= OLD.through_delivery_sequence
+      OR NOT EXISTS (
+            SELECT 1 FROM turn_lifecycle AS lifecycle
+             WHERE lifecycle.turn_id = OLD.turn_id
+               AND lifecycle.session_id = OLD.recipient_session_id
+               AND lifecycle.state_kind = 'queued'
+      ) THEN
+        RAISE EXCEPTION 'only a queued wake origin may extend its delivery range'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER session_delegation_wake_turn_origin_changes_are_guarded
+BEFORE UPDATE OR DELETE ON session_delegation_wake_turn_origin
+FOR EACH ROW EXECUTE FUNCTION guard_session_delegation_wake_turn_origin_change();
+
 CREATE FUNCTION require_session_message_delivery()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -2223,8 +2586,11 @@ BEGIN
                  OR (payload_kind = ''delegation_result''
                     AND delegation_message_id IS NULL
                     AND delegation_result_awaiting_tool_request_id IS NOT NULL
-                    AND tool_result_request_id =
-                        delegation_result_awaiting_tool_request_id
+                    AND (
+                        tool_result_request_id IS NULL
+                        OR tool_result_request_id =
+                            delegation_result_awaiting_tool_request_id
+                    )
                     AND delegation_result_spawning_tool_request_id IS NOT NULL
                     AND %s)
                  OR (payload_kind NOT IN (
@@ -2309,6 +2675,585 @@ ALTER TABLE semantic_transcript_entry
             spawning_tool_request_id,
             parent_session_id
         ) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE FUNCTION delegation_delivery_semantic_entry(
+    checked_recipient uuid,
+    checked_sequence numeric(20, 0)
+)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT entry.semantic_entry_id
+      FROM session_pending_delivery AS pending
+      JOIN session_message_delivery AS delivery
+        ON pending.delivery_kind = 'message'
+       AND delivery.recipient_session_id = pending.recipient_session_id
+       AND delivery.delivery_sequence = pending.delivery_sequence
+      JOIN semantic_transcript_entry AS entry
+        ON entry.source_session_id = delivery.recipient_session_id
+       AND entry.payload_kind = 'delegation_message'
+       AND entry.delegation_message_id = delivery.message_id
+     WHERE pending.recipient_session_id = checked_recipient
+       AND pending.delivery_sequence = checked_sequence
+    UNION ALL
+    SELECT entry.semantic_entry_id
+      FROM session_pending_delivery AS pending
+      JOIN session_child_result_delivery AS delivery
+        ON pending.delivery_kind = 'background_result'
+       AND delivery.parent_session_id = pending.recipient_session_id
+       AND delivery.delivery_sequence = pending.delivery_sequence
+      JOIN semantic_transcript_entry AS entry
+        ON entry.source_session_id = delivery.parent_session_id
+       AND entry.payload_kind = 'delegation_result'
+       AND entry.delegation_result_awaiting_tool_request_id =
+            delivery.awaiting_tool_request_id
+       AND entry.delegation_result_spawning_tool_request_id =
+            delivery.spawning_tool_request_id
+     WHERE pending.recipient_session_id = checked_recipient
+       AND pending.delivery_sequence = checked_sequence
+$$;
+
+CREATE OR REPLACE FUNCTION require_delegation_initial_task_origin()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    delegation_origin_count bigint;
+BEGIN
+    SELECT
+        (SELECT count(*) FROM session_delegation_initial_task AS task
+          WHERE task.turn_id = NEW.turn_id
+            AND task.child_session_id = NEW.session_id
+            AND task.admission_position = NEW.acceptance_position)
+        +
+        (SELECT count(*) FROM session_delegation_wake_turn_origin AS wake
+          WHERE wake.turn_id = NEW.turn_id
+            AND wake.recipient_session_id = NEW.session_id
+            AND wake.admission_position = NEW.acceptance_position)
+      INTO delegation_origin_count;
+    IF (NEW.origin_kind = 'delegation') IS DISTINCT FROM
+            (delegation_origin_count = 1)
+       OR delegation_origin_count > 1 THEN
+        RAISE EXCEPTION 'turn lifecycle requires exactly its typed origin'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'turn_lifecycle_typed_origin';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION turn_origin_effective_model_configuration(
+    checked_turn_id uuid,
+    checked_session_id uuid
+)
+RETURNS TABLE (
+    defaults_version numeric(20, 0),
+    direct_selection_id uuid
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE configuration_chain AS (
+        (
+            SELECT
+                origin.turn_id,
+                origin.source_configuration_turn_id,
+                origin.defaults_version,
+                COALESCE(
+                    origin.frozen_direct_model_selection_id,
+                    origin.frozen_alias_selected_direct_id
+                ) AS direct_selection_id,
+                ARRAY[origin.turn_id]::uuid[] AS visited_turn_ids
+              FROM queued_input_origin AS origin
+             WHERE origin.turn_id = checked_turn_id
+               AND origin.session_id = checked_session_id
+
+            UNION ALL
+
+            SELECT
+                task.turn_id,
+                NULL::uuid AS source_configuration_turn_id,
+                task.defaults_version,
+                task.frozen_direct_model_selection_id,
+                ARRAY[task.turn_id]::uuid[] AS visited_turn_ids
+              FROM session_delegation_initial_task AS task
+             WHERE task.turn_id = checked_turn_id
+               AND task.child_session_id = checked_session_id
+
+            UNION ALL
+
+            SELECT
+                wake.turn_id,
+                NULL::uuid AS source_configuration_turn_id,
+                wake.defaults_version,
+                wake.frozen_direct_model_selection_id,
+                ARRAY[wake.turn_id]::uuid[] AS visited_turn_ids
+              FROM session_delegation_wake_turn_origin AS wake
+             WHERE wake.turn_id = checked_turn_id
+               AND wake.recipient_session_id = checked_session_id
+        )
+
+        UNION ALL
+
+        SELECT
+            source.turn_id,
+            source.source_configuration_turn_id,
+            source.defaults_version,
+            COALESCE(
+                source.frozen_direct_model_selection_id,
+                source.frozen_alias_selected_direct_id
+            ),
+            chain.visited_turn_ids || source.turn_id
+          FROM configuration_chain AS chain
+          JOIN queued_input_origin AS source
+            ON source.turn_id = chain.source_configuration_turn_id
+           AND source.session_id = checked_session_id
+         WHERE NOT source.turn_id = ANY(chain.visited_turn_ids)
+    )
+    SELECT chain.defaults_version, chain.direct_selection_id
+      FROM configuration_chain AS chain
+     WHERE chain.defaults_version IS NOT NULL
+       AND chain.direct_selection_id IS NOT NULL
+     ORDER BY cardinality(chain.visited_turn_ids) DESC
+     LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION turn_lifecycle_origin_semantic_entry(
+    checked_turn_id uuid,
+    checked_session_id uuid,
+    checked_origin_input_id uuid
+)
+RETURNS TABLE (semantic_entry_id uuid)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT entry.semantic_entry_id
+      FROM turn_lifecycle AS lifecycle
+      JOIN semantic_transcript_entry AS entry
+        ON entry.source_session_id = lifecycle.session_id
+      LEFT JOIN session_delegation_initial_task AS task
+        ON task.turn_id = lifecycle.turn_id
+       AND task.child_session_id = lifecycle.session_id
+       AND task.semantic_entry_id = entry.semantic_entry_id
+      LEFT JOIN session_delegation_wake_turn_origin AS wake
+        ON wake.turn_id = lifecycle.turn_id
+       AND wake.recipient_session_id = lifecycle.session_id
+       AND delegation_delivery_semantic_entry(
+            wake.recipient_session_id,
+            wake.through_delivery_sequence
+       ) = entry.semantic_entry_id
+     WHERE lifecycle.turn_id = checked_turn_id
+       AND lifecycle.session_id = checked_session_id
+       AND (
+            (lifecycle.origin_kind = 'accepted_input'
+                AND entry.payload_kind = 'origin_accepted_input'
+                AND entry.origin_accepted_input_id = checked_origin_input_id)
+            OR (lifecycle.origin_kind = 'delegation'
+                AND lifecycle.state_kind <> 'queued'
+                AND (
+                    (entry.payload_kind = 'delegated_task'
+                        AND task.spawning_tool_request_id =
+                            entry.delegated_task_spawning_tool_request_id)
+                    OR wake.turn_id IS NOT NULL
+                ))
+       )
+$$;
+
+CREATE OR REPLACE FUNCTION accepted_input_turn_queue_predecessor(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE derived_order (
+        turn_id,
+        root_position,
+        interrupt_depth
+    ) AS (
+        SELECT
+            lifecycle.turn_id,
+            lifecycle.acceptance_position,
+            0::bigint
+          FROM turn_lifecycle AS lifecycle
+          LEFT JOIN queued_input_origin AS origin
+            ON origin.turn_id = lifecycle.turn_id
+           AND origin.session_id = lifecycle.session_id
+         WHERE lifecycle.session_id = checked_session
+           AND (
+                origin.priority_kind = 'ordinary'
+                OR (
+                    lifecycle.origin_kind = 'delegation'
+                    AND (
+                        EXISTS (
+                            SELECT 1
+                              FROM session_delegation_initial_task AS task
+                             WHERE task.turn_id = lifecycle.turn_id
+                               AND task.child_session_id = lifecycle.session_id
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                              FROM session_delegation_wake_turn_origin AS wake
+                             WHERE wake.turn_id = lifecycle.turn_id
+                               AND wake.recipient_session_id = lifecycle.session_id
+                        )
+                    )
+                )
+           )
+           AND goal_turn_is_runtime_relevant(
+                lifecycle.session_id,
+                lifecycle.turn_id
+           )
+        UNION ALL
+        SELECT
+            successor.turn_id,
+            predecessor.root_position,
+            predecessor.interrupt_depth + 1
+          FROM derived_order AS predecessor
+          JOIN queued_input_origin AS successor
+            ON successor.session_id = checked_session
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = predecessor.turn_id
+          JOIN turn_lifecycle AS successor_lifecycle
+            ON successor_lifecycle.turn_id = successor.turn_id
+           AND successor_lifecycle.session_id = successor.session_id
+         WHERE goal_turn_is_runtime_relevant(
+            successor_lifecycle.session_id,
+            successor_lifecycle.turn_id
+         )
+    ),
+    ranked AS (
+        SELECT
+            turn_id,
+            lag(turn_id) OVER (
+                ORDER BY root_position, interrupt_depth
+            ) AS predecessor_turn
+          FROM derived_order
+    )
+    SELECT predecessor_turn
+      FROM ranked
+     WHERE turn_id = checked_turn
+$$;
+
+CREATE OR REPLACE FUNCTION accepted_input_turn_is_first_nonterminal(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE derived_order (
+        turn_id,
+        root_position,
+        interrupt_depth
+    ) AS (
+        SELECT
+            lifecycle.turn_id,
+            lifecycle.acceptance_position,
+            0::bigint
+          FROM turn_lifecycle AS lifecycle
+          LEFT JOIN queued_input_origin AS origin
+            ON origin.turn_id = lifecycle.turn_id
+           AND origin.session_id = lifecycle.session_id
+         WHERE lifecycle.session_id = checked_session
+           AND (
+                origin.priority_kind = 'ordinary'
+                OR (
+                    lifecycle.origin_kind = 'delegation'
+                    AND (
+                        EXISTS (
+                            SELECT 1
+                              FROM session_delegation_initial_task AS task
+                             WHERE task.turn_id = lifecycle.turn_id
+                               AND task.child_session_id = lifecycle.session_id
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                              FROM session_delegation_wake_turn_origin AS wake
+                             WHERE wake.turn_id = lifecycle.turn_id
+                               AND wake.recipient_session_id = lifecycle.session_id
+                        )
+                    )
+                )
+           )
+           AND goal_turn_is_runtime_relevant(
+                lifecycle.session_id,
+                lifecycle.turn_id
+           )
+        UNION ALL
+        SELECT
+            successor.turn_id,
+            predecessor.root_position,
+            predecessor.interrupt_depth + 1
+          FROM derived_order AS predecessor
+          JOIN queued_input_origin AS successor
+            ON successor.session_id = checked_session
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = predecessor.turn_id
+          JOIN turn_lifecycle AS successor_lifecycle
+            ON successor_lifecycle.turn_id = successor.turn_id
+           AND successor_lifecycle.session_id = successor.session_id
+         WHERE goal_turn_is_runtime_relevant(
+            successor_lifecycle.session_id,
+            successor_lifecycle.turn_id
+         )
+    ),
+    ranked AS (
+        SELECT
+            turn_id,
+            row_number() OVER (
+                ORDER BY root_position, interrupt_depth
+            ) AS queue_rank
+          FROM derived_order
+    ),
+    candidate AS (
+        SELECT queue_rank
+          FROM ranked
+         WHERE turn_id = checked_turn
+    )
+    SELECT EXISTS (SELECT 1 FROM candidate)
+       AND NOT EXISTS (
+            SELECT 1
+              FROM ranked AS earlier
+              JOIN turn_lifecycle AS lifecycle
+                ON lifecycle.turn_id = earlier.turn_id
+               AND lifecycle.session_id = checked_session
+              JOIN candidate
+                ON earlier.queue_rank < candidate.queue_rank
+             WHERE lifecycle.state_kind <> 'terminal'
+       )
+$$;
+
+CREATE FUNCTION turn_lifecycle_origin_member_span(
+    checked_turn_id uuid,
+    checked_session_id uuid
+)
+RETURNS numeric(20, 0)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(
+        (
+            SELECT wake.through_delivery_sequence
+                   - wake.first_delivery_sequence + 1
+              FROM session_delegation_wake_turn_origin AS wake
+             WHERE wake.turn_id = checked_turn_id
+               AND wake.recipient_session_id = checked_session_id
+        ),
+        1
+    )
+$$;
+
+DO $migration$
+DECLARE
+    checked_function regprocedure;
+    definition text;
+    updated_definition text;
+BEGIN
+    FOREACH checked_function IN ARRAY ARRAY[
+        'assert_turn_lifecycle_final_state_without_steering(uuid)'::regprocedure,
+        'assert_terminal_started_turn_common_final_state(uuid)'::regprocedure
+    ]
+    LOOP
+        SELECT pg_get_functiondef(checked_function) INTO definition;
+        updated_definition := replace(
+            replace(
+                definition,
+                'predecessor_terminal_member_count + 1',
+                'predecessor_terminal_member_count + turn_lifecycle_origin_member_span(checked_turn_id, checked_session_id)'
+            ),
+            'predecessor_member_count + 1',
+            'predecessor_member_count + turn_lifecycle_origin_member_span(checked_turn_id, checked_session)'
+        );
+        IF updated_definition = definition THEN
+            RAISE EXCEPTION 'delegation wake could not extend lifecycle origin span in %',
+                checked_function;
+        END IF;
+        EXECUTE updated_definition;
+    END LOOP;
+END;
+$migration$;
+
+CREATE FUNCTION require_delegation_wake_turn_origin()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    stored session_delegation_wake_turn_origin%ROWTYPE;
+    lifecycle turn_lifecycle%ROWTYPE;
+    predecessor_turn uuid;
+    predecessor_frontier uuid;
+    predecessor_member_count numeric(20, 0);
+    predecessor_defaults_version numeric(20, 0);
+    predecessor_direct_selection uuid;
+    delivery_count bigint;
+    incorrect_member_count bigint;
+    skipped_earlier_count bigint;
+BEGIN
+    SELECT * INTO stored FROM session_delegation_wake_turn_origin
+     WHERE turn_id = NEW.turn_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    SELECT * INTO lifecycle FROM turn_lifecycle
+     WHERE turn_id = stored.turn_id
+       AND session_id = stored.recipient_session_id
+       AND acceptance_position = stored.admission_position
+       AND origin_kind = 'delegation';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'delegation wake lacks its exact typed turn lifecycle'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_delegation_wake_turn_origin';
+    END IF;
+
+    SELECT count(*) INTO delivery_count
+      FROM generate_series(
+            stored.first_delivery_sequence,
+            stored.through_delivery_sequence
+      ) AS sequence(value)
+     WHERE delegation_delivery_semantic_entry(
+            stored.recipient_session_id,
+            sequence.value
+     ) IS NOT NULL;
+    IF delivery_count <> stored.through_delivery_sequence
+            - stored.first_delivery_sequence + 1 THEN
+        RAISE EXCEPTION 'delegation wake range lacks typed delivered content'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_delegation_wake_turn_origin';
+    END IF;
+    predecessor_turn := accepted_input_turn_queue_predecessor(
+        stored.recipient_session_id,
+        stored.turn_id
+    );
+    SELECT terminal_frontier_id INTO predecessor_frontier
+      FROM turn_lifecycle
+     WHERE turn_id = predecessor_turn
+       AND session_id = stored.recipient_session_id
+       AND state_kind = 'terminal';
+    SELECT member_count INTO predecessor_member_count
+      FROM context_frontier
+     WHERE owning_session_id = stored.recipient_session_id
+       AND context_frontier_id = predecessor_frontier;
+    SELECT effective.defaults_version, effective.direct_selection_id
+      INTO predecessor_defaults_version, predecessor_direct_selection
+      FROM turn_origin_effective_model_configuration(
+            predecessor_turn,
+            stored.recipient_session_id
+      ) AS effective;
+    IF predecessor_member_count IS NULL
+       OR stored.defaults_version IS DISTINCT FROM predecessor_defaults_version
+       OR stored.frozen_direct_model_selection_id IS DISTINCT FROM
+            predecessor_direct_selection THEN
+        RAISE EXCEPTION 'delegation wake lacks its exact terminal predecessor configuration'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_delegation_wake_turn_origin';
+    END IF;
+    IF lifecycle.state_kind = 'queued' THEN
+        RETURN NULL;
+    END IF;
+
+    IF lifecycle.start_lineage_kind <> 'after'
+       OR lifecycle.immediate_predecessor_turn_id IS DISTINCT FROM predecessor_turn
+    THEN
+        RAISE EXCEPTION 'delegation wake lacks its exact terminal predecessor'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_delegation_wake_turn_origin';
+    END IF;
+
+    SELECT count(*) INTO incorrect_member_count
+      FROM generate_series(
+            stored.first_delivery_sequence,
+            stored.through_delivery_sequence
+      ) AS sequence(value)
+      LEFT JOIN context_frontier_member AS member
+        ON member.owning_session_id = stored.recipient_session_id
+       AND member.context_frontier_id = lifecycle.starting_frontier_id
+       AND member.member_position = predecessor_member_count
+            + sequence.value - stored.first_delivery_sequence + 1
+            + CASE
+                WHEN sequence.value = stored.through_delivery_sequence THEN
+                    turn_start_model_identity_entry_count(
+                        stored.turn_id,
+                        lifecycle.starting_frontier_id
+                    )
+                ELSE 0
+              END
+       AND member.source_session_id = stored.recipient_session_id
+       AND member.semantic_entry_id = delegation_delivery_semantic_entry(
+            stored.recipient_session_id,
+            sequence.value
+       )
+     WHERE member.semantic_entry_id IS NULL;
+    SELECT count(*) INTO skipped_earlier_count
+      FROM session_pending_delivery AS pending
+     WHERE pending.recipient_session_id = stored.recipient_session_id
+       AND pending.delivery_sequence < stored.first_delivery_sequence
+       AND NOT EXISTS (
+            SELECT 1 FROM context_frontier_member AS member
+             WHERE member.owning_session_id = stored.recipient_session_id
+               AND member.context_frontier_id = predecessor_frontier
+               AND member.source_session_id = stored.recipient_session_id
+               AND member.semantic_entry_id = delegation_delivery_semantic_entry(
+                    stored.recipient_session_id,
+                    pending.delivery_sequence
+               )
+       );
+    IF incorrect_member_count <> 0 OR skipped_earlier_count <> 0 THEN
+        RAISE EXCEPTION 'delegation wake starting frontier skips or reorders delivery content'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_delegation_wake_turn_origin';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_delegation_wake_turn_origin_is_valid
+AFTER INSERT OR UPDATE ON session_delegation_wake_turn_origin
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_wake_turn_origin();
+CREATE CONSTRAINT TRIGGER turn_lifecycle_requires_valid_delegation_wake_origin
+AFTER INSERT OR UPDATE ON turn_lifecycle
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW WHEN (NEW.origin_kind = 'delegation')
+EXECUTE FUNCTION require_delegation_wake_turn_origin();
+
+-- Foreground delivery completes the exact await_session tool request. A
+-- background wait already completed with its registration receipt, so its
+-- later wake content retains the await identity only as delegation provenance
+-- and must not become a second logical tool result.
+CREATE FUNCTION require_semantic_delegation_result_delivery_mode()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM session_child_result_delivery AS delivery
+         WHERE delivery.awaiting_tool_request_id =
+                NEW.delegation_result_awaiting_tool_request_id
+           AND delivery.spawning_tool_request_id =
+                NEW.delegation_result_spawning_tool_request_id
+           AND delivery.parent_session_id = NEW.source_session_id
+           AND (
+                (
+                    delivery.delivery_sequence IS NULL
+                    AND NEW.tool_result_request_id =
+                        NEW.delegation_result_awaiting_tool_request_id
+                )
+                OR (
+                    delivery.delivery_sequence IS NOT NULL
+                    AND NEW.tool_result_request_id IS NULL
+                )
+           )
+    ) THEN
+        RAISE EXCEPTION 'delegation result correlation contradicts its delivery mode'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'semantic_delegation_result_delivery_mode';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER semantic_delegation_result_delivery_mode
+AFTER INSERT ON semantic_transcript_entry
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW WHEN (NEW.payload_kind = 'delegation_result')
+EXECUTE FUNCTION require_semantic_delegation_result_delivery_mode();
 
 -- Delegation messages and results are authorized by their exact delivery
 -- foreign keys, not by a fabricated producing turn in the recipient session.
@@ -3036,6 +3981,9 @@ BEFORE TRUNCATE ON session_message_delivery
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
 CREATE TRIGGER session_child_result_delivery_cannot_be_truncated
 BEFORE TRUNCATE ON session_child_result_delivery
+FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
+CREATE TRIGGER session_delegation_wake_turn_origin_cannot_be_truncated
+BEFORE TRUNCATE ON session_delegation_wake_turn_origin
 FOR EACH STATEMENT EXECUTE FUNCTION reject_session_delegation_table_truncate();
 
 -- Delegated child creation is request-provenanced rather than a user command.
