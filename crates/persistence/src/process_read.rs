@@ -18,7 +18,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
-    mapping::{session_id_from_uuid, session_id_to_uuid},
+    mapping::{model_settings_from_json, session_id_from_uuid, session_id_to_uuid},
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -156,11 +156,20 @@ fn decode_session_defaults_value(
                 .map_err(|_| ProcessReadCorruption::Inconsistent("system prompt admission"))
         })
         .transpose()?;
-    Ok(signalbox_domain::SessionConfigurationDefaults::complete(
+    let model_settings = row
+        .try_get::<Option<serde_json::Value>, _>("model_settings")?
+        .ok_or(ProcessReadCorruption::Missing("model_settings"))?;
+    let model_settings = model_settings_from_json(model_settings)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("model settings"))?;
+    signalbox_domain::SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
-    ))
+        model_settings,
+    )
+    .ok_or_else(|| {
+        ProcessReadCorruption::Inconsistent("model settings validation selection").into()
+    })
 }
 
 /// One repeatable-read session-summary cursor that owns at most one decoded row.
@@ -1273,7 +1282,8 @@ impl ProcessReadRepository {
                 selected_defaults.direct_model_selection_id,
                 selected_defaults.model_alias_id,
                 selected_defaults.dangerous_tool_auto_approval,
-                selected_defaults.system_prompt
+                selected_defaults.system_prompt,
+                selected_defaults.model_settings
                FROM session AS session_row
                LEFT JOIN session_current_defaults AS current_defaults
                  ON current_defaults.session_id = session_row.session_id
