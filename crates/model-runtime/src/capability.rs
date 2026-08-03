@@ -216,7 +216,14 @@ pub enum ModelCapabilityCatalogError {
 
 impl std::fmt::Display for ModelCapabilityCatalogError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("model capability catalog contains an invalid target relation")
+        match self {
+            Self::DuplicateTarget { .. } => {
+                formatter.write_str("model capability catalog contains a duplicate target")
+            }
+            Self::SelfMappedFastTarget { .. } => {
+                formatter.write_str("model capability catalog maps fast mode to its serving target")
+            }
+        }
     }
 }
 
