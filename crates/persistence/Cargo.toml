@@ -16,6 +16,7 @@ rust_decimal = { version = "1.42.1", default-features = false, features = ["std"
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
+signalbox-tools-plan = { path = "../tools-plan" }
 sqlx = { version = "0.9.0", default-features = false, features = [
     "postgres",
     "runtime-tokio",
@@ -54,6 +55,11 @@ path = "tests/conversation_listing_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "goal_postgres"
+path = "tests/goal_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "imported_session_postgres"
 path = "tests/imported_session_postgres.rs"
 required-features = ["postgres-integration"]
@@ -81,6 +87,11 @@ required-features = ["postgres-integration"]
 [[test]]
 name = "session_metadata_postgres"
 path = "tests/session_metadata_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "session_placement_postgres"
+path = "tests/session_placement_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[bench]]

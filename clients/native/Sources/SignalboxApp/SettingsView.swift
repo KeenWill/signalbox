@@ -65,7 +65,7 @@ struct SettingsScreen: View {
           LabeledContent("Wire", value: "Process protocol version 1")
             .accessibilityIdentifier("wire-diagnostic")
           LabeledContent("Authentication", value: "Not defined")
-          LabeledContent("Remote transport", value: "Owner design gate")
+          LabeledContent("Remote transport", value: "Maintainer design gate")
             .accessibilityIdentifier("remote-transport-diagnostic")
         }
       }

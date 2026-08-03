@@ -52,7 +52,7 @@ pub struct AppliedInterruptProof {
 }
 
 impl AppliedInterruptProof {
-    /// Returns the owner-global command identity whose applied result supplied
+    /// Returns the user-global command identity whose applied result supplied
     /// this authority.
     pub const fn command(&self) -> DurableCommandId {
         self.command

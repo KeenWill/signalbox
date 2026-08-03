@@ -144,9 +144,9 @@ pub enum ModelToolResultContent {
     Success(ToolResultContent),
     /// Exact terminal executor error evidence.
     ExecutionError(ToolExecutionError),
-    /// Exact durable owner denial.
+    /// Exact durable user denial.
     Denied {
-        /// Optional bounded sanitized owner explanation.
+        /// Optional bounded sanitized user explanation.
         reason: Option<ToolDenialReason>,
     },
     /// The turn ended before this request received a decision.
@@ -1725,7 +1725,7 @@ where
                                 .copied()
                                 .unwrap_or(InitialToolApproval::Confirm);
                             approval_index += 1;
-                            every_request_approved &= approval != InitialToolApproval::Confirm;
+                            every_request_approved &= !approval.requires_decision();
                             continuing.push(ToolResponsePartIdentity::tool_call(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
@@ -1737,6 +1737,7 @@ where
                 debug_assert_eq!(approval_index, tool_approvals.len());
                 let continuation_attempt =
                     every_request_approved.then(|| self.ids.next_turn_attempt_id());
+                let mut stopped_approval_index = 0usize;
                 for part in response.parts() {
                     match part {
                         AssistantResponsePart::Text(_) => {
@@ -1745,14 +1746,21 @@ where
                             ));
                         }
                         AssistantResponsePart::ToolCall(_) => {
+                            let approval = tool_approvals
+                                .get(stopped_approval_index)
+                                .copied()
+                                .unwrap_or(InitialToolApproval::Confirm);
+                            stopped_approval_index += 1;
                             stopped.push(StoppedToolResponsePartIdentity::tool_call(
                                 self.ids.next_semantic_entry_id(),
                                 self.ids.next_tool_request_id(),
                                 self.ids.next_semantic_entry_id(),
+                                approval,
                             ));
                         }
                     }
                 }
+                debug_assert_eq!(stopped_approval_index, tool_approvals.len());
                 return ModelCallTerminalIdentityCandidates::ToolRound {
                     continuing: ToolRoundModelCallIdentities::new(
                         continuing,
@@ -1879,7 +1887,7 @@ fn report_model_call_terminalization(outcome: &ModelCallTerminalOutcome) {
     report_turn_terminalization(session, turn, terminal_outcome);
 }
 
-/// Emits one content-free record for a turn parked on owner reconciliation.
+/// Emits one content-free record for a turn parked on user reconciliation.
 ///
 /// Session and turn are daemon-minted identities, while the event name is a
 /// closed lifecycle state. Ambiguity details and model content remain absent.
@@ -1887,7 +1895,7 @@ fn report_turn_parked_for_reconciliation(session: SessionId, turn: TurnId) {
     tracing::warn!(
         session_id = %session.into_uuid(),
         turn_id = %turn.into_uuid(),
-        "turn parked awaiting owner reconciliation"
+        "turn parked awaiting user reconciliation"
     );
 }
 
@@ -2279,7 +2287,7 @@ mod tests {
             session_id,
             session_id,
             SessionCreationProvenance::new(
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::None,
             ),
             session_id,
@@ -2287,6 +2295,14 @@ mod tests {
             session_id,
             version,
             defaults.clone(),
+            signalbox_domain::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id,
+                current_pointer_version: signalbox_domain::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id,
+                selected_event: signalbox_domain::VersionedSessionPlacement::initial(
+                    signalbox_domain::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("fixture Session facts are correlated");
@@ -2307,7 +2323,7 @@ mod tests {
         let receipt = SubmitInputReconstitutionInput::applied_turn_origin(
             SubmitInputAppliedTurnOriginReconstitutionInput {
                 command,
-                stored_actor: Actor::Owner,
+                stored_actor: Actor::User,
                 result_session: session_id,
                 result_accepted_input: accepted_input,
                 result_turn: turn_id,
@@ -2896,7 +2912,7 @@ mod tests {
             .collect()
     }
 
-    /// The owner-selected rendering decision: origin input becomes a user
+    /// The user-selected rendering decision: origin input becomes a user-role
     /// message carrying the semantic entry's source, in frontier order.
     #[test]
     fn s02_inv015_frontier_rendering_preserves_user_role_order_and_source() {
@@ -3052,6 +3068,18 @@ mod tests {
         };
         assert_eq!(*first_approval, InitialToolApproval::PolicyAuto);
         assert_eq!(*second_approval, InitialToolApproval::Confirm);
+
+        let non_overridable_approvals = [
+            InitialToolApproval::PolicyAuto,
+            InitialToolApproval::AlwaysConfirm,
+        ];
+        service.ids = FixedIds::baseline();
+        let ModelCallTerminalIdentityCandidates::ToolRound { continuing, .. } =
+            service.next_terminal_identities(&observation, &non_overridable_approvals)
+        else {
+            panic!("tool response requires both race-safe closures");
+        };
+        assert_eq!(continuing.continuation_attempt(), None);
         assert_eq!(
             stopped,
             StoppedToolRoundModelCallIdentities::new(
@@ -3064,11 +3092,13 @@ mod tests {
                         identity(34, SemanticTranscriptEntryId::from_uuid),
                         identity(62, ToolRequestId::from_uuid),
                         identity(35, SemanticTranscriptEntryId::from_uuid),
+                        InitialToolApproval::PolicyAuto,
                     ),
                     StoppedToolResponsePartIdentity::tool_call(
                         identity(36, SemanticTranscriptEntryId::from_uuid),
                         identity(63, ToolRequestId::from_uuid),
                         identity(37, SemanticTranscriptEntryId::from_uuid),
+                        InitialToolApproval::Confirm,
                     ),
                 ],
                 identity(38, SemanticTranscriptEntryId::from_uuid),
@@ -3615,7 +3645,7 @@ mod tests {
         else {
             panic!("terminal fixture reconstitutes as ended")
         };
-        let denial_reason = ToolDenialReason::try_new(String::from("owner declined"))
+        let denial_reason = ToolDenialReason::try_new(String::from("user declined"))
             .expect("fixture denial reason is valid");
         let denial_command = DecideToolRequest::try_new(
             identity(118, DurableCommandId::from_uuid),
@@ -3627,9 +3657,9 @@ mod tests {
         .expect("the fixture command identity is admitted")
         .prepare_applied(&denied_request)
         .expect("the command names the exact request");
-        let denial = ToolApprovalResolutionReconstitutionInput::owner_command(denial_command)
+        let denial = ToolApprovalResolutionReconstitutionInput::user_command(denial_command)
             .reconstitute()
-            .expect("owner denial provenance is implemented");
+            .expect("user denial provenance is implemented");
         let entries = [
             (
                 completed_use_source,

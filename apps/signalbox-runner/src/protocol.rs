@@ -259,8 +259,16 @@ pub enum EnrollmentOutcome {
 /// Honest terminal outcome of one established connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConnectionEnd {
-    DaemonShutdown { connection_epoch: PositiveU64 },
-    RunnerShutdown { connection_epoch: PositiveU64 },
+    DaemonShutdown {
+        connection_epoch: PositiveU64,
+    },
+    RunnerShutdown {
+        connection_epoch: PositiveU64,
+    },
+    /// A fatal stale-connection rejection was written before closing the stream.
+    StaleConnectionRejected {
+        connection_epoch: PositiveU64,
+    },
 }
 
 /// One serial serving-loop boundary observed without cancelling an outbound frame.
@@ -769,7 +777,9 @@ where
                     }),
                 )
                 .await?;
-                Ok(None)
+                Ok(Some(ConnectionEnd::StaleConnectionRejected {
+                    connection_epoch: shutdown.connection_epoch,
+                }))
             }
             Message::Shutdown(_) => Err(RunnerConnectionError::Violation(
                 ProtocolViolation::InvalidShutdownReason,
@@ -1617,7 +1627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_daemon_shutdown_is_refused_before_current_shutdown_applies() {
+    async fn fatal_stale_daemon_shutdown_rejection_closes_before_following_heartbeat() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -1634,15 +1644,10 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before shutdown");
-            let refused = connection
-                .serve_one(&mut state)
+            connection
+                .serve(&mut state)
                 .await
-                .expect("the stale shutdown is refused");
-            let applied = connection
-                .serve_one(&mut state)
-                .await
-                .expect("the current shutdown is accepted");
-            (refused, applied)
+                .expect("the fatal stale shutdown rejection terminates serving")
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -1663,20 +1668,26 @@ mod tests {
                 }),
             )
             .await;
-            let rejected = receive_hub_message(&mut hub_io).await;
             send_hub_message(
                 &mut hub_io,
-                Message::Shutdown(Shutdown {
-                    connection_epoch: current_epoch,
-                    reason: ShutdownReason::DaemonShutdown,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
                 }),
             )
             .await;
-            rejected
+            let rejected = receive_hub_message(&mut hub_io).await;
+            let after_rejection = receive_message(&mut hub_io).await;
+            (rejected, after_rejection)
         };
-        let ((refused, applied), rejected) = tokio::join!(runner, hub);
+        let (end, (rejected, after_rejection)) = tokio::join!(runner, hub);
 
-        assert_eq!(refused, None);
+        assert_eq!(
+            end,
+            ConnectionEnd::StaleConnectionRejected {
+                connection_epoch: stale_epoch,
+            }
+        );
         assert_eq!(
             rejected,
             Message::Rejected(Rejected {
@@ -1685,11 +1696,9 @@ mod tests {
                 code: RejectionCode::StaleConnection,
             })
         );
-        assert_eq!(
-            applied,
-            Some(ConnectionEnd::DaemonShutdown {
-                connection_epoch: current_epoch,
-            })
-        );
+        assert!(matches!(
+            after_rejection,
+            Err(RunnerConnectionError::PeerClosed)
+        ));
     }
 }

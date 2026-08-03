@@ -26,7 +26,7 @@ const COMMAND_KIND: &str = durable_command_kind_to_str(DurableCommandKind::Compa
 /// All caller and hub-minted facts for a fresh explicit command attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrepareContextCompactionRequest {
-    /// Owner-global command identity.
+    /// User-global command identity.
     pub command: DurableCommandId,
     /// Session whose complete frontier is summarized.
     pub session: SessionId,
@@ -185,7 +185,7 @@ pub enum PrepareContextCompactionOutcome {
     AutomaticAlreadyAttempted,
 }
 
-/// Read-only disposition of one owner-global compaction command lookup.
+/// Read-only disposition of one user-global compaction command lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextCompactionCommandLookup {
     /// No durable command has claimed the supplied identity.
@@ -866,7 +866,7 @@ async fn prepare_in_transaction(
     if result_identity_taken {
         return Err(ContextCompactionRepositoryError::IdentityCollision);
     }
-    // Lock inventory: the session scheduler follows the owner-global command
+    // Lock inventory: the session scheduler follows the user-global command
     // claim, then the current-defaults pointer. Holding the scheduler while
     // selecting and recording the boundary makes compaction preparation and
     // turn activation mutually exclusive.
@@ -1380,7 +1380,7 @@ pub enum ContextCompactionCorruption {
     Inconsistent(&'static str),
     /// Stored command result discriminator is unknown.
     UnsupportedResult(String),
-    /// Stored owner-global command-kind discriminator is unknown.
+    /// Stored user-global command-kind discriminator is unknown.
     UnsupportedCommandKind(String),
     /// Summary text did not satisfy the semantic entry scalar.
     InvalidSummary,

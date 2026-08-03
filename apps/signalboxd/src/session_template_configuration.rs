@@ -53,7 +53,7 @@ pub struct ResolvedSessionTemplate {
 }
 
 impl ResolvedSessionTemplate {
-    /// Returns the owner-assigned bundle version.
+    /// Returns the operator-assigned bundle version.
     pub const fn version(&self) -> SessionTemplateVersion {
         self.version
     }
@@ -850,6 +850,10 @@ mod tests {
         HubModelConfiguration::parse(&format!(
             r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"

@@ -1,5 +1,8 @@
 # Sessions and the transcript
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
@@ -24,6 +27,10 @@ a law is cited as `INV-NNN`, the generated
 [invariant test index](../invariants.md) resolves it; where mechanics owned by
 another contract are summarized, the owning sibling page is linked inline.
 
+The path-scoped session-placement paragraphs are the foundation proposal at the
+bottom of their implementing stack and become verified only with its
+read-introspection and process-surface child pull request.
+
 ## Session identity and creation provenance
 
 A session is one durable, independently browsable conversation with its own
@@ -31,9 +38,9 @@ A session is one durable, independently browsable conversation with its own
 records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
-- **Creation cause** — why the session exists. The only constructible variant is
-  `OwnerInitiated`. Reserved causes (application, schedule, delegation) are not
-  represented as placeholder variants.
+- **Creation cause** — why the session exists. The only constructible variant in
+  this foundation slice is `UserInitiated`. Application, schedule, and
+  delegation causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
@@ -44,6 +51,11 @@ records two required, independent, immutable creation facts, paired as
 
 Why: deriving one fact from the other would make ordinary forks look delegated
 and force delegated children to inherit transcripts.
+
+**Committed unimplemented functionality.** The delegation persistence slice in
+this stack introduces `Delegated { spawning_request }` with durable storage and
+fixes its ancestry independently to `None`. No present session-provenance value
+or persistence path exposes that delegated creation cause.
 
 Neither fact can be rewritten after creation, and later source-session activity
 cannot change a descendant's recorded ancestry (INV-030). The `session` table
@@ -66,15 +78,15 @@ INV-039).
 ## Session creation
 
 `CreateSession` carries the durable command identity, the provenance pair, one
-complete unversioned initial defaults value, and one optional complete session
-runner placement, plus its explicit or template-derived creation mode.
-Structural equality excludes the command identifier. Explicit mode compares
-provenance, the complete defaults, and the placement; template-derived mode
-compares provenance, the placement, and the caller-supplied template name while
-excluding the copied defaults and content digest. The two modes are never equal
-(INV-012, INV-047). Three topics are owned by
-[identity-and-commands](identity-and-commands.md): durable-command storage, the
-structural-equality doctrine, and identity generation, supply, and encoding.
+complete unversioned initial defaults value, one path-scoped placement decision,
+and one optional complete session runner placement, plus its explicit or
+template-derived creation mode. Structural equality excludes the command
+identifier. Explicit mode compares provenance, the complete defaults, and the
+placement; template-derived mode compares provenance, the placement, and the
+caller-supplied template name while excluding the copied defaults and content
+digest. The two modes are never equal (INV-012, INV-047). Three topics are owned
+by [identity-and-commands](identity-and-commands.md): durable-command storage,
+the structural-equality doctrine, and identity generation, supply, and encoding.
 
 The placement is absent for a daemon-only session. When present it is the
 complete immutable request — runner selector, working-directory selection,
@@ -94,13 +106,13 @@ discarded.
 Application orchestration (`crates/application/src/create_session.rs`):
 
 - rejects nil/max sentinel command identities before canonical construction;
-- fixes cause `OwnerInitiated` and ancestry `None` — the request type has no
+- fixes cause `UserInitiated` and ancestry `None` — the request type has no
   cause or ancestry inputs;
 - mints one fresh UUIDv7 `SessionId` candidate per invocation (the UUID
   timestamp confers no domain order or authority); and
 - calls one atomic transaction port exactly once, with no retry.
 
-Domain preparation admits only the owner-initiated, no-ancestry pair. A
+Domain preparation admits only the user-initiated, no-ancestry pair. A
 `SingleSource` command is a valid canonical value but fails preparation with
 `TranscriptAncestryUnavailable` — a nonterminal error that claims no command
 identifier. Forks are therefore typed but not yet creatable. Import-seeded
@@ -109,7 +121,7 @@ creation uses the separate command path below; it does not widen
 
 The committing transaction atomically inserts the session row, the scheduler
 registration (`session_scheduler`), defaults version one, the current-defaults
-pointer, the typed command record, the owner-global registry claim, and — when
+pointer, the typed command record, the user-global registry claim, and — when
 the request carried a placement — that session's initial `Unpinned`
 `SessionRunnerPlacement` record at revision one with its complete request. A
 visible session therefore never names a placement its creation command did not
@@ -136,11 +148,45 @@ resolution follow the shared durable-command contract owned by
 equal replay returns the recorded receipt, which may name a different session
 than the freshly minted candidate; the unused candidate is simply discarded.
 
-Why (append-only, one exception): provenance, defaults versions, command
-receipts, and scheduler registration are historical facts; in-place mutation
-would rewrite recorded intent and the context that later work consumed. The
-current-defaults pointer alone is mutable because "current" is a present choice,
-not a historical fact.
+### Path-scoped session placement
+
+Path placement is opt-in. `Pathless` is the compatibility value and preserves
+today's cross-session read behavior exactly. A placed session carries one
+validated dotted path whose nonempty ASCII label segments admit letters, digits,
+hyphen, and underscore; each segment is at most 64 bytes and a path is at most
+64 segments. The initial value is pinned by creation. Only the explicit
+`UpdateSessionPlacement` durable command changes it, appending a versioned
+`Updated` event that names its predecessor and command identity; creation itself
+appends version-one `Created`, so no update rewrites history. Every
+current-placement load authenticates the contiguous history from version one
+through the selected head against each event's typed receipt and durable-command
+registry claim; a missing, cross-wired, or invalid command fact fails closed as
+typed storage corruption.
+
+A placed requester's readable scope is its parent directory's subtree. The
+decision computes the requesting path's parent prefix once and performs one
+prefix comparison against the target placement: siblings and descendants are
+allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
+refusal is typed evidence containing that requesting directory and the closed
+reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
+The child pull request enforces this decision where the conversation
+introspection adapter opens a selected native transcript. Conversation-list
+inventory is discovery rather than a selected transcript read, and imported
+conversations are not sessions; neither surface is filtered by this rule.
+
+A one-segment placement sits in the root directory and therefore has global
+conversation read, including pathless sessions. It is legal only through the
+loud `SessionPlacement::root_global_read` constructor, which requires
+`RootPlacementGlobalReadIntent::Acknowledged`. The creation command, typed
+record, and version-one event all preserve both its path and the explicit
+global-read-intent bit. Ordinary scoped construction rejects a root path.
+
+Why (append-only, two pointer exceptions): provenance, defaults versions,
+placement events, command receipts, and scheduler registration are historical
+facts; in-place mutation would rewrite recorded intent and the context that
+later work consumed. The current-defaults pointer and
+`session_current_placement` head are mutable because each selects a present
+choice without rewriting history.
 
 ### Create from an imported frontier
 
@@ -183,12 +229,12 @@ semantic-entry generator closure to one atomic transaction port. Imported
 aggregates are immutable, so the repository takes no explicit imported-record
 row lock; after resolving the complete selected prefix, it invokes the closure
 exactly once per prefix member in order. The transaction first follows the
-owner-global claim protocol in
-[identity-and-commands](identity-and-commands.md). A claimed identifier resolves
-to its recorded equal replay or conflicting reuse before any imported-target
-lookup. Only for an unclaimed identifier does the transaction load the complete
-imported conversation named by `frontier.conversation()`, resolve exactly
-positions `1..=N` through that frontier's inclusive boundary, and either:
+user-global claim protocol in [identity-and-commands](identity-and-commands.md).
+A claimed identifier resolves to its recorded equal replay or conflicting reuse
+before any imported-target lookup. Only for an unclaimed identifier does the
+transaction load the complete imported conversation named by
+`frontier.conversation()`, resolve exactly positions `1..=N` through that
+frontier's inclusive boundary, and either:
 
 - returns `ImportedConversationNotFound` or `ImportedFrontierNotFound` without
   claiming the command identity; or
@@ -199,12 +245,12 @@ An equal replay returns the recorded created session and ignores unused fresh
 identity candidates. Changed frontier, relationship, or defaults under an
 already claimed command identity is conflicting reuse; selecting another
 conversation necessarily changes the frontier. Cross-kind reuse follows the
-owner-global durable-command contract in
+user-global durable-command contract in
 [identity-and-commands](identity-and-commands.md).
 
 The committing transaction atomically inserts:
 
-- the owner-initiated session whose immutable ancestry names the imported
+- the user-initiated session whose immutable ancestry names the imported
   conversation and boundary derived from the selected frontier, plus the
   relationship;
 - defaults version one, its current pointer, scheduler registration, typed
@@ -304,7 +350,7 @@ selection alone.
 
 ### Session-template provenance
 
-An owner-initiated session may carry one optional immutable
+A user-initiated session may carry one optional immutable
 `SessionTemplateProvenance`, distinct from its creation cause and transcript
 ancestry. Presence pairs a validated `SessionTemplateName` with an exact 32-byte
 `SessionTemplateContentDigest`; absence denotes explicit creation. Template
@@ -424,23 +470,23 @@ never a combination of separately committed snapshots.
 `ReplaceSessionMetadata` carries durable command identity, target session,
 actor, and one complete replacement snapshot. Its replay equality covers every
 field except command identity (INV-012). The process-facing application request
-fixes `Actor::Owner`. A separate purpose-specific application constructor
-accepts only `Actor::Tool { request }` for the exact executing tool request;
-model, recovery, and arbitrary caller-selected actors remain unconstructible.
-First handling locks the target session, then either records `SessionNotFound`
-without an effect or atomically replaces the complete root, tag, and attribute
-snapshot. After acquiring that lock, a separate statement samples PostgreSQL
-statement time at microsecond precision; the applied result records it together
-with the command actor as the one last-writer stamp. An equal replay returns
-that exact recorded result and timestamp. The database timestamp is result
-evidence, not caller intent or a global ordering token, so it does not
-participate in command equality.
+fixes `Actor::User`. A separate purpose-specific application constructor accepts
+only `Actor::Tool { request }` for the exact executing tool request; model,
+recovery, and arbitrary caller-selected actors remain unconstructible. First
+handling locks the target session, then either records `SessionNotFound` without
+an effect or atomically replaces the complete root, tag, and attribute snapshot.
+After acquiring that lock, a separate statement samples PostgreSQL statement
+time at microsecond precision; the applied result records it together with the
+command actor as the one last-writer stamp. An equal replay returns that exact
+recorded result and timestamp. The database timestamp is result evidence, not
+caller intent or a global ordering token, so it does not participate in command
+equality.
 
 There is deliberately no expected or installed metadata version and no versioned
 metadata-history API. Two distinct writes are last-writer-wins after
 serialization on the session row; a full replacement can overwrite an earlier
 writer's unrelated field. Callers that need to preserve fields read the current
-snapshot before forming the replacement. The owner-global durable-command
+snapshot before forming the replacement. The user-global durable-command
 contract retains each command's payload and typed result for replay, so those
 records preserve prior replacement values. Persistence also retains append-only
 internal evidence that each applied receipt became current exactly once; it
@@ -488,7 +534,7 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because `OwnerInitiated` is the only constructible creation cause and every
+Because `UserInitiated` is the only constructible creation cause and every
 current session-creation boundary lacks actor attribution, the implemented
 default view is exactly all non-archived sessions. No visibility taxonomy,
 creation-time override, or inference from missing attribution is stored. The
@@ -567,11 +613,11 @@ and closed:
   summary text retaining its dedicated physical call and the first and through
   source-qualified entries of the inclusive range it represents;
 - `RunnerPlacementChanged { placement_revision }` — a reference to the complete
-  checked successor placement record at an owner-explicit relocation boundary.
-  One entry kind covers every session-relocation fact: a move to a different
-  runner and a working-directory move on the same runner both require it, and
-  the referenced record is the authority for which of them occurred. Splitting
-  the kind so that a working-directory-only move carries its own payload variant
+  checked successor placement record at a user-explicit relocation boundary. One
+  entry kind covers every session-relocation fact: a move to a different runner
+  and a working-directory move on the same runner both require it, and the
+  referenced record is the authority for which of them occurred. Splitting the
+  kind so that a working-directory-only move carries its own payload variant
   changes no other contract on this page, since every consumer resolves the
   record rather than reading the payload;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
@@ -714,7 +760,7 @@ frozen direct selection changed, and finally appends its ordinary origin
 
 Session relocation has a session-level frontier boundary. Every transaction that
 installs a successor placement — loss replacement today, and the committed
-owner-directed move of a healthy session or of its working directory later
+user-directed move of a healthy session or of its working directory later
 ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
 — appends one `RunnerPlacementChanged` entry after the latest authoritative
 semantic frontier, or establishes a one-entry root when no frontier exists, and
@@ -831,34 +877,35 @@ Why (bytes, at admission): byte measurement matches wire and storage cost and
 keeps the domain value exactly as accepted; rejecting before construction can
 never truncate or rewrite content.
 
-This is a provisional owner-approved floor, not the resource-governance policy.
+This is a provisional maintainer-approved floor, not the resource-governance
+policy.
 
 ## Actor attribution
 
-The actor algebra (`Owner`, `Model { turn }`, `Recovery`, `Tool { request }`),
+The actor algebra (`User`, `Model { turn }`, `Recovery`, `Tool { request }`),
 its participation in structural replay equality, and its closed-discriminator
 storage convention are owned by
 [identity-and-commands](identity-and-commands.md). Attribution is provenance
 only — not authentication, authorization, or approval — and model agency can
-never compare equal to owner agency (INV-020).
+never compare equal to user agency (INV-020).
 
 The session-command consequences: `SubmitInput` and `ReplaceSessionMetadata` are
 the command payloads carrying an actor inside the conversational command
-surface. `SubmitInput` fixes `Actor::Owner`. Metadata replacement admits the
-owner-facing constructor plus the purpose-specific `Actor::Tool { request }`
+surface. `SubmitInput` fixes `Actor::User`. Metadata replacement admits the
+user-facing constructor plus the purpose-specific `Actor::Tool { request }`
 constructor described above; neither accepts arbitrary agency. Domain
 reconstitution compares the stored actor against the canonical command and fails
 closed on mismatch (`StoredActorMismatch` for input and `CommandActorMismatch`
 for metadata). The metadata actor also becomes its organizational last-writer
 stamp.
 
-Why (seeded before expansion): carrying owner attribution from the first
-metadata write preserved a truthful backfill, and the existing closed actor
-columns now admit tool attribution without a semantic migration.
+Why (seeded before expansion): carrying user attribution from the first metadata
+write preserved a truthful backfill, and the existing closed actor columns now
+admit tool attribution without a semantic migration.
 
-`CreateSession` carries no actor; amending it remains an explicit owner choice
-that has not been taken. `Recovery` and `Model` remain representable without an
-implemented command-producing boundary.
+`CreateSession` carries no actor; amending it remains an explicit maintainer
+choice that has not been taken. `Recovery` and `Model` remain representable
+without an implemented command-producing boundary.
 
 ## Implemented transcript projections
 
@@ -871,6 +918,123 @@ implemented: `PreparedModelOperation::render` maps frontier entries to
 provider-neutral messages and binds the frozen epoch's optional session system
 prompt; multi-source system-prompt composition remains deferred under the open
 edges of [model-call-execution](model-call-execution.md).
+
+## Session delegation
+
+This section is the foundation proposal at the bottom of the session-delegation
+stack and becomes verified only with that stack's persistence, scheduling, and
+tool/client pull requests. A delegated child is a distinct, independently
+browsable session. The persistence slice introduces
+`SessionCreationCause::Delegated { spawning_request }` and stores the exact
+spawning `ToolRequestId`; `TranscriptAncestry` independently remains `None`.
+Delegation does not copy, reference, merge, or expose the parent transcript, and
+it does not widen the none-or-one ancestry baseline.
+
+The child copies the complete `SessionConfigurationDefaults` value from the
+immutable defaults epoch frozen to the parent turn that owns the spawning
+request. The spawn transaction resolves that stored epoch through the parent
+turn's frozen defaults version and establishes the exact copy as the child's
+defaults version one. It never reads the parent's current-defaults pointer for
+this choice, so replacement after parent-turn acceptance, including replacement
+while the spawn request awaits approval or execution, cannot change the child.
+Tool arguments supply no defaults field.
+
+The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
+referencing the exact spawning request and its parent session and turn. It is
+model/tool-authored delegation work, not accepted input and not `Actor::User`;
+the child's first turn has a distinct delegation-task origin and starts from
+that entry. Reconstitution resolves the request and requires its checked task
+bytes, parent, turn, child relationship, and entry to agree before the task
+becomes model-visible.
+
+Each spawning request creates at most one immutable parent/child relationship.
+The public domain surface accepts neither a caller-supplied relationship count
+nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
+construction remains sealed in the foundation slice; the persistence slice in
+this stack admits a spawn only from the complete parent relationship inventory
+held under the spawn transaction's lock, together with the child-session
+uniqueness check. The relationship records the exact parent session and turn,
+child session and delegated-task turn, and one parent-chosen policy:
+
+- `Background` never derives a child stop or cancellation from a parent state;
+- `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
+  each exactly `KeepRunning`, `Stop`, or `Cancel`.
+
+The `SessionDelegation` aggregate records an admitted sealed
+`DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
+provenance as the first event in one contiguous history. Typed await and message
+requests may act only on their exact relationship and only under sealed
+in-flight dispatch authority carrying that complete immutable request; matching
+identities cannot substitute a different producing call, ordinal, tool name,
+arguments, or approval posture. Consuming transition failures return the
+unchanged aggregate and attempted input. Message delivery remains available
+after a terminal outcome. Outcome authority is checked against the relationship
+before recording, including an exact match to this spawn's delegated-task turn:
+an equal authority-and-outcome replay is idempotent, `ContinueRunning` preserves
+the active lifecycle, and every other outcome terminalizes it.
+
+A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
+`ParentAlone` does not evaluate descendants. The descendant form walks the
+durable relationship tree: background edges and bound `KeepRunning` edges
+produce explicit continue-running dispositions, while bound stop/cancel actions
+produce the corresponding typed outcome. If the child already has its unique
+terminal result, the edge instead records `AlreadyTerminal` with the new parent
+command provenance and an exact check of that prior result; it creates no second
+terminal result. Traversal still visits that child's outgoing relationships.
+Every evaluated relationship therefore records an outcome with the parent event,
+exact spawn request, and user command provenance. No path deletes the child or
+its history, and neither a continued child nor a terminated child can become a
+silent orphan or silent kill.
+
+Delegation messages are immutable, bounded, nonempty content records with a
+distinct `DelegationMessageId`, the spawning relationship, exact sender and
+recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
+child may each send to the other before or after either session stops, cancels,
+or completes. `DelegationMessage` semantic entries refer to those records; they
+do not reclassify model-authored content as input from the user. Undelivered
+messages and background results share one positive, gap-free `delivery_sequence`
+allocated under the recipient session lock. An active recipient consumes pending
+items at the next model-call safe point in that recipient-wide order. An idle
+recipient gets one delegation-origin queued turn, and further items coalesce
+into its starting frontier in the same order until activation. Per-relationship
+message ordinals remain provenance and do not serve as a cross-relationship
+tie-break.
+
+A child result is delivered content, never transcript access. Its immutable
+record targets the exact spawning request and carries either the returned
+`DelegationContent` or a typed failed, stopped, or cancelled outcome together
+with exact provenance. Returned content, failure, and a child's own cancellation
+carry the exact terminal child turn. Returned content is derived only from the
+proof-bearing completed call; independently supplied text cannot authorize a
+result. A completed turn with empty or oversized returned text records the
+distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
+terminal delegation evidence and produces no outcome. **Committed unimplemented
+functionality.** Durable terminal-result reconstitution is not exposed by this
+foundation slice; the persistence slice must consume a sealed reconstituted
+ended-call/turn projection rather than accepting parallel raw identities or
+semantic entries. A parent-policy stop or cancellation instead carries opaque
+authority from the exact applied parent termination result. Every authority
+exposes its parent session, durable user command, command kind, and descendant
+scope; a turn interrupt additionally names its exact turn, while a goal stop
+names the exact goal generation and carries no turn. Raw identities cannot
+construct that authority, `parent_alone` authority cannot produce a child
+disposition, and the recorded outcome reason must match its command kind and
+scope. `ChildStopped` is produced only by a parent-policy stop; the existing
+proof-bearing failed, refused, and cancelled model-call turn candidates can name
+any turn origin, including the delegated-task origin, but do not fabricate a
+distinct stopped outcome from that evidence. Delivery appends a
+`DelegationResult` semantic entry only to the target parent, names the exact
+awaiting request that receives the result, and is idempotent by that awaiting
+request. The immutable child result remains keyed by the spawning request. A
+detached child may return after the parent has stopped or cancelled; the result
+remains durable and independently inspectable even when no parent turn can
+consume it.
+
+**Committed unimplemented functionality.** A spawned child defaults into its
+parent's directory. No present delegation or placement surface implements or
+derives this default; its implementation is deferred to the session-placement
+surface. This compatibility constraint does not copy the parent's complete
+placement and this stack implements no placement logic.
 
 ## Open edges
 
@@ -892,20 +1056,22 @@ edges of [model-call-execution](model-call-execution.md).
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
 - Assistant text, tool-use/result references, completed-turn, steering, and
-  cancelled-turn semantic entries are implemented; refusal, reconciliation,
-  approval-event, and delegation entry variants remain open.
+  cancelled-turn semantic entries are implemented. The session-delegation stack
+  adds delegation-message and delegation-result entries. Refusal,
+  reconciliation, mismatch, accepted-risk, and approval-event variants remain
+  open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so
-  later adoption needs another kind-scoped storage version; the truthful `Owner`
+  later adoption needs another kind-scoped storage version; the truthful `User`
   backfill that design relies on still exists.
-- `CreateSession` actor attribution remains implicit pending an explicit owner
-  amendment choice.
+- `CreateSession` actor attribution remains implicit pending an explicit
+  maintainer amendment choice.
 - `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
-- The 1 MiB content bound is a provisional owner floor; the resource-governance
-  limit question stays open, and non-text content kinds remain unconstructible
-  pending their owning decisions.
+- The 1 MiB content bound is a provisional maintainer floor; the
+  resource-governance limit question stays open, and non-text content kinds
+  remain unconstructible pending their owning decisions.
 - The session system prompt remains one optional bounded string per defaults
   epoch. Composition from base, per-use-case, and instruction-file sources and
   richer named profiles remain the open

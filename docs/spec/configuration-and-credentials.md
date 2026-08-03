@@ -1,5 +1,14 @@
 # Configuration and credentials
 
+The delegated tool-approval posture and judge-selection configuration is
+verified against this PR (`agent/approval-judge-config`).
+
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
+The credential billing-kind registry and versioned per-model rate catalog are
+verified against PR #389 (`agent/cost-accounting`).
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
@@ -222,7 +231,7 @@ The initial registry contains exactly three metric names:
 - `signalbox_turns_terminalized_total{outcome}`, whose only label values are
   `completed`, `failed`, `refused`, `cancelled`, and `reconciliation_required`,
   counts durable terminal turn outcomes. It earns its place as the user-visible
-  success, failure, refusal, cancellation, and owner-intervention rate.
+  success, failure, refusal, cancellation, and user-intervention rate.
 - `signalbox_model_calls_terminalized_total{disposition}`, whose only label
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
@@ -260,7 +269,7 @@ The complete OTLP record inventory is:
   not added.
 - Event name `turn activated`, with `session_id` and `turn_id`;
   `turn terminalized`, with those ids and the closed `terminal_outcome`;
-  `turn parked awaiting owner reconciliation`, with those ids;
+  `turn parked awaiting user reconciliation`, with those ids;
   `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
   `turn_attempt_id`; and the event names
   `model runtime reported a trustworthy capability-preparation failure`,
@@ -399,14 +408,29 @@ fail-closed:
   `version = 1` fails startup.
 - At least one `[[adapter_mappings]]` entry is required. Each entry gives one
   exact `model_family`, the build-provided `adapter`, and its non-secret
-  `credential_profile`. Duplicate families, an adapter this daemon build does
-  not provide, or a credential profile that adapter does not provide are typed
-  startup failures. Nothing is inferred from model spelling.
+  `credential_profile`. The profile must name one declared
+  `[[credential_profiles]]` entry. Duplicate families, an adapter this daemon
+  build does not provide, or an undeclared profile are typed startup failures.
+  Nothing is inferred from model spelling.
+- At least one `[[credential_profiles]]` entry is required. Each exact `name`
+  carries one closed `billing_kind`: `api_metered` or `subscription`. Duplicate
+  names, unknown kinds, and unknown fields are rejected. Billing kind belongs to
+  authentication, not to the adapter selected by a mapping.
 - Unknown fields are rejected at the root and inside every table. Why: a
   silently ignored key would let a typo change model meaning invisibly, so
   unrecognized content fails explicitly instead.
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
+
+The conversation-import bound was verified against PR #401
+(`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
+exactly one `max_source_bytes` positive integer. It bounds both a single-shot
+source and the exact source bytes retained while one per-connection chunked
+import is assembled. An absent table uses 268,435,456 bytes (256 MiB).
+Single-shot import rejects a source above the configured value before
+conversion. Begin rejects a declaration above the configured value before
+assembly, append rejects the first observed size above it, and commit rechecks
+the value against the actual appended byte count.
 
 The optional `[web_fetch]` table has exactly one `allowed_origins` array. It
 contains at most 64 distinct bare HTTP(S) origins: scheme, host, and optional
@@ -418,7 +442,7 @@ approval cannot silently egress to an arbitrary host. Paths and queries remain
 unrestricted request data at an admitted origin.
 
 Production signalboxd composition requires exactly one mapping for each of the
-four implemented tool families in the same closed-table style as
+four deployment-mapped tool families in the same closed-table style as
 `[[adapter_mappings]]`:
 
 - `code_host` selects adapter `github`, credential profile `github-primary`, and
@@ -447,18 +471,48 @@ one credential-free download from its validated, pinned, bounded public HTTPS
 redirect destination; the pull-request suite has no such exception. Model
 arguments cannot widen either admission rule.
 
-Composition preserves each compiled declaration's permission default and feeds
-it unchanged into the existing durable approval flow. Exact-revision code-host
-and pull-request reads and all workspace reads default to `Auto`; code-host
-mutations, GitHub review publication, and every workspace mutation default to
-`Confirm`. Reading the invoking session's transcript defaults to `Auto`, while
-listing conversations and reading another native or imported conversation
-default to `Confirm`. With the session posture disabled, a confirmed request
-creates the ordinary durable approval wait exposed by the process protocol;
-execution does not enter its transport or filesystem boundary until a
-per-request approval is recorded. A session frozen with `ApproveAll` instead
-receives the existing explicit `SessionBlanket` approval and does not park. No
-composition layer changes a declaration from `Confirm` to `Auto`.
+The optional `[tool_approval_postures]` table maps an exact composed tool name
+to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
+unknown posture values, and startup rejects a structurally valid name that is
+absent from the selected composition. That name check and the temporary
+`delegated` refusal run in the pre-database configuration pass. An absent table
+or omitted tool name preserves that declaration's legacy permission-default and
+session-blanket behavior exactly. Subject to the `AlwaysConfirm` human-only rule
+owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
+an explicit posture supersedes that legacy result for the request: `auto`
+records policy automation and `human` parks for a user even when the session
+blanket is enabled. Until judge wiring lands, daemon startup rejects a
+configured `delegated` override.
+
+Committed unimplemented functionality: `delegated` will park with delegated
+authority for the approval-judge wiring. That wiring must not expose a delegated
+request to the ordinary user-decision path before escalation.
+
+The optional `[approval_judge]` table has exactly one `selection_id`, and the
+configuration parser requires it to name a configured direct selection.
+
+Committed unimplemented functionality: no present runtime consumes the
+approval-judge selection or dispatches an approval-judge call. The implementing
+daemon-wiring slice must use the selected model through the ordinary adapter,
+credential-profile, and target-resolution machinery; when the table is absent,
+it must use the judged session call's direct selection unchanged, never a
+hardcoded lower tier.
+
+When no explicit posture is configured, composition preserves each compiled
+declaration's permission default and feeds it unchanged into the existing
+durable approval flow. Exact-revision code-host and pull-request reads and all
+workspace reads default to `Auto`; code-host mutations, GitHub review
+publication, and every workspace mutation default to `Confirm`. Reading the
+invoking session's transcript defaults to `Auto`, while listing conversations
+and reading another native or imported conversation default to `Confirm`. With
+the session posture disabled, a confirmed request creates the ordinary durable
+approval wait exposed by the process protocol; execution does not enter its
+transport or filesystem boundary until a per-request approval is recorded. A
+session frozen with `ApproveAll` instead receives the existing explicit
+`SessionBlanket` approval and does not park. Only the explicit
+`[tool_approval_postures]` table changes a declaration's resolved posture;
+family composition itself does not.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
@@ -483,22 +537,36 @@ Each `[[models]]` entry defines one direct selection:
 - `max_output_tokens` — required positive `u32` output-token ceiling.
 - `context_window_tokens` — required positive `u32` context ceiling, not smaller
   than `max_output_tokens`.
+- the optional all-or-none rate set — `rate_version`,
+  `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
+  `cache_creation_input_usd_per_million_tokens`, and
+  `cache_read_input_usd_per_million_tokens`. The four rates are nonnegative
+  decimal USD strings per million tokens. A derived figure is absent when
+  multiplying, dividing by one million, or summing those rates and the reported
+  counts would lose decimal precision. The version is nonempty, unpadded,
+  NUL-free, and at most 128 UTF-8 bytes. Declaring only part of the set is a
+  configuration error; omitting all five is valid and yields no dollar figure
+  for that model.
 
-This build provides exactly `anthropic` with profile `anthropic-primary` and
-`codex_cli` with profile `codex-subscription-primary`. A Codex mapping also
-requires `[codex_cli]` with an absolute executable path naming an existing
-regular file and an absolute, existing `working_directory`; construction
-validates that shape and platform support without invoking Codex or inspecting
-login state. The Codex CLI continues to own its external subscription login
-exactly as the adapter contract specifies. OpenAI HTTP and Claude CLI mappings
-are not provided by this build.
+This build provides exactly `anthropic` and `codex_cli`. Anthropic mappings use
+the declared `anthropic-primary` profile. Codex mappings may select any declared
+profile, but every Codex family in one daemon configuration must select the same
+one because the composed CLI runtime has one ambient authentication context. A
+Codex mapping also requires `[codex_cli]` with an absolute executable path
+naming an existing regular file and an absolute, existing `working_directory`;
+construction validates that shape and platform support without invoking Codex or
+inspecting login state. The Codex CLI owns its external login exactly as the
+adapter contract specifies. OpenAI HTTP and Claude CLI mappings are not provided
+by this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
 aliases are rejected). Duplicate selection keys, duplicate aliases, and
-conflicting runtime meanings for one target are all rejected.
+conflicting runtime meanings for one target are all rejected. If more than one
+model entry names the same target, its complete rate set or complete rate
+absence must also agree; a rated and unrated entry cannot share a target.
 
-One valid document yields three correlated immutable in-memory catalogs:
+One valid document yields correlated immutable in-memory catalogs:
 
 - the domain `ModelTargetCatalog`, mapping each `DirectModelSelection` to its
   exact `ResolvedProviderTarget`, used by execution-time target resolution;
@@ -510,6 +578,9 @@ One valid document yields three correlated immutable in-memory catalogs:
   selects a session-pinned credential entry. A provider model routed to
   different adapters or a target assigned conflicting families is rejected at
   startup.
+- the profile-to-billing-kind registry and target-to-versioned-rate catalog used
+  only when a read surface derives dollar cost. Rates are never written to a
+  model-call row.
 
 The file is read once at startup and never reread; changing the catalog is a
 process restart. Why: pinned targets and frozen selections must not change
@@ -626,7 +697,7 @@ digest does not replace the ordinary content digest: template provenance uses
 the complete assembled prompt digest above, while the immutable orchestration
 attempt uses the header/body/key-aware digest.
 
-Creation by template name first consults the owner-global durable-command
+Creation by template name first consults the user-global durable-command
 registry by command identity. An existing create-session claim is reconstituted
 and compared using the caller-supplied creation mode and template name before
 the current catalog is consulted; an equal replay returns its stored session,
@@ -681,6 +752,29 @@ subsequent turn resolves its target through the same static table and selects
 the latest session credential snapshot entry for that target's family. A
 prepared or in-flight predecessor retains its call pin (INV-046).
 
+Dollar cost is derived only while reading a terminal call: the call's pinned
+target selects the current configured rate version, and the exact credential
+profile stored on that call selects `api_metered` or `subscription`. An
+API-metered profile produces `real`; a subscription profile produces
+`metered_equivalent`, regardless of adapter kind. A missing rate set, missing
+historical profile declaration, call with no present usage axis, or historical
+call whose input/cache semantics predate the durable pin produces no dollar
+figure rather than zero. Codex CLI's reported `input_tokens` includes its
+reported cache-creation and cache-read breakdowns. Derivation therefore applies
+the ordinary input rate only when both cache breakdown axes are present and can
+be subtracted from total input; an omitted breakdown leaves ordinary input
+unreported while any independently reported output or cache axis remains
+priceable. Each cache rate is applied once. That inclusive-input meaning is
+pinned on the call when it is prepared, so a later configuration restart that
+reuses the target with another adapter cannot reinterpret historical usage. A
+cache breakdown larger than total input yields no figure. A credential update
+that advances the session head cannot relabel an earlier call because that call
+retains its original profile pin. Deployment keeps one profile name's billing
+meaning stable and uses a new name when an authentication update changes that
+meaning. The parser cannot detect a same-name semantic rewrite across
+configuration restarts; such a rewrite would relabel historical reads and is
+invalid deployment evolution.
+
 In the provider bridge, a durably resolved target with no `RuntimeModelCatalog`
 mapping is a typed adapter defect (`UnconfiguredTarget`), never provider
 evidence; both catalogs derive from the one document, so this indicates a
@@ -696,10 +790,10 @@ deployment-side rules that code cannot enforce are stated in
 - **Reference/value split.** A `CredentialReference` is the non-secret name of
   one credential; a `CredentialValue` carries the secret bytes. References are
   safe in configuration, errors, logs, and durable records; values are safe only
-  at the adapter boundary. Why: rotation preserves the stable name so no record
-  or log ever needs the secret (INV-035). Three references exist today: the
-  composition constants `anthropic-primary`, `codex-subscription-primary`, and
-  `github-primary`.
+  at the adapter boundary. Why: value rotation preserves the stable name so no
+  record or log ever needs the secret (INV-035). The composition constants are
+  `anthropic-primary`, `codex-subscription-primary`, and `github-primary`; model
+  configuration may declare additional non-secret profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the Anthropic and GitHub references to their corresponding deployment paths
   and reads the file for every Anthropic model-call, code-host operation, or
@@ -709,11 +803,13 @@ deployment-side rules that code cannot enforce are stated in
   reference-scoped: a foreign reference fails typed `Unmapped`; a missing file
   is `Unavailable`; an unreadable file is `Unreadable` — all reference-only
   errors.
-- **External Codex login.** `codex-subscription-primary` names the
-  operator-selected ambient Codex CLI login. The daemon and adapter neither
-  locate nor read its credential store and invent no credential-value shape; the
-  fresh CLI process resolves login state under the adapter's existing
-  environment contract.
+- **External Codex login.** A Codex mapping's profile names the
+  operator-selected ambient Codex CLI login. The default example uses
+  `codex-subscription-primary`. The daemon and adapter neither locate nor read
+  its credential store and invent no credential-value shape; the fresh CLI
+  process resolves login state under the adapter's existing environment
+  contract. The profile's configured billing kind labels derived cost; adapter
+  kind does not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -859,6 +955,19 @@ a runner. Explicit `ambient` nevertheless retains same-user filesystem powers
 and therefore does not promise those files are unreadable; that access is
 outside the credential-grant channel.
 
+## Always-composed session plan family
+
+This family is verified through PR #387 (`agent/tool-exercise-smoke`) at
+implementation ref `6ca4e31dffcb5b88d9f149cf1c347f8aa34843a3`.
+
+`plan_write` and `plan_read` have no `[[tool_mappings]]` entry. Both the
+compatibility base composition and the complete four-mapping composition
+construct them through the injected `SessionPlanPort`; production injects
+`SessionPlanRepository`. They require no credential profile, egress policy, or
+workspace root, and model arguments cannot select another session or storage
+adapter. Their automatic permission defaults and effect classes are owned by
+[tool-loop](tool-loop.md#session-plan-tools).
+
 ## Redaction and logs
 
 The following never appear in logs, error text, or durable records: credential
@@ -926,10 +1035,10 @@ are outside this cluster-delivery policy:
   defect because the next sync overwrites it. This split governs exactly the
   provider and integration runtime credentials plus the bootstrap and deployment
   material the channels themselves depend on, not every cluster-delivered
-  secret: owner-client authentication, runner enrollment, and the database
+  secret: user-client authentication, runner enrollment, and the database
   credential are separate open decisions outside it (see Open edges).
-- **Acyclic bootstrap chain.** The owner-held age identity (custodied outside
-  git and outside operator sync) decrypts the sops channel; the sops channel
+- **Acyclic bootstrap chain.** The operator-held age identity (custodied outside
+  git and outside automated sync) decrypts the sops channel; the sops channel
   delivers the operator's credential; the operator syncs the 1Password channel;
   the daemon consumes mounted artifacts. No cluster workload may reach the age
   identity through the 1Password channel.

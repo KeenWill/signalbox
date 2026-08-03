@@ -513,7 +513,7 @@ impl ConversationToolKind {
     /// Own-session transcript access is automatic because the target is the
     /// trusted dispatch correlation. Inventory, selected native reads, and
     /// imported reads can cross conversation boundaries and therefore require
-    /// explicit owner approval by default.
+    /// explicit user approval by default.
     const fn permission(self) -> ToolPermissionDefault {
         match self {
             Self::ReadOwn => ToolPermissionDefault::Auto,

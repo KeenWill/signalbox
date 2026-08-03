@@ -64,9 +64,9 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const SCRIPTED_PROVIDER: &str = "scripted-chat";
 const TOOL_NAME: &str = "confirmed_probe";
 const APPROVAL_INPUT_LINE: &str = "use the confirmed probe\n";
-const INITIAL_INPUT_LINE: &str = "first owner line\n";
+const INITIAL_INPUT_LINE: &str = "first user line\n";
 const STEERING_INPUT_LINE: &str = ":steer inspect the cache\n";
-const STOP_INPUT_LINE: &str = ":stop successor owner line\n";
+const STOP_INPUT_LINE: &str = ":stop successor user line\n";
 const FIRST_DELTA: &str = "checking ";
 const FINAL_REPLY: &str = "approved tool reply";
 const COMPACTION_PROMPT: &str = "Summarize the prior conversation faithfully for continuation.";
@@ -187,6 +187,10 @@ impl RunningIdleFixture {
             r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -268,6 +272,10 @@ impl RunningChatFixture {
         let model_configuration = HubModelConfiguration::parse(&format!(
             r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"

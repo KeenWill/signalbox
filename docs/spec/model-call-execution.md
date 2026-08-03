@@ -1,5 +1,11 @@
 # Model-call execution
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
+The durable usage-provenance column and read projection are verified against PR
+`#389` (`agent/cost-accounting`).
+
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
 rendering a context frontier into provider messages, the staged prepare /
@@ -68,15 +74,24 @@ The predecessor matrix:
   what was externally done, and rewriting it would let later facts silently
   change that record.
 
-The same terminal transition stores the provider's four token-usage fields —
-input, output, cache-creation input, and cache-read input — on the `model_call`
-row. Each field is independently nullable: null means the provider did not
-report that field, while a reported zero remains zero. Calls closed from
+The same terminal transition stores four token-usage fields — input, output,
+cache-creation input, and cache-read input — on the `model_call` row. Each field
+is independently nullable: null means that axis was not supplied, while a
+present zero remains zero. Every call also carries the closed
+`usage_provenance_kind` discriminator, exactly `reported` or `estimated`. The
+prepared checkpoint also pins `usage_input_includes_cache_tokens`, which
+preserves whether input is inclusive of separately reported cache axes even if a
+later daemon configuration routes the target through another adapter. Calls
+prepared before that pin's migration retain null as an unknown historical
+meaning, so a read never derives cost from possibly cache-inclusive input.
+Current execution paths produce only `reported`; `estimated` is reserved for a
+later explicit estimator and no present writer selects it. Calls closed from
 `ProvenUnsent`, `CancellationConfirmed`, capability failure, or restart recovery
 have all four fields unreported because no provider usage evidence exists.
-Historical rows likewise remain unreported. The terminal-row immutability rule
-makes this evidence write-once; no later path estimates, normalizes, or corrects
-it.
+Historical rows retain any reported axes exactly; the absent semantic pin, not
+rewriting those axes, prevents an invented dollar derivation. The terminal-row
+immutability rule makes this evidence write-once; no later path normalizes or
+corrects it.
 
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
@@ -91,7 +106,13 @@ the schema backstops the aggregate against any buggy or racing writer, not just
 the audited one. Migration `202607290301_model_call_token_usage.sql` adds the
 terminal-only usage-field constraints and rejects reported usage on every direct
 `Prepared -> Terminal` transition, because that transition proves no send was
-authorized.
+authorized. Migration `202608020014_model_call_usage_provenance.sql` adds the
+non-null closed provenance column with `reported` as the existing-row and
+current-writer value. It rejects an unknown spelling and prevents provenance
+rewrites except when a nonterminal call and its usage become terminal in the
+same update. The same migration leaves the input semantic null on existing rows,
+establishes cache-exclusive as the default for later inserts, and rejects every
+rewrite after insertion.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured
@@ -156,10 +177,10 @@ physical position. Otherwise the complete order is unchanged. Malformed range or
 append provenance fails closed. The resulting order becomes provider-neutral
 messages:
 
-- `OriginAcceptedInput` renders as a user message with its checked accepted
+- `OriginAcceptedInput` renders as a user-role message with its checked accepted
   input content;
-- `SteeringAcceptedInput` renders as a user message with the referenced accepted
-  input's checked content;
+- `SteeringAcceptedInput` renders as a user-role message with the referenced
+  accepted input's checked content;
 - `ModelIdentityChanged` renders as the structured provider-neutral identity
   change retaining the exact selected-model UUID and bound session-defaults
   epoch; the provider bridge later projects it as an injected user-role message
@@ -180,7 +201,7 @@ messages:
   cross-session, or non-successor placement authority fails rendering instead of
   inventing text. The same profile-specific text renders every relocation,
   including a working-directory move on the same runner and a later
-  owner-directed move of a healthy session
+  user-directed move of a healthy session
   ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
   What is genuinely unavailable is authority to execute through the retired
   placement; the old path is no longer the active working directory or writable
@@ -204,6 +225,39 @@ messages:
 - `AssistantToolUse` and its proposal-ordered result entries render as paired
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
+
+**Committed unimplemented functionality (session-delegation foundation
+proposal).** No present renderer admits the delegation semantic variants. The
+implementing delegation child pull requests add these mappings:
+
+- `DelegatedTask` renders as a structured provider-neutral delegated-task
+  message retaining the child, parent session and turn, and exact spawning
+  request. The provider bridge emits one injected user-role message with exact
+  prefix `Signalbox delegated task:\n` followed by the checked task bytes. The
+  transport role does not create an accepted input or `Actor::User`; the
+  structured value retains model/tool-authored spawn provenance;
+- `DelegationMessage` renders as a structured provider-neutral session event
+  retaining the relationship, message, sender, recipient, and recipient-wide
+  delivery sequence. The provider bridge emits one injected user-role message
+  with exact prefix
+  `Signalbox delegation message from session {sender_session_id}:\n` followed by
+  the immutable message content, replacing the braces with the canonical UUID.
+  The transport role does not reclassify the sender as the user;
+- a foreground `DelegationResult` resolves its exact `await_session` request and
+  renders through the ordinary paired tool-result path. A returned result uses
+  the delivered bytes; another outcome uses the compact closed
+  outcome/reason/provenance JSON defined by the delegation process contract: one
+  object whose members appear in the exact order `outcome`, `reason`,
+  `provenance`, encoded without insignificant whitespace. A background result
+  instead renders as a structured provider-neutral session event retaining its
+  awaiting request and recipient-wide delivery sequence. Its injected user-role
+  form is
+  `Signalbox background child result from session {child_session_id}:\n{content}`
+  for returned content, or
+  `Signalbox background child outcome from session {child_session_id}: {compact_json}`
+  for another outcome. Braces are replaced by the canonical child UUID, exact
+  returned bytes, or that same exact compact JSON respectively. These transport
+  messages are neither accepted input nor child transcript access.
 
 The prepared model operation carries one immutable `ExecutableToolSnapshot`, not
 the unfiltered process registry. Preparation includes every daemon-only tool;
@@ -246,12 +300,12 @@ satisfying registration. If none remains, the proposal closes known-failed as
 `ToolUnavailableBeforePin` without creating an attempt or placement, because no
 runner execution was authorized. `RunnerAbandoned` exposes daemon-executable
 tools only. `RunnerLost` and `RunnerLostBeforePin` cannot prepare a new model
-operation while the turn awaits owner recovery. An operation prepared before
-loss retains its frozen snapshot and physical-call disposition, but a
-runner-only proposal from it cannot authorize against the lost locus. A
-combined-locus definition remains executable through its daemon locus when
-runner availability disappears; an already frozen runner selection never
-silently falls back after the provider returns.
+operation while the turn awaits user recovery. An operation prepared before loss
+retains its frozen snapshot and physical-call disposition, but a runner-only
+proposal from it cannot authorize against the lost locus. A combined-locus
+definition remains executable through its daemon locus when runner availability
+disappears; an already frozen runner selection never silently falls back after
+the provider returns.
 
 Each snapshot entry binds the exact model definition, permission/effect policy,
 and selected executable locus used to validate and authorize a returned
@@ -322,7 +376,7 @@ summary entry, and result frontier.
 Preparation also rejects a freshly minted summary-entry, result-frontier, or
 compaction identity that already names a durable record, so the daemon remints
 and retries before any provider interaction exactly as it does for a colliding
-call identity; the rejected claim rolls back, leaving the owner-global command
+call identity; the rejected claim rolls back, leaving the user-global command
 reusable. A uniqueness violation observed later, while applying the completion,
 is a decided fact rather than a retryable database failure: the completion fails
 closed and its in-flight call is left to startup recovery, because the prepared
@@ -343,7 +397,7 @@ operation, and the daemon performs no automatic pre-activation compaction;
 explicit compaction remains available.
 
 The explicit trigger uses the same compaction transaction and provider-call
-lifecycle. An explicit command first resolves its owner-global replay state; an
+lifecycle. An explicit command first resolves its user-global replay state; an
 equal applied command returns its original receipt even when the current
 deployment no longer resolves the original selection or compaction credential.
 Configuration and credential resolution occur only for an unseen command.
@@ -532,12 +586,13 @@ inferred from timing or injected I/O errors.
 
 For `Completed`, `Refused`, `ProviderError`, and `BoundaryLoss`, the bridge also
 copies the runtime terminal evidence's final absorbed `TokenUsage` fields into
-the correlated observation verbatim. Classification does not derive usage from
-the disposition, content, context, or provider family. The observation commit
-stores those fields atomically with the terminal disposition. A commit-ambiguity
-reread returns `AlreadyCommitted` only when the durable disposition, closure,
-and every independently nullable usage field equal the retained observation;
-different or newly absent usage is conflicting evidence, not an equal replay.
+the correlated observation verbatim. This is reported evidence. Classification
+does not derive usage from the disposition, content, context, or provider
+family. The observation commit stores those fields atomically with the terminal
+disposition. A commit-ambiguity reread returns `AlreadyCommitted` only when the
+durable disposition, closure, and every independently nullable usage field equal
+the retained observation; different or newly absent usage is conflicting
+evidence, not an equal replay.
 
 ### Provider-target identity
 
@@ -759,7 +814,7 @@ prints the semantic transcript; it is deliberately not the client protocol.
   adapters would have to construct and redact, and is routed through the
   provider provenance schema in
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-- Unstopped ambiguity recovery is a parked state only: no owner decision,
+- Unstopped ambiguity recovery is a parked state only: no user decision,
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.

@@ -80,7 +80,7 @@ pub struct PostgresReviewOrchestrationStore {
 
 impl PostgresReviewOrchestrationStore {
     /// Records the response recovered after the aggregate effect commits and
-    /// before the owner-global command receipt is committed.
+    /// before the user-global command receipt is committed.
     pub async fn record_command_recovery(
         &self,
         command: ReviewOrchestrationCommand,
@@ -521,7 +521,7 @@ pub struct ReviewOrchestrationSnapshotFacts {
     pub publication_outcomes: Option<Vec<ReviewPublicationMemberOutcome>>,
 }
 
-/// Closed owner-global command kinds for orchestration mutations.
+/// Closed user-global command kinds for orchestration mutations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReviewOrchestrationCommandKind {
     Start,
@@ -533,7 +533,7 @@ pub enum ReviewOrchestrationCommandKind {
     Publication,
 }
 
-/// One checked owner-global orchestration command claim.
+/// One checked user-global orchestration command claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReviewOrchestrationCommand {
     pub command_id: DurableCommandId,
@@ -550,7 +550,7 @@ pub struct ReviewOrchestrationCommandResult {
     pub progress: ReviewOrchestrationProgress,
 }
 
-/// Pre-effect owner-global command claim result.
+/// Pre-effect user-global command claim result.
 pub enum ReviewOrchestrationCommandClaim {
     ExistingRecorded(ReviewOrchestrationCommandResult),
     Conflicting,
@@ -606,7 +606,7 @@ impl ReviewOrchestrationCommandGuard {
 }
 
 impl PostgresReviewOrchestrationStore {
-    /// Durably claims an owner-global command before its separately durable effect.
+    /// Durably claims a user-global command before its separately durable effect.
     ///
     /// A fresh claim commits an immutable typed intent. An exact retry observes
     /// that intent as pending, while a distinct payload conflicts before it can

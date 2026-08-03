@@ -1,17 +1,16 @@
 # Design scenarios
 
 These scenarios test architectural boundaries; quoted commands and state names
-are descriptive pseudocode, not final APIs. “Durable commands” means owner
-intent the daemon must commit before acknowledging, not a prescribed
-event-sourcing design. Invariant identifiers link to
-[the catalog](invariants.md).
+are descriptive pseudocode, not final APIs. “Durable commands” means user intent
+the daemon must commit before acknowledging, not a prescribed event-sourcing
+design. Invariant identifiers link to [the catalog](invariants.md).
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
 implemented test); a scenario's normative content changes or is added only
-alongside the owner-accepted change that motivates it, and a change introducing
-a new lifecycle edge adds or amends its scenario fixture in the same change.
-Test coverage is recorded outside this document: tests name the scenario
+alongside the maintainer-accepted change that motivates it, and a change
+introducing a new lifecycle edge adds or amends its scenario fixture in the same
+change. Test coverage is recorded outside this document: tests name the scenario
 identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
 [testing-style.md](agents/testing-style.md). The
 [invariant test index](invariants.md) is generated separately from corresponding
@@ -22,15 +21,15 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Start an empty conversation from a terminal and make it
   available on every client.
 - **Durable commands:**
-  `CreateSession(cause: owner_initiated, ancestry: none, initial_model_selection_defaults)`
+  `CreateSession(cause: user_initiated, ancestry: none, initial_model_selection_defaults)`
   establishes defaults version one.
   `SubmitInput(delivery: start_when_no_active_turn, ...)` resolves its model
   request against that exact version and atomically persists the accepted input,
   origin turn, and complete baseline configuration provenance. A later defaults
   update affects only subsequently accepted origins.
 - **State transitions:** No session → durable session with immutable
-  owner/no-ancestry provenance and complete current defaults version one; no
-  turn → queued origin turn with derived eligibility → atomically fixed starting
+  user/no-ancestry provenance and complete current defaults version one; no turn
+  → queued origin turn with derived eligibility → atomically fixed starting
   frontier plus `Active(Running)` and initial prepared attempt.
 - **Transient updates:** Optimistic client placeholder and scheduling progress.
 - **Owning component:** Daemon owns creation and acceptance; Postgres stores the
@@ -40,7 +39,7 @@ INV-tagged test names and attached doc comments.
   committed domain handling returns visibly and claims no command identifier;
   corrected boundary input may reuse it. Canonically equivalent caller forms
   compare as the same command. The first committed handling of a well-formed
-  typed command under established owner authority records either its applied
+  typed command under established user authority records either its applied
   result or a typed domain rejection. Replay returns that same result before
   current-state validation; a command rejected after construction cannot later
   become valid under the same identifier. Corrected domain intent then needs a
@@ -51,7 +50,7 @@ INV-tagged test names and attached doc comments.
   defaults version rather than silently becoming new work.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
 - **Remaining questions:** Authenticated remote and browser clients remain
-  [open](open-questions.md#protocols-and-persistence); the owner-global
+  [open](open-questions.md#protocols-and-persistence); the user-global
   idempotency scope, the typed relational command representation, and actor
   attribution in the canonical command payload with its replay equality are
   decided in [identity-and-commands](spec/identity-and-commands.md); the
@@ -135,7 +134,7 @@ INV-tagged test names and attached doc comments.
   same atomic boundary as live completion; a partial draft never does. A
   response that would introduce unfinished tool work remains outside the first
   slice until its owning decision defines the required recovery transition. An
-  owner decision, if needed, is a separate command bound to the exact
+  user decision, if needed, is a separate command bound to the exact
   ambiguous-operation set.
 - **State transitions:** The startup scan derives the complete evidence and
   stop-cause set before ending the old turn attempt with disposition `Lost` in
@@ -154,7 +153,7 @@ INV-tagged test names and attached doc comments.
   ambiguous preserves that physical disposition and contributes
   `TerminalAmbiguityResolution` to the complete recovered fatal causes, yielding
   turn failure when no other ambiguity remains and exact fatal reconciliation
-  otherwise. An owner may preserve an ambiguous call while separately accepting
+  otherwise. A user may preserve an ambiguous call while separately accepting
   duplicate risk only when no fatal invalidation exists.
 - **Transient updates:** Uncommitted deltas and the live provider connection are
   lost; clients replace drafts from an authoritative snapshot.
@@ -188,7 +187,7 @@ INV-tagged test names and attached doc comments.
   preserves existing state and precedence. After authority transfer it is
   non-authoritative evidence; after valid turn terminalization it cannot rewrite
   committed content or successor context. Another provider call may remain in
-  the same turn only after an exact-set owner decision accepts unresolved
+  the same turn only after an exact-set user decision accepts unresolved
   duplicate risk while preserving origin, configuration, context, and evidence,
   and no fatal invalidation exists. That decision atomically closes the wait,
   consumes all eligible steering into the replacement frontier, creates the
@@ -241,7 +240,7 @@ INV-tagged test names and attached doc comments.
 - **Transient updates:** Last progress text may be shown only as
   non-authoritative evidence.
 - **Owning component:** Daemon classifies and blocks automatic retry; the
-  selected runner may later provide evidence; the owner resolves uncertainty.
+  selected runner may later provide evidence; the user resolves uncertainty.
 - **Failure behavior:** No blind retry and no claim that interrupt or disconnect
   undid the effect. Version one has no writer for resolving evidence or
   accepted-risk continuation; the parked wait retains its slot until an applied
@@ -308,8 +307,9 @@ INV-tagged test names and attached doc comments.
   turn.
 - **Required invariants:** INV-007–INV-009, INV-012, INV-025, INV-028, INV-029.
 - **Remaining questions:** Provider/tool-specific cancellation evidence remains
-  open. Child-cancellation propagation is excluded from the baseline and
-  reserved for the open [delegation decision](open-questions.md#delegation).
+  open. Delegated-child propagation follows the explicit relationship policy and
+  user-selected scope owned by
+  [S19](#s19--cancel-a-parent-while-child-work-is-active).
 
 ## S08 — Submit safe-point steering
 
@@ -380,7 +380,7 @@ INV-tagged test names and attached doc comments.
 
 - **User intent:** Permit one clearly presented risky operation.
 - **Durable commands:** Create the exact content-authoritative tool request;
-  record fail-closed `confirmation_required`; persist an owner-global approval
+  record fail-closed `confirmation_required`; persist a user-global approval
   command bound to that request; then create a new turn attempt for the
   authorized-but-not-yet-dispatched batch. Tool-attempt identity is created only
   at later physical dispatch.
@@ -416,7 +416,7 @@ INV-tagged test names and attached doc comments.
   tool attempt → orchestration later reaches an ordinary terminal disposition.
 - **Transient updates:** Prompt closes and clients receive status.
 - **Owning component:** Daemon owns denial and prevents dispatch; client
-  captures the owner's decision.
+  captures the user's decision.
 - **Failure behavior:** No physical tool attempt is created. The new turn
   attempt exists only to continue conversational orchestration with the denial
   outcome. Duplicate or delayed approval messages cannot reverse the denial
@@ -459,7 +459,7 @@ INV-tagged test names and attached doc comments.
 ## S13 — Use an ambient-user runner
 
 - **User intent:** Intentionally run a workspace tool with the same OS authority
-  as the owner.
+  as the user.
 - **Durable commands:** Select the runner explicitly; snapshot the declared,
   configured, and verified evidence relevant to the attempt together with the
   effective ambient boundary; apply tool policy and approval rules.
@@ -540,8 +540,8 @@ INV-tagged test names and attached doc comments.
 
 - **User intent:** Explore an alternative from an earlier point without changing
   the source session.
-- **Durable commands:** Create a session with the baseline `OwnerInitiated`
-  cause independent from ancestry `(source session, immutable frontier)`.
+- **Durable commands:** Create a session with the baseline `UserInitiated` cause
+  independent from ancestry `(source session, immutable frontier)`.
 - **State transitions:** New session absent → session durably created with its
   immutable source-session and `TranscriptFrontier` reference. After the fork's
   first input is accepted and its turn becomes eligible, the eligibility
@@ -568,52 +568,53 @@ INV-tagged test names and attached doc comments.
 
 - **User intent:** Assign related work to an independently browsable child and
   receive an explicit result.
-- **Durable commands:** Future delegation commands (open:
-  [delegation](open-questions.md#delegation)) must add a delegated
-  creation-cause variant with an exact durable parent-work identity, create the
-  child with that cause and a parent-work relation, persist task input, record a
-  typed parent wait/reference, and later persist explicit result delivery.
-- **State transitions:** Child creation and execution use a distinct session.
-  Parent wait, resume, result, and cancellation transitions are intentionally
-  not part of the first implementable turn state machine; the delegation
-  decision must add a typed child-wait phase before delegation ships.
-- **Transient updates:** Child progress summaries and presence indicators.
+- **Durable commands:** `spawn_session` creates one child whose delegated cause
+  names the exact parent tool request, with ancestry `None`, task input, and a
+  background or bound relationship. `await_session` records foreground or
+  background delivery; `send_session_message` records either direction, as owned
+  by the
+  [delegation tool contract](spec/tool-loop.md#session-delegation-tool-family).
+- **State transitions:** A foreground wait retains the parent's only active turn
+  slot until an explicit child result arrives. A background wait registers
+  delivery without retaining that slot; result commit creates a durable parent
+  wake. The returned value or typed failure becomes delivered parent content,
+  never child transcript content, under the
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
+- **Transient updates:** Best-effort nudges reduce result/message wake latency;
+  the durable eligibility sweep is the restart and lost-wake backstop.
 - **Owning component:** Daemon owns relationships and scheduling; each session
   retains independent history.
-- **Failure behavior:** Once the delegation decision defines the feature,
-  restart must restore both child state and parent wait, and child failure must
-  be delivered explicitly rather than disappearing into parent UI state. The
-  current foundation does not permit an implementation to invent those
-  transitions.
+- **Failure behavior:** Restart restores the relationship, exact wait, messages,
+  and undelivered result. Child failure, stop, or cancellation is delivered as a
+  typed outcome. A detached result remains durable after parent termination, as
+  owned by
+  [session delegation](spec/sessions-and-transcript.md#session-delegation).
 - **Required invariants:** INV-003, INV-010, INV-034.
-- **Remaining questions:** The delegation decision must define the child-wait
-  variant, result representation, cancellation propagation, detached work, and
-  resource limits. Any accepted child wait retains the parent session slot
-  unless that decision also defines explicit branching or rebasing.
+- **Remaining questions:** Multi-source or merged transcript ancestry remains
+  separate and unchanged.
 
 ## S19 — Cancel a parent while child work is active
 
 - **User intent:** Stop parent work with a clear understanding of what happens
   to the child.
-- **Durable commands:** No baseline command is exposed for canceling a parent in
-  a child wait. The delegation decision must define and atomically persist
-  parent cancellation together with an explicit child-disposition decision
-  before enabling this scenario.
-- **State transitions:** Reserved for the delegation decision; the first turn
-  state machine has no `AwaitingChild` phase and therefore no incomplete
-  cancellation edge.
-- **Transient updates:** Cancellation progress for each physical attempt.
-- **Owning component:** Daemon applies the eventual delegation policy; executors
-  only respond to cancellation requests.
-- **Failure behavior:** A future policy may keep or cancel the child, but
-  already-issued effects are never undone, the child never silently disappears,
-  and ambiguous child effects remain reconcilable. Implementations must not
-  choose a policy before the delegation decision is accepted.
+- **Durable commands:** Parent stop/cancel carries `ParentAlone` or
+  `ParentAndDescendants`. The latter atomically records a disposition for each
+  evaluated relationship from the durable descendant walk defined by
+  [session delegation](spec/sessions-and-transcript.md#session-delegation).
+- **State transitions:** Background children continue. Bound children apply
+  their separately recorded stop/cancel action; `KeepRunning` is itself a typed
+  disposition. A child is never deleted and may finish after the parent.
+- **Transient updates:** Cancellation progress remains per physical attempt;
+  relationship outcomes are durable updates rather than presence hints.
+- **Owning component:** Daemon applies the recorded policy and user-selected
+  scope; executors respond only to typed stop/cancel authority.
+- **Failure behavior:** Every evaluated child has an explicit reason and exact
+  spawn, parent-event, and command provenance. Already-issued effects are not
+  undone and ambiguous effects remain reconcilable under the
+  [delegated-wait contract](spec/turn-lifecycle-and-scheduling.md#delegated-waits-messages-and-wake-turns).
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-034.
-- **Remaining questions:** The delegation decision remains blocking for
-  propagation, detached-child support, result delivery after parent termination,
-  and the parent/child disposition model. Ordinary archive is independently
-  non-cascading; destructive retention remains separate later scope.
+- **Remaining questions:** Ordinary archive remains independently non-cascading;
+  destructive retention remains separate later scope.
 
 ## S20 — Resolve a curated model alias
 
@@ -1022,7 +1023,7 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Continue a pinned session on an explicitly selected
   replacement while ensuring the model learns the changed logical runner,
   directory, tools, credential profile, and workspace.
-- **Durable commands:** A later owner command marks the runner lost and supplies
+- **Durable commands:** A later user command marks the runner lost and supplies
   one complete validated replacement placement. When the placement selects a
   credential profile, runner replacement consumes the prior grant and creates
   its checked successor revision in that same replacement. A separate
@@ -1038,7 +1039,7 @@ INV-tagged test names and attached doc comments.
   workspace is never inherited.
 - **Transient updates:** UI progress and connection discovery are not
   replacement authority.
-- **Owning component:** The daemon validates and records owner intent; the
+- **Owning component:** The daemon validates and records user intent; the
   selected runner provisions and cleans its workspace; context assembly later
   appends the typed placement-change message.
 - **Failure behavior:** Automatic migration is absent. An ineligible runner,
@@ -1048,7 +1049,7 @@ INV-tagged test names and attached doc comments.
   an already offered lease.
 - **Required invariants:** INV-005, INV-008, INV-024–INV-026, INV-035, INV-036,
   INV-042, INV-044, INV-045.
-- **Remaining questions:** Owner command shape, atomic store boundaries, exact
+- **Remaining questions:** User command shape, atomic store boundaries, exact
   injected semantic content, cleanup recovery, and recovery when no eligible
   replacement exists remain under
   [scheduling and runners](open-questions.md#scheduling-and-runners) and
@@ -1071,7 +1072,7 @@ INV-tagged test names and attached doc comments.
   replacement receipt.
 - **Owning component:** The domain owns epoch and frontier laws; Postgres stores
   and constrains them; the daemon validates against its read-only catalog; the
-  process protocol and terminal model verb expose the owner command.
+  process protocol and terminal model verb expose the user command.
 - **Failure behavior:** Missing session, stale or exhausted epoch, conflicting
   command reuse, unknown catalog selection, and commit ambiguity retain their
   distinct typed outcomes. Exact replay returns the first recorded result.
@@ -1096,7 +1097,7 @@ INV-tagged test names and attached doc comments.
 - **Owning component:** The domain owns the bounded prompt value and epoch laws;
   Postgres stores and constrains it, including digest-keyed command/defaults
   agreement; the process protocol and terminal create/model verbs expose the
-  owner surface.
+  user surface.
 - **Failure behavior:** An empty, U+0000-bearing, over-bound, or omitted prompt
   member fails before any command identity is claimed. Stale epochs, conflicting
   reuse, unknown catalog selections, and commit ambiguity retain their S33
@@ -1137,10 +1138,36 @@ INV-tagged test names and attached doc comments.
   richer prompt/tool composition remains owned by
   [configuration categories](open-questions.md#configuration-categories).
 
+## S36 — Scope a session's cross-session reads by placement path
+
+- **User intent:** Place a session in a dotted project directory so it can read
+  sibling and descendant native conversations without reading above or outside
+  that directory.
+- **Durable commands:** Creation records pathless, scoped, or loudly
+  acknowledged root-global-read placement as history version one.
+  `UpdateSessionPlacement(expected_version, replacement)` appends one explicit
+  next-version event and preserves every prior event.
+- **State transitions:** Pathless retains legacy read behavior. Scoped placement
+  reads the parent directory subtree by one prefix comparison. Root placement
+  reads everything only when the current creation or update event records
+  explicit global-read intent.
+- **Transient updates:** None; a denied selected-transcript read returns typed
+  refusal evidence naming the requester's directory and closed reason.
+- **Owning component:** Domain owns validated paths, events, and scope decision;
+  Postgres owns history and current selection; conversation introspection owns
+  enforcement; process surfaces own creation, update, and display.
+- **Failure behavior:** Empty, malformed, overlong, and over-deep paths fail
+  before command handling. Stale updates are authoritative typed rejections.
+  Ancestor, pathless-target, and disjoint scoped reads are typed refusals rather
+  than empty successful results.
+- **Required invariants:** INV-008, INV-012, INV-050.
+- **Remaining questions:** None.
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input
-lifecycle. Delegation cancellation, fallback, capability vocabulary, safety
-policy, queue management, archive behavior, and protocol choices remain open. A
-decision that changes a lifecycle should update the affected scenarios and cite
-the invariant changes it requires.
+lifecycle. Fallback, capability vocabulary, safety policy, queue management,
+archive behavior, and other protocol choices remain open; the delegation
+command, result, message, and descendant-scope protocols are committed by S18
+and S19. A decision that changes a lifecycle should update the affected
+scenarios and cite the invariant changes it requires.

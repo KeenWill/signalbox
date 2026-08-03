@@ -12,8 +12,9 @@
 
 use crate::{
     ContextFrontierId, DurableCommandId, ImportedConversationId, ImportedTranscriptFrontier,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId, SessionPlacement,
+    SessionPlacementVersion, SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
+    VersionedSessionPlacement,
 };
 
 #[derive(Clone, Debug)]
@@ -27,7 +28,7 @@ enum SessionCreationDefaults {
 
 /// Why one session exists.
 ///
-/// The first implementable cause is owner-initiated. Application-initiated,
+/// The first implementable cause is user-initiated. Application-initiated,
 /// scheduled, delegated, and any other causes are reserved extension examples
 /// rather than valid baseline values: the spec revision that enables one
 /// must add a typed variant carrying the exact durable initiating domain
@@ -54,13 +55,13 @@ enum SessionCreationDefaults {
 /// use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
 ///
 /// fn a_cause_cannot_carry_ancestry(ancestry: TranscriptAncestry) {
-///     let _ = SessionCreationCause::OwnerInitiated { ancestry };
+///     let _ = SessionCreationCause::UserInitiated { ancestry };
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SessionCreationCause {
-    /// The owner started this conversation.
-    OwnerInitiated,
+    /// The user started this conversation.
+    UserInitiated,
 }
 
 /// Identifies one exact immutable source boundary in semantic history.
@@ -195,7 +196,7 @@ impl SessionCreationProvenance {
 
 /// The complete typed caller payload that creates one session.
 ///
-/// The payload carries the owner-global durable command identity, both
+/// The payload carries the user-global durable command identity, both
 /// required independent creation-provenance facts, and one complete
 /// unversioned model-selection defaults value. Session creation establishes
 /// the first immutable defaults version through
@@ -232,7 +233,7 @@ impl SessionCreationProvenance {
 /// # Scope
 ///
 /// This is neither a wire message nor a committed command handling. It omits
-/// session identity minting, owner authority, command deduplication and
+/// session identity minting, user authority, command deduplication and
 /// replay, atomic validation of the provenance pair before acknowledgement,
 /// persistence, and acknowledgement.
 #[derive(Clone, Debug)]
@@ -240,6 +241,7 @@ pub struct CreateSession {
     command_id: DurableCommandId,
     provenance: SessionCreationProvenance,
     creation_defaults: SessionCreationDefaults,
+    placement: SessionPlacement,
 }
 
 impl CreateSession {
@@ -254,6 +256,22 @@ impl CreateSession {
             command_id,
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
+            placement: SessionPlacement::pathless(),
+        }
+    }
+
+    /// Creates an explicitly placed session.
+    pub const fn new_with_placement(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
+    ) -> Self {
+        Self {
+            command_id,
+            provenance,
+            creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
+            placement,
         }
     }
 
@@ -272,10 +290,30 @@ impl CreateSession {
                 provenance: template_provenance,
                 resolved: resolved_configuration_defaults,
             },
+            placement: SessionPlacement::pathless(),
         }
     }
 
-    /// Returns the owner-global durable command identity claimed by this
+    /// Creates a template-sourced session with an explicit placement.
+    pub const fn new_from_template_with_placement(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
+    ) -> Self {
+        Self {
+            command_id,
+            provenance,
+            creation_defaults: SessionCreationDefaults::Template {
+                provenance: template_provenance,
+                resolved: resolved_configuration_defaults,
+            },
+            placement,
+        }
+    }
+
+    /// Returns the user-global durable command identity claimed by this
     /// payload.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
@@ -302,6 +340,11 @@ impl CreateSession {
             SessionCreationDefaults::Explicit(_) => None,
             SessionCreationDefaults::Template { provenance, .. } => Some(provenance),
         }
+    }
+
+    /// Borrows the placement pinned by this creation record.
+    pub const fn placement(&self) -> &SessionPlacement {
+        &self.placement
     }
 
     /// Establishes the first immutable defaults version this creation
@@ -345,6 +388,7 @@ impl CreateSession {
 impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
+            && self.placement == other.placement
             && match (&self.creation_defaults, &other.creation_defaults) {
                 (
                     SessionCreationDefaults::Explicit(left),
@@ -368,6 +412,7 @@ impl Eq for CreateSession {}
 impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
+        self.placement.hash(state);
         match &self.creation_defaults {
             SessionCreationDefaults::Explicit(defaults) => {
                 0_u8.hash(state);
@@ -411,7 +456,7 @@ impl CreateSessionFromImportedFrontier {
         }
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -510,6 +555,7 @@ pub struct InitialSession {
     provenance: SessionCreationProvenance,
     template_provenance: Option<SessionTemplateProvenance>,
     configuration_defaults: VersionedSessionConfigurationDefaults,
+    placement: VersionedSessionPlacement,
 }
 
 impl InitialSession {
@@ -523,6 +569,7 @@ impl InitialSession {
             provenance,
             template_provenance: None,
             configuration_defaults,
+            placement: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         }
     }
 
@@ -544,6 +591,11 @@ impl InitialSession {
     /// Returns defaults version one established by creation.
     pub const fn configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
         &self.configuration_defaults
+    }
+
+    /// Borrows placement event one established by creation.
+    pub const fn placement(&self) -> &VersionedSessionPlacement {
+        &self.placement
     }
 }
 
@@ -597,6 +649,7 @@ pub struct Session {
     creation_provenance: SessionCreationProvenance,
     template_provenance: Option<SessionTemplateProvenance>,
     current_configuration_defaults: VersionedSessionConfigurationDefaults,
+    current_placement: VersionedSessionPlacement,
 }
 
 impl Session {
@@ -604,12 +657,14 @@ impl Session {
         id: SessionId,
         creation_provenance: SessionCreationProvenance,
         current_configuration_defaults: VersionedSessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
     ) -> Self {
         Self {
             id,
             creation_provenance,
             template_provenance: None,
             current_configuration_defaults,
+            current_placement,
         }
     }
 
@@ -633,6 +688,24 @@ impl Session {
     pub const fn current_configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
         &self.current_configuration_defaults
     }
+
+    /// Borrows the complete placement event selected as current.
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement {
+        &self.current_placement
+    }
+}
+
+/// Labeled, independently stored placement facts for current-session reconstitution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPlacementReconstitutionFacts {
+    /// Session identity owning the mutable current-placement pointer.
+    pub current_pointer_session: SessionId,
+    /// Placement version selected by the current-placement pointer.
+    pub current_pointer_version: SessionPlacementVersion,
+    /// Session identity owning the selected immutable placement event.
+    pub selected_event_session: SessionId,
+    /// Complete selected immutable placement event.
+    pub selected_event: VersionedSessionPlacement,
 }
 
 /// Complete checked inputs for reconstituting one current [`Session`].
@@ -652,13 +725,17 @@ pub struct SessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    current_placement_session: SessionId,
+    current_placement_version: SessionPlacementVersion,
+    placement_session: SessionId,
+    current_placement: VersionedSessionPlacement,
 }
 
 impl SessionReconstitutionInput {
-    /// Supplies the complete typed facts required by the current-session
+    /// Supplies every independently stored fact required by the current-session
     /// reconstitution seam.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -667,8 +744,9 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
-        Self::new_with_template_provenance(
+        Self::new_with_template_and_placement(
             requested_session,
             stored_session,
             provenance,
@@ -678,12 +756,14 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            placement,
         )
     }
 
-    /// Supplies complete typed facts including optional template provenance.
+    /// Supplies every independently stored fact, including optional template
+    /// provenance, required by the current-session reconstitution seam.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new_with_template_provenance(
+    pub fn new_with_template_provenance(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -693,7 +773,42 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
+        Self::new_with_template_and_placement(
+            requested_session,
+            stored_session,
+            provenance,
+            template_provenance,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+            placement,
+        )
+    }
+
+    /// Supplies complete stored facts including current placement history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_template_and_placement(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+    ) -> Self {
+        let SessionPlacementReconstitutionFacts {
+            current_pointer_session,
+            current_pointer_version,
+            selected_event_session,
+            selected_event,
+        } = placement;
         Self {
             requested_session,
             stored_session,
@@ -704,6 +819,10 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement_session: current_pointer_session,
+            current_placement_version: current_pointer_version,
+            placement_session: selected_event_session,
+            current_placement: selected_event,
         }
     }
 
@@ -752,6 +871,26 @@ impl SessionReconstitutionInput {
         &self.defaults
     }
 
+    /// Returns the session identity owning the current-placement pointer.
+    pub const fn current_placement_session(&self) -> SessionId {
+        self.current_placement_session
+    }
+
+    /// Returns the version selected by the current-placement pointer.
+    pub const fn current_placement_version(&self) -> SessionPlacementVersion {
+        self.current_placement_version
+    }
+
+    /// Returns the session identity owning the selected placement event.
+    pub const fn placement_session(&self) -> SessionId {
+        self.placement_session
+    }
+
+    /// Borrows the current placement event supplied for reconstitution.
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement {
+        &self.current_placement
+    }
+
     /// Reconstructs one complete current session without performing I/O,
     /// replay, identity generation, or lifecycle effects.
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError> {
@@ -763,6 +902,12 @@ impl SessionReconstitutionInput {
             Some(SessionReconstitutionFailure::DefaultsSessionMismatch)
         } else if self.current_defaults_version != self.defaults_version {
             Some(SessionReconstitutionFailure::CurrentDefaultsVersionMismatch)
+        } else if self.current_placement_session != self.stored_session {
+            Some(SessionReconstitutionFailure::CurrentPlacementSessionMismatch)
+        } else if self.placement_session != self.stored_session {
+            Some(SessionReconstitutionFailure::PlacementSessionMismatch)
+        } else if self.current_placement_version != self.current_placement.version() {
+            Some(SessionReconstitutionFailure::CurrentPlacementVersionMismatch)
         } else if matches!(
             self.provenance.ancestry(),
             TranscriptAncestry::ImportedConversation { .. }
@@ -786,6 +931,7 @@ impl SessionReconstitutionInput {
                 self.defaults_version,
                 self.defaults,
             ),
+            current_placement: self.current_placement,
         })
     }
 }
@@ -801,6 +947,12 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The pointer and selected defaults record name different versions.
     CurrentDefaultsVersionMismatch,
+    /// The current-placement pointer belongs to another session.
+    CurrentPlacementSessionMismatch,
+    /// The selected placement event belongs to another session.
+    PlacementSessionMismatch,
+    /// The pointer and selected placement event name different versions.
+    CurrentPlacementVersionMismatch,
     /// Imported ancestry requires the separate exact-prefix seed
     /// reconstitution seam.
     ImportedSessionSeedUnavailable,
@@ -934,7 +1086,7 @@ impl CreateSessionPreparationError {
 }
 
 impl CreateSession {
-    /// Prepares the owner-initiated, no-ancestry baseline for one transaction.
+    /// Prepares the user-initiated, no-ancestry baseline for one transaction.
     ///
     /// A single-source command remains a canonical command value but cannot
     /// be handled until a trusted transcript-frontier producer validates its
@@ -945,9 +1097,9 @@ impl CreateSession {
         session: SessionId,
     ) -> Result<PreparedCreateSession, CreateSessionPreparationError> {
         match (self.provenance.cause(), self.provenance.ancestry()) {
-            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
+            (SessionCreationCause::UserInitiated, TranscriptAncestry::None) => {}
             (
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -964,6 +1116,7 @@ impl CreateSession {
             provenance: self.provenance,
             template_provenance: self.template_provenance().cloned(),
             configuration_defaults: self.establish_initial_defaults(),
+            placement: VersionedSessionPlacement::initial(self.placement.clone()),
         };
         Ok(PreparedCreateSession {
             command: self,
@@ -989,6 +1142,7 @@ pub struct CreateSessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: crate::SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    placement: VersionedSessionPlacement,
 }
 
 impl CreateSessionReconstitutionInput {
@@ -1003,7 +1157,7 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
-        Self::new_with_template_provenance(
+        Self::new_with_template_and_placement(
             command,
             result_session,
             session,
@@ -1012,6 +1166,7 @@ impl CreateSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 
@@ -1027,6 +1182,32 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
+        Self::new_with_template_and_placement(
+            command,
+            result_session,
+            session,
+            provenance,
+            template_provenance,
+            defaults_session,
+            defaults_version,
+            defaults,
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+        )
+    }
+
+    /// Supplies complete creation facts including placement event one.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_with_template_and_placement(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: crate::SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: VersionedSessionPlacement,
+    ) -> Self {
         Self {
             command,
             result_session,
@@ -1036,6 +1217,7 @@ impl CreateSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            placement,
         }
     }
 
@@ -1079,6 +1261,11 @@ impl CreateSessionReconstitutionInput {
         &self.defaults
     }
 
+    /// Borrows placement event one stored with creation.
+    pub const fn placement(&self) -> &VersionedSessionPlacement {
+        &self.placement
+    }
+
     /// Reconstructs the complete canonical creation without replaying effects.
     pub fn reconstitute(
         self,
@@ -1111,6 +1298,14 @@ impl CreateSessionReconstitutionInput {
                 CreateSessionReconstitutionFailure::TemplateProvenanceMismatch,
             ));
         }
+        if self.placement.version() != crate::SessionPlacementVersion::INITIAL
+            || self.command.placement() != self.placement.placement()
+        {
+            return Err(fail(
+                self,
+                CreateSessionReconstitutionFailure::PlacementMismatch,
+            ));
+        }
         if self.defaults_session != self.session {
             return Err(fail(
                 self,
@@ -1118,9 +1313,9 @@ impl CreateSessionReconstitutionInput {
             ));
         }
         match (self.provenance.cause(), self.provenance.ancestry()) {
-            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
+            (SessionCreationCause::UserInitiated, TranscriptAncestry::None) => {}
             (
-                SessionCreationCause::OwnerInitiated,
+                SessionCreationCause::UserInitiated,
                 TranscriptAncestry::SingleSource { .. }
                 | TranscriptAncestry::ImportedConversation { .. },
             ) => {
@@ -1152,6 +1347,7 @@ impl CreateSessionReconstitutionInput {
                 configuration_defaults: VersionedSessionConfigurationDefaults::establish(
                     self.defaults,
                 ),
+                placement: self.placement,
             },
             applied_result: CreateSessionAppliedResult {
                 session: self.result_session,
@@ -1169,6 +1365,8 @@ pub enum CreateSessionReconstitutionFailure {
     ProvenanceMismatch,
     /// The session's template name/digest differs from the canonical command.
     TemplateProvenanceMismatch,
+    /// Placement event one differs from the canonical creation payload.
+    PlacementMismatch,
     /// The stored initial defaults row belongs to a different session.
     DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.
@@ -1262,17 +1460,18 @@ mod tests {
     };
     use crate::{
         ImportedTranscriptPosition, ModelSelectionRequest, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionTemplateContentDigest, SessionTemplateName,
-        SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionPlacement, SessionPlacementVersion,
+        SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+        VersionedSessionConfigurationDefaults, VersionedSessionPlacement,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(value)))
     }
 
-    fn owner_initiated_empty() -> SessionCreationProvenance {
+    fn user_initiated_empty() -> SessionCreationProvenance {
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         )
     }
@@ -1301,38 +1500,51 @@ mod tests {
         defaults: SessionConfigurationDefaults,
     ) -> SessionReconstitutionInput {
         SessionReconstitutionInput::new(
-            session, session, provenance, session, version, session, version, defaults,
+            session,
+            session,
+            provenance,
+            session,
+            version,
+            session,
+            version,
+            defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            },
         )
     }
 
-    /// S01 / INV-003: an owner-initiated session with explicitly empty
+    /// S01 / INV-003: a user-initiated session with explicitly empty
     /// ancestry is complete creation provenance for an empty conversation.
     #[test]
-    fn s01_inv003_owner_initiated_with_no_ancestry_is_complete_provenance() {
+    fn s01_inv003_user_initiated_with_no_ancestry_is_complete_provenance() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         );
 
-        assert_eq!(provenance.cause(), SessionCreationCause::OwnerInitiated);
+        assert_eq!(provenance.cause(), SessionCreationCause::UserInitiated);
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
     }
 
-    /// S17 / INV-003 / INV-030: an owner-created fork records the exact
+    /// S17 / INV-003 / INV-030: a user-created fork records the exact
     /// immutable source session and source frontier it was seeded from.
     #[test]
     fn s17_inv003_inv030_fork_provenance_records_exact_source_and_frontier() {
         let source_session = session_id(1);
         let source_frontier = test_frontier(2);
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::SingleSource {
                 source_session,
                 source_frontier,
             },
         );
 
-        assert_eq!(provenance.cause(), SessionCreationCause::OwnerInitiated);
+        assert_eq!(provenance.cause(), SessionCreationCause::UserInitiated);
         let TranscriptAncestry::SingleSource {
             source_session: carried_session,
             source_frontier: carried_frontier,
@@ -1355,7 +1567,7 @@ mod tests {
             ImportedTranscriptPosition::try_from_u64(3).expect("positive position"),
         );
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::ImportedConversation {
                 source_frontier,
                 relationship: ImportedSessionRelationship::Resume,
@@ -1407,7 +1619,7 @@ mod tests {
     #[test]
     fn s28_inv039_current_session_requires_imported_seed_reconstitution() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::ImportedConversation {
                 source_frontier: test_imported_frontier(
                     imported_conversation_id(1),
@@ -1436,16 +1648,16 @@ mod tests {
         assert_eq!(error.input(), &input);
     }
 
-    /// S01 / S17 / INV-003: the same owner-initiated cause pairs with empty
+    /// S01 / S17 / INV-003: the same user-initiated cause pairs with empty
     /// and single-source ancestry, so neither fact is a proxy for the other.
     #[test]
     fn s01_s17_inv003_cause_and_ancestry_vary_independently() {
         let empty = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         );
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -1494,14 +1706,14 @@ mod tests {
             .checked_next()
             .expect("version two exists");
         let input =
-            matching_session_input(session_id(1), owner_initiated_empty(), version, defaults(2));
+            matching_session_input(session_id(1), user_initiated_empty(), version, defaults(2));
 
         let session = input
             .reconstitute()
             .expect("complete matching current-session facts must reconstruct");
 
         assert_eq!(session.id(), session_id(1));
-        assert_eq!(session.creation_provenance(), owner_initiated_empty());
+        assert_eq!(session.creation_provenance(), user_initiated_empty());
         assert_eq!(session.current_configuration_defaults().version(), version);
         assert_eq!(
             session.current_configuration_defaults().defaults(),
@@ -1510,7 +1722,7 @@ mod tests {
         assert_eq!(session.clone(), session);
 
         let changed_defaults =
-            matching_session_input(session_id(1), owner_initiated_empty(), version, defaults(3))
+            matching_session_input(session_id(1), user_initiated_empty(), version, defaults(3))
                 .reconstitute()
                 .expect("a different complete defaults value must also reconstruct");
         assert_ne!(session, changed_defaults);
@@ -1522,7 +1734,7 @@ mod tests {
     #[test]
     fn inv003_current_session_reconstitution_retains_typed_provenance() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -1556,6 +1768,10 @@ mod tests {
         defaults_session: crate::SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: crate::SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: crate::SessionId,
+        placement: VersionedSessionPlacement,
     }
 
     impl CurrentSessionFacts {
@@ -1565,25 +1781,36 @@ mod tests {
             Self {
                 requested_session: session,
                 stored_session: session,
-                provenance: owner_initiated_empty(),
+                provenance: user_initiated_empty(),
                 current_defaults_session: session,
                 current_defaults_version: SessionConfigurationDefaultsVersion::first(),
                 defaults_session: session,
                 defaults_version: SessionConfigurationDefaultsVersion::first(),
                 defaults: defaults(3),
+                current_placement_session: session,
+                current_placement_version: SessionPlacementVersion::INITIAL,
+                placement_session: session,
+                placement: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             }
         }
 
         fn input(self) -> SessionReconstitutionInput {
-            SessionReconstitutionInput::new(
+            SessionReconstitutionInput::new_with_template_and_placement(
                 self.requested_session,
                 self.stored_session,
                 self.provenance,
+                None,
                 self.current_defaults_session,
                 self.current_defaults_version,
                 self.defaults_session,
                 self.defaults_version,
                 self.defaults,
+                crate::SessionPlacementReconstitutionFacts {
+                    current_pointer_session: self.current_placement_session,
+                    current_pointer_version: self.current_placement_version,
+                    selected_event_session: self.placement_session,
+                    selected_event: self.placement,
+                },
             )
         }
     }
@@ -1607,8 +1834,8 @@ mod tests {
         failure
     }
 
-    /// S01 / INV-002 / INV-008: every requested/stored identity, pointer
-    /// owner, defaults owner, or selected-version mismatch fails closed and
+    /// S01 / INV-002 / INV-008: every requested/stored identity, defaults pointer/record identity, placement
+    /// pointer/event identity, or selected-version mismatch fails closed and
     /// returns the complete unchanged typed projection.
     #[test]
     fn s01_inv002_inv008_current_session_rejects_cross_wired_facts() {
@@ -1616,6 +1843,9 @@ mod tests {
         let second_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version two exists");
+        let second_placement_version = SessionPlacementVersion::INITIAL
+            .next()
+            .expect("placement version two exists");
 
         let requested_other_session = current_session_reconstitution_failure(CurrentSessionFacts {
             requested_session: session_id(2),
@@ -1655,6 +1885,36 @@ mod tests {
             SessionReconstitutionFailure::CurrentDefaultsVersionMismatch
         );
 
+        let placement_pointer_owned_elsewhere =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                current_placement_session: session_id(2),
+                ..matching.clone()
+            });
+        assert_eq!(
+            placement_pointer_owned_elsewhere,
+            SessionReconstitutionFailure::CurrentPlacementSessionMismatch
+        );
+
+        let placement_event_owned_elsewhere =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                placement_session: session_id(2),
+                ..matching.clone()
+            });
+        assert_eq!(
+            placement_event_owned_elsewhere,
+            SessionReconstitutionFailure::PlacementSessionMismatch
+        );
+
+        let placement_pointer_and_event_versions_torn =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                current_placement_version: second_placement_version,
+                ..matching.clone()
+            });
+        assert_eq!(
+            placement_pointer_and_event_versions_torn,
+            SessionReconstitutionFailure::CurrentPlacementVersionMismatch
+        );
+
         expect![[r#"
             ┌──────────────────────────────────┬────────────────────────────────┐
             │ perturbed_stored_fact            │ failure                        │
@@ -1690,7 +1950,7 @@ mod tests {
     /// unversioned defaults payload.
     #[test]
     fn s01_inv003_create_session_couples_command_provenance_and_defaults() {
-        let provenance = owner_initiated_empty();
+        let provenance = user_initiated_empty();
         let create = CreateSession::new(command_id(1), provenance, defaults(2));
 
         assert_eq!(create.command_id(), command_id(1));
@@ -1702,7 +1962,7 @@ mod tests {
     /// model-selection defaults payload.
     #[test]
     fn s01_creation_establishes_version_one_of_the_carried_defaults() {
-        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
 
         let established = create.establish_initial_defaults();
 
@@ -1722,7 +1982,7 @@ mod tests {
     /// provenance facts compare unchanged.
     #[test]
     fn s01_s17_inv003_defaults_are_not_a_third_provenance_fact() {
-        let provenance = owner_initiated_empty();
+        let provenance = user_initiated_empty();
         let first = CreateSession::new(command_id(1), provenance, defaults(2));
         let second = CreateSession::new(command_id(1), provenance, defaults(3));
 
@@ -1748,26 +2008,26 @@ mod tests {
     #[test]
     fn s01_s17_inv012_create_session_comparison_payload_excludes_command_id() {
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
             },
         );
-        let create = CreateSession::new(command_id(3), owner_initiated_empty(), defaults(4));
+        let create = CreateSession::new(command_id(3), user_initiated_empty(), defaults(4));
 
         assert_eq!(
             create,
-            CreateSession::new(command_id(3), owner_initiated_empty(), defaults(4))
+            CreateSession::new(command_id(3), user_initiated_empty(), defaults(4))
         );
         assert_eq!(
             create,
-            CreateSession::new(command_id(5), owner_initiated_empty(), defaults(4))
+            CreateSession::new(command_id(5), user_initiated_empty(), defaults(4))
         );
         assert_ne!(create, CreateSession::new(command_id(3), fork, defaults(4)));
         assert_ne!(
             create,
-            CreateSession::new(command_id(3), owner_initiated_empty(), defaults(6))
+            CreateSession::new(command_id(3), user_initiated_empty(), defaults(6))
         );
     }
 
@@ -1778,23 +2038,23 @@ mod tests {
     fn inv047_template_creation_comparison_uses_name_and_creation_mode() {
         let original = CreateSession::new_from_template(
             command_id(1),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             template_provenance("reviewer", 2),
             defaults(3),
         );
         let edited_same_name = CreateSession::new_from_template(
             command_id(1),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             template_provenance("reviewer", 4),
             defaults(5),
         );
         let different_name = CreateSession::new_from_template(
             command_id(1),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             template_provenance("planner", 2),
             defaults(3),
         );
-        let explicit = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(3));
+        let explicit = CreateSession::new(command_id(1), user_initiated_empty(), defaults(3));
 
         assert_eq!(original, edited_same_name);
         assert_ne!(original, different_name);
@@ -1808,14 +2068,14 @@ mod tests {
         let provenance = template_provenance("reviewer", 2);
         let create = CreateSession::new_from_template(
             command_id(1),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             provenance.clone(),
             defaults(3),
         );
 
         let prepared = create
             .prepare(session_id(4))
-            .expect("owner creation without ancestry prepares");
+            .expect("user creation without ancestry prepares");
 
         assert_eq!(prepared.command().template_provenance(), Some(&provenance));
         assert_eq!(prepared.session().template_provenance(), Some(&provenance));
@@ -1832,7 +2092,7 @@ mod tests {
         let provenance = template_provenance("reviewer", 2);
         let create = CreateSession::new_from_template(
             command_id(1),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             provenance,
             defaults(3),
         );
@@ -1840,7 +2100,7 @@ mod tests {
             create,
             session_id(4),
             session_id(4),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             None,
             session_id(4),
             SessionConfigurationDefaultsVersion::first(),
@@ -1929,17 +2189,17 @@ mod tests {
     /// one, and matching replay result without claiming a commit.
     #[test]
     fn s01_inv003_inv008_inv012_preparation_couples_complete_creation() {
-        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
 
         let prepared = create
             .clone()
             .prepare(session_id(3))
-            .expect("the empty owner-initiated baseline is preparable");
+            .expect("the empty user-initiated baseline is preparable");
 
         assert_eq!(prepared.command().command_id(), command_id(1));
         assert_eq!(prepared.command(), &create);
         assert_eq!(prepared.session().id(), session_id(3));
-        assert_eq!(prepared.session().provenance(), owner_initiated_empty());
+        assert_eq!(prepared.session().provenance(), user_initiated_empty());
         assert_eq!(
             prepared.session().configuration_defaults().version(),
             SessionConfigurationDefaultsVersion::first()
@@ -1961,7 +2221,7 @@ mod tests {
     #[test]
     fn s17_unavailable_ancestry_is_a_nonclaiming_preparation_failure() {
         let provenance = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(1),
                 source_frontier: test_frontier(2),
@@ -1995,12 +2255,12 @@ mod tests {
     /// without producing a pre-commit candidate.
     #[test]
     fn s01_inv003_inv008_inv012_matching_creation_reconstitutes_whole() {
-        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
         let input = CreateSessionReconstitutionInput::new(
             create.clone(),
             session_id(3),
             session_id(3),
-            owner_initiated_empty(),
+            user_initiated_empty(),
             session_id(3),
             SessionConfigurationDefaultsVersion::first(),
             defaults(2),
@@ -2013,10 +2273,7 @@ mod tests {
         assert_eq!(reconstituted.command().command_id(), command_id(1));
         assert_eq!(reconstituted.command(), &create);
         assert_eq!(reconstituted.session().id(), session_id(3));
-        assert_eq!(
-            reconstituted.session().provenance(),
-            owner_initiated_empty()
-        );
+        assert_eq!(reconstituted.session().provenance(), user_initiated_empty());
         assert_eq!(
             reconstituted.session().configuration_defaults().version(),
             SessionConfigurationDefaultsVersion::first()
@@ -2109,13 +2366,13 @@ mod tests {
     /// unchanged typed projection.
     #[test]
     fn s01_inv003_inv008_inv012_reconstitution_rejects_cross_wired_facts() {
-        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let create = CreateSession::new(command_id(1), user_initiated_empty(), defaults(2));
         let matching = CreationFacts::matching(create, session_id(3));
         let second_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version two exists");
         let fork = SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::SingleSource {
                 source_session: session_id(10),
                 source_frontier: test_frontier(11),
@@ -2133,7 +2390,7 @@ mod tests {
         );
 
         let replaced_provenance = creation_reconstitution_failure(CreationFacts {
-            provenance: owner_initiated_empty(),
+            provenance: user_initiated_empty(),
             ..CreationFacts::matching(fork_create.clone(), session_id(3))
         });
         assert_eq!(

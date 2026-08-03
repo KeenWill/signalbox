@@ -31,7 +31,7 @@ pub struct CreateSessionFromImportedFrontierRequest {
 }
 
 impl CreateSessionFromImportedFrontierRequest {
-    /// Validates the owner-global command identity before any effect.
+    /// Validates the user-global command identity before any effect.
     pub fn try_new(
         command_id: DurableCommandId,
         imported_frontier: ImportedTranscriptFrontier,
@@ -53,7 +53,7 @@ impl CreateSessionFromImportedFrontierRequest {
         })
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -125,7 +125,7 @@ pub enum CreateSessionFromImportedFrontierOutcome {
         /// The exact selected boundary that was not found.
         frontier: ImportedTranscriptFrontier,
     },
-    /// The owner-global command identity already names another typed payload.
+    /// The user-global command identity already names another typed payload.
     ConflictingReuse {
         /// The identity whose existing meaning remains intact.
         command_id: DurableCommandId,
@@ -134,7 +134,7 @@ pub enum CreateSessionFromImportedFrontierOutcome {
 
 /// Atomic command boundary for creation from an imported frontier.
 ///
-/// Implementations inspect the owner-global command registry first. A claimed
+/// Implementations inspect the user-global command registry first. A claimed
 /// identity resolves replay or conflict before imported-target lookup. For an
 /// unseen identity, the transaction loads the complete immutable conversation,
 /// resolves the selected prefix, then invokes `next_semantic_entry_id` exactly

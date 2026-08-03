@@ -8,7 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+bstr = "1.12.1"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+gix-validate = "0.11.3"
 reqwest = { version = "0.13.4", default-features = false, features = [
     "rustls-no-provider",
     "stream",
@@ -25,7 +27,7 @@ signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
 signalbox-model-runtime = { path = "../model-runtime" }
 signalbox-tool-contract = { path = "../tool-contract" }
-signalbox-tools-basic = { path = "../tools-basic" }
+signalbox-egress-transport = { path = "../egress-transport" }
 tracing = { version = "0.1.41", default-features = false }
 tokio = { version = "1.53.0", default-features = false, features = ["time"] }
 

@@ -234,12 +234,12 @@ fn confirmed_approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolReques
     .expect("the fixture command identity is valid");
     let prepared = command
         .prepare_applied(&request)
-        .expect("the fixture request and owner decision correlate");
+        .expect("the fixture request and user decision correlate");
     let signalbox_domain::DecideToolRequestResult::Applied(applied) = prepared.result() else {
-        panic!("the approving fixture owner decision applies")
+        panic!("the approving fixture user decision applies")
     };
     ApprovedToolRequest::try_from_resolution(request, applied.resolution().clone())
-        .expect("the fixture owner approval matches its request")
+        .expect("the fixture user approval matches its request")
 }
 
 fn authorization_from_approved(
@@ -562,6 +562,36 @@ fn confirm_catalog() -> RunnerCatalog {
     .expect("the confirm fixture catalog is internally consistent")
 }
 
+fn always_confirm_catalog() -> RunnerCatalog {
+    let inspect = RunnerToolDeclaration::new(
+        tool("inspect"),
+        model_definition(),
+        ToolPermissionDefault::AlwaysConfirm,
+        RunnerToolEffectClass::Pure,
+        ToolAdmissibleLoci::RunnerOnly {
+            selector: RunnerSelector::CapabilityClass(class()),
+        },
+    );
+    let policy = CredentialProfilePolicy::try_new(
+        profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the explicit-approval fixture profile references its declared tool");
+    let replacement_policy = CredentialProfilePolicy::try_new(
+        replacement_profile(),
+        [(tool("inspect"), CredentialToolApproval::SessionPolicy)],
+    )
+    .expect("the replacement profile references the explicit-approval tool");
+    RunnerCatalog::try_new(
+        [class()],
+        [inspect],
+        [policy, replacement_policy],
+        [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+    )
+    .expect("the explicit-approval fixture catalog is internally consistent")
+}
+
 fn idempotent_catalog() -> RunnerCatalog {
     let inspect = RunnerToolDeclaration::new(
         tool("inspect"),
@@ -846,7 +876,7 @@ async fn insert_physical_attempt(
     Ok(())
 }
 
-async fn replace_approval_with_owner_command(
+async fn replace_approval_with_user_command(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
 ) -> Result<(), sqlx::Error> {
@@ -1421,6 +1451,30 @@ async fn s30_inv001_inv042_registration_round_trips_canonical_evidence()
         .expect_err("durable revocation closes the exact caller-held enrollment fence");
     assert_eq!(revoked, RunnerDomainError::EnrollmentRevoked);
     drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn always_confirm_registration_persists_under_the_closed_constraint()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool, always_confirm_catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+
+    let stored = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+
+    assert_eq!(
+        stored
+            .registration()
+            .tool(&tool("inspect"))
+            .expect("the registered explicit-approval tool is present")
+            .permission(),
+        ToolPermissionDefault::AlwaysConfirm
+    );
     Ok(())
 }
 
@@ -2786,7 +2840,7 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
         .store_pin(&pin, &registration)
         .await
         .expect_err("a session blanket cannot authorize runner dispatch");
-    replace_approval_with_owner_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    replace_approval_with_user_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     store.store_pin(&pin, &registration).await?;
     let admitted: Decimal = sqlx::query_scalar(
         "SELECT generation
@@ -2879,7 +2933,7 @@ async fn s31_inv035_inv045_profileless_confirm_lease_requires_confirmed_provenan
         .store_pin(&pin, &registration)
         .await
         .expect_err("a session blanket cannot authorize runner dispatch");
-    replace_approval_with_owner_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    replace_approval_with_user_command(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     store.store_pin(&pin, &registration).await?;
     let admitted: Decimal = sqlx::query_scalar(
         "SELECT generation

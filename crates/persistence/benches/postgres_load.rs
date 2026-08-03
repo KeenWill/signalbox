@@ -674,7 +674,7 @@ async fn create_session(pool: &PgPool, ids: OperationIds) -> HarnessResult<TurnF
     let prepared = CreateSession::new(
         command,
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),

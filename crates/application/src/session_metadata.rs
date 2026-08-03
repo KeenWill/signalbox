@@ -18,7 +18,7 @@ use crate::InvalidDurableCommandId;
 
 /// The complete validated application request for metadata replacement.
 ///
-/// Construction admits either the owner boundary or execution of one exact
+/// Construction admits either the user boundary or execution of one exact
 /// tool request; callers cannot supply an arbitrary actor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplaceSessionMetadataRequest {
@@ -30,7 +30,7 @@ pub struct ReplaceSessionMetadataRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionMetadataReplacementIssuer {
-    Owner,
+    User,
     Tool(ToolRequestId),
 }
 
@@ -51,7 +51,7 @@ impl ReplaceSessionMetadataRequest {
         Ok(Self {
             command_id,
             session,
-            issuer: SessionMetadataReplacementIssuer::Owner,
+            issuer: SessionMetadataReplacementIssuer::User,
             replacement,
         })
     }
@@ -79,7 +79,7 @@ impl ReplaceSessionMetadataRequest {
         })
     }
 
-    /// Returns the owner-global durable command identity.
+    /// Returns the user-global durable command identity.
     pub const fn command_id(&self) -> DurableCommandId {
         self.command_id
     }
@@ -92,7 +92,7 @@ impl ReplaceSessionMetadataRequest {
     /// Returns the exact initiating agency.
     pub const fn actor(&self) -> Actor {
         match self.issuer {
-            SessionMetadataReplacementIssuer::Owner => Actor::Owner,
+            SessionMetadataReplacementIssuer::User => Actor::User,
             SessionMetadataReplacementIssuer::Tool(request) => Actor::Tool { request },
         }
     }
@@ -108,7 +108,7 @@ impl ReplaceSessionMetadataRequest {
 pub enum ReplaceSessionMetadataOutcome {
     /// First handling or equal replay returned the recorded domain result.
     Recorded(ReplaceSessionMetadataResult),
-    /// The owner-global command identity already names another typed payload.
+    /// The user-global command identity already names another typed payload.
     ConflictingReuse {
         /// The identity whose existing meaning remains intact.
         command_id: DurableCommandId,
@@ -155,7 +155,7 @@ where
         request: ReplaceSessionMetadataRequest,
     ) -> Result<ReplaceSessionMetadataOutcome, Transaction::Error> {
         let command = match request.issuer {
-            SessionMetadataReplacementIssuer::Owner => DomainReplaceSessionMetadata::new(
+            SessionMetadataReplacementIssuer::User => DomainReplaceSessionMetadata::new(
                 request.command_id,
                 request.session,
                 request.replacement,
@@ -578,7 +578,7 @@ mod tests {
         }
     }
 
-    /// INV-012: reserved owner-global identifiers fail before transaction
+    /// INV-012: reserved user-global identifiers fail before transaction
     /// construction and therefore claim no command meaning.
     #[test]
     fn inv012_reserved_command_identities_fail_before_transaction_construction() {
@@ -602,8 +602,9 @@ mod tests {
         );
     }
 
+    /// INV-020: process-facing metadata replacement fixes user agency.
     #[test]
-    fn replacement_orchestration_fixes_owner_actor() {
+    fn inv020_replacement_orchestration_fixes_user_actor() {
         let request =
             ReplaceSessionMetadataRequest::try_new(command_id(1), session_id(2), metadata(true))
                 .expect("ordinary command identity is admitted");
@@ -629,7 +630,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].command_id(), request.command_id());
         assert_eq!(observed[0].session(), request.session());
-        assert_eq!(observed[0].actor(), Actor::Owner);
+        assert_eq!(observed[0].actor(), Actor::User);
         assert_eq!(observed[0].replacement(), request.replacement());
     }
 
@@ -725,7 +726,7 @@ mod tests {
             metadata(true),
             SessionMetadataLastWriter::new(
                 SessionMetadataUpdatedAt::from_unix_micros(17),
-                Actor::Owner,
+                Actor::User,
             ),
         );
         let service = LoadSessionMetadataService::new(FakeReader {
@@ -955,7 +956,7 @@ mod tests {
             metadata(true),
             SessionMetadataLastWriter::new(
                 SessionMetadataUpdatedAt::from_unix_micros(17),
-                Actor::Owner,
+                Actor::User,
             ),
         );
         let version = signalbox_domain::SessionConfigurationDefaultsVersion::try_from_u64(3)

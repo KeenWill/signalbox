@@ -43,6 +43,7 @@ use crate::lock_inventory::{
     RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD,
 };
+use crate::mapping::{tool_permission_default_from_str, tool_permission_default_to_str};
 
 /// Adapter-owned positive revision of one validated registration.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -198,6 +199,65 @@ pub enum RunnerConnectionTransitionOutcome {
         /// Epoch that currently owns lifecycle authority.
         current: RunnerConnectionEpoch,
     },
+}
+
+/// One nonterminal current connection selected by the startup scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NonterminalRunnerConnection {
+    enrollment: RunnerEnrollmentId,
+    epoch: RunnerConnectionEpoch,
+}
+
+impl NonterminalRunnerConnection {
+    /// Returns the enrollment that owns the connection.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the physical connection epoch selected by the scan.
+    pub const fn epoch(self) -> RunnerConnectionEpoch {
+        self.epoch
+    }
+}
+
+/// One lifecycle event that was appended for an enrollment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AppliedRunnerConnectionTransition {
+    enrollment: RunnerEnrollmentId,
+    snapshot: RunnerConnectionSnapshot,
+}
+
+impl AppliedRunnerConnectionTransition {
+    /// Returns the enrollment whose lifecycle event was appended.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the durable lifecycle head produced by the append.
+    pub const fn snapshot(self) -> RunnerConnectionSnapshot {
+        self.snapshot
+    }
+}
+
+/// Whether a requested lifecycle transition appended a durable event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerConnectionTransitionEffect {
+    /// The request appended this enrollment-owned lifecycle event.
+    Applied(AppliedRunnerConnectionTransition),
+    /// The request left durable state unchanged and observed this outcome.
+    Unchanged(RunnerConnectionTransitionOutcome),
+}
+
+impl RunnerConnectionTransitionEffect {
+    /// Returns the transition outcome independently of whether it appended.
+    pub const fn outcome(self) -> RunnerConnectionTransitionOutcome {
+        match self {
+            Self::Applied(applied) => {
+                RunnerConnectionTransitionOutcome::Current(applied.snapshot())
+            }
+            Self::Unchanged(outcome) => outcome,
+        }
+    }
 }
 
 /// One canonical validated registration plus its durable adapter revision.
@@ -592,18 +652,19 @@ impl RunnerProtocolStore {
         epoch: RunnerConnectionEpoch,
         transition: RunnerConnectionTransition,
     ) -> Result<RunnerConnectionTransitionOutcome, RunnerProtocolStoreError> {
-        let (outcome, _) = self
+        let effect = self
             .transition_connection_with_effect(enrollment, epoch, transition)
             .await?;
-        Ok(outcome)
+        Ok(effect.outcome())
     }
 
-    async fn transition_connection_with_effect(
+    /// Appends one lifecycle transition and reports whether it changed durable state.
+    pub async fn transition_connection_with_effect(
         &self,
         enrollment: RunnerEnrollmentId,
         epoch: RunnerConnectionEpoch,
         transition: RunnerConnectionTransition,
-    ) -> Result<(RunnerConnectionTransitionOutcome, bool), RunnerProtocolStoreError> {
+    ) -> Result<RunnerConnectionTransitionEffect, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         let locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment.into_uuid())
@@ -617,12 +678,11 @@ impl RunnerProtocolStore {
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         if epoch != current.epoch() {
             transaction.rollback().await?;
-            return Ok((
+            return Ok(RunnerConnectionTransitionEffect::Unchanged(
                 RunnerConnectionTransitionOutcome::Stale {
                     observed: epoch,
                     current: current.epoch(),
                 },
-                false,
             ));
         }
         if matches!(
@@ -641,7 +701,9 @@ impl RunnerProtocolStore {
             )
         {
             transaction.rollback().await?;
-            return Ok((RunnerConnectionTransitionOutcome::Current(current), false));
+            return Ok(RunnerConnectionTransitionEffect::Unchanged(
+                RunnerConnectionTransitionOutcome::Current(current),
+            ));
         }
         let event_ordinal = NonZeroU64::new(
             current
@@ -666,14 +728,16 @@ impl RunnerProtocolStore {
         .execute(&mut *transaction)
         .await?;
         commit_mutation(transaction).await?;
-        Ok((
-            RunnerConnectionTransitionOutcome::Current(RunnerConnectionSnapshot {
-                epoch,
-                event_ordinal,
-                state,
-                cause,
-            }),
-            true,
+        Ok(RunnerConnectionTransitionEffect::Applied(
+            AppliedRunnerConnectionTransition {
+                enrollment,
+                snapshot: RunnerConnectionSnapshot {
+                    epoch,
+                    event_ordinal,
+                    state,
+                    cause,
+                },
+            },
         ))
     }
 
@@ -688,8 +752,10 @@ impl RunnerProtocolStore {
         Ok(snapshot)
     }
 
-    /// Marks every prior-process nonterminal connection lost before admission opens.
-    pub async fn mark_orphaned_connections_lost(&self) -> Result<u64, RunnerProtocolStoreError> {
+    /// Loads every current nonterminal connection head for startup reconciliation.
+    pub async fn load_nonterminal_connection_heads(
+        &self,
+    ) -> Result<Vec<NonterminalRunnerConnection>, RunnerProtocolStoreError> {
         let rows = sqlx::query(
             "SELECT DISTINCT ON (enrollment_id)
                     enrollment_id, connection_epoch, state_kind
@@ -698,7 +764,7 @@ impl RunnerProtocolStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        let mut transitioned = 0_u64;
+        let mut connections = Vec::new();
         for row in rows {
             let state: String = row.decode_column("state_kind")?;
             if state != "connected" && state != "suspect" {
@@ -709,20 +775,9 @@ impl RunnerProtocolStore {
                 row.decode_column("connection_epoch")?,
             )?)
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
-            let (_, applied) = self
-                .transition_connection_with_effect(
-                    enrollment,
-                    epoch,
-                    RunnerConnectionTransition::TransportClosed,
-                )
-                .await?;
-            if applied {
-                transitioned = transitioned
-                    .checked_add(1)
-                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
-            }
+            connections.push(NonterminalRunnerConnection { enrollment, epoch });
         }
-        Ok(transitioned)
+        Ok(connections)
     }
 
     /// Atomically creates one pristine enrollment and first registration, or
@@ -2454,7 +2509,7 @@ async fn insert_registration(
         .bind(tool.name().as_str())
         .bind(tool.model().description())
         .bind(tool.model().input_schema().as_str())
-        .bind(encode_permission(tool.permission()))
+        .bind(tool_permission_default_to_str(tool.permission()))
         .bind(encode_effect(tool.effect()))
         .bind(loci.kind)
         .bind(loci.selector_kind)
@@ -4299,19 +4354,9 @@ fn decode_permission_override(
     }
 }
 
-const fn encode_permission(permission: ToolPermissionDefault) -> &'static str {
-    match permission {
-        ToolPermissionDefault::Auto => "auto",
-        ToolPermissionDefault::Confirm => "confirm",
-    }
-}
-
 fn decode_permission(value: String) -> Result<ToolPermissionDefault, RunnerProtocolStoreError> {
-    match value.as_str() {
-        "auto" => Ok(ToolPermissionDefault::Auto),
-        "confirm" => Ok(ToolPermissionDefault::Confirm),
-        _ => Err(RunnerProtocolCorruption::InvalidEncoding.into()),
-    }
+    tool_permission_default_from_str(&value)
+        .ok_or_else(|| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
 const fn encode_effect(effect: RunnerToolEffectClass) -> &'static str {

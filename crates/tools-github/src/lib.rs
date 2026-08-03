@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bstr::BStr;
 use futures_util::StreamExt;
 use reqwest::{
     Method, Response, StatusCode, Url,
@@ -29,15 +30,15 @@ use signalbox_domain::{
     NormalizedToolArguments, ToolAttemptDispatchCorrelation, ToolEffectClass,
     ToolExecutionErrorDetail, ToolPermissionDefault,
 };
+use signalbox_egress_transport::{
+    PublicDestinationClientError, WebFetchTransportFailure, has_more_response_bytes,
+    public_destination_client,
+};
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
-};
-use signalbox_tools_basic::{
-    PublicDestinationClientError, WebFetchTransportFailure, has_more_response_bytes,
-    public_destination_client,
 };
 
 /// Pull-request metadata tool name.
@@ -368,27 +369,11 @@ impl CreatePullRequestArguments {
 }
 
 fn valid_git_ref(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_GIT_REF_BYTES {
-        return false;
-    }
-    if value.starts_with('-') || value.starts_with('/') || value.starts_with('.') {
-        return false;
-    }
-    if value.ends_with('/') || value.ends_with('.') || value.ends_with(".lock") {
-        return false;
-    }
-    if value.contains("..") || value.contains("//") || value.contains("@{") || value.contains("/.")
-    {
-        return false;
-    }
-    if value == "@" {
-        return false;
-    }
-    value.chars().all(|character| {
-        !character.is_control()
-            && !character.is_whitespace()
-            && !matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
-    })
+    let reference = format!("refs/heads/{value}");
+    !value.is_empty()
+        && value.len() <= MAX_GIT_REF_BYTES
+        && value != "@"
+        && gix_validate::reference::branch_name(BStr::new(reference.as_bytes())).is_ok()
 }
 
 /// Accepts one local ref or one `owner:ref` cross-repository head selector.
@@ -3430,6 +3415,19 @@ mod tests {
             "base": "release branch"
         })))
         .expect_err("a whitespace-bearing base selector is rejected before dispatch");
+
+        assert_eq!(rejection, InvalidGitHubArguments);
+    }
+
+    #[test]
+    fn create_rejects_a_lock_suffixed_interior_ref_component() {
+        let rejection = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": "release.lock/fix"
+        })))
+        .expect_err("a lock-suffixed ref component is rejected before dispatch");
 
         assert_eq!(rejection, InvalidGitHubArguments);
     }

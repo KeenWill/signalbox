@@ -539,7 +539,7 @@ pub enum RunnerSandboxProfile {
 pub enum RunnerToolPermissionOverride {
     /// The exact tool may run without per-attempt confirmation.
     Auto,
-    /// The exact tool requires confirmation by an exact owner command.
+    /// The exact tool requires confirmation by an exact user command.
     Confirm,
 }
 
@@ -2707,7 +2707,7 @@ fn validate_authorized_attempt(
         || attempt.attempt() != correlation.attempt()
         || approved.approval().source() == ToolDecisionSource::SessionBlanket
         || (approval == CredentialToolApproval::SessionPolicy
-            && approved.approval().source() != ToolDecisionSource::OwnerCommand)
+            && approved.approval().source() != ToolDecisionSource::UserCommand)
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
@@ -3802,7 +3802,7 @@ mod tests {
                 ),
                 lease_offer_request("inspect"),
             )
-            .expect("the confirmation override accepts an exact owner decision");
+            .expect("the confirmation override accepts an exact user decision");
         (registration, pin)
     }
 

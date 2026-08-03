@@ -4,7 +4,11 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, HashSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -14,19 +18,20 @@ use signalbox_application::{
     ToolExecutionTransaction,
 };
 use signalbox_domain::{
-    ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
-    CurrentToolAttemptState, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, DurableCommandId, EndedToolAttempt,
-    NormalizedToolArguments, PreparedDecideToolRequest, PreparedToolBatchDecision,
-    PreparedToolResultProjection, ReconstitutedToolAttempt,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptEnd, ToolAttemptId,
-    ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchGeneration, ToolEffectClass,
-    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId,
-    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
+    ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
+    DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
+    DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
+    DirectModelSelection, DurableCommandId, EndedToolAttempt, NormalizedToolArguments,
+    PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
+    ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
+    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -38,8 +43,8 @@ use crate::{
     mapping::{
         dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
         durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        tool_approval_posture_from_str, tool_attempt_id_from_uuid, tool_attempt_id_to_uuid,
+        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{insert_prepared_call, insert_snapshot},
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
@@ -194,16 +199,18 @@ pub struct PostgresToolLoopRepository {
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    cache_inclusive_input_targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
 }
 
 impl PostgresToolLoopRepository {
     /// Uses the shared production pool.
-    pub const fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
             continuation_targets: None,
             continuation_credential: None,
             credential_families: None,
+            cache_inclusive_input_targets: HashSet::new(),
         }
     }
 
@@ -219,7 +226,16 @@ impl PostgresToolLoopRepository {
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
             credential_families: None,
+            cache_inclusive_input_targets: HashSet::new(),
         }
+    }
+
+    pub(crate) fn with_cache_inclusive_input_targets(
+        mut self,
+        targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
+    ) -> Self {
+        self.cache_inclusive_input_targets = targets;
+        self
     }
 
     /// Selects continuation credentials from the session's latest snapshot.
@@ -289,12 +305,14 @@ impl PostgresToolLoopRepository {
                 | CommandKind::SubmitInput
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession,
+                | CommandKind::CompactSession
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement,
             ) => Err(ToolLoopRepositoryError::DifferentCommandKind),
         }
     }
 
-    /// Atomically records one replay-idempotent owner decision and successor
+    /// Atomically records one replay-idempotent user decision and successor
     /// phase. A fresh continuation attempt is supplied only for the final
     /// undecided request.
     pub async fn decide<NextAttempt>(
@@ -388,10 +406,10 @@ impl PostgresToolLoopRepository {
                         })
                         .map(|_| next_attempt());
                     let decision = batch
-                        .prepare_owner_decision(command, continuation_attempt)
+                        .prepare_user_decision(command, continuation_attempt)
                         .map_err(|_| {
                             ToolLoopRepositoryError::InvalidTransition(
-                                "owner decision does not match active batch",
+                                "user decision does not match active batch",
                             )
                         })?;
                     persist_batch_decision(&mut transaction, &decision).await?;
@@ -443,14 +461,14 @@ impl PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, ToolLoopRepositoryError> {
+    ) -> Result<ToolDispatchAuthority, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
             let batch = load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
-            let authorized = batch.authorize_attempt(attempt).map_err(|_| {
+            let authorized = batch.authorize_dispatch(attempt).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared")
             })?;
             mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
@@ -511,7 +529,7 @@ impl PostgresToolLoopRepository {
         let status = match current.state() {
             CurrentToolAttemptState::Prepared => ToolAttemptAuthorizationStatus::Prepared(current),
             CurrentToolAttemptState::InFlight => ToolAttemptAuthorizationStatus::InFlight(
-                batch.resume_in_flight_attempt(attempt).map_err(|_| {
+                batch.resume_in_flight_dispatch(attempt).map_err(|_| {
                     ToolLoopRepositoryError::InvalidTransition(
                         "in-flight authorization could not restore its fence",
                     )
@@ -750,9 +768,15 @@ impl PostgresToolLoopRepository {
                 },
             )
             .await?;
-            insert_prepared_call(&mut transaction, prepared, credential_reference)
-                .await
-                .map_err(map_model_call_error)?;
+            insert_prepared_call(
+                &mut transaction,
+                prepared,
+                credential_reference,
+                self.cache_inclusive_input_targets
+                    .contains(&prepared.call().target()),
+            )
+            .await
+            .map_err(map_model_call_error)?;
             let rows = sqlx::query(
                 "UPDATE turn_lifecycle
                     SET active_tool_round_call_id = NULL,
@@ -853,6 +877,7 @@ impl PostgresToolLoopRepository {
                 targets,
                 credential_reference,
                 self.credential_families.as_ref(),
+                &self.cache_inclusive_input_targets,
                 &projection,
                 identities.call(),
                 identities.target_failure().clone(),
@@ -932,7 +957,7 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<AuthorizedToolAttempt, Self::Error> {
+    ) -> Result<ToolDispatchAuthority, Self::Error> {
         PostgresToolLoopRepository::authorize_attempt(self, session, turn, attempt).await
     }
 
@@ -1312,7 +1337,7 @@ async fn load_window_result_attempts(
         .collect()
 }
 
-/// Loads the owner-sourced denial resolution backing every `tool_denied` entry
+/// Loads the user-sourced denial resolution backing every `tool_denied` entry
 /// in a terminal tool round's result suffix.
 ///
 /// The reconstitution guard tightened by the terminal tool-round evidence work
@@ -1343,7 +1368,7 @@ pub(crate) async fn load_terminal_result_denials(
 
 /// Loads the round result evidence backing one steering-consuming call
 /// prepared at a tool-round continuation boundary: the terminal tool attempts
-/// and owner-sourced denial resolutions whose result entries fill the call's
+/// and user-sourced denial resolutions whose result entries fill the call's
 /// frontier between the round boundary and the consumed steering suffix.
 ///
 /// A `None` result names a call frontier with no continuing tool round in
@@ -1393,7 +1418,7 @@ pub(crate) async fn load_steering_continuation_round_evidence(
 
 /// Loads the round result evidence backing one steering-free continuation
 /// call named by a terminal or recovery gate: the terminal tool attempts and
-/// owner-sourced denial resolutions whose result entries fill the call's
+/// user-sourced denial resolutions whose result entries fill the call's
 /// whole frontier after the round boundary, with no trailing suffix.
 ///
 /// A `None` result names a call frontier with no continuing tool round in
@@ -1445,7 +1470,9 @@ async fn load_window_result_denials(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id
+                approval.owner_command_id,
+                approval.delegate_model_selection_id,
+                approval.delegate_model_call_id, approval.rationale
            FROM resolve_context_frontier_members($1, $2) AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
@@ -1524,7 +1551,7 @@ async fn load_requests(
 ) -> Result<Vec<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text
+                arguments_kind, arguments_text, approval_posture
            FROM tool_request
           WHERE producing_model_call_id = $1
           ORDER BY request_ordinal",
@@ -1562,6 +1589,17 @@ pub(crate) fn decode_request(
     let arguments =
         NormalizedToolArguments::try_from_stored(arguments_kind, required(&row, "arguments_text")?)
             .map_err(|_| ToolLoopCorruption::Inconsistent("normalized arguments"))?;
+    let stored_posture: String = required(&row, "approval_posture")?;
+    let posture = match tool_approval_posture_from_str(&stored_posture) {
+        Some(posture) => posture,
+        None => {
+            return Err(ToolLoopCorruption::Unsupported {
+                field: "approval_posture",
+                value: stored_posture,
+            }
+            .into());
+        }
+    };
     Ok(ToolRequestReconstitutionInput::new(
         tool_request_id_from_uuid(required(&row, "request_id")?),
         session,
@@ -1571,6 +1609,7 @@ pub(crate) fn decode_request(
         name,
         arguments,
     )
+    .with_approval_posture(posture)
     .into_request())
 }
 
@@ -1581,7 +1620,9 @@ async fn load_approvals(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id
+                approval.owner_command_id,
+                approval.delegate_model_selection_id,
+                approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
            JOIN tool_request AS request
              ON request.request_id = approval.request_id
@@ -1598,7 +1639,7 @@ pub(crate) async fn decode_approvals(
     connection: &mut PgConnection,
     rows: Vec<PgRow>,
 ) -> Result<Vec<signalbox_domain::ToolApprovalResolution>, ToolLoopRepositoryError> {
-    let owner_commands = rows
+    let user_commands = rows
         .iter()
         .map(|row| row.try_get::<Option<Uuid>, _>("owner_command_id"))
         .collect::<Result<Vec<_>, _>>()?
@@ -1606,14 +1647,21 @@ pub(crate) async fn decode_approvals(
         .flatten()
         .map(|command| {
             durable_command_id_from_uuid(command).map_err(|_| {
-                ToolLoopCorruption::Inconsistent("approval owner command identity").into()
+                ToolLoopCorruption::Inconsistent("approval user command identity").into()
             })
         })
         .collect::<Result<Vec<_>, ToolLoopRepositoryError>>()?;
-    let receipts = load_owner_decision_receipts(connection, &owner_commands).await?;
+    let receipts = load_user_decision_receipts(connection, &user_commands).await?;
+    let mut delegate_request_ids = Vec::new();
+    for row in &rows {
+        if required::<String>(row, "decision_source")? == "delegate" {
+            delegate_request_ids.push(tool_request_id_from_uuid(required(row, "request_id")?));
+        }
+    }
+    let delegate_requests = load_requests_by_id(connection, &delegate_request_ids).await?;
     let mut approvals = Vec::with_capacity(rows.len());
     for row in rows {
-        approvals.push(decode_approval(connection, row, &receipts).await?);
+        approvals.push(decode_approval(connection, row, &receipts, &delegate_requests).await?);
     }
     Ok(approvals)
 }
@@ -1621,7 +1669,8 @@ pub(crate) async fn decode_approvals(
 async fn decode_approval(
     connection: &mut PgConnection,
     row: PgRow,
-    owner_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
+    user_receipts: &BTreeMap<DurableCommandId, PreparedDecideToolRequest>,
+    delegate_requests: &BTreeMap<ToolRequestId, signalbox_domain::ToolRequest>,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
     let reason: Option<String> = row.try_get("denial_reason")?;
@@ -1646,40 +1695,71 @@ async fn decode_approval(
             .into());
         }
     };
-    let owner_command: Option<Uuid> = row.try_get("owner_command_id")?;
+    let user_command: Option<Uuid> = row.try_get("owner_command_id")?;
     let input = match required::<String>(&row, "decision_source")?.as_str() {
         "owner_command" => {
             let command_id = durable_command_id_from_uuid(
-                owner_command.ok_or(ToolLoopCorruption::Missing("approval owner command"))?,
+                user_command.ok_or(ToolLoopCorruption::Missing("approval user command"))?,
             )
-            .map_err(|_| ToolLoopCorruption::Inconsistent("approval owner command identity"))?;
-            let command =
-                owner_receipts
-                    .get(&command_id)
-                    .cloned()
-                    .ok_or(ToolLoopCorruption::Missing(
-                        "approval owner command receipt",
-                    ))?;
+            .map_err(|_| ToolLoopCorruption::Inconsistent("approval user command identity"))?;
+            let command = user_receipts
+                .get(&command_id)
+                .cloned()
+                .ok_or(ToolLoopCorruption::Missing("approval user command receipt"))?;
             if command.command().request() != request
                 || command.command().decision() != &decision
                 || !matches!(command.result(), DecideToolRequestResult::Applied(_))
             {
                 return Err(
-                    ToolLoopCorruption::Inconsistent("approval owner command receipt").into(),
+                    ToolLoopCorruption::Inconsistent("approval user command receipt").into(),
                 );
             }
-            ToolApprovalResolutionReconstitutionInput::owner_command(command)
+            ToolApprovalResolutionReconstitutionInput::user_command(command)
         }
-        "policy_auto" if owner_command.is_none() && decision == ToolApprovalDecision::Approve => {
+        "policy_auto" if user_command.is_none() && decision == ToolApprovalDecision::Approve => {
             ToolApprovalResolutionReconstitutionInput::policy_auto(request)
         }
         "session_blanket"
-            if owner_command.is_none() && decision == ToolApprovalDecision::Approve =>
+            if user_command.is_none() && decision == ToolApprovalDecision::Approve =>
         {
             ToolApprovalResolutionReconstitutionInput::session_blanket(
                 request,
                 load_frozen_dangerous_tool_auto_approval(connection, request).await?,
             )
+        }
+        "delegate" if user_command.is_none() => {
+            let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
+            let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
+            let rationale: Option<String> = row.try_get("rationale")?;
+            let request_record = delegate_requests
+                .get(&request)
+                .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
+            let recommendation = match decision {
+                ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
+                ToolApprovalDecision::Deny { ref reason } if reason.is_none() => {
+                    DelegateApprovalRecommendation::Deny
+                }
+                ToolApprovalDecision::Deny { .. } => {
+                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
+                }
+            };
+            let rationale = signalbox_domain::ToolDecisionRationale::try_new(
+                rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
+            let approval = DelegateToolApproval::try_new(
+                request_record,
+                DirectModelSelection::from_uuid(
+                    delegate_model.ok_or(ToolLoopCorruption::Missing("delegate model"))?,
+                ),
+                signalbox_domain::ModelCallId::from_uuid(
+                    delegate_call.ok_or(ToolLoopCorruption::Missing("delegate call"))?,
+                ),
+                recommendation,
+                rationale,
+            )
+            .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
+            ToolApprovalResolutionReconstitutionInput::delegate(approval)
         }
         "policy_auto" | "session_blanket" => {
             return Err(ToolLoopCorruption::Inconsistent("automatic approval evidence").into());
@@ -1697,7 +1777,7 @@ async fn decode_approval(
         .map_err(|_| ToolLoopCorruption::Inconsistent("approval resolution").into())
 }
 
-async fn load_owner_decision_receipts(
+async fn load_user_decision_receipts(
     connection: &mut PgConnection,
     commands: &[DurableCommandId],
 ) -> Result<BTreeMap<DurableCommandId, PreparedDecideToolRequest>, ToolLoopRepositoryError> {
@@ -1715,6 +1795,7 @@ async fn load_owner_decision_receipts(
                 command.result_earliest_undecided_request_id,
                 request.request_ordinal, request.tool_name,
                 request.arguments_kind, request.arguments_text,
+                request.approval_posture,
                 request.producing_model_call_id, request.session_id,
                 request.turn_id
            FROM decide_tool_request_command AS command
@@ -1739,7 +1820,7 @@ async fn load_owner_decision_receipts(
         let rejection: Option<String> = row.try_get("rejection_kind")?;
         let earliest: Option<Uuid> = row.try_get("result_earliest_undecided_request_id")?;
         if result_kind != "applied" || rejection.is_some() || earliest.is_some() {
-            return Err(ToolLoopCorruption::Inconsistent("approval owner command receipt").into());
+            return Err(ToolLoopCorruption::Inconsistent("approval user command receipt").into());
         }
         let producing_call =
             signalbox_domain::ModelCallId::from_uuid(required(&row, "producing_model_call_id")?);
@@ -1751,7 +1832,7 @@ async fn load_owner_decision_receipts(
             .map_err(|_| ToolLoopCorruption::Inconsistent("applied decision receipt"))?;
         if receipts.insert(command_id, prepared).is_some() {
             return Err(ToolLoopCorruption::Inconsistent(
-                "duplicate approval owner command receipt",
+                "duplicate approval user command receipt",
             )
             .into());
         }
@@ -1937,7 +2018,7 @@ pub(crate) async fn load_approvals_by_request(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, decision_kind, decision_source, denial_reason,
-                owner_command_id
+                owner_command_id, delegate_model_selection_id, delegate_model_call_id, rationale
            FROM tool_approval_decision
           WHERE request_id = ANY($1)",
     )
@@ -2533,7 +2614,7 @@ pub(crate) async fn load_request_by_id(
 ) -> Result<Option<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
     let row = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text,
+                arguments_kind, arguments_text, approval_posture,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = $1",
@@ -2564,7 +2645,7 @@ pub(crate) async fn load_requests_by_id(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT request_id, request_ordinal, tool_name,
-                arguments_kind, arguments_text,
+                arguments_kind, arguments_text, approval_posture,
                 producing_model_call_id, session_id, turn_id
            FROM tool_request
           WHERE request_id = ANY($1)",

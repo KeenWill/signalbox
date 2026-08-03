@@ -65,19 +65,19 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
     ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-    ConversationSummary, CurrentModelCallState, ErrorCode, ImportedContentKind,
-    ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    InputContent, InputDelivery, MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail,
-    RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind,
-    ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
-    ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-    encode_client_line,
+    ConversationSummary, CurrentModelCallState, ErrorCode, GoalHistoryEvent, GoalLifecycleState,
+    ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker,
+    ImportedTextPreview, InputContent, InputDelivery, MetadataActor, ModelSelection,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
+    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember,
+    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -122,6 +122,10 @@ const STREAMING_DELTA_COUNT: usize = 192;
 const STREAMING_DELTA_BYTES: usize = 8 * 1024;
 const MODEL_CONFIGURATION: &str = r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -612,6 +616,142 @@ async fn create_alias_session(
         ))
         .into()),
     }
+}
+
+async fn read_goal_messages(
+    connection: &mut Connection,
+    request_id: u64,
+    session_id: CanonicalUuid,
+) -> Result<Vec<ServerMessage>, Box<dyn Error>> {
+    connection
+        .request(request_id, ClientRequest::ReadGoal { session_id })
+        .await?;
+    let mut messages = Vec::new();
+    loop {
+        let message = response_within(connection).await?.message().clone();
+        let ended = matches!(message, ServerMessage::GoalHistoryEnd { .. });
+        messages.push(message);
+        if ended {
+            return Ok(messages);
+        }
+    }
+}
+
+/// INV-048: process goal commands preserve immutable supersession lineage and
+/// show returns the complete ordered event stream with its current projection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s_goal_inv048_process_protocol_supersession_history_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let attach_command = command()?;
+    let supersede_command = command()?;
+    let stop_command = command()?;
+    let first_statement = String::from("finish the commissioned task");
+    let replacement_statement = String::from("finish the clarified task");
+
+    connection
+        .request(
+            2,
+            ClientRequest::AttachGoal {
+                command_id: attach_command,
+                session_id,
+                statement: first_statement.clone(),
+            },
+        )
+        .await?;
+    let attached = response_within(&mut connection).await?.message().clone();
+    connection
+        .request(
+            3,
+            ClientRequest::SupersedeGoal {
+                command_id: supersede_command,
+                session_id,
+                statement: replacement_statement.clone(),
+            },
+        )
+        .await?;
+    let superseded = response_within(&mut connection).await?.message().clone();
+    connection
+        .request(
+            4,
+            ClientRequest::StopGoal {
+                command_id: stop_command,
+                session_id,
+            },
+        )
+        .await?;
+    let stopped = response_within(&mut connection).await?.message().clone();
+    let history = read_goal_messages(&mut connection, 5, session_id).await?;
+
+    assert_eq!(
+        attached,
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        }
+    );
+    assert_eq!(
+        superseded,
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal: CanonicalU64::new(2),
+            generation: CanonicalU64::new(1),
+        }
+    );
+    assert_eq!(
+        stopped,
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal: CanonicalU64::new(3),
+            generation: CanonicalU64::new(2),
+        }
+    );
+    assert_eq!(
+        history,
+        vec![
+            ServerMessage::GoalHistoryStart {
+                session_id,
+                current_generation: CanonicalU64::new(2),
+                current_statement: replacement_statement.clone(),
+            },
+            ServerMessage::GoalHistoryState {
+                current_state: GoalLifecycleState::UserStopped {},
+            },
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(1),
+                generation: CanonicalU64::new(1),
+                event: GoalHistoryEvent::Commissioned {
+                    statement: first_statement,
+                    command_id: attach_command,
+                },
+            },
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(2),
+                generation: CanonicalU64::new(1),
+                event: GoalHistoryEvent::Superseded {
+                    replacement_statement,
+                    command_id: supersede_command,
+                },
+            },
+            ServerMessage::GoalHistoryItem {
+                event_ordinal: CanonicalU64::new(3),
+                generation: CanonicalU64::new(2),
+                event: GoalHistoryEvent::UserStopped {
+                    command_id: stop_command,
+                },
+            },
+            ServerMessage::GoalHistoryEnd {
+                event_count: CanonicalU64::new(3),
+            },
+        ]
+    );
+
+    drop(connection);
+    runtime.stop().await
 }
 
 #[tokio::test]
@@ -1401,11 +1541,12 @@ async fn complete_active_text_turn(
     Ok(())
 }
 
-/// S28 / INV-038: the owner-visible operation distinguishes first insertion
+/// S28 / INV-038: the user-visible operation distinguishes first insertion
 /// from exact-snapshot reimport while retaining the winner's identity.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_inv038_reports_inserted_then_already_imported() -> Result<(), Box<dyn Error>> {
+async fn s28_inv038_single_shot_and_chunked_import_resolve_the_same_snapshot()
+-> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let source = ConversationImportSource::new(
@@ -1441,14 +1582,43 @@ async fn s28_inv038_reports_inserted_then_already_imported() -> Result<(), Box<d
         }
     );
 
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(source.as_bytes().len())?);
     connection
         .request_version(
             ProtocolVersion::One,
             2,
-            ClientRequest::ImportConversation {
+            ClientRequest::BeginConversationImport {
                 format: ConversationImportFormat::ClaudeCodeSessionJsonlV2,
-                source,
+                declared_size_bytes,
             },
+        )
+        .await?;
+    let begun = response_within(&mut connection).await?;
+    assert_eq!(
+        begun.message(),
+        &ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        }
+    );
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::AppendConversationImport { chunk: source },
+        )
+        .await?;
+    let appended = response_within(&mut connection).await?;
+    assert_eq!(
+        appended.message(),
+        &ServerMessage::ConversationImportAppended {
+            assembled_size_bytes: declared_size_bytes,
+        }
+    );
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::CommitConversationImport {},
         )
         .await?;
     let already_imported = response_within(&mut connection).await?;
@@ -1460,6 +1630,84 @@ async fn s28_inv038_reports_inserted_then_already_imported() -> Result<(), Box<d
     );
 
     drop(connection);
+    runtime.stop().await
+}
+
+/// S28: disconnect discards per-connection partial import state.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_disconnect_discards_a_partial_chunked_import() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let chunk = vec![b'x'];
+    let declared_size_bytes = CanonicalU64::new(u64::try_from(chunk.len())?);
+    let mut abandoned = Connection::connect(runtime.socket()).await?;
+    abandoned
+        .request_version(
+            ProtocolVersion::One,
+            1,
+            ClientRequest::BeginConversationImport {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                declared_size_bytes,
+            },
+        )
+        .await?;
+    let begun = response_within(&mut abandoned).await?;
+    assert_eq!(
+        begun.message(),
+        &ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        }
+    );
+    abandoned
+        .request_version(
+            ProtocolVersion::One,
+            2,
+            ClientRequest::AppendConversationImport {
+                chunk: ConversationImportSource::new(chunk.clone()),
+            },
+        )
+        .await?;
+    let appended = response_within(&mut abandoned).await?;
+    assert_eq!(
+        appended.message(),
+        &ServerMessage::ConversationImportAppended {
+            assembled_size_bytes: declared_size_bytes,
+        }
+    );
+    drop(abandoned);
+
+    let mut replacement = Connection::connect(runtime.socket()).await?;
+    replacement
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::BeginConversationImport {
+                format: ConversationImportFormat::CodexRolloutJsonlV1,
+                declared_size_bytes,
+            },
+        )
+        .await?;
+    let replacement_begun = response_within(&mut replacement).await?;
+    assert_eq!(
+        replacement_begun.message(),
+        &ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        }
+    );
+    replacement
+        .request_version(
+            ProtocolVersion::One,
+            4,
+            ClientRequest::AbortConversationImport {},
+        )
+        .await?;
+    let aborted = response_within(&mut replacement).await?;
+    assert_eq!(
+        aborted.message(),
+        &ServerMessage::ConversationImportAborted {}
+    );
+
+    drop(replacement);
     runtime.stop().await
 }
 
@@ -1981,7 +2229,7 @@ async fn inv012_enforces_metadata_command_identity() -> Result<(), Box<dyn Error
     };
     assert_eq!(*session_id, first_session);
     assert_eq!(metadata, &replacement);
-    assert!(matches!(last_writer.actor(), MetadataActor::Owner {}));
+    assert!(matches!(last_writer.actor(), MetadataActor::User {}));
 
     connection
         .request_version(
@@ -2449,7 +2697,7 @@ async fn inv033_reads_current_metadata_projection() -> Result<(), Box<dyn Error>
     };
     assert_eq!(*session_id, first_session);
     assert_eq!(metadata, &replacement);
-    assert!(matches!(last_writer.actor(), MetadataActor::Owner {}));
+    assert!(matches!(last_writer.actor(), MetadataActor::User {}));
 
     drop(connection);
     runtime.stop().await
@@ -2872,7 +3120,7 @@ async fn park_turn_on_ambiguous_model_call(
 }
 
 /// S04 / S07 / INV-029: a turn parked on an ambiguous model call refuses
-/// ordinary input until the owner reconciliation decision releases the slot.
+/// ordinary input until the user reconciliation decision releases the slot.
 ///
 /// The refusal and the release are one contract: proving the release means
 /// nothing unless the same session is demonstrably wedged first, against the
@@ -5384,7 +5632,7 @@ async fn inv012_inv014_inv015_compaction_lifecycle_retries_are_exact() -> Result
     runtime.stop().await
 }
 
-/// INV-012: concurrent reuse of one owner-global command identity elects one
+/// INV-012: concurrent reuse of one user-global command identity elects one
 /// claimant and makes the loser inspect the committed winner exactly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
@@ -5877,7 +6125,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
 /// exactly as a colliding call identity already is. Discovering it in
 /// `complete` instead would cost a paid summary and admit no remint, because
 /// the in-flight lifecycle pins the identities by then. The rejected claim
-/// rolls back so the reminting caller can reuse its owner-global command.
+/// rolls back so the reminting caller can reuse its user-global command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s03_inv012_inv015_taken_compaction_result_identities_remint_before_sending()

@@ -461,7 +461,7 @@ mod tests {
     use super::build_request;
 
     /// An operation whose correlation seed is the one knob; targets, one
-    /// user message, and a 64-token ceiling are canonical.
+    /// user-role message, and a 64-token ceiling are canonical.
     fn operation(correlation: &str) -> ModelOperation<String> {
         ModelOperation::new(
             correlation.to_string(),

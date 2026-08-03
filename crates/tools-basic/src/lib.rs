@@ -3,7 +3,6 @@
 mod current_time;
 mod echo;
 mod session_status;
-mod web_fetch;
 
 pub use current_time::{
     CURRENT_TIME_NAME, CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError,
@@ -15,11 +14,4 @@ pub use session_status::{
     SessionStatusExecutor, SessionStatusExecutorError, SessionStatusTool,
     SessionStatusToolConstructionError, SessionStatusWrite, SessionStatusWriteOutcome,
     SessionStatusWriter,
-};
-pub use web_fetch::{
-    PublicDestinationClientError, ReqwestWebFetchConstructionError, ReqwestWebFetchTransport,
-    WEB_FETCH_NAME, WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchEgressPolicyError,
-    WebFetchExecutor, WebFetchExecutorError, WebFetchRequest, WebFetchResponse, WebFetchTool,
-    WebFetchToolConstructionError, WebFetchTransport, WebFetchTransportFailure,
-    has_more_response_bytes, public_destination_client,
 };

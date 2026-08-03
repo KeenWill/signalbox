@@ -1,5 +1,8 @@
 # Turn lifecycle and scheduling
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the
@@ -27,7 +30,7 @@ final-state gate was verified through PR #314
 composition-root name and that `apps/signalboxd` code home were verified through
 PR #258 (`agent/signalboxd-rename`); the additional daemon-held code-host
 credential path is verified through PR #270 (`agent/tool-batch-tier1`); and the
-owner reconciliation decision that releases an ambiguity wait, together with the
+user reconciliation decision that releases an ambiguity wait, together with the
 startup scan's separate report of sessions holding their slot for that decision,
 were verified through PR #281 (`agent/turn-reconciliation-recovery`). The finite
 startup scan and removal of the superseded steering blocker were verified
@@ -259,14 +262,15 @@ acting on a false hint changes zero rows, and a lost true hint is recovered by
 the sweep (INV-007).
 
 - **Nudge (primary).** After a submit-input pass whose recorded result is a turn
-  origin (`Recorded(Applied(TurnOrigin))` — including owner-global replay of an
+  origin (`Recorded(Applied(TurnOrigin))` — including user-global replay of an
   already-recorded command, whose transaction rolls back and commits nothing
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
-- **Sweep (backstop).** `PostgresEligibilitySweep` finds sessions with either a
-  queued turn and no active turn — the storage shape of the activation
-  precondition — or an active tool round in the running phase. The
+- **Sweep (backstop).** `PostgresEligibilitySweep` finds three durable shapes: a
+  queued turn with no active turn (the activation precondition), an active tool
+  round in the running phase, or a current pursuing goal turn that is terminal
+  and therefore still owed its durable continuation-or-blocking disposition. The
   `turn_lifecycle_queued_by_session` partial index is created for the queued
   query shape, though planner adoption is not pinned by any test. Results are
   paged 16 sessions per query with a fixed per-cycle bound; continuation pages
@@ -280,13 +284,15 @@ the sweep (INV-007).
   nothing is lost because the rows are the queue.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
-scheduler after startup recovery. Each authoritative pass first asks its
-execution composition to reconcile any active running tool round for the hinted
-session, then runs ordinary queued-turn activation. Failure of the read-only
-active-round lookup is an ordinary failed pass for later scheduler retry; only a
-failure after active-turn execution begins trips fatal recovery supervision. A
-parked approval returns from the pass immediately and therefore retains no
-scheduler worker capacity. Activation returns the activated turn
+scheduler after startup recovery. This recovers a goal disposition when the
+process ended after turn terminalization but before scheduler reconciliation.
+Each authoritative pass first asks its execution composition to reconcile any
+active running tool round for the hinted session, then runs ordinary queued-turn
+activation. Failure of the read-only active-round lookup is an ordinary failed
+pass for later scheduler retry; only a failure after active-turn execution
+begins trips fatal recovery supervision. A parked approval returns from the pass
+immediately and therefore retains no scheduler worker capacity. Activation
+returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
@@ -420,7 +426,7 @@ concurrently.
 
 ## Occupied-slot input handling
 
-Command construction, owner-global deduplication, and acceptance atomicity are
+Command construction, user-global deduplication, and acceptance atomicity are
 [identity-and-commands](identity-and-commands.md) scope. The process protocol
 exposes the existing delivery algebra as the closed `start_when_idle`, `steer`,
 and `queue` intents, mapped respectively to `StartWhenNoActiveTurn`,
@@ -507,7 +513,7 @@ unpinned capability-class request names no selected runner and is unaffected
 until a live registration can satisfy it. Locking, page bounds, and crash
 recovery are owned by [persistence-protocol](persistence-protocol.md).
 
-Only two owner commands consume that state. `ReplaceLostRunner` requires the
+Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
 the one pending replacement enrollment it atomically activates, or — for a
 registration-triggered loss alone — a checked re-enrollment of the same runner
@@ -543,7 +549,7 @@ boundary, workspace, grant, or lease. Workspace provisioning and the first pin
 remain part of the eventual initial dispatch. `AbandonLostRunner` requires the
 same exact lost revision and no active turn, then installs terminal
 `RunnerAbandoned` placement state. If a turn is active it records
-`ActiveTurnRequiresExistingControl`; the owner first uses the existing
+`ActiveTurnRequiresExistingControl`; the user first uses the existing
 `stop_turn`, approval-decision, or reconciliation flow until the slot is empty,
 so abandonment never mints cancellation authority. With no active turn,
 including an idle session with queued turns, no turn or frontier is fabricated;
@@ -649,10 +655,10 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   instead of accepting an evidence-free failure record, and the deferred
   `assert_failed_terminal_execution_final_state` assertion re-closes the shape
   at every commit. When the failure closed a tool round, the same input names
-  the complete owner-sourced denial resolutions backing every `ToolDenied`
-  result entry in the terminal suffix; a `ToolDenied` entry whose request lacks
-  an exact `Deny` resolution — including a missing or approving decision — fails
-  reconstitution rather than fabricating an owner denial. A failed turn may
+  the complete user-sourced denial resolutions backing every `ToolDenied` result
+  entry in the terminal suffix; a `ToolDenied` entry whose request lacks an
+  exact `Deny` resolution — including a missing or approving decision — fails
+  reconstitution rather than fabricating a user denial. A failed turn may
   instead name the round's own continuation call — created at the continuation
   boundary and later lost or known-failed. Reconstitution accepts that call
   exactly when its whole frontier is the completed round's batch-correlated
@@ -670,7 +676,7 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   terminal frontier extends that call's yielded frontier by exactly one
   batch-correlated result entry per request in proposal order before the
   correlated `TurnCancelled` marker. Each `ToolDenied` entry in that suffix is
-  batch-correlated only against a named owner-sourced `Deny` resolution for its
+  batch-correlated only against a named user-sourced `Deny` resolution for its
   exact request; a missing or approving decision fails reconstitution. A
   cancelled continuation call — prepared at the continuation boundary and
   interrupted before or during send — is admitted on the same terms as the
@@ -779,6 +785,66 @@ outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so the grace
 window buys only latency. Repositories and services are cheap per-invocation
 clones over the shared pool; no shared locked service instance exists.
 
+## Delegated waits, messages, and wake turns
+
+This section is the session-delegation foundation proposal and becomes verified
+only with its implementing child pull requests. A spawned child's first turn has
+a closed delegated-task origin naming the exact spawning request; its starting
+frontier contains the checked `DelegatedTask` entry and contains no synthetic
+accepted input. Every later turn uses the ordinary accepted-input or
+delegation-wake origin appropriate to the work that queued it.
+
+`AwaitingChild { wait }` is an active phase with no current attempt. Its wait
+names the exact foreground `await_session` request, spawning request, and child;
+it retains the parent's sole progressing-turn slot, and survives restart
+unchanged until that relationship has one deliverable terminal result. Result
+consumption atomically appends the parent's delivered-result entry, returns the
+result as that tool request's content, and moves the same turn back to running
+with a fresh continuation attempt. A raw child identity or an unrelated result
+cannot release the wait.
+
+A background await instead commits a delivery registration and returns its
+receipt immediately. It does not create `AwaitingChild` or retain the slot; the
+current turn may continue and end normally. Child result commit appends one
+parent-scoped `DelegationWake` event and makes the parent eligible for a new
+delegation-origin turn. A missing in-process nudge changes only latency: the
+eligibility sweep includes both a foreground wait with a deliverable result and
+an undelivered background result.
+
+Pending inter-session messages use the same safety pattern. An active recipient
+consumes its FIFO inbox at the next model-call safe point. Pending messages and
+background results are ordered by their shared, gap-free recipient delivery
+sequence, not by relationship-local ordinals. An idle recipient has at most one
+queued delegation-origin wake turn; later items coalesce into that turn's
+starting frontier until activation. Reconstitution checks delivery sequence,
+message ordinal where present, relationship, sender/recipient, and
+semantic-entry identity before any content becomes model-visible.
+
+Parent termination evaluates descendants only when its explicit scope is
+`ParentAndDescendants`. The transaction locks the relationship frontier before
+applying each edge's background/bound policy and records one typed disposition
+per evaluated edge. `ParentAlone`, background, and bound `KeepRunning` never
+fabricate child stop authority. Parent-driven stop/cancel outcomes carry their
+exact spawn request plus opaque authority from the applied parent termination; a
+turn command names its exact turn, while a goal-stop command names its exact
+goal generation and carries no turn. Raw identities cannot construct either
+source. Each edge verifies that authority's parent, command kind, and descendant
+scope against its typed outcome before applying the policy. Partial or
+unrecorded propagation does not commit. Equal reevaluation of the same edge by
+the same command returns the recorded disposition without appending another. An
+edge whose child already has a terminal result records an `AlreadyTerminal`
+disposition for the evaluating command, creates no second terminal result, and
+still traverses the child's outgoing relationships. Child-originated
+cancellation instead carries the child's exact proof-bearing cancelled turn. A
+reconciliation-required turn supplies no terminal child outcome, and the same
+cancelled-turn evidence cannot be selected as a stopped outcome. Detached child
+work stays independently schedulable after the parent's turn or goal has
+terminalized.
+
+Startup and the periodic sweep recognize child waits, pending delegation inbox
+content, and undelivered results from durable rows. They neither infer a result
+from child transcript state nor depend on process-local wake memory.
+
 ## Open edges
 
 - Direct fatal terminalization has sealed domain derivation values
@@ -786,8 +852,8 @@ clones over the shared pool; no shared locked service instance exists.
 - Dispatch fencing covers model calls, daemon tools, and local runner leases;
   remote runner transport and result envelopes remain deferred.
 - Loss replacement is the only version-one producer of a placement change.
-  Owner-directed relocation of a healthy session, and a working-directory move
-  on the same runner, are committed functionality with no command here yet; the
+  User-directed relocation of a healthy session, and a working-directory move on
+  the same runner, are committed functionality with no command here yet; the
   placement-revision, transcript-boundary, and runner-event mechanisms this page
   drives must stay compatible with a relocation that no loss caused
   ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
@@ -802,12 +868,11 @@ clones over the shared pool; no shared locked service instance exists.
   the atomic boundary in [tool-loop](tool-loop.md).
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
-  `awaiting_model_call_recovery`) and tool-loop evidence; delegated-result waits
-  remain deferred with delegation. An owner reconciliation decision is the only
-  implemented resolution for that park: no automatic resolution exists, because
-  the terminal disposition it produces is proof-bearing and the durable evidence
-  supplies no authority to construct. Resolving the ambiguity itself from
-  provider evidence remains an
+  `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
+  waits. A user reconciliation decision is the only implemented resolution for
+  that park: no automatic resolution exists, because the terminal disposition it
+  produces is proof-bearing and the durable evidence supplies no authority to
+  construct. Resolving the ambiguity itself from provider evidence remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
 - Per-session scan gating, sweep interval, and fairness tuning remain

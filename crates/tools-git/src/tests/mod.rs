@@ -1,0 +1,32 @@
+//! Unit tests for the local Git tool family.
+
+mod arguments;
+mod branch_create;
+mod branch_switch;
+mod catalog;
+mod checkout_rollback;
+mod commit;
+mod commit_publication;
+mod diff;
+mod diff_revision;
+mod identity;
+mod index;
+mod layout;
+mod log;
+mod object_database;
+mod operation_review;
+mod pack_install;
+mod packed_reference;
+mod planting;
+mod push;
+mod reference;
+mod reflog;
+mod regression_properties;
+mod repository;
+mod stage;
+mod stage_removal;
+mod status;
+mod status_reference;
+mod status_report;
+mod support;
+mod worktree_entries;

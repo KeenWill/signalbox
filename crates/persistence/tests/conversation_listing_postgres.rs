@@ -61,7 +61,7 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
 }
 
 /// One synthetic Claude Code export whose summary record supplies the derived
-/// display title and whose one user message supplies the fallback candidate.
+/// display title and whose one user-role message supplies the fallback candidate.
 const CLAUDE_SUMMARY_SOURCE: &str = concat!(
     "{\"type\":\"summary\",\"summary\":\"Imported planning summary\"}\n",
     "{\"type\":\"user\",\"message\":{\"role\":\"user\",",
@@ -72,14 +72,14 @@ const CLAUDE_SUMMARY_TITLE: &str = "Imported planning summary";
 /// The normalized entry count of [`CLAUDE_SUMMARY_SOURCE`].
 const CLAUDE_SUMMARY_ENTRY_COUNT: u64 = 2;
 
-/// One synthetic Codex rollout whose only user message supplies the derived
+/// One synthetic Codex rollout whose only user-role message supplies the derived
 /// display title.
 const CODEX_USER_SOURCE: &str = concat!(
     "{\"timestamp\":\"2026-07-25T00:00:00Z\",\"type\":\"response_item\",",
     "\"payload\":{\"type\":\"message\",\"role\":\"user\",",
     "\"content\":[{\"type\":\"input_text\",\"text\":\"synthetic codex question\"}]}}"
 );
-/// The exact title [`CODEX_USER_SOURCE`]'s user message derives.
+/// The exact title [`CODEX_USER_SOURCE`]'s user-role message derives.
 const CODEX_USER_TITLE: &str = "synthetic codex question";
 /// The normalized entry count of [`CODEX_USER_SOURCE`].
 const CODEX_USER_ENTRY_COUNT: u64 = 1;
@@ -121,7 +121,7 @@ fn creation(command_value: u128, session_value: u128) -> PreparedCreateSession {
     CreateSession::new(
         command(command_value),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
@@ -129,7 +129,7 @@ fn creation(command_value: u128, session_value: u128) -> PreparedCreateSession {
         )),
     )
     .prepare(session(session_value))
-    .expect("owner-initiated creation without ancestry is preparable")
+    .expect("user-initiated creation without ancestry is preparable")
 }
 
 async fn create_fixture_session(pool: &PgPool, seed: u128) -> Result<SessionId, Box<dyn Error>> {

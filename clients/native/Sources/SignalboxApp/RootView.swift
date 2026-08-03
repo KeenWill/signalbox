@@ -21,7 +21,7 @@ struct RootView: View {
 
     private var compactLayout: some View {
         // Templates has no compact destination until its information
-        // architecture is owner-approved. Regular layouts retain the explicit
+        // architecture is maintainer-approved. Regular layouts retain the explicit
         // capability gate so the missing process operation remains visible.
         TabView(selection: $coordinator.selectedSection) {
             ProcessSessionsScreen()

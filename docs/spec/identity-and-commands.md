@@ -1,5 +1,8 @@
 # Identity, commands, and telemetry correlation
 
+The user-vocabulary surface on this page was re-verified through PR #378
+(`agent/user-vocabulary`).
+
 This page describes the implemented identity, durable-command, and
 telemetry-correlation behavior of Signalbox, including the imported identity
 kinds and command family and the tool-loop identity kinds and decision command,
@@ -7,7 +10,7 @@ as verified against the implementing stack through PR #224
 (`agent/session-metadata-domain`). The behavior lives in `crates/domain`
 (identity newtypes, command payloads, actor attribution, replay equality),
 `crates/application` (identity generation, command boundaries),
-`crates/persistence` (the owner-global command registry and typed record
+`crates/persistence` (the user-global command registry and typed record
 families), and `apps/signalboxd` (telemetry wiring); those `apps/signalboxd`
 code homes were verified through PR #258 (`agent/signalboxd-rename`). Storage
 transaction mechanics, locking, and the reconstitution seam are owned by
@@ -23,7 +26,10 @@ ambiguity-ownership inventory was verified through PR #288
 (`agent/audit-fix-docs-coherence`); the context-compaction command lifecycle was
 verified through PR #314 (`agent/context-compaction-protocol`). The runner
 recovery command families are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
+implementing stack and become verified only with those child pull requests. The
+path-scoped placement command family is likewise a foundation proposal at the
+bottom of its implementing stack and becomes verified with its child pull
+request.
 
 ## Identity model
 
@@ -49,7 +55,7 @@ Identities fall into three supply classes:
   application request constructor accepts the caller-supplied value, and the
   daemon accepts any non-sentinel RFC 9562 UUID — the nil and max sentinels are
   rejected (see below) — without checking its version bits. Why: idempotency
-  correctness comes from the owner-global durable claim plus canonical payload
+  correctness comes from the user-global durable claim plus canonical payload
   comparison, never from trusting a caller's clock or version bits (INV-012).
 - **Daemon-minted durable-fact identity** — `SessionId`,
   `ImportedConversationId`, `ImportedTranscriptEntryId`, `AcceptedInputId`,
@@ -61,7 +67,7 @@ Identities fall into three supply classes:
   Postgres B-tree keys without changing the 128-bit storage shape; no
   index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
-  Callers supply them inside command payloads to name owner-configured model
+  Callers supply them inside command payloads to name operator-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
   `model_alias_id`), and alias meaning resolves through a definition lookup at
   domain preparation, so an unknown alias becomes a recorded rejection, not an
@@ -70,7 +76,7 @@ Identities fall into three supply classes:
 `ProviderModelIdentity` names the daemon's normalized provider/model value
 space. It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
 `model_call.resolved_provider_model_identity_id`) and supplied as an
-owner-configured key from signalboxd's model-configuration file; how
+operator-configured key from signalboxd's model-configuration file; how
 provider-reported data normalizes into it remains open (see Open edges).
 
 UUID contents are never semantic. No code derives acceptance order, queue order,
@@ -87,7 +93,7 @@ boundaries: checked command/request construction (`try_new` on
 `crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
 command can reach a transaction and claims no identifier. Why: sentinel-like
 values are common accidental defaults and would otherwise become permanent
-owner-global claims.
+user-global claims.
 
 ## Generation and minting boundary
 
@@ -174,36 +180,36 @@ open.
 
 ## Durable command records
 
-All claimed command identifiers live in one owner-global, append-only
+All claimed command identifiers live in one user-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`, `replace_lost_runner`,
-`abandon_lost_runner`, `promote_pending_runner`), a kind-scoped
-`storage_version`, and `claimed_at` (`transaction_timestamp()`), which is
-non-semantic operational metadata. No command kind, session, or client has a
-separate command-ID namespace.
+`review_workflow`, `compact_session`, `update_session_placement`,
+`replace_lost_runner`, `abandon_lost_runner`, `promote_pending_runner`), a
+kind-scoped `storage_version`, and `claimed_at` (`transaction_timestamp()`),
+which is non-semantic operational metadata. No command kind, session, or client
+has a separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
 `replace_session_defaults_command`, `replace_session_metadata_command`,
 `submit_input_command`, `decide_tool_request_command`,
 `review_workflow_command`, `compact_session_command`,
-`replace_lost_runner_command`, `abandon_lost_runner_command`,
-`promote_pending_runner_command`) keyed one-to-one by `command_id`, storing
-every caller-supplied semantic field under `CHECK` constraints and foreign keys.
-Every family except replacement also stores its terminal `applied`/`rejected`
-discriminator and typed result fields in that row. A compact-session record
-begins `pending` with its exact dedicated Prepared call, then changes exactly
-once to `applied` with its receipt or to `failed`; its request fields never
-change. Runner replacement instead has one immutable request row plus at most
-one append-only `replace_lost_runner_result`: the request row satisfies
-typed-claim completeness while provisioning crosses the runner boundary, and no
-success or rejection response exists until the result row commits. Kind and
-version agreement between the registry row and its typed record is enforced by a
-composite foreign key, and a deferred constraint trigger
-(`durable_command_requires_typed_record`, executing function
+`update_session_placement_command`, `replace_lost_runner_command`,
+`abandon_lost_runner_command`, `promote_pending_runner_command`) keyed
+one-to-one by `command_id`, storing every caller-supplied semantic field under
+`CHECK` constraints and foreign keys. Every family except replacement also
+stores its terminal `applied`/`rejected` discriminator and typed result fields
+in that row. A compact-session record begins `pending` with its exact dedicated
+Prepared call, then changes exactly once to `applied` with its receipt or to
+`failed`; its request fields never change. Runner replacement instead has one
+immutable request row plus at most one append-only `replace_lost_runner_result`:
+the request row satisfies typed-claim completeness while provisioning crosses
+the runner boundary, and no success or rejection response exists until the
+result row commits. Kind and version agreement between the registry row and its
+typed record is enforced by a composite foreign key, and a deferred constraint
+trigger (`durable_command_requires_typed_record`, executing function
 `require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
 command's comparison payload and result reviewable and constraint-checked
@@ -221,13 +227,21 @@ start another workspace nor acquire another meaning. Startup resumes an
 unterminated request before client admission. `abandon_lost_runner` remains one
 ordinary atomic claim-and-terminal-result transaction.
 
-`promote_pending_runner` is the one owner command in this set whose payload
-names no session. It carries only the command identity and the pending
+`promote_pending_runner` is the one user command in this set whose payload names
+no session. It carries only the command identity and the pending
 enrollment-request identity it promotes, and it is a single atomic
 claim-and-terminal-result transaction: the deployment-scoped fact it acts on is
 that this daemon's active runner is durably gone, so no session placement is a
 required argument and none is mutated
 ([runner protocol and placement](runner-protocol.md#identity-enrollment-and-registration)).
+
+`UpdateSessionPlacement` carries the target session, the exact expected current
+placement version, and the complete replacement placement. Its first handling
+atomically records either the next immutable event or one of `SessionNotFound`,
+`CurrentVersionMismatch`, and `VersionExhausted`; equal replay returns that
+recorded result, while a different payload under the same command identity is
+conflicting reuse. This is the sole command that advances session path placement
+after creation.
 
 For `SubmitInput`, each terminal command result must correlate with exactly its
 committed domain effects. Equal replay returns the recorded result only after
@@ -249,20 +263,21 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-New `CreateSession` records use storage version 5 and new
-`CreateSessionFromImportedFrontier` records version 4; new
+New `CreateSession` records use storage version 6 and new
+`CreateSessionFromImportedFrontier` records remain written at version 3. Version
+4 is committed-unimplemented compatibility space for that command family's
+optional runner-placement payload: no present writer or decoder provides it. New
 `ReplaceSessionDefaults` records use version 3. All three families reconstitute
 version 1 with dangerous blanket approval disabled and versions 1 and 2 with no
 system prompt. Create-session versions 1 through 3 carry no template provenance;
 version 4 and every later version require provenance for template mode and
-require its absence for explicit mode, so template provenance and the placement
-below compose in one version-5 record. The two creation families' newest
-versions are the ones that carry the optional session runner placement; every
-earlier version requires its complete absence, so a reader that supports only
-earlier versions rejects a runner-backed creation record instead of projecting
-it as daemon-only. `ReplaceSessionMetadata`, `SubmitInput`, and
-`DecideToolRequest` use version 1. `CreateSession` records applied results only
-(its one preparation failure is an error, not a recorded rejection);
+require its absence for explicit mode. Version 5 adds the optional session
+runner placement but remains unsupported until that payload's decoder lands;
+version 6 composes it with path-scoped placement. Each field is absent before
+its introducing version, so an older reader rejects a newer creation record
+instead of discarding either decision. `ReplaceSessionMetadata`, `SubmitInput`,
+and `DecideToolRequest` use version 1. `CreateSession` records applied results
+only (its one preparation failure is an error, not a recorded rejection);
 `CreateSessionFromImportedFrontier` also records applied results only, because a
 missing conversation named by the frontier or a boundary absent from that
 conversation is a pre-claim admission error rather than an authoritative
@@ -284,14 +299,15 @@ recorded result without catalog resolution. Only an unseen identity resolves the
 startup catalog and constructs the complete defaults-and-provenance payload.
 Structural equality (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
-`ReplaceSessionMetadata`, and `DecideToolRequest` in `crates/domain`) covers
-every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
-identifier is the lookup key that names the payload, not part of the meaning it
-names. The optional session runner placement is such a field in both creation
-families, so it participates in that equality in both creation modes — including
-template-derived creation, whose daemon-resolved defaults are excluded — and a
-replay carrying a different placement, or a placement where the first handling
-had none, is conflicting reuse.
+`ReplaceSessionMetadata`, `DecideToolRequest`, and `UpdateSessionPlacement` in
+`crates/domain`) covers every caller-supplied semantic field and excludes
+`DurableCommandId`. Why: the identifier is the lookup key that names the
+payload, not part of the meaning it names. The optional session runner placement
+is such a field in both creation families, so it participates in that equality
+in both creation modes — including template-derived creation, whose
+daemon-resolved defaults are excluded — and a replay carrying a different
+placement, or a placement where the first handling had none, is conflicting
+reuse.
 
 Every command repository, including
 `crates/persistence/src/context_compaction.rs`, follows one claim protocol, with
@@ -318,7 +334,7 @@ validation (INV-012):
 Before complete payload construction, template creation may perform only the
 caller-intent registry preflight above. After the repository inspects the
 registry for a constructed command and before claiming an unseen identifier, a
-command may perform an owner-specified pre-claim admission read.
+command may perform a user-specified pre-claim admission read.
 `CreateSessionFromImportedFrontier` uses that phase to load the conversation
 named by `frontier.conversation()` and resolve the frontier's inclusive
 boundary; a missing target returns the corresponding admission error without
@@ -359,7 +375,7 @@ rejection must use a new identifier.
 ## Actor attribution
 
 `Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
-durable command's initiating agency: `Owner`, `Model { turn: TurnId }`,
+durable command's initiating agency: `User`, `Model { turn: TurnId }`,
 `Recovery`, or `Tool { request: ToolRequestId }`. Equality is structural; a
 carried identity is a validated reference, not minting authority, and
 attribution confers no lifecycle, authorization, or approval authority (INV-001,
@@ -367,10 +383,10 @@ INV-020).
 
 `SubmitInput` and `ReplaceSessionMetadata` are the command kinds whose durable
 payloads carry an `actor` field. The `SubmitInput` application constructor fixes
-`Actor::Owner`. Metadata replacement has two purpose-specific constructors: the
-process-facing form fixes `Actor::Owner`, while the tool-facing form requires
-one exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts
-an arbitrary actor, and model/recovery issuers remain unconstructible.
+`Actor::User`. Metadata replacement has two purpose-specific constructors: the
+process-facing form fixes `Actor::User`, while the tool-facing form requires one
+exact `ToolRequestId` and fixes `Actor::Tool { request }`. Neither accepts an
+arbitrary actor, and model/recovery issuers remain unconstructible.
 `SubmitInput` and `ReplaceSessionMetadata` both include actor agency in replay
 equality and hashing: replaying a claimed identifier under a different actor is
 conflicting reuse (INV-012). Checked metadata reconstitution independently
@@ -385,7 +401,7 @@ Storage follows the closed-discriminator convention: `actor_kind`
 in `submit_input_command` and `replace_session_metadata_command`. Metadata
 receipts additionally carry constructor-selected `issuer_kind` (`owner`/`tool`)
 and `issuer_tool_request_id` columns, sealed separately from the actor
-projection. The issuer migration fixes every pre-issuer receipt to the owner
+projection. The issuer migration fixes every pre-issuer receipt to the user
 agency that its legacy constructor required, rather than trusting the actor
 projection being checked. Unknown or malformed stored spellings fail decoding as
 corruption. A well-formed `model` or `recovery` actor on a metadata command
@@ -393,7 +409,7 @@ fails earlier as unsupported metadata-writer corruption. Metadata loading
 constructs the canonical command from the independent issuer proof, then domain
 reconstitution compares the separately decoded supported actor against that
 command (`CommandActorMismatch`) for both applied and rejected receipts, so a
-cross-wired owner/tool actor fails closed.
+cross-wired user/tool actor fails closed.
 
 `CreateSession` and `ReplaceSessionDefaults` v1 carry no actor field in payload
 or storage, and no recorded-transition family (including startup-scan
@@ -435,10 +451,10 @@ edges.
   ([telemetry correlation](../open-questions.md#telemetry-correlation)).
 - `ReplaceSessionDefaults` v1/v2 payloads and storage carry no `actor` field
   despite the accepted adoption path expecting one from the kind's first
-  accepted version; the truthful `Owner` backfill via another kind-scoped
-  storage version remains available but unexercised.
-- `CreateSession` actor adoption remains an explicit owner choice; v1/v2 leave
-  its attribution implicit.
+  accepted version; the truthful `User` backfill via another kind-scoped storage
+  version remains available but unexercised.
+- `CreateSession` actor adoption remains an explicit maintainer choice; v1/v2
+  leave its attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
 - Public URL identity encodings remain undecided
@@ -450,7 +466,7 @@ edges.
   configuration-supplied; provider-identity normalization remains open
   ([model fallback and provenance](../open-questions.md#model-fallback-and-provenance)).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
-  identities are exposed outside the single-owner boundary or treated as
+  identities are exposed outside the single-user boundary or treated as
   capabilities.
-- Which command kinds may admit non-owner actors, and under what verification,
+- Which command kinds may admit non-user actors, and under what verification,
   remains with reserved delegation and authorization decisions.

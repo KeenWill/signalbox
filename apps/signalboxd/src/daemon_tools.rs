@@ -7,13 +7,13 @@ use signalbox_application::{
     OperatorFailureClass, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
     ToolExecutionInvocation, ToolExecutor,
 };
-use signalbox_domain::{NormalizedToolArguments, ToolName};
+use signalbox_domain::{NormalizedToolArguments, ToolApprovalPosture, ToolName};
 use signalbox_model_runtime::CredentialAccess;
+use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
     CURRENT_TIME_NAME, CurrentTimeClock, CurrentTimeExecutor, CurrentTimeTool, ECHO_NAME,
-    EchoExecutor, EchoTool, PostgresSessionStatusWriter, ReqwestWebFetchTransport,
-    SESSION_STATUS_UPDATE_NAME, SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
-    WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
+    EchoExecutor, EchoTool, PostgresSessionStatusWriter, SESSION_STATUS_UPDATE_NAME,
+    SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
 };
 use signalbox_tools_code_host::{
     CODE_HOST_TOOL_NAMES, CodeHostExecutor, CodeHostTools, CodeHostTransport,
@@ -26,6 +26,11 @@ use signalbox_tools_github::{
     GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy, GitHubExecutor, GitHubTools,
     GitHubTransport,
 };
+use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
+use signalbox_tools_web::{
+    ReqwestWebFetchTransport, WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool,
+    WebFetchTransport,
+};
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES,
     WorkspaceDirectoryRead, WorkspaceEntryKind, WorkspaceFileBytes, WorkspaceFileMutation,
@@ -37,7 +42,10 @@ use signalbox_tools_workspace::{
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-use crate::{FileCredentialAccess, PostgresConversationIntrospection};
+use crate::{
+    FileCredentialAccess, PostgresConversationIntrospection,
+    goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor, GoalDeclarationTool},
+};
 
 /// Daemon-local filesystem adapter that shares one pinned root across both
 /// workspace suites.
@@ -124,7 +132,8 @@ struct ComposedToolFamilies<
     HostTransport,
     GitHubTransportType,
     FileSystem: WorkspaceMutationFileSystem,
-    Port,
+    ConversationPort,
+    PlanPort,
 > {
     web_fetch: WebFetchTool<Transport>,
     status: SessionStatusTool<Writer>,
@@ -132,7 +141,9 @@ struct ComposedToolFamilies<
     github: Option<GitHubTools<Credentials, GitHubTransportType>>,
     workspace_read: Option<WorkspaceReadTools<FileSystem>>,
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
-    conversations: Option<ConversationTools<Port>>,
+    conversations: Option<ConversationTools<ConversationPort>>,
+    plan: PlanTools<PlanPort>,
+    goal: Option<GoalDeclarationTool>,
 }
 
 /// The complete daemon-local declarations and their matching dispatch executor.
@@ -144,7 +155,8 @@ pub struct DaemonTools<
     HostTransport,
     GitHubTransportType,
     FileSystem: WorkspaceMutationFileSystem,
-    Port,
+    ConversationPort,
+    PlanPort,
 > {
     catalog: DaemonToolCatalog,
     executor: DaemonToolExecutor<
@@ -155,7 +167,8 @@ pub struct DaemonTools<
         HostTransport,
         GitHubTransportType,
         FileSystem,
-        Port,
+        ConversationPort,
+        PlanPort,
     >,
 }
 
@@ -169,6 +182,7 @@ impl<Clock>
         GitHubApiTransport,
         PinnedWorkspaceFileSystem,
         PostgresConversationIntrospection,
+        SessionPlanRepository,
     >
 {
     /// Composes every production tool family from explicit deployment inputs.
@@ -196,8 +210,12 @@ impl<Clock>
         let workspace_mutation = WorkspaceMutationTools::try_new(workspace, workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
         let conversations =
-            ConversationTools::try_new(PostgresConversationIntrospection::new(pool))
+            ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
+        let goal = GoalDeclarationTool::try_new(pool.clone())
+            .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
+        let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
+            .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -208,6 +226,8 @@ impl<Clock>
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
+                plan,
+                goal: Some(goal),
             },
         )
     }
@@ -223,10 +243,14 @@ impl<Clock>
     ) -> Result<Self, DaemonToolsConstructionError> {
         let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
-        let status = SessionStatusTool::try_new_postgres(pool)
+        let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
+        let goal = GoalDeclarationTool::try_new(pool.clone())
+            .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(credentials, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
+            .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -237,12 +261,24 @@ impl<Clock>
                 workspace_read: None,
                 workspace_mutation: None,
                 conversations: None,
+                plan,
+                goal: Some(goal),
             },
         )
     }
 }
 
-impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, FileSystem, Port>
+impl<
+    Clock,
+    Transport,
+    Writer,
+    Credentials,
+    HostTransport,
+    GitHubTransportType,
+    FileSystem,
+    ConversationPort,
+    PlanPort,
+>
     DaemonTools<
         Clock,
         Transport,
@@ -251,7 +287,8 @@ impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, 
         HostTransport,
         GitHubTransportType,
         FileSystem,
-        Port,
+        ConversationPort,
+        PlanPort,
     >
 where
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
@@ -269,7 +306,8 @@ where
         github_egress_policy: GitHubEgressPolicy,
         filesystem: FileSystem,
         workspace_root: &Path,
-        conversation_port: Port,
+        conversation_port: ConversationPort,
+        plan_port: PlanPort,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let web_fetch = WebFetchTool::try_new(transport, web_fetch_egress_policy)
@@ -287,6 +325,7 @@ where
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
+        let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -297,6 +336,8 @@ where
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
+                plan,
+                goal: None,
             },
         )
     }
@@ -310,7 +351,8 @@ where
             HostTransport,
             GitHubTransportType,
             FileSystem,
-            Port,
+            ConversationPort,
+            PlanPort,
         >,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let ComposedToolFamilies {
@@ -321,6 +363,8 @@ where
             workspace_read,
             workspace_mutation,
             conversations,
+            plan,
+            goal,
         } = families;
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
             .map_err(|_| DaemonToolsConstructionError::CurrentTime)?
@@ -335,12 +379,15 @@ where
         let workspace_read = workspace_read.map(WorkspaceReadTools::into_parts);
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
+        let (plan_catalog, plan) = plan.into_parts();
+        let goal = goal.map(GoalDeclarationTool::into_parts);
         let mut catalogs = vec![
             current_time_catalog,
             echo_catalog,
             web_fetch_catalog,
             status_catalog,
             code_host_catalog,
+            plan_catalog,
         ];
         catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(workspace_read.as_ref().map(|(catalog, _)| catalog.clone()));
@@ -350,6 +397,7 @@ where
                 .map(|(catalog, _)| catalog.clone()),
         );
         catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(goal.as_ref().map(|(catalog, _)| catalog.clone()));
         let catalog = DaemonToolCatalog::try_new(catalogs)
             .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
         Ok(Self {
@@ -365,6 +413,8 @@ where
                 workspace_mutation: workspace_mutation
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
                 conversations: conversations.map(|(_, executor)| executor),
+                plan,
+                goal: goal.map(|(_, executor)| executor),
             },
         })
     }
@@ -383,7 +433,8 @@ where
             HostTransport,
             GitHubTransportType,
             FileSystem,
-            Port,
+            ConversationPort,
+            PlanPort,
         >,
     ) {
         (self.catalog, self.executor)
@@ -412,6 +463,10 @@ pub enum DaemonToolsConstructionError {
     WorkspaceMutation,
     /// The conversation declarations or introspection port were invalid.
     Conversations,
+    /// The plan declarations or session plan port were invalid.
+    Plan,
+    /// The goal declaration or its static validation details were invalid.
+    GoalDeclaration,
     /// Two declarations unexpectedly shared one name.
     Duplicate,
 }
@@ -428,6 +483,8 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceRead => "workspace read tool suite construction failed",
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
+            Self::Plan => "plan tool suite construction failed",
+            Self::GoalDeclaration => "goal_declare tool construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
     }
@@ -445,6 +502,15 @@ struct DaemonToolCatalogEntry {
 #[derive(Clone, Debug)]
 pub struct DaemonToolCatalog {
     entries: BTreeMap<ToolName, DaemonToolCatalogEntry>,
+}
+
+/// Statically selected daemon tool families available before runtime assembly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonToolComposition {
+    /// Process-local and always-compiled tool families only.
+    Base,
+    /// Base tools plus families enabled by complete deployment mappings.
+    WithMappedFamilies,
 }
 
 impl DaemonToolCatalog {
@@ -471,10 +537,102 @@ impl DaemonToolCatalog {
         }
         Ok(Self { entries })
     }
+
+    /// Validates deployment postures against the statically selected
+    /// composition before database-backed tool dependencies are constructed.
+    pub fn validate_approval_postures_for_composition(
+        postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
+        composition: DaemonToolComposition,
+    ) -> Result<(), ConfiguredApprovalPostureError> {
+        for (name, posture) in postures {
+            if !configured_composition_contains(&name, composition) {
+                return Err(ConfiguredApprovalPostureError::UnknownTool { name });
+            }
+            match posture {
+                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
+                ToolApprovalPosture::Delegated => {
+                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies explicit deployment postures that the current runtime can enforce.
+    pub fn with_approval_postures(
+        mut self,
+        postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
+    ) -> Result<Self, ConfiguredApprovalPostureError> {
+        for (name, posture) in postures {
+            let Some(entry) = self.entries.get_mut(&name) else {
+                return Err(ConfiguredApprovalPostureError::UnknownTool { name });
+            };
+            match posture {
+                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
+                ToolApprovalPosture::Delegated => {
+                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+                }
+            }
+            entry.definition = entry.definition.clone().with_approval_posture(posture);
+        }
+        Ok(self)
+    }
+}
+
+fn configured_composition_contains(name: &ToolName, composition: DaemonToolComposition) -> bool {
+    let name = name.as_str();
+    let mapped_family_contains = match composition {
+        DaemonToolComposition::Base => false,
+        DaemonToolComposition::WithMappedFamilies => {
+            GITHUB_TOOL_NAMES.contains(&name)
+                || WORKSPACE_READ_TOOL_NAMES.contains(&name)
+                || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
+                || CONVERSATION_TOOL_NAMES.contains(&name)
+        }
+    };
+    name == CURRENT_TIME_NAME
+        || name == ECHO_NAME
+        || name == WEB_FETCH_NAME
+        || name == SESSION_STATUS_UPDATE_NAME
+        || name == GOAL_DECLARE_NAME
+        || CODE_HOST_TOOL_NAMES.contains(&name)
+        || PLAN_TOOL_NAMES.contains(&name)
+        || mapped_family_contains
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DuplicateDaemonTool;
+
+/// A configured approval posture cannot be enforced by this daemon runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfiguredApprovalPostureError {
+    /// The configured name is absent from the composed catalog.
+    UnknownTool { name: ToolName },
+    /// Delegated judging is not wired into this runtime yet.
+    DelegatedJudgeUnavailable { name: ToolName },
+}
+
+impl ConfiguredApprovalPostureError {
+    /// Borrows the configured tool name without exposing it to startup telemetry.
+    pub const fn name(&self) -> &ToolName {
+        match self {
+            Self::UnknownTool { name } | Self::DelegatedJudgeUnavailable { name } => name,
+        }
+    }
+}
+
+impl fmt::Display for ConfiguredApprovalPostureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UnknownTool { .. } => "configured approval posture names an unknown tool",
+            Self::DelegatedJudgeUnavailable { .. } => {
+                "delegated approval posture requires judge wiring"
+            }
+        })
+    }
+}
+
+impl Error for ConfiguredApprovalPostureError {}
 
 impl ToolCatalog for DaemonToolCatalog {
     fn definitions(&self) -> Box<[ToolDefinition]> {
@@ -553,7 +711,8 @@ pub struct DaemonToolExecutor<
     HostTransport,
     GitHubTransportType,
     FileSystem: WorkspaceMutationFileSystem,
-    Port,
+    ConversationPort,
+    PlanPort,
 > {
     current_time: CurrentTimeExecutor<Clock>,
     echo: EchoExecutor,
@@ -563,7 +722,9 @@ pub struct DaemonToolExecutor<
     github: Option<GitHubExecutor<Credentials, GitHubTransportType>>,
     workspace_read: Option<WorkspaceReadExecutor<FileSystem>>,
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
-    conversations: Option<ConversationExecutor<Port>>,
+    conversations: Option<ConversationExecutor<ConversationPort>>,
+    plan: PlanExecutor<PlanPort>,
+    goal: Option<GoalDeclarationExecutor>,
 }
 
 /// Sanitized aggregate executor failure.
@@ -600,8 +761,17 @@ impl ClassifyOperatorFailure for DaemonToolExecutorError {
     }
 }
 
-impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, FileSystem, Port>
-    ToolExecutor
+impl<
+    Clock,
+    Transport,
+    Writer,
+    Credentials,
+    HostTransport,
+    GitHubTransportType,
+    FileSystem,
+    ConversationPort,
+    PlanPort,
+> ToolExecutor
     for DaemonToolExecutor<
         Clock,
         Transport,
@@ -610,7 +780,8 @@ impl<Clock, Transport, Writer, Credentials, HostTransport, GitHubTransportType, 
         HostTransport,
         GitHubTransportType,
         FileSystem,
-        Port,
+        ConversationPort,
+        PlanPort,
     >
 where
     Clock: CurrentTimeClock,
@@ -620,7 +791,8 @@ where
     HostTransport: CodeHostTransport,
     GitHubTransportType: GitHubTransport,
     FileSystem: WorkspaceFileSystem + WorkspaceMutationFileSystem,
-    Port: ConversationIntrospectionPort,
+    ConversationPort: ConversationIntrospectionPort,
+    PlanPort: SessionPlanPort,
 {
     type Error = DaemonToolExecutorError;
 
@@ -679,6 +851,18 @@ where
                 .conversations
                 .as_mut()
                 .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            GOAL_DECLARE_NAME => self
+                .goal
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if PLAN_TOOL_NAMES.contains(&name) => self
+                .plan
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
@@ -824,12 +1008,128 @@ mod tests {
             Ok(None)
         }
     }
+    impl SessionPlanPort for OfflineConversationPort {
+        type Error = OfflineWriterError;
+
+        async fn append_plan_event(
+            &mut self,
+            _request: signalbox_tools_plan::PlanAppendRequest,
+        ) -> Result<signalbox_tools_plan::PlanAppendOutcome, Self::Error> {
+            Err(OfflineWriterError)
+        }
+
+        async fn read_plan(
+            &mut self,
+            _request: signalbox_tools_plan::PlanReadRequest,
+        ) -> Result<signalbox_tools_plan::PlanReadPage, Self::Error> {
+            Err(OfflineWriterError)
+        }
+    }
 
     fn definition_names(definitions: &[ToolDefinition]) -> Vec<&str> {
         definitions
             .iter()
             .map(|definition| definition.name().as_str())
             .collect()
+    }
+
+    #[test]
+    fn composed_catalog_applies_an_enforceable_posture() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+        let configured = catalog
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Human)])
+            .expect("known tool posture is applied");
+
+        assert_eq!(
+            configured
+                .definition(&echo)
+                .expect("configured tool remains present")
+                .approval_posture(),
+            Some(ToolApprovalPosture::Human)
+        );
+    }
+
+    #[test]
+    fn composed_catalog_rejects_an_unknown_posture_name() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let unknown = ToolName::try_new(String::from("unknown_tool"))
+            .expect("unknown fixture name is structurally valid");
+        let rejected = catalog
+            .with_approval_postures([(unknown.clone(), ToolApprovalPosture::Human)])
+            .expect_err("unknown tool posture fails closed");
+
+        assert_eq!(rejected.name(), &unknown);
+    }
+
+    #[test]
+    fn base_composition_prevalidation_rejects_an_uncomposed_mapped_tool() {
+        let mapped = ToolName::try_new(String::from(PULL_REQUEST_METADATA_NAME))
+            .expect("mapped fixture name is valid");
+        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped.clone(), ToolApprovalPosture::Human)],
+            DaemonToolComposition::Base,
+        )
+        .expect_err("base composition excludes mapped families");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::UnknownTool { name: mapped }
+        );
+    }
+
+    #[test]
+    fn mapped_composition_prevalidation_accepts_a_mapped_tool() {
+        let mapped = ToolName::try_new(String::from(PULL_REQUEST_METADATA_NAME))
+            .expect("mapped fixture name is valid");
+
+        DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped, ToolApprovalPosture::Human)],
+            DaemonToolComposition::WithMappedFamilies,
+        )
+        .expect("mapped composition includes configured families");
+    }
+
+    #[test]
+    fn composition_prevalidation_rejects_delegated_without_judge_wiring() {
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(echo.clone(), ToolApprovalPosture::Delegated)],
+            DaemonToolComposition::Base,
+        )
+        .expect_err("delegated posture fails before database construction");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+        );
+    }
+
+    #[test]
+    fn composed_catalog_rejects_delegated_posture_without_judge_wiring() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+
+        let rejected = catalog
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
+            .expect_err("delegated posture fails closed without judge dispatch");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+        );
     }
 
     #[test]
@@ -901,6 +1201,9 @@ mod tests {
                 workspace_read: None::<WorkspaceReadTools<LocalWorkspaceFileSystem>>,
                 workspace_mutation: None::<WorkspaceMutationTools<LocalWorkspaceFileSystem>>,
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
+                plan: PlanTools::try_new(OfflineConversationPort)
+                    .expect("offline plan tools compile"),
+                goal: None,
             },
         )
         .expect("base daemon tools compile")
@@ -927,6 +1230,8 @@ mod tests {
                 CHANGE_REQUEST_THREAD_RESOLVE_NAME,
                 CURRENT_TIME_NAME,
                 ECHO_NAME,
+                signalbox_tools_plan::PLAN_READ_NAME,
+                signalbox_tools_plan::PLAN_WRITE_NAME,
                 REPOSITORY_LIST_DIRECTORY_NAME,
                 REPOSITORY_READ_FILE_NAME,
                 REVIEW_GATE_CHECK_NAME,
@@ -952,6 +1257,7 @@ mod tests {
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
             workspace.path(),
+            OfflineConversationPort,
             OfflineConversationPort,
             WebFetchEgressPolicy::deny_all(),
         )
@@ -988,6 +1294,8 @@ mod tests {
                 GLOB_FILES_NAME,
                 signalbox_tools_conversations::LIST_CONVERSATIONS_NAME,
                 LIST_DIRECTORY_NAME,
+                signalbox_tools_plan::PLAN_READ_NAME,
+                signalbox_tools_plan::PLAN_WRITE_NAME,
                 signalbox_tools_conversations::READ_CONVERSATION_NAME,
                 READ_FILE_NAME,
                 signalbox_tools_conversations::READ_IMPORTED_CONVERSATION_NAME,

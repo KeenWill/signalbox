@@ -4837,7 +4837,7 @@ mod tests {
     const FOREIGN_FINDING_SEED: u128 = 11;
     /// Arbitrary judgment pass used by unchanged-aggregate fixtures.
     const ARBITRARY_JUDGMENT_PASS_SEED: u128 = 20;
-    /// Distinct pass used to exercise changed owner-global pass claims.
+    /// Distinct pass used to exercise changed user-global pass claims.
     const REASSIGNED_PASS_SEED: u128 = 21;
     /// Distinct event pass used by referenced-finding fixtures.
     const ARBITRARY_DEDUPE_PASS_SEED: u128 = 22;
@@ -4937,7 +4937,7 @@ mod tests {
         }
     }
 
-    /// Builds one owner-global pass from an arbitrary pass seed, deriving a
+    /// Builds one user-global pass from an arbitrary pass seed, deriving a
     /// distinct owning run in the test namespace.
     fn pass_ref(value: u128) -> ReviewPassRef {
         ReviewPassRef::new(
@@ -7997,7 +7997,7 @@ mod tests {
         assert_eq!(error.event(), Some(&event));
     }
 
-    /// INV-040: an owner-global pass identity cannot move to another run inside
+    /// INV-040: a user-global pass identity cannot move to another run inside
     /// one finding history.
     #[test]
     fn inv040_finding_history_rejects_reparented_pass_identity() {
@@ -8040,7 +8040,7 @@ mod tests {
         );
     }
 
-    /// INV-040: an owner-global run identity cannot change its one pass or
+    /// INV-040: a user-global run identity cannot change its one pass or
     /// workflow inside one finding history.
     #[test]
     fn inv040_finding_history_rejects_changed_run_claim() {
@@ -9131,7 +9131,7 @@ mod tests {
         );
     }
 
-    /// INV-040: an owner-global external-effect pass cannot move to another
+    /// INV-040: a user-global external-effect pass cannot move to another
     /// run.
     #[test]
     fn inv040_external_link_rejects_reparented_pass_identity() {

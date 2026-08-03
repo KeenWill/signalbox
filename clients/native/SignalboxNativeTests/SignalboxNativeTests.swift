@@ -1330,7 +1330,7 @@ final class SignalboxNativeTests: XCTestCase {
         )
     }
 
-    /// A visible user message whose identity and text derive from its event ID,
+    /// A visible user-role message whose identity and text derive from its event ID,
     /// unless `text` supplies content for a record that restates an event ID.
     private func longSequenceRecord(
         eventID: Int,

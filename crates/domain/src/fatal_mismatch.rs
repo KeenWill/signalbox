@@ -52,7 +52,7 @@ pub(crate) enum AmbiguousOperationTurnTreatment {
     Blocking,
     /// Separate resolving evidence supplies a turn-level disposition.
     ResolvedByEvidence,
-    /// The owner durably accepted duplicate risk for this exact operation.
+    /// The user durably accepted duplicate risk for this exact operation.
     DuplicateRiskAccepted,
 }
 

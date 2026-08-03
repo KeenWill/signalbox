@@ -10,8 +10,9 @@ use std::{
 };
 
 use arguments::{
-    Command, DangerousToolAutoApprovalArgument, ImportSourceArgument, ParseOutcome, ReviewCommand,
-    SendDeliveryArgument, SystemPromptArgument, ThroughPositionArgument,
+    Command, DangerousToolAutoApprovalArgument, GoalCommand, GoalTextArgument,
+    ImportSourceArgument, ParseOutcome, ReviewCommand, SendDeliveryArgument, SystemPromptArgument,
+    ThroughPositionArgument,
 };
 use connection::ProcessClient;
 use error::ClientError;
@@ -24,18 +25,20 @@ use rustix::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationCursor,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, InputContent, InputDelivery,
-    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
-    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
-    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ConversationOriginFilter, ConversationSummary, ErrorCode, ErrorDetail, FrameEncodeError,
+    GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+    MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
+    ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RequestId,
+    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
+    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
     SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
-    encode_server_line,
+    encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -50,7 +53,7 @@ mod transcript;
 
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
-const MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Smallest bounded metadata page the process protocol admits.
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
@@ -134,7 +137,7 @@ impl ConversationsPageRequest {
 }
 
 enum PreparedImport {
-    File(Vec<u8>),
+    File(tokio::fs::File),
     Scan(PreparedImportScan),
 }
 
@@ -152,6 +155,105 @@ struct ScannedImportPath {
 enum ConversationImportOutcome {
     Inserted(CanonicalUuid),
     AlreadyImported(CanonicalUuid),
+}
+
+enum ConversationImportResponse {
+    Begun(CanonicalU64),
+    Appended(CanonicalU64),
+    Inserted(CanonicalUuid),
+    AlreadyImported(CanonicalUuid),
+    Error {
+        code: ErrorCode,
+        message: String,
+        detail: ErrorDetail,
+    },
+    Unexpected,
+}
+
+fn classify_conversation_import_response(message: ServerMessage) -> ConversationImportResponse {
+    match message {
+        ServerMessage::ConversationImportBegun {
+            declared_size_bytes,
+        } => ConversationImportResponse::Begun(declared_size_bytes),
+        ServerMessage::ConversationImportAppended {
+            assembled_size_bytes,
+        } => ConversationImportResponse::Appended(assembled_size_bytes),
+        ServerMessage::ConversationImportInserted {
+            imported_conversation_id,
+        } => ConversationImportResponse::Inserted(imported_conversation_id),
+        ServerMessage::ConversationImportAlreadyImported {
+            imported_conversation_id,
+        } => ConversationImportResponse::AlreadyImported(imported_conversation_id),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => ConversationImportResponse::Error {
+            code,
+            message,
+            detail,
+        },
+        ServerMessage::SessionCreated { .. }
+        | ServerMessage::InputSubmitted { .. }
+        | ServerMessage::SteeringSubmitted { .. }
+        | ServerMessage::GoalTransitionApplied { .. }
+        | ServerMessage::GoalHistoryStart { .. }
+        | ServerMessage::GoalHistoryState { .. }
+        | ServerMessage::GoalHistoryItem { .. }
+        | ServerMessage::GoalHistoryEnd { .. }
+        | ServerMessage::SessionsStart {}
+        | ServerMessage::SessionSummary { .. }
+        | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::TemplatesStart {}
+        | ServerMessage::TemplateSummary { .. }
+        | ServerMessage::TemplatesEnd { .. }
+        | ServerMessage::SessionMetadataPageStart {}
+        | ServerMessage::SessionMetadataSummary { .. }
+        | ServerMessage::SessionMetadataPageEnd { .. }
+        | ServerMessage::ConversationPageStart {}
+        | ServerMessage::ConversationSummary { .. }
+        | ServerMessage::ConversationPageEnd { .. }
+        | ServerMessage::ModelAliasesStart {}
+        | ServerMessage::ModelAliasSummary { .. }
+        | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::SessionMetadata { .. }
+        | ServerMessage::SessionMetadataReplaced { .. }
+        | ServerMessage::SessionDefaultsReplaced { .. }
+        | ServerMessage::SessionDefaults { .. }
+        | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::SessionCompacted { .. }
+        | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::ImportedConversationStart { .. }
+        | ServerMessage::ImportedConversationEntry { .. }
+        | ServerMessage::ImportedConversationEnd { .. }
+        | ServerMessage::TranscriptSnapshotStart { .. }
+        | ServerMessage::TranscriptTurn { .. }
+        | ServerMessage::TranscriptModelCallUsage { .. }
+        | ServerMessage::TranscriptModelCallsEnd { .. }
+        | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptTextEntry { .. }
+        | ServerMessage::TranscriptContent { .. }
+        | ServerMessage::TranscriptSnapshotEnd { .. }
+        | ServerMessage::SessionEvent { .. }
+        | ServerMessage::ProviderTextDelta { .. }
+        | ServerMessage::ReviewTargetCreated { .. }
+        | ServerMessage::ReviewRunStarted { .. }
+        | ServerMessage::ReviewPassActivated { .. }
+        | ServerMessage::ReviewPassCompleted { .. }
+        | ServerMessage::ReviewFindingsRecorded { .. }
+        | ServerMessage::ReviewFindingEventRecorded { .. }
+        | ServerMessage::ReviewExternalLinkReserved { .. }
+        | ServerMessage::ReviewExternalLinkAttached { .. }
+        | ServerMessage::ReviewTarget { .. }
+        | ServerMessage::ReviewRun { .. }
+        | ServerMessage::ReviewFinding { .. }
+        | ServerMessage::ReviewFindingsStart { .. }
+        | ServerMessage::ReviewFindingItem { .. }
+        | ServerMessage::ReviewFindingsEnd { .. }
+        | ServerMessage::ReviewOrchestrationStarted { .. }
+        | ServerMessage::ReviewOrchestrationAdvanced { .. }
+        | ServerMessage::ReviewOrchestration { .. } => ConversationImportResponse::Unexpected,
+    }
 }
 
 #[derive(Default)]
@@ -274,7 +376,7 @@ async fn execute(
         Command::Import {
             source: ImportSourceArgument::File(path),
             ..
-        } => Some(PreparedImport::File(read_import_source(path).await?)),
+        } => Some(PreparedImport::File(open_import_source(path).await?)),
         Command::Import {
             source: ImportSourceArgument::Scan(path),
             ..
@@ -282,6 +384,7 @@ async fn execute(
         Command::Create { .. }
         | Command::Continue { .. }
         | Command::Compact { .. }
+        | Command::Goal(_)
         | Command::Imported { .. }
         | Command::List
         | Command::Templates
@@ -310,6 +413,7 @@ async fn execute(
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
         | Command::Compact { .. }
+        | Command::Goal(_)
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -392,6 +496,7 @@ async fn execute(
         Command::Imported {
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
+        Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -469,8 +574,8 @@ async fn execute(
         )),
         Command::Import { format, .. } => {
             match prepared_import.ok_or(ClientError::Input("import source was not prepared"))? {
-                PreparedImport::File(source) => {
-                    let outcome = import_conversation(&mut client, format, source).await?;
+                PreparedImport::File(file) => {
+                    let outcome = import_conversation_file(&mut client, format, file).await?;
                     write_single_import_outcome(&mut output, outcome)
                 }
                 PreparedImport::Scan(scan) => {
@@ -549,26 +654,25 @@ async fn execute(
     }
 }
 
-async fn read_import_source(path: &Path) -> Result<Vec<u8>, ClientError> {
-    let file = tokio::fs::File::open(path)
+async fn open_import_source(path: &Path) -> Result<tokio::fs::File, ClientError> {
+    tokio::fs::File::open(path)
         .await
-        .map_err(ClientError::source_file)?;
-    read_import_file(file).await
+        .map_err(ClientError::source_file)
 }
 
 async fn read_import_file(file: tokio::fs::File) -> Result<Vec<u8>, ClientError> {
-    let read_limit = MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES
-        .checked_add(1)
-        .ok_or(ClientError::Protocol("import read bound overflow"))?;
-    let read_limit = u64::try_from(read_limit)
-        .map_err(|_| ClientError::Protocol("import read bound is not representable"))?;
-    let mut bounded = file.take(read_limit);
+    let read_limit = u64::try_from(MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol(
+            "conversation import read bound overflow",
+        ))?;
     let mut source = Vec::new();
-    bounded
+    file.take(read_limit)
         .read_to_end(&mut source)
         .await
         .map_err(ClientError::source_file)?;
-    if source.len() > MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES {
+    if source.len() > MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES {
         return Err(ClientError::SourceExceedsFrame);
     }
     Ok(source)
@@ -622,6 +726,52 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
         .map_err(|_| ClientError::Input("the system prompt must be valid UTF-8"))?;
     SystemPromptText::try_new(text)
         .map_err(|_| ClientError::Input("the system prompt must not contain U+0000"))
+}
+
+async fn read_goal_text_argument(argument: GoalTextArgument) -> Result<String, ClientError> {
+    match argument {
+        GoalTextArgument::Inline(text) => validate_goal_text_input(text),
+        GoalTextArgument::File(path) => read_goal_text_file(&path).await,
+    }
+}
+
+async fn read_goal_text_file(path: &Path) -> Result<String, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| ClientError::goal_text_file(path, error))?;
+    let read_limit = u64::try_from(MAX_CONTENT_FRAGMENT_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol("goal text read bound overflow"))?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| ClientError::goal_text_file(path, error))?;
+    if bytes.len() > MAX_CONTENT_FRAGMENT_BYTES {
+        return Err(ClientError::Input(
+            "goal text exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ClientError::Input("goal text must be valid UTF-8"))?;
+    validate_goal_text_input(text)
+}
+
+fn validate_goal_text_input(text: String) -> Result<String, ClientError> {
+    if text.is_empty() {
+        return Err(ClientError::Input("goal text must not be empty"));
+    }
+    if text.len() > MAX_CONTENT_FRAGMENT_BYTES {
+        return Err(ClientError::Input(
+            "goal text exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    if text.contains('\0') {
+        return Err(ClientError::Input("goal text must not contain U+0000"));
+    }
+    Ok(text)
 }
 
 fn socket_path(
@@ -1198,6 +1348,193 @@ fn open_scanned_import_source(
     Ok(tokio::fs::File::from_std(File::from(descriptor)))
 }
 
+fn source_fits_single_shot_import(
+    format: ConversationImportFormat,
+    source: &[u8],
+    request_id: RequestId,
+) -> Result<bool, ClientError> {
+    if source.len() > MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES {
+        return Ok(false);
+    }
+    let frame = ClientFrame::try_new_for_version(
+        ProtocolVersion::One,
+        request_id,
+        ClientRequest::ImportConversation {
+            format,
+            source: ConversationImportSource::new(source.to_vec()),
+        },
+    )
+    .map_err(FrameEncodeError::Validation)?;
+    match encode_client_line(&frame) {
+        Ok(_) => Ok(true),
+        Err(FrameEncodeError::OversizedFrame) => Ok(false),
+        Err(FrameEncodeError::Validation(error)) => {
+            Err(ClientError::Encode(FrameEncodeError::Validation(error)))
+        }
+        Err(FrameEncodeError::Json(error)) => {
+            Err(ClientError::Encode(FrameEncodeError::Json(error)))
+        }
+    }
+}
+
+async fn import_conversation_file(
+    client: &mut ProcessClient,
+    format: ConversationImportFormat,
+    file: tokio::fs::File,
+) -> Result<ConversationImportOutcome, ClientError> {
+    let declared_size_bytes = file
+        .metadata()
+        .await
+        .map_err(ClientError::source_file)?
+        .len();
+    if declared_size_bytes
+        <= u64::try_from(MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES).unwrap_or(u64::MAX)
+    {
+        let source = read_import_file(file).await?;
+        import_conversation_source(client, format, source).await
+    } else {
+        import_conversation_chunked(client, format, CanonicalU64::new(declared_size_bytes), file)
+            .await
+    }
+}
+
+async fn import_conversation_source(
+    client: &mut ProcessClient,
+    format: ConversationImportFormat,
+    source: Vec<u8>,
+) -> Result<ConversationImportOutcome, ClientError> {
+    if source_fits_single_shot_import(format, &source, client.pending_request_id()?)? {
+        import_conversation(client, format, source).await
+    } else {
+        let declared_size_bytes = u64::try_from(source.len())
+            .map(CanonicalU64::new)
+            .map_err(|_| ClientError::Protocol("import source size is not representable"))?;
+        import_conversation_chunked(client, format, declared_size_bytes, source.as_slice()).await
+    }
+}
+
+async fn import_conversation_chunked<Source>(
+    client: &mut ProcessClient,
+    format: ConversationImportFormat,
+    declared_size_bytes: CanonicalU64,
+    mut source: Source,
+) -> Result<ConversationImportOutcome, ClientError>
+where
+    Source: tokio::io::AsyncRead + Unpin,
+{
+    let mut connection = client
+        .setup_request(ClientRequest::BeginConversationImport {
+            format,
+            declared_size_bytes,
+        })
+        .await?;
+    match classify_conversation_import_response(connection.message().await?) {
+        ConversationImportResponse::Begun(admitted) if admitted == declared_size_bytes => {}
+        ConversationImportResponse::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        ConversationImportResponse::Begun(_)
+        | ConversationImportResponse::Appended(_)
+        | ConversationImportResponse::Inserted(_)
+        | ConversationImportResponse::AlreadyImported(_)
+        | ConversationImportResponse::Unexpected => {
+            return Err(ClientError::Protocol(
+                "conversation import begin returned an unexpected response",
+            ));
+        }
+    }
+
+    let mut assembled_size_bytes = 0_u64;
+    loop {
+        let read_limit =
+            conversation_import_chunk_read_limit(declared_size_bytes, assembled_size_bytes);
+        if read_limit == 0 {
+            break;
+        }
+        let mut chunk = Vec::with_capacity(MAX_CONVERSATION_IMPORT_CHUNK_BYTES);
+        (&mut source)
+            .take(read_limit)
+            .read_to_end(&mut chunk)
+            .await
+            .map_err(ClientError::source_file)?;
+        let chunk_size = chunk.len();
+        if chunk_size == 0 {
+            break;
+        }
+        assembled_size_bytes = assembled_size_bytes
+            .checked_add(u64::try_from(chunk_size).map_err(|_| {
+                ClientError::Protocol("conversation import chunk size is not representable")
+            })?)
+            .ok_or(ClientError::Protocol(
+                "conversation import assembled size overflowed",
+            ))?;
+        client
+            .continue_setup_request(
+                &mut connection,
+                ClientRequest::AppendConversationImport {
+                    chunk: ConversationImportSource::new(chunk),
+                },
+            )
+            .await?;
+        match classify_conversation_import_response(connection.message().await?) {
+            ConversationImportResponse::Appended(admitted)
+                if admitted.value() == assembled_size_bytes => {}
+            ConversationImportResponse::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(code, message, detail)),
+            ConversationImportResponse::Begun(_)
+            | ConversationImportResponse::Appended(_)
+            | ConversationImportResponse::Inserted(_)
+            | ConversationImportResponse::AlreadyImported(_)
+            | ConversationImportResponse::Unexpected => {
+                return Err(ClientError::Protocol(
+                    "conversation import append returned an unexpected response",
+                ));
+            }
+        }
+    }
+
+    client
+        .continue_mutation_request(&mut connection, ClientRequest::CommitConversationImport {})
+        .await?;
+    match classify_conversation_import_response(
+        connection.message().await.map_err(ClientError::mutation)?,
+    ) {
+        ConversationImportResponse::Inserted(imported_conversation_id) => Ok(
+            ConversationImportOutcome::Inserted(imported_conversation_id),
+        ),
+        ConversationImportResponse::AlreadyImported(imported_conversation_id) => Ok(
+            ConversationImportOutcome::AlreadyImported(imported_conversation_id),
+        ),
+        ConversationImportResponse::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        ConversationImportResponse::Begun(_)
+        | ConversationImportResponse::Appended(_)
+        | ConversationImportResponse::Unexpected => Err(ClientError::Protocol(
+            "conversation import commit returned an unexpected response",
+        )
+        .mutation()),
+    }
+}
+
+fn conversation_import_chunk_read_limit(
+    declared_size_bytes: CanonicalU64,
+    assembled_size_bytes: u64,
+) -> u64 {
+    declared_size_bytes
+        .value()
+        .saturating_add(1)
+        .saturating_sub(assembled_size_bytes)
+        .min(u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES).unwrap_or(u64::MAX))
+}
+
 async fn import_conversation(
     client: &mut ProcessClient,
     format: ConversationImportFormat,
@@ -1253,11 +1590,7 @@ async fn scan_conversations(
     let mut summary = ImportScanSummary::default();
     for path in scan.paths {
         let outcome = match open_scanned_import_source(&scan.root, &path.relative) {
-            Ok(file) => read_import_file(file).await,
-            Err(error) => Err(error),
-        };
-        let outcome = match outcome {
-            Ok(source) => import_conversation(client, format, source).await,
+            Ok(file) => import_conversation_file(client, format, file).await,
             Err(error) => Err(error),
         };
         match outcome {
@@ -1403,6 +1736,391 @@ async fn read_imported_conversation(
             }
         }
     }
+}
+
+async fn goal(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    command: GoalCommand,
+) -> Result<(), ClientError> {
+    match command {
+        GoalCommand::Attach {
+            session_id,
+            statement,
+            command_id,
+        } => {
+            let statement = read_goal_text_argument(statement).await?;
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::AttachGoal {
+                    command_id,
+                    session_id,
+                    statement,
+                }
+            })
+            .await
+        }
+        GoalCommand::Show { session_id } => goal_show(client, output, session_id).await,
+        GoalCommand::Resume {
+            session_id,
+            guidance,
+            command_id,
+        } => {
+            let guidance = match guidance {
+                Some(guidance) => Some(read_goal_text_argument(guidance).await?),
+                None => None,
+            };
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::ResumeGoal {
+                    command_id,
+                    session_id,
+                    guidance,
+                }
+            })
+            .await
+        }
+        GoalCommand::Stop {
+            session_id,
+            command_id,
+        } => {
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::StopGoal {
+                    command_id,
+                    session_id,
+                }
+            })
+            .await
+        }
+        GoalCommand::Supersede {
+            session_id,
+            statement,
+            command_id,
+        } => {
+            let statement = read_goal_text_argument(statement).await?;
+            goal_mutation(client, output, session_id, command_id, |command_id| {
+                ClientRequest::SupersedeGoal {
+                    command_id,
+                    session_id,
+                    statement,
+                }
+            })
+            .await
+        }
+    }
+}
+
+async fn goal_mutation<BuildRequest>(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    expected_session: CanonicalUuid,
+    command_id: Option<CommandId>,
+    build_request: BuildRequest,
+) -> Result<(), ClientError>
+where
+    BuildRequest: FnOnce(CommandId) -> ClientRequest,
+{
+    let (command_id, generated) = command_identity(command_id)?;
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client.mutation_request(build_request(command_id)).await?;
+    let receipt = decode_goal_mutation_receipt(
+        expected_session,
+        connection.message().await.map_err(ClientError::mutation)?,
+    )?;
+    output
+        .goal_transition_applied(
+            receipt.session_id,
+            receipt.event_ordinal,
+            receipt.generation,
+        )
+        .map_err(ClientError::from)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GoalMutationReceipt {
+    session_id: CanonicalUuid,
+    event_ordinal: u64,
+    generation: u64,
+}
+
+fn decode_goal_mutation_receipt(
+    expected_session: CanonicalUuid,
+    message: ServerMessage,
+) -> Result<GoalMutationReceipt, ClientError> {
+    match message {
+        ServerMessage::GoalTransitionApplied {
+            session_id,
+            event_ordinal,
+            generation,
+        } if session_id == expected_session => Ok(GoalMutationReceipt {
+            session_id,
+            event_ordinal: event_ordinal.value(),
+            generation: generation.value(),
+        }),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail).mutation()),
+        _ => Err(ClientError::Protocol("goal mutation returned an unexpected response").mutation()),
+    }
+}
+
+#[derive(Debug)]
+struct GoalHistoryProjection {
+    generation: u64,
+    statement: String,
+    state: GoalLifecycleState,
+}
+
+#[derive(Debug, Default)]
+struct GoalHistoryReplay {
+    current: Option<GoalHistoryProjection>,
+}
+
+impl GoalHistoryReplay {
+    fn apply(&mut self, generation: u64, event: &GoalHistoryEvent) -> Result<(), ClientError> {
+        let current = self.current.take();
+        let next = match (current, event) {
+            (None, GoalHistoryEvent::Commissioned { statement, .. }) if generation == 1 => {
+                GoalHistoryProjection {
+                    generation,
+                    statement: statement.clone(),
+                    state: GoalLifecycleState::Pursuing {},
+                }
+            }
+            (Some(current), GoalHistoryEvent::Commissioned { statement, .. })
+                if goal_state_admits_commission(&current.state)
+                    && current.generation.checked_add(1) == Some(generation) =>
+            {
+                GoalHistoryProjection {
+                    generation,
+                    statement: statement.clone(),
+                    state: GoalLifecycleState::Pursuing {},
+                }
+            }
+            (Some(mut current), GoalHistoryEvent::Blocked { reason, need, .. })
+                if generation == current.generation && goal_state_is_pursuing(&current.state) =>
+            {
+                current.state = GoalLifecycleState::Blocked {
+                    reason: *reason,
+                    need: need.clone(),
+                };
+                current
+            }
+            (Some(mut current), GoalHistoryEvent::Resumed { .. })
+                if generation == current.generation && goal_state_is_blocked(&current.state) =>
+            {
+                current.state = GoalLifecycleState::Pursuing {};
+                current
+            }
+            (
+                Some(mut current),
+                GoalHistoryEvent::Achieved {
+                    turn_id,
+                    tool_request_id,
+                    ..
+                },
+            ) if generation == current.generation && goal_state_is_pursuing(&current.state) => {
+                current.state = GoalLifecycleState::Achieved {
+                    turn_id: *turn_id,
+                    tool_request_id: *tool_request_id,
+                };
+                current
+            }
+            (Some(mut current), GoalHistoryEvent::UserStopped { .. })
+                if generation == current.generation && goal_state_is_open(&current.state) =>
+            {
+                current.state = GoalLifecycleState::UserStopped {};
+                current
+            }
+            (
+                Some(current),
+                GoalHistoryEvent::Superseded {
+                    replacement_statement,
+                    ..
+                },
+            ) if generation == current.generation && goal_state_is_open(&current.state) => {
+                let successor = current
+                    .generation
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("goal history generation overflowed"))?;
+                GoalHistoryProjection {
+                    generation: successor,
+                    statement: replacement_statement.clone(),
+                    state: GoalLifecycleState::Pursuing {},
+                }
+            }
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal history contained an invalid lifecycle transition",
+                ));
+            }
+        };
+        self.current = Some(next);
+        Ok(())
+    }
+
+    fn validate_projection(
+        self,
+        generation: u64,
+        statement: &str,
+        state: &GoalLifecycleState,
+    ) -> Result<(), ClientError> {
+        match self.current {
+            Some(current)
+                if current.generation == generation
+                    && current.statement == statement
+                    && current.state == *state =>
+            {
+                Ok(())
+            }
+            Some(_) | None => Err(ClientError::Protocol(
+                "goal history did not derive its declared current projection",
+            )),
+        }
+    }
+}
+
+const fn goal_state_is_pursuing(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Pursuing {} => true,
+        GoalLifecycleState::Blocked { .. }
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+const fn goal_state_is_blocked(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Blocked { .. } => true,
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+const fn goal_state_is_open(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Pursuing {} | GoalLifecycleState::Blocked { .. } => true,
+        GoalLifecycleState::Achieved { .. }
+        | GoalLifecycleState::UserStopped {}
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+const fn goal_state_admits_commission(state: &GoalLifecycleState) -> bool {
+    match state {
+        GoalLifecycleState::Achieved { .. } | GoalLifecycleState::UserStopped {} => true,
+        GoalLifecycleState::Pursuing {}
+        | GoalLifecycleState::Blocked { .. }
+        | GoalLifecycleState::Superseded { .. } => false,
+    }
+}
+
+async fn goal_show(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .request(ClientRequest::ReadGoal { session_id })
+        .await?;
+    let first = connection.frame().await?;
+    let (current_generation, current_statement) = match first.message() {
+        ServerMessage::GoalHistoryStart {
+            session_id: observed,
+            current_generation,
+            current_statement,
+        } if *observed == session_id => (current_generation.value(), current_statement.clone()),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "goal history did not begin with its selected session",
+            ));
+        }
+    };
+    let state_frame = connection.frame().await?;
+    let current_state = match state_frame.message() {
+        ServerMessage::GoalHistoryState { current_state } => current_state.clone(),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "goal history did not carry its current state after its projection",
+            ));
+        }
+    };
+    let mut spool = tempfile::tempfile()?;
+    let mut replay = GoalHistoryReplay::default();
+    let mut event_count = 0_u64;
+    loop {
+        let frame = connection.frame().await?;
+        match frame.message() {
+            ServerMessage::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                event,
+            } if event_ordinal.value() == event_count.saturating_add(1) => {
+                event_count = event_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("goal event count overflowed"))?;
+                replay.apply(generation.value(), event)?;
+                spool.write_all(&encode_server_line(&frame)?)?;
+            }
+            ServerMessage::GoalHistoryEnd {
+                event_count: declared,
+            } if declared.value() == event_count => break,
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal history sequence or count was invalid",
+                ));
+            }
+        }
+    }
+    replay.validate_projection(current_generation, &current_statement, &current_state)?;
+    output.goal_current(
+        session_id,
+        current_generation,
+        &current_statement,
+        &current_state,
+    )?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::GoalHistoryItem {
+                event_ordinal,
+                generation,
+                event,
+            } => output.goal_history_event(event_ordinal.value(), generation.value(), event)?,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "goal-history spool contained an unexpected frame",
+                ));
+            }
+        }
+        line.clear();
+    }
+    Ok(())
 }
 
 async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
@@ -1825,7 +2543,7 @@ async fn steer(
     Ok(())
 }
 
-/// Supplies the owner reconciliation decision a turn parked on an ambiguous
+/// Supplies the user reconciliation decision a turn parked on an ambiguous
 /// model call requires, then continues the session with the given content.
 ///
 /// The parked turn terminalizes as reconciliation-required — its ambiguity is
@@ -1996,7 +2714,7 @@ async fn await_and_report_turn(
     }
 }
 
-/// Supplies one owner decision for a pending tool request and validates the
+/// Supplies one user decision for a pending tool request and validates the
 /// exact recorded receipt.
 async fn decide(
     client: &mut ProcessClient,
@@ -2381,6 +3099,7 @@ fn terminal_event_state(
         }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. }
@@ -2532,6 +3251,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
         | SessionEvent::ModelCallTransition { .. } => None,
@@ -3648,15 +4368,16 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationOriginFilter, ConversationSummary, FrameEncodeError, ImportedContentKind,
-        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
-        ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
-        ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
+        ConversationSummary, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState,
+        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
+        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
+        ModelCallState, ModelSelection, ProtocolVersion, RequestId, ReviewConcernTerminalOutcome,
+        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
+        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
         encode_server_line,
     };
     use tokio::{
@@ -3667,21 +4388,148 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ConversationsPageRequest, MAX_INPUT_CONTENT_BYTES, MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES,
-        MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES, ProcessClient, ReviewCommand,
-        ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest, SnapshotSelection,
-        SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
-        await_turn_terminal, collect_import_paths, continue_imported, conversations, create,
-        decide, imported, model_call_recovery_transition, open_scanned_import_source, read_input,
-        read_review_json_file, read_system_prompt_file, reconcile_turn, review,
-        review_concern_state_is_coherent, review_finding_event_status,
+        ConversationImportOutcome, ConversationsPageRequest, GoalHistoryReplay,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN,
+        MAX_REVIEW_JSON_INPUT_BYTES, MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ProcessClient,
+        ReviewCommand, ReviewConcernsFile, ReviewFindingsFile, SessionMetadataPageRequest,
+        SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument, TurnTerminal, TurnWaitMode,
+        await_turn_terminal, collect_import_paths, continue_imported,
+        conversation_import_chunk_read_limit, conversations, create, decide,
+        decode_goal_mutation_receipt, import_conversation_file, imported,
+        model_call_recovery_transition, open_scanned_import_source, read_goal_text_file,
+        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
+        reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
         review_pass_completion_is_coherent, review_publication_state_is_coherent,
         review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
-        stop_turn, submit_input, terminal_event_state, terminal_snapshot_selection,
-        terminal_snapshot_state, tool_recovery_transition,
+        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    #[test]
+    fn inv033_goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
+        let first_command = CommandId::try_from_uuid(Uuid::from_u128(11))
+            .expect("fixture command identity is admitted");
+        let supersede_command = CommandId::try_from_uuid(Uuid::from_u128(12))
+            .expect("fixture command identity is admitted");
+        let stop_command = CommandId::try_from_uuid(Uuid::from_u128(13))
+            .expect("fixture command identity is admitted");
+        let mut replay = GoalHistoryReplay::default();
+
+        replay.apply(
+            1,
+            &GoalHistoryEvent::Commissioned {
+                statement: String::from("first scope"),
+                command_id: first_command,
+            },
+        )?;
+        replay.apply(
+            1,
+            &GoalHistoryEvent::Superseded {
+                replacement_statement: String::from("replacement scope"),
+                command_id: supersede_command,
+            },
+        )?;
+        replay.apply(
+            2,
+            &GoalHistoryEvent::UserStopped {
+                command_id: stop_command,
+            },
+        )?;
+
+        replay.validate_projection(2, "replacement scope", &GoalLifecycleState::UserStopped {})
+    }
+
+    #[test]
+    fn inv033_goal_history_replay_rejects_an_invalid_first_transition() {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(14))
+            .expect("fixture command identity is admitted");
+        let mut replay = GoalHistoryReplay::default();
+
+        let result = replay.apply(1, &GoalHistoryEvent::UserStopped { command_id });
+
+        assert!(matches!(result, Err(ClientError::Protocol(_))));
+    }
+
+    #[test]
+    fn inv033_goal_history_replay_rejects_a_mismatched_current_projection() {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(15))
+            .expect("fixture command identity is admitted");
+        let mut replay = GoalHistoryReplay::default();
+        replay
+            .apply(
+                1,
+                &GoalHistoryEvent::Commissioned {
+                    statement: String::from("commissioned scope"),
+                    command_id,
+                },
+            )
+            .expect("the commissioning event is valid");
+
+        let result =
+            replay.validate_projection(1, "different projection", &GoalLifecycleState::Pursuing {});
+
+        assert!(matches!(result, Err(ClientError::Protocol(_))));
+    }
+
+    #[test]
+    fn goal_mutation_receipt_rejects_a_cross_wired_session() {
+        let selected_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let message = ServerMessage::GoalTransitionApplied {
+            session_id: foreign_session,
+            event_ordinal: CanonicalU64::new(1),
+            generation: CanonicalU64::new(1),
+        };
+
+        let error = decode_goal_mutation_receipt(selected_session, message)
+            .expect_err("foreign session receipt is rejected");
+
+        assert!(error.is_ambiguous_mutation());
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_reads_the_exact_maximum() -> Result<(), Box<dyn Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), vec![b'g'; MAX_CONTENT_FRAGMENT_BYTES])?;
+
+        let text = read_goal_text_file(file.path()).await?;
+
+        assert_eq!(text.len(), MAX_CONTENT_FRAGMENT_BYTES);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_rejects_content_beyond_the_maximum() -> Result<(), Box<dyn Error>> {
+        let file = tempfile::NamedTempFile::new()?;
+        fs::write(file.path(), vec![b'g'; MAX_CONTENT_FRAGMENT_BYTES + 1])?;
+
+        let result = read_goal_text_file(file.path()).await;
+
+        assert!(matches!(result, Err(ClientError::Input(_))));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn goal_text_file_error_retains_the_selected_path() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("missing-goal.txt");
+
+        let error = read_goal_text_file(&path)
+            .await
+            .expect_err("the absent goal text file is rejected");
+
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn review_findings_file_decodes_an_empty_complete_inventory()
@@ -4490,74 +5338,195 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_source_beyond_the_possible_frame_payload_is_read_bounded()
+    async fn import_reader_rejects_source_beyond_its_single_frame_bound()
     -> Result<(), Box<dyn Error>> {
-        let directory = tempfile::tempdir()?;
-        let source_path = directory.path().join("oversized.jsonl");
-        let source_file = std::fs::File::create(&source_path)?;
-        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES + 1)?)?;
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
+        let source_file = tempfile::tempfile()?;
+        let source_size = MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES + 1;
+        source_file.set_len(u64::try_from(source_size)?)?;
+        let source_file = tokio::fs::File::from_std(source_file);
 
-        let exit = run(
-            [
-                OsString::from("--socket"),
-                OsString::from("/does/not/exist/hub.sock"),
-                OsString::from("import"),
-                OsString::from("--format"),
-                OsString::from("claude-code"),
-                source_path.into_os_string(),
-            ],
-            None,
-            &mut input,
-            &mut output,
-            &mut error,
-        )
-        .await;
+        let error = read_import_file(source_file).await.unwrap_err();
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert!(output.is_empty());
-        assert!(
-            String::from_utf8_lossy(&error)
-                .contains("conversation import source cannot fit within the process frame bound")
-        );
+        assert!(matches!(error, ClientError::SourceExceedsFrame));
         Ok(())
     }
 
+    #[test]
+    fn import_transport_selects_single_shot_only_when_the_exact_frame_fits()
+    -> Result<(), Box<dyn Error>> {
+        let small_source = b"{}\n";
+        let oversized_source = vec![b'x'; MAX_FRAME_BYTES];
+        let request_id = RequestId::try_new(1)?;
+
+        assert!(source_fits_single_shot_import(
+            ConversationImportFormat::CodexRolloutJsonlV1,
+            small_source,
+            request_id,
+        )?);
+        assert!(!source_fits_single_shot_import(
+            ConversationImportFormat::CodexRolloutJsonlV1,
+            &oversized_source,
+            request_id,
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn chunked_import_reads_at_most_one_byte_past_the_declared_size() {
+        let declared_size_bytes = CanonicalU64::new(1);
+
+        assert_eq!(
+            conversation_import_chunk_read_limit(declared_size_bytes, 0),
+            2
+        );
+        assert_eq!(
+            conversation_import_chunk_read_limit(declared_size_bytes, 1),
+            1
+        );
+        assert_eq!(
+            conversation_import_chunk_read_limit(declared_size_bytes, 2),
+            0
+        );
+        assert_eq!(
+            conversation_import_chunk_read_limit(CanonicalU64::new(u64::MAX), u64::MAX),
+            0
+        );
+    }
+
+    #[track_caller]
+    fn assert_append_request(frame: &ClientFrame, expected_chunk: &[u8]) {
+        assert_eq!(
+            frame.request(),
+            &ClientRequest::AppendConversationImport {
+                chunk: ConversationImportSource::new(expected_chunk.to_vec()),
+            }
+        );
+    }
+
     #[tokio::test]
-    async fn import_source_at_the_reader_bound_is_encoded_before_connecting()
+    async fn large_file_import_streams_exact_bounded_assembly_and_commits()
     -> Result<(), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
-        let source_path = directory.path().join("boundary.jsonl");
-        let source_file = std::fs::File::create(&source_path)?;
-        source_file.set_len(u64::try_from(MAX_POSSIBLY_FRAMED_IMPORT_SOURCE_BYTES)?)?;
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let source = vec![b'x'; MAX_FRAME_BYTES / 4 * 3 + 1];
+        let source_path = directory.path().join("source.jsonl");
+        fs::write(&source_path, &source)?;
+        let source_file = tokio::fs::File::open(source_path).await?;
+        let expected_source = source;
+        let imported_conversation_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
 
-        let exit = run(
-            [
-                OsString::from("--socket"),
-                OsString::from("/does/not/exist/hub.sock"),
-                OsString::from("import"),
-                OsString::from("--format"),
-                OsString::from("claude-code"),
-                source_path.into_os_string(),
-            ],
-            None,
-            &mut input,
-            &mut output,
-            &mut error,
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let begin = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                begin.request(),
+                &ClientRequest::BeginConversationImport {
+                    format: ConversationImportFormat::CodexRolloutJsonlV1,
+                    declared_size_bytes: CanonicalU64::new(
+                        u64::try_from(expected_source.len()).map_err(io::Error::other)?,
+                    ),
+                }
+            );
+            let begun = ServerFrame::try_new_for_version(
+                begin.version(),
+                begin.request_id(),
+                ServerMessage::ConversationImportBegun {
+                    declared_size_bytes: CanonicalU64::new(
+                        u64::try_from(expected_source.len()).map_err(io::Error::other)?,
+                    ),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&begun).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let first_append = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_append_request(
+                &first_append,
+                &expected_source[..MAX_CONVERSATION_IMPORT_CHUNK_BYTES],
+            );
+            let first_appended = ServerFrame::try_new_for_version(
+                first_append.version(),
+                first_append.request_id(),
+                ServerMessage::ConversationImportAppended {
+                    assembled_size_bytes: CanonicalU64::new(
+                        u64::try_from(MAX_CONVERSATION_IMPORT_CHUNK_BYTES)
+                            .map_err(io::Error::other)?,
+                    ),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&first_appended).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let second_append = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_append_request(
+                &second_append,
+                &expected_source[MAX_CONVERSATION_IMPORT_CHUNK_BYTES..],
+            );
+            let second_appended = ServerFrame::try_new_for_version(
+                second_append.version(),
+                second_append.request_id(),
+                ServerMessage::ConversationImportAppended {
+                    assembled_size_bytes: CanonicalU64::new(
+                        u64::try_from(expected_source.len()).map_err(io::Error::other)?,
+                    ),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&second_appended).map_err(io::Error::other)?)
+                .await?;
+
+            line.clear();
+            reader.read_until(b'\n', &mut line).await?;
+            assert!(line.len() <= MAX_FRAME_BYTES);
+            let commit = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                commit.request(),
+                &ClientRequest::CommitConversationImport {}
+            );
+            let inserted = ServerFrame::try_new_for_version(
+                commit.version(),
+                commit.request_id(),
+                ServerMessage::ConversationImportInserted {
+                    imported_conversation_id,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&inserted).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+
+        let outcome = import_conversation_file(
+            &mut client,
+            ConversationImportFormat::CodexRolloutJsonlV1,
+            source_file,
         )
-        .await;
+        .await?;
 
-        assert_eq!(exit, ExitCode::FAILURE);
-        assert!(output.is_empty());
-        assert!(
-            String::from_utf8_lossy(&error)
-                .contains("conversation import source cannot fit within the process frame bound")
+        assert_eq!(
+            outcome,
+            ConversationImportOutcome::Inserted(imported_conversation_id)
         );
+        server.await??;
         Ok(())
     }
 

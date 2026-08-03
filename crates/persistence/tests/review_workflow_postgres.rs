@@ -621,7 +621,7 @@ async fn insert_active_turn_with_offset(
     let create = CreateSession::new(
         DurableCommandId::from_uuid(uuid(0x101 + offset)),
         SessionCreationProvenance::new(
-            SessionCreationCause::OwnerInitiated,
+            SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
@@ -629,7 +629,7 @@ async fn insert_active_turn_with_offset(
         )),
     )
     .prepare(session)
-    .expect("owner-created fixture session is preparable");
+    .expect("user-created fixture session is preparable");
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(create)
         .await
@@ -9252,7 +9252,7 @@ async fn review_orchestration_recovery_preserves_interrupted_judgment_state()
     Ok(())
 }
 
-/// A recovery-only orchestration command reserves its owner-global identity and
+/// A recovery-only orchestration command reserves its user-global identity and
 /// its exact retry materializes the typed receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -9329,7 +9329,7 @@ async fn review_orchestration_intent_blocks_cross_kind_registry_insert()
     .bind(command.command_id.into_uuid())
     .execute(&mut *transaction)
     .await
-    .expect_err("intent already reserves the owner-global command identity");
+    .expect_err("intent already reserves the user-global command identity");
     assert_sqlstate(&error, "23505");
     transaction.rollback().await?;
     drop(guard);
