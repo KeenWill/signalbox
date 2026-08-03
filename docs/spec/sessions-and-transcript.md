@@ -18,17 +18,17 @@ through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
 provenance and creation mode were verified through PR #311
 (`agent/session-templates-spec`). Delegated creation provenance and its durable
 mapping are the foundation proposal at the bottom of the delegation stack and
-become verified only with its implementing child pull requests.
-The append-only context-compaction record and projection were verified through
-PR #312 (`agent/context-compaction-core`); the command path and canonical
-visible-range selection were verified through PR #314
-(`agent/context-compaction-protocol`). The runner placement-entry paragraphs are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. The imported-conversation record
-and converter are owned by [conversation-import](conversation-import.md). Where
-a law is cited as `INV-NNN`, the generated
-[invariant test index](../invariants.md) resolves it; where mechanics owned by
-another contract are summarized, the owning sibling page is linked inline.
+become verified only with its implementing child pull requests. The append-only
+context-compaction record and projection were verified through PR #312
+(`agent/context-compaction-core`); the command path and canonical visible-range
+selection were verified through PR #314 (`agent/context-compaction-protocol`).
+The runner placement-entry paragraphs are the foundation proposal at the bottom
+of their implementing stack and become verified only with those child pull
+requests. The imported-conversation record and converter are owned by
+[conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
+where mechanics owned by another contract are summarized, the owning sibling
+page is linked inline.
 
 The path-scoped session-placement paragraphs are the foundation proposal at the
 bottom of their implementing stack and become verified only with its
