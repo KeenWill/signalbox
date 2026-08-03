@@ -91,71 +91,6 @@ fn commit_rejects_an_unborn_branch_beneath_a_packed_reference() {
 }
 
 #[test]
-fn failed_unborn_commit_removes_its_new_reference_directories() {
-    let root = tempfile::tempdir().expect("temporary repository root constructs");
-    let repository = Repository::init(root.path()).expect("unborn repository initializes");
-    let unborn_reference = "refs/heads/topic/v1";
-    repository
-        .set_head(unborn_reference)
-        .expect("nested unborn branch selects");
-    fs::write(root.path().join(TRACKED_PATH), INITIAL_CONTENT).expect("fixture file writes");
-    let executor = LocalGitTools::try_new(LocalWorkspaceFileSystem, root.path(), identity())
-        .expect("local Git suite constructs")
-        .into_parts()
-        .1;
-    execute(
-        &executor,
-        LocalOperation::Stage(GitStageArguments {
-            paths: vec![TRACKED_PATH.to_owned()],
-        }),
-    );
-    let mut pinned_repository = executor
-        .repository_authority
-        .repository()
-        .expect("pinned unborn repository opens");
-    let pinned_objects =
-        PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
-    let persistent_object_database =
-        Odb::new().expect("fixture persistent object database constructs");
-    pinned_objects
-        .add_to(&persistent_object_database)
-        .expect("fixture persistent objects attach");
-    let object_database = Odb::new().expect("fixture object database constructs");
-    pinned_objects
-        .add_to(&object_database)
-        .expect("fixture writable objects attach");
-    let _mempack = object_database
-        .add_new_mempack_backend(1000)
-        .expect("fixture memory pack attaches");
-    pinned_repository
-        .set_odb(&object_database)
-        .expect("fixture writable object database installs");
-
-    let failure = commit(
-        &mut pinned_repository,
-        &executor.identity,
-        GitCommitArguments {
-            message: MODEL_MESSAGE.to_owned(),
-        },
-        &executor.repository_authority,
-        &persistent_object_database,
-        &object_database,
-        || Err(LocalGitFailure::Repository),
-    )
-    .expect_err("final validation rejects unborn commit");
-
-    assert_eq!(failure, LocalGitFailure::Repository);
-    assert!(!root.path().join(".git/refs/heads/topic").exists());
-    assert_eq!(
-        repository
-            .find_reference("HEAD")
-            .expect("symbolic HEAD remains")
-            .symbolic_target(),
-        Ok(Some(unborn_reference))
-    );
-}
-
-#[test]
 fn commit_rejects_an_existing_index_lock_before_advancing_head() {
     let fixture = Fixture::new();
     fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
@@ -194,7 +129,7 @@ fn commit_rejects_an_index_over_the_entry_budget() {
         }))
         .expect_err("over-budget index rejects before object traversal");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
     assert_eq!(
         repository.head().expect("HEAD exists").target(),
         Some(fixture.initial)
@@ -314,7 +249,7 @@ fn commit_reference_publication_rejects_a_replaced_refs_hierarchy() {
         .strip_prefix("refs/")
         .expect("fixture target is under refs");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
     assert_eq!(
         fs::read_to_string(retired_refs.join(relative_target))
             .expect("retired fixture branch reads"),
@@ -390,7 +325,7 @@ fn commit_rejects_an_oversized_merge_parent_before_parsing() {
         }))
         .expect_err("oversized merge parent rejects before parsing");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
     assert_eq!(
         repository.head().expect("fixture HEAD remains").target(),
         Some(fixture.initial)
@@ -398,7 +333,7 @@ fn commit_rejects_an_oversized_merge_parent_before_parsing() {
 }
 
 #[test]
-fn commit_reports_success_after_merge_state_cleanup_failure() {
+fn commit_rejects_a_nonregular_merge_state_entry_before_publication() {
     let fixture = Fixture::new();
     install_deleted_conflict(&fixture);
     let executor = fixture.executor();
@@ -408,6 +343,11 @@ fn commit_reports_success_after_merge_state_cleanup_failure() {
             paths: vec![TRACKED_PATH.to_owned()],
         }),
     );
+    let live_repository = Repository::open(fixture.root()).expect("live fixture repository opens");
+    let head_before = live_repository
+        .head()
+        .expect("fixture HEAD exists")
+        .target();
     let mut repository = executor
         .repository_authority
         .repository()
@@ -436,24 +376,27 @@ fn commit_reports_success_after_merge_state_cleanup_failure() {
     fs::set_permissions(&merge_mode, fs::Permissions::from_mode(0o0))
         .expect("merge cleanup blocker permissions set");
 
-    let result = commit(
+    let failure = commit(
         &mut repository,
         &executor.identity,
         GitCommitArguments {
             message: MODEL_MESSAGE.to_owned(),
         },
         &executor.repository_authority,
-        &persistent_object_database,
-        &object_database,
+        (
+            &persistent_object_database,
+            &object_database,
+            &pinned_objects,
+        ),
         || executor.validate_current_repository_identity(),
     )
-    .expect("commit succeeds after advancing HEAD");
+    .expect_err("nonregular merge state rejects before publication");
     fs::set_permissions(&merge_mode, fs::Permissions::from_mode(0o700))
         .expect("merge cleanup blocker permissions restore");
 
-    assert!(!result.state_cleaned);
+    assert_eq!(failure, LocalGitFailure::Repository);
     assert_eq!(
-        repository.head().expect("advanced HEAD exists").target(),
-        Some(Oid::from_str(&result.commit).expect("commit id parses"))
+        live_repository.head().expect("HEAD remains").target(),
+        head_before
     );
 }

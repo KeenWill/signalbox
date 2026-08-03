@@ -16,8 +16,10 @@ use signalbox_tools_workspace::{
 
 use crate::arguments::GitDiffArguments;
 use crate::bounded::{
-    bounded_text, resolve_bounded_tree, tree_files, validate_index_objects, validate_tree_discovery,
+    bounded_text, resolve_bounded_tree, tree_files, tree_for_commit, validate_index_objects,
+    validate_tree_discovery,
 };
+use crate::executor::regular_file_mode;
 use crate::failure::LocalGitFailure;
 use crate::limits::{GITLINK_MODE, MAX_DIFF_BYTES, MAX_OBJECT_BYTES};
 use crate::pinning::{PinnedRepository, repository_filemode};
@@ -25,7 +27,7 @@ use crate::result::DiffResult;
 use crate::status::{
     charge_worktree_bytes, conflicted_index_paths, index_backed_worktree_files, index_files,
 };
-use crate::status_reference::worktree_head_tree;
+use crate::status_reference::StatusHeadSnapshot;
 
 pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
     repository: &Repository,
@@ -40,14 +42,17 @@ pub(super) fn diff<FileSystem: WorkspaceFileSystem>(
     };
     let mut options = DiffOptions::new();
     options.ignore_submodules(false);
-    let base_tree = resolve_bounded_tree(repository, authority, &base)?;
-    let head_tree = resolve_bounded_tree(repository, authority, &head)?;
+    let (base_tree, base_snapshot) = resolve_bounded_tree(repository, authority, &base)?;
+    let (head_tree, head_snapshot) = resolve_bounded_tree(repository, authority, &head)?;
     validate_tree_discovery(repository, &base_tree)?;
     validate_tree_discovery(repository, &head_tree)?;
     let diff = repository
         .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), Some(&mut options))
         .map_err(|_| LocalGitFailure::Operation)?;
-    render_diff(&diff)
+    let result = render_diff(&diff)?;
+    base_snapshot.validate(authority)?;
+    head_snapshot.validate(authority)?;
+    Ok(result)
 }
 
 pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
@@ -57,7 +62,11 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     root: &WorkspaceRoot,
     untracked: Vec<PathBuf>,
 ) -> Result<DiffResult, LocalGitFailure> {
-    let head_tree = worktree_head_tree(repository, authority)?;
+    let head_snapshot = StatusHeadSnapshot::capture(authority)?;
+    let head_tree = head_snapshot
+        .target
+        .map(|target| tree_for_commit(repository, target))
+        .transpose()?;
     let head_files = match head_tree.as_ref() {
         Some(tree) => {
             validate_tree_discovery(repository, tree)?;
@@ -88,9 +97,6 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     let mut truncated = false;
     let filemode = repository_filemode(repository)?;
     let mut worktree_bytes = 0_usize;
-    if truncated {
-        return render_patch_bytes(bytes, true);
-    }
     let paths = head_files
         .keys()
         .chain(diff_index_files.keys())
@@ -110,10 +116,15 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             || untracked_files.contains(&path)
         {
             match filesystem.entry_kind(root, &path) {
-                Ok(WorkspaceEntryKind::Directory) => diff_index_files
-                    .get(&path)
-                    .filter(|(_, mode)| *mode == GITLINK_MODE)
-                    .map(|(oid, mode)| (gitlink_buffer(*oid), *mode)),
+                Ok(WorkspaceEntryKind::Directory) => {
+                    if diff_index_files
+                        .get(&path)
+                        .is_some_and(|(_, mode)| *mode == GITLINK_MODE)
+                    {
+                        return Err(LocalGitFailure::Operation);
+                    }
+                    None
+                }
                 Ok(WorkspaceEntryKind::Symlink)
                 | Err(WorkspaceResolveError::Rejected(WorkspacePathRejection::Symlink)) => {
                     let bytes = read_worktree_symlink(authority, &path, MAX_OBJECT_BYTES)?;
@@ -141,13 +152,8 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
                             } else {
                                 0o100755
                             };
-                            let mode = if filemode {
-                                observed_mode
-                            } else {
-                                index_files
-                                    .get(&path)
-                                    .map_or(observed_mode, |(_, mode)| *mode)
-                            };
+                            let indexed_mode = index_files.get(&path).map(|(_, mode)| *mode);
+                            let mode = regular_file_mode(observed_mode, indexed_mode, filemode);
                             Some((read.bytes, mode))
                         }
                         Err(WorkspaceResolveError::Rejected(_)) => {
@@ -184,7 +190,9 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
             break;
         }
     }
-    render_patch_bytes(bytes, truncated)
+    let result = render_patch_bytes(bytes, truncated)?;
+    head_snapshot.validate(authority)?;
+    Ok(result)
 }
 
 pub(super) fn diff_object_buffer(
@@ -348,8 +356,12 @@ pub(super) fn render_diff(diff: &git2::Diff<'_>) -> Result<DiffResult, LocalGitF
         };
         let content = line.content();
         let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
-        if prefix.is_some_and(|_| remaining > 0) {
-            bytes.push(prefix.unwrap_or_default());
+        if let Some(origin) = prefix {
+            if remaining > 0 {
+                bytes.push(origin);
+            } else {
+                truncated = true;
+            }
         }
         let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
         if content.len() <= remaining {

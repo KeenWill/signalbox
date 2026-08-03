@@ -6,14 +6,11 @@ use git2::{ObjectType, Repository, Signature};
 use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
-use crate::arguments::{GitDiffArguments, GitLogArguments, LocalOperation};
+use crate::arguments::{GitLogArguments, LocalOperation};
 use crate::catalog::LocalGitTools;
 use crate::construction::LocalGitToolsConstructionError;
-use crate::diff::diff;
 use crate::failure::LocalGitFailure;
 use crate::limits::{MAX_SHALLOW_ENTRIES, MAX_WORKTREE_INSPECTIONS};
-use crate::log::log;
-use crate::status::status;
 use crate::tests::planting::{oversized_commit_object, plant_shallow_entries};
 use crate::tests::support::{
     AUTHOR_EMAIL, AUTHOR_NAME, CHANGED_CONTENT, Fixture, MODEL_MESSAGE, TRACKED_PATH, commit_all,
@@ -48,22 +45,9 @@ fn log_rejects_a_fifo_head_without_blocking() {
     let head_path = fixture.root().join(".git/HEAD");
     fs::remove_file(&head_path).expect("fixture HEAD removes");
     mkfifoat(CWD, &head_path, Mode::RUSR | Mode::WUSR).expect("fixture HEAD FIFO constructs");
-    let repository = executor
-        .repository_authority
-        .repository()
-        .expect("pinned fixture repository opens");
+    let failure = executor.repository_authority.repository();
 
-    let failure = log(
-        &repository,
-        &executor.repository_authority,
-        GitLogArguments {
-            revision: "HEAD".to_owned(),
-            max_entries: 1,
-        },
-    )
-    .expect_err("FIFO HEAD rejects without libgit2 reopen");
-
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(matches!(failure, Err(LocalGitFailure::Repository)));
 }
 
 #[test]
@@ -73,31 +57,9 @@ fn status_and_worktree_diff_reject_a_fifo_head_without_blocking() {
     let head_path = fixture.root().join(".git/HEAD");
     fs::remove_file(&head_path).expect("fixture HEAD removes");
     mkfifoat(CWD, &head_path, Mode::RUSR | Mode::WUSR).expect("fixture HEAD FIFO constructs");
-    let repository = executor
-        .repository_authority
-        .repository()
-        .expect("pinned fixture repository opens");
+    let failure = executor.repository_authority.repository();
 
-    let status_failure = status(
-        &repository,
-        &executor.repository_authority,
-        &executor.filesystem,
-        &executor.root,
-        Vec::new(),
-    )
-    .expect_err("status rejects a FIFO HEAD");
-    let diff_failure = diff(
-        &repository,
-        &executor.repository_authority,
-        GitDiffArguments::Worktree,
-        &executor.filesystem,
-        &executor.root,
-        Vec::new(),
-    )
-    .expect_err("worktree diff rejects a FIFO HEAD");
-
-    assert_eq!(status_failure, LocalGitFailure::Operation);
-    assert_eq!(diff_failure, LocalGitFailure::Operation);
+    assert!(matches!(failure, Err(LocalGitFailure::Repository)));
 }
 
 #[test]
@@ -147,32 +109,17 @@ fn one_entry_log_does_not_order_an_unreturned_long_merge_parent() {
 }
 
 #[test]
-fn log_honors_a_repository_shallow_boundary() {
+fn log_construction_rejects_a_nonempty_shallow_boundary() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let boundary = plant_linear_history(&repository, fixture.initial, 1);
-    let newest = plant_linear_history(&repository, boundary, 1);
+    plant_linear_history(&repository, boundary, 1);
     fs::write(fixture.root().join(".git/shallow"), format!("{boundary}\n"))
         .expect("fixture shallow boundary writes");
-    let executor = fixture.executor();
+    let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+        .expect_err("nonempty shallow state rejects");
 
-    let log = execute(
-        &executor,
-        LocalOperation::Log(GitLogArguments {
-            revision: newest.to_string(),
-            max_entries: 10,
-        }),
-    );
-
-    assert_eq!(
-        log["commits"]
-            .as_array()
-            .expect("commits are an array")
-            .len(),
-        2
-    );
-    assert_eq!(log["commits"][0]["commit"], newest.to_string());
-    assert_eq!(log["commits"][1]["commit"], boundary.to_string());
+    assert!(matches!(error, LocalGitToolsConstructionError::Repository));
 }
 
 #[test]
@@ -243,7 +190,7 @@ fn log_rejects_oversized_commit_object() {
         }))
         .expect_err("oversized commit object rejects");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]
@@ -260,7 +207,7 @@ fn log_rejects_an_exact_oid_before_loading_an_oversized_commit() {
         }))
         .expect_err("exact oversized commit object rejects");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]
@@ -391,5 +338,5 @@ fn log_bounds_the_extra_commit_used_only_for_truncation() {
         }))
         .expect_err("oversized truncation candidate rejects before parsing");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }

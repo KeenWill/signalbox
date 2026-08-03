@@ -1,9 +1,52 @@
 //! Pinned status-reference snapshot properties.
 
+use std::fs;
+
 use git2::Repository;
 
-use crate::status_reference::status_head_from_reference;
-use crate::tests::support::{FIX_BRANCH, Fixture, raw_commit_with_tree};
+use crate::failure::LocalGitFailure;
+use crate::layout::validate_repository_layout;
+use crate::pinning::PinnedRepository;
+use crate::status_reference::{status_head, status_head_from_reference};
+use crate::tests::support::{FIX_BRANCH, Fixture, raw_commit_with_tree, workspace_root_identity};
+
+#[test]
+fn status_head_rejects_a_symbolic_target_outside_git_reference_grammar() {
+    let fixture = Fixture::new();
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    fs::write(
+        fixture.root().join(".git/HEAD"),
+        b"ref: refs/heads/topic..invalid\n",
+    )
+    .expect("invalid symbolic HEAD writes");
+
+    let failure = status_head(&authority).expect_err("invalid symbolic target rejects status");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn status_head_rejects_a_non_utf8_symbolic_target() {
+    let fixture = Fixture::new();
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    fs::write(
+        fixture.root().join(".git/HEAD"),
+        b"ref: refs/heads/non-utf8-\xff\n",
+    )
+    .expect("non-UTF-8 symbolic HEAD writes");
+
+    let failure = status_head(&authority).expect_err("non-UTF-8 symbolic target rejects status");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
 
 #[test]
 fn status_head_snapshot_does_not_mix_a_later_head_selection() {

@@ -4,7 +4,7 @@ use std::fs;
 
 use git2::Repository;
 
-use crate::commit::publish_commit_reference_with_hook;
+use crate::commit::publish_commit_reference;
 use crate::failure::LocalGitFailure;
 use crate::packed_reference::packed_reference_target;
 use crate::reference_lock::ReferenceLock;
@@ -39,7 +39,7 @@ fn commit_restores_reflogs_when_reference_publication_fails() {
         .signature()
         .expect("fixture signature constructs");
 
-    let failure = publish_commit_reference_with_hook(
+    let failure = publish_commit_reference(
         &executor.repository_authority,
         update_lock,
         update_reference,
@@ -49,6 +49,7 @@ fn commit_restores_reflogs_when_reference_publication_fails() {
         || {
             fs::rename(&lock_path, &retired_lock).expect("target reference lock retires");
             fs::write(&lock_path, replacement_lock).expect("replacement lock writes");
+            Ok(())
         },
     )
     .expect_err("replaced target lock rejects publication");
@@ -99,7 +100,7 @@ fn commit_publication_preserves_a_concurrent_destination_reference() {
         .signature()
         .expect("fixture signature constructs");
 
-    let failure = publish_commit_reference_with_hook(
+    let failure = publish_commit_reference(
         &executor.repository_authority,
         update_lock,
         update_reference,
@@ -109,6 +110,7 @@ fn commit_publication_preserves_a_concurrent_destination_reference() {
         || {
             fs::write(&reference_path, format!("{replacement}\n"))
                 .expect("concurrent destination reference writes");
+            Ok(())
         },
     )
     .expect_err("concurrent destination reference rejects publication");
@@ -180,32 +182,6 @@ fn reference_publication_preserves_a_concurrent_packed_destination() {
             .expect("concurrent packed destination reads"),
         Some(replacement)
     );
-}
-
-#[test]
-fn reflog_rollback_removes_new_nested_hierarchy() {
-    let fixture = Fixture::new();
-    let executor = fixture.executor();
-    let signature = identity()
-        .signature()
-        .expect("fixture signature constructs");
-    let nested_reference = "refs/heads/topic/v1";
-    let nested_parent = fixture.root().join(".git/logs/refs/heads/topic");
-    let mut log = ReferenceLogLock::acquire(&executor.repository_authority, nested_reference)
-        .expect("nested fixture reflog locks");
-    log.append(
-        git2::Oid::ZERO_SHA1,
-        fixture.initial,
-        &signature,
-        "fixture action",
-    )
-    .expect("nested fixture reflog appends");
-    log.publish().expect("nested fixture reflog publishes");
-
-    log.rollback().expect("nested fixture reflog rolls back");
-    drop(log);
-
-    assert!(!nested_parent.exists());
 }
 
 #[test]

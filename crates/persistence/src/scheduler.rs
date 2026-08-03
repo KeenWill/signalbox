@@ -57,7 +57,7 @@ impl ClassifyOperatorFailure for PostgresEligibilitySweepError {
     }
 }
 
-/// Finds durable sessions that may contain eligible queued work.
+/// Finds durable sessions that may require an authoritative scheduling pass.
 #[derive(Clone, Debug)]
 pub struct PostgresEligibilitySweep {
     pool: PgPool,
@@ -75,8 +75,8 @@ impl PostgresEligibilitySweep {
         }
     }
 
-    /// Finds the next bounded page of sessions with queued work or a durable
-    /// active tool batch ready for reconciliation.
+    /// Finds the next bounded page of sessions with queued work, a durable
+    /// active tool batch, or a terminal goal turn owed disposition.
     ///
     /// The result is only a set of hints. The authoritative per-session pass
     /// reconstitutes complete queue and lifecycle state under its scheduler-row
@@ -91,6 +91,10 @@ impl PostgresEligibilitySweep {
                 SELECT queued.session_id
                   FROM turn_lifecycle AS queued
                  WHERE queued.state_kind = 'queued'
+                   AND goal_turn_is_runtime_relevant(
+                       queued.session_id,
+                       queued.turn_id
+                   )
                    AND NOT EXISTS (
                        SELECT 1
                          FROM turn_lifecycle AS active
@@ -98,6 +102,35 @@ impl PostgresEligibilitySweep {
                           AND active.state_kind = 'active'
                  )
                  GROUP BY queued.session_id
+                UNION
+                SELECT terminal.session_id
+                  FROM turn_lifecycle AS terminal
+                  JOIN goal_turn AS terminal_goal
+                    ON terminal_goal.session_id = terminal.session_id
+                   AND terminal_goal.turn_id = terminal.turn_id
+                  JOIN goal_event AS current_event
+                    ON current_event.session_id = terminal.session_id
+                 WHERE terminal.state_kind = 'terminal'
+                   AND current_event.event_kind IN (
+                       'commissioned', 'resumed', 'superseded'
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM goal_event AS later_event
+                        WHERE later_event.session_id = current_event.session_id
+                          AND later_event.event_ordinal > current_event.event_ordinal
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM goal_turn AS later_goal
+                         JOIN turn_lifecycle AS later_lifecycle
+                           ON later_lifecycle.session_id = later_goal.session_id
+                          AND later_lifecycle.turn_id = later_goal.turn_id
+                        WHERE later_goal.session_id = terminal_goal.session_id
+                          AND later_lifecycle.acceptance_position
+                              > terminal.acceptance_position
+                   )
+                 GROUP BY terminal.session_id
                 UNION
                 SELECT active.session_id
                   FROM turn_lifecycle AS active

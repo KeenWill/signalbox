@@ -16,7 +16,10 @@ use signalbox_tools_workspace::{
     WorkspaceEntryKind, WorkspaceFileSystem, WorkspaceResolveError, WorkspaceRoot,
 };
 
-use crate::descriptor::{FileIdentity, descriptor_entry_exists, descriptor_path, file_identity};
+use crate::descriptor::{
+    FileIdentity, QuarantineDirectory, descriptor_entry_exists, descriptor_path_from_fd,
+    file_identity,
+};
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
 use crate::limits::{
@@ -30,6 +33,8 @@ pub(super) enum WorktreeRollbackEntry {
     Directory,
     File { bytes: Vec<u8>, mode: u32 },
 }
+
+pub(super) type WorktreeRollbackIdentities = BTreeMap<PathBuf, Option<FileIdentity>>;
 
 pub(super) fn capture_worktree_rollback_state<FileSystem: WorkspaceFileSystem>(
     filesystem: &FileSystem,
@@ -112,51 +117,45 @@ pub(super) fn rollback_checkout_atomically<FileSystem: WorkspaceFileSystem>(
     current_tree: Option<&git2::Tree<'_>>,
     target_tree: &git2::Tree<'_>,
     checkout_paths: &BTreeSet<PathBuf>,
-    filesystem: &FileSystem,
-    root: &WorkspaceRoot,
-    authority: &PinnedRepository,
+    rollback: CheckoutRollbackContext<'_, FileSystem>,
+    expected_identities: Option<&WorktreeRollbackIdentities>,
 ) -> Result<(), LocalGitFailure> {
-    let root_path = descriptor_path(&authority.root);
-    let original = tempfile::Builder::new()
-        .prefix(".signalbox-git-original-")
-        .tempdir_in(&root_path)
-        .map_err(|_| LocalGitFailure::Operation)?;
-    let expected = tempfile::Builder::new()
-        .prefix(".signalbox-git-expected-")
-        .tempdir_in(&root_path)
-        .map_err(|_| LocalGitFailure::Operation)?;
-    checkout_snapshot(repository, current_tree, checkout_paths, original.path())?;
+    let root = dup(&rollback.authority.root).map_err(|_| LocalGitFailure::Operation)?;
+    let original = QuarantineDirectory::create(&root)?;
+    let expected = QuarantineDirectory::create(&root)?;
+    let original_path = descriptor_path_from_fd(original.descriptor());
+    let expected_path = descriptor_path_from_fd(expected.descriptor());
+    checkout_snapshot(repository, current_tree, checkout_paths, &original_path)?;
     checkout_snapshot(
         repository,
         Some(target_tree),
         checkout_paths,
-        expected.path(),
+        &expected_path,
     )?;
-    let original_prefix = PathBuf::from(
-        original
-            .path()
-            .file_name()
-            .ok_or(LocalGitFailure::Operation)?,
-    );
-    let expected_prefix = PathBuf::from(
-        expected
-            .path()
-            .file_name()
-            .ok_or(LocalGitFailure::Operation)?,
-    );
+    let original_prefix = PathBuf::from(original.name());
+    let expected_prefix = PathBuf::from(expected.name());
     for path in checkout_rollback_roots(checkout_paths) {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(original.path().join(parent))
+            fs::create_dir_all(original_path.join(parent))
                 .map_err(|_| LocalGitFailure::Operation)?;
         }
-        let expected_state = capture_rollback_subtree(filesystem, root, &expected_prefix, &path)?;
+        let expected_state =
+            capture_rollback_subtree(rollback.filesystem, rollback.root, &expected_prefix, &path)?;
+        let expected_path_identities = expected_identities.map(|identities| {
+            identities
+                .iter()
+                .filter(|(entry_path, _)| entry_path.starts_with(&path))
+                .map(|(entry_path, identity)| (entry_path.clone(), *identity))
+                .collect::<WorktreeRollbackIdentities>()
+        });
         atomic_restore_checkout_path(
-            filesystem,
-            root,
-            authority,
+            rollback.filesystem,
+            rollback.root,
+            rollback.authority,
             &original_prefix,
             &path,
             &expected_state,
+            expected_path_identities.as_ref(),
         )?;
     }
     Ok(())
@@ -177,7 +176,8 @@ pub(super) fn checkout_snapshot(
         .target_dir(destination)
         .update_index(false)
         .refresh(false)
-        .disable_filters(true);
+        .disable_filters(true)
+        .disable_pathspec_match(true);
     for path in checkout_paths {
         checkout.path(path);
     }
@@ -223,6 +223,7 @@ pub(super) fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
     original_prefix: &Path,
     path: &Path,
     expected: &BTreeMap<PathBuf, WorktreeRollbackEntry>,
+    expected_identities: Option<&WorktreeRollbackIdentities>,
 ) -> Result<(), LocalGitFailure> {
     let original_path = original_prefix.join(path);
     let (workspace_parent, workspace_leaf) = open_worktree_parent(&authority.root, path)?;
@@ -240,10 +241,15 @@ pub(super) fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
             )
             .map_err(|_| LocalGitFailure::Operation)?;
             let observed = capture_rollback_subtree(filesystem, root, original_prefix, path);
-            if observed
-                .as_ref()
-                .map_or(true, |observed| !rollback_states_equal(observed, expected))
-            {
+            let observed_identities = observed.as_ref().ok().and_then(|observed| {
+                expected_identities.map(|_| {
+                    capture_rollback_identities(&authority.root, original_prefix, observed)
+                })
+            });
+            if observed.as_ref().map_or(true, |observed| {
+                !rollback_states_equal(observed, expected)
+                    || !rollback_identities_equal(observed_identities.as_ref(), expected_identities)
+            }) {
                 renameat_with(
                     &original_parent,
                     &original_leaf,
@@ -291,10 +297,15 @@ pub(super) fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
             )
             .map_err(|_| LocalGitFailure::Operation)?;
             let observed = capture_rollback_subtree(filesystem, root, original_prefix, path);
-            if observed
-                .as_ref()
-                .map_or(true, |observed| !rollback_states_equal(observed, expected))
-            {
+            let observed_identities = observed.as_ref().ok().and_then(|observed| {
+                expected_identities.map(|_| {
+                    capture_rollback_identities(&authority.root, original_prefix, observed)
+                })
+            });
+            if observed.as_ref().map_or(true, |observed| {
+                !rollback_states_equal(observed, expected)
+                    || !rollback_identities_equal(observed_identities.as_ref(), expected_identities)
+            }) {
                 renameat_with(
                     &original_parent,
                     &original_leaf,
@@ -328,6 +339,79 @@ pub(super) fn atomic_restore_checkout_path<FileSystem: WorkspaceFileSystem>(
         }
     }
     Ok(())
+}
+
+pub(super) fn capture_rollback_identities(
+    root: &fs::File,
+    prefix: &Path,
+    state: &BTreeMap<PathBuf, WorktreeRollbackEntry>,
+) -> Result<WorktreeRollbackIdentities, LocalGitFailure> {
+    state
+        .iter()
+        .map(|(path, entry)| {
+            let identity = if entry == &WorktreeRollbackEntry::Missing {
+                None
+            } else {
+                let full_path = prefix.join(path);
+                let (parent, leaf) = open_worktree_parent(root, &full_path)?;
+                Some(
+                    statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
+                        .map(|metadata| FileIdentity {
+                            device: metadata.st_dev,
+                            inode: metadata.st_ino,
+                        })
+                        .map_err(|_| LocalGitFailure::Operation)?,
+                )
+            };
+            Ok((path.clone(), identity))
+        })
+        .collect()
+}
+
+pub(super) fn capture_rollback_identity(
+    root: &fs::File,
+    path: &Path,
+) -> Result<Option<FileIdentity>, LocalGitFailure> {
+    let leaf = path
+        .file_name()
+        .filter(|leaf| !leaf.is_empty())
+        .ok_or(LocalGitFailure::Operation)?
+        .to_owned();
+    let mut directory = dup(root).map_err(|_| LocalGitFailure::Operation)?;
+    for component in path.parent().unwrap_or_else(|| Path::new("")).components() {
+        let Component::Normal(component) = component else {
+            return Err(LocalGitFailure::Operation);
+        };
+        directory = match openat(
+            &directory,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => directory,
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+            Err(_) => return Err(LocalGitFailure::Operation),
+        };
+    }
+    match statat(&directory, &leaf, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(status) => Ok(Some(FileIdentity {
+            device: status.st_dev,
+            inode: status.st_ino,
+        })),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+        Err(_) => Err(LocalGitFailure::Operation),
+    }
+}
+
+fn rollback_identities_equal(
+    observed: Option<&Result<WorktreeRollbackIdentities, LocalGitFailure>>,
+    expected: Option<&WorktreeRollbackIdentities>,
+) -> bool {
+    match (observed, expected) {
+        (Some(Ok(observed)), Some(expected)) => observed == expected,
+        (None, None) => true,
+        (Some(Err(_)) | None, Some(_)) | (Some(_), None) => false,
+    }
 }
 
 pub(super) fn open_worktree_parent(
@@ -396,20 +480,26 @@ pub(super) fn checkout_tree_with_rollback<
     current_tree: Option<&git2::Tree<'_>>,
     target_tree: &git2::Tree<'_>,
     updated_paths: &RefCell<BTreeSet<PathBuf>>,
+    updated_identities: &RefCell<WorktreeRollbackIdentities>,
     rollback: CheckoutRollbackContext<'_, FileSystem>,
     checkout: Checkout,
 ) -> Result<(), LocalGitFailure> {
     if checkout().is_err() {
-        let rollback_paths = updated_paths.borrow().clone();
+        let identities = updated_identities.borrow().clone();
+        let rollback_paths = updated_paths
+            .borrow()
+            .iter()
+            .filter(|path| identities.contains_key(*path))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if !rollback_paths.is_empty() {
             rollback_checkout_atomically(
                 repository,
                 current_tree,
                 target_tree,
                 &rollback_paths,
-                rollback.filesystem,
-                rollback.root,
-                rollback.authority,
+                rollback,
+                Some(&identities),
             )?;
         }
         return Err(LocalGitFailure::Operation);

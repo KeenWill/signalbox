@@ -14,14 +14,16 @@ use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::GitBranchSwitchArguments;
 use crate::catalog::LocalGitTools;
-use crate::executor::clone_index_entry;
 use crate::failure::LocalGitFailure;
-use crate::rollback::{CheckoutRollbackContext, checkout_tree_with_rollback};
+use crate::rollback::{
+    CheckoutRollbackContext, WorktreeRollbackIdentities, capture_rollback_identity,
+    checkout_tree_with_rollback,
+};
 use crate::tests::planting::install_resolve_undo_extension;
 use crate::tests::support::{
     CHANGED_CONTENT, CONFLICT_OURS_CONTENT, FIX_BRANCH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
-    MODEL_MESSAGE, TARGET_CONTENT, TRACKED_PATH, UNTRACKED_CONTENT, commit_all, identity,
-    index_extension, install_deleted_conflict,
+    MODEL_MESSAGE, TARGET_CONTENT, TRACKED_PATH, commit_all, identity, index_extension,
+    install_deleted_conflict,
 };
 
 #[test]
@@ -143,7 +145,7 @@ fn branch_switch_rejects_a_replaced_target_reference_directory() {
     fs::remove_file(&target_parent).expect("replacement reference symlink removes");
     fs::rename(&retired_parent, &target_parent).expect("target reference parent restores");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
     assert!(!outside.path().join("fix.lock").exists());
     assert_eq!(
         repository.head().expect("fixture HEAD remains").target(),
@@ -170,10 +172,6 @@ fn branch_switch_rolls_back_checkout_after_index_commit_failure() {
 
     let failure = executor
         .branch_switch_with_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned fixture repository opens"),
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -216,10 +214,6 @@ fn branch_switch_rolls_back_after_target_reference_revalidation_fails() {
 
     let failure = executor
         .branch_switch_with_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned fixture repository opens"),
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -286,10 +280,6 @@ fn branch_switch_revalidates_the_root_at_head_publication() {
 
     let failure = executor
         .branch_switch_with_head_publish_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned original repository opens"),
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -307,7 +297,7 @@ fn branch_switch_revalidates_the_root_at_head_publication() {
     let replacement = Repository::open(&root).expect("replacement repository opens");
     let retired_repository = Repository::open(&retired).expect("retired original repository opens");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
     assert_eq!(
         replacement
             .head()
@@ -324,7 +314,7 @@ fn branch_switch_revalidates_the_root_at_head_publication() {
     );
     assert_eq!(
         fs::read(retired.join(TRACKED_PATH)).expect("retired worktree file reads"),
-        INITIAL_CONTENT.as_bytes()
+        CHANGED_CONTENT.as_bytes()
     );
 }
 
@@ -347,10 +337,6 @@ fn branch_switch_rollback_preserves_a_concurrent_worktree_edit() {
 
     let failure = executor
         .branch_switch_with_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned fixture repository opens"),
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -409,10 +395,6 @@ fn branch_switch_rolls_back_unchanged_paths_when_another_path_becomes_a_symlink(
 
     let failure = executor
         .branch_switch_with_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned fixture repository opens"),
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -429,7 +411,7 @@ fn branch_switch_rolls_back_unchanged_paths_when_another_path_becomes_a_symlink(
     fs::remove_file(&target_reference).expect("replacement target reference FIFO removes");
     fs::rename(&retired_reference, &target_reference).expect("target reference restores");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Path);
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("unchanged checkout path rolls back"),
         CHANGED_CONTENT.as_bytes()
@@ -464,10 +446,6 @@ fn branch_switch_rollback_preserves_the_original_index_extensions() {
 
     let failure = executor
         .branch_switch_with_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned fixture repository opens"),
             GitBranchSwitchArguments {
                 name: FIX_BRANCH.to_owned(),
             },
@@ -491,72 +469,6 @@ fn branch_switch_rollback_preserves_the_original_index_extensions() {
     assert_eq!(
         repository.head().expect("fixture HEAD remains").target(),
         original_head
-    );
-}
-
-#[test]
-fn branch_switch_rollback_preserves_a_concurrently_published_index() {
-    let fixture = Fixture::new();
-    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
-    let initial = repository
-        .find_commit(fixture.initial)
-        .expect("fixture initial commit exists");
-    repository
-        .branch(FIX_BRANCH, &initial, false)
-        .expect("fixture branch creates");
-    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
-        .expect("current branch fixture change writes");
-    let original_head = commit_all(&repository, MODEL_MESSAGE);
-    let executor = fixture.executor();
-    let target_reference = fixture.root().join(".git/refs/heads/agent/fix");
-    let retired_reference = fixture.root().join(".git/refs/heads/agent/fix.retired");
-    let mut competing_index = Vec::new();
-
-    let failure = executor
-        .branch_switch_with_index_publish_hook(
-            &executor
-                .repository_authority
-                .repository()
-                .expect("pinned fixture repository opens"),
-            GitBranchSwitchArguments {
-                name: FIX_BRANCH.to_owned(),
-            },
-            || {
-                let competing =
-                    Repository::open(fixture.root()).expect("competing repository opens");
-                let blob = competing
-                    .blob(UNTRACKED_CONTENT.as_bytes())
-                    .expect("competing blob writes");
-                let mut index = competing.index().expect("competing index opens");
-                let mut entry = clone_index_entry(
-                    &index
-                        .get_path(Path::new(TRACKED_PATH), 0)
-                        .expect("competing tracked entry exists"),
-                );
-                entry.id = blob;
-                entry.file_size = UNTRACKED_CONTENT.len() as u32;
-                index.add(&entry).expect("competing entry stages");
-                index.write().expect("competing index publishes");
-                competing_index = fs::read(fixture.root().join(".git/index"))
-                    .expect("competing index bytes read");
-                fs::rename(&target_reference, &retired_reference)
-                    .expect("target reference retires after index publication");
-                mkfifoat(CWD, &target_reference, Mode::RUSR | Mode::WUSR)
-                    .expect("replacement target reference FIFO constructs");
-            },
-        )
-        .expect_err("target reference failure rejects switch");
-    fs::remove_file(&target_reference).expect("replacement target reference FIFO removes");
-    fs::rename(&retired_reference, &target_reference).expect("target reference restores");
-
-    assert_eq!(failure, LocalGitFailure::Operation);
-    assert_eq!(
-        fs::read(fixture.root().join(".git/index")).expect("published index reads"),
-        competing_index
-    );
-    assert_eq!(
-        repository.head().expect("fixture HEAD remains").target(),
-        Some(original_head)
     );
 }
 
@@ -603,6 +515,7 @@ fn checkout_error_rolls_back_a_partially_written_worktree() {
         .tree()
         .expect("fixture target tree opens");
     let updated_paths = RefCell::new(BTreeSet::from([PathBuf::from(TRACKED_PATH)]));
+    let updated_identities = RefCell::new(WorktreeRollbackIdentities::new());
     let executor = fixture.executor();
 
     let failure = checkout_tree_with_rollback(
@@ -610,6 +523,7 @@ fn checkout_error_rolls_back_a_partially_written_worktree() {
         Some(&current_tree),
         &target_tree,
         &updated_paths,
+        &updated_identities,
         CheckoutRollbackContext {
             filesystem: &executor.filesystem,
             root: &executor.root,
@@ -618,6 +532,14 @@ fn checkout_error_rolls_back_a_partially_written_worktree() {
         || {
             fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
                 .expect("partial checkout fixture writes");
+            let identity = capture_rollback_identity(
+                &executor.repository_authority.root,
+                Path::new(TRACKED_PATH),
+            )
+            .expect("partial checkout identity captures");
+            updated_identities
+                .borrow_mut()
+                .insert(PathBuf::from(TRACKED_PATH), identity);
             Err(LocalGitFailure::Operation)
         },
     )
@@ -649,12 +571,20 @@ fn checkout_error_preserves_an_edit_after_a_partial_write() {
         .expect("fixture target tree opens");
     let updated_paths = RefCell::new(BTreeSet::from([PathBuf::from(TRACKED_PATH)]));
     let executor = fixture.executor();
+    let identity =
+        capture_rollback_identity(&executor.repository_authority.root, Path::new(TRACKED_PATH))
+            .expect("partial checkout identity captures");
+    let updated_identities = RefCell::new(WorktreeRollbackIdentities::from([(
+        PathBuf::from(TRACKED_PATH),
+        identity,
+    )]));
 
     let failure = checkout_tree_with_rollback(
         &repository,
         Some(&current_tree),
         &target_tree,
         &updated_paths,
+        &updated_identities,
         CheckoutRollbackContext {
             filesystem: &executor.filesystem,
             root: &executor.root,

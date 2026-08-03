@@ -18,13 +18,37 @@ public enum SignalboxProcessProtocol {
   public static let maximumStreamedTextUTF8Bytes = 8 * 1024 * 1024
 }
 
-public enum SignalboxProcessProtocolVersion: UInt64, Codable, CaseIterable, Sendable {
-  case one = 1
+public enum SignalboxProcessProtocolVersion: Codable, Equatable, CaseIterable, Sendable {
+  case one
+  case unknown(UInt64)
+
+  public static let allCases: [Self] = [.one]
+
+  public var rawValue: UInt64 {
+    switch self {
+    case .one:
+      return 1
+    case .unknown(let value):
+      return value
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(UInt64.self)
+    self = value == 1 ? .one : .unknown(value)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(rawValue)
+  }
 }
 
 public enum SignalboxCanonicalValueError: LocalizedError, Equatable {
   case uuid
   case decimal
+  case dollarAmount
+  case rateVersion
   case requestID
   case commandID
 
@@ -34,6 +58,10 @@ public enum SignalboxCanonicalValueError: LocalizedError, Equatable {
       return "UUID is not canonical lowercase hyphenated text."
     case .decimal:
       return "Unsigned integer is not canonical decimal text."
+    case .dollarAmount:
+      return "Dollar amount is not canonical nonnegative decimal text."
+    case .rateVersion:
+      return "Billing rate version is not a bounded unpadded string."
     case .requestID:
       return "Client request identity must be nonzero."
     case .commandID:
@@ -456,9 +484,32 @@ public enum SignalboxConversationOriginFilter: String, Codable, Equatable, Senda
   case all
 }
 
-public enum SignalboxConversationCursorOrigin: String, Codable, Equatable, Sendable {
-  case nativeSession = "native_session"
-  case importedConversation = "imported_conversation"
+public enum SignalboxConversationCursorOrigin: Codable, Equatable, Sendable {
+  case nativeSession
+  case importedConversation
+  case unknown(String)
+
+  public var rawValue: String {
+    switch self {
+    case .nativeSession: return "native_session"
+    case .importedConversation: return "imported_conversation"
+    case .unknown(let value): return value
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "native_session": self = .nativeSession
+    case "imported_conversation": self = .importedConversation
+    default: self = .unknown(value)
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(rawValue)
+  }
 }
 
 public struct SignalboxConversationCursor: Codable, Equatable, Sendable {
@@ -727,9 +778,13 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
         self = .transcriptTurn(try SignalboxTranscriptTurn(from: decoder))
       case "transcript_model_call_usage":
         try tagged.rejectUnadmittedFields(
-          ["type", "model_call_index", "turn_id", "model_call_id", "usage"],
+          [
+            "type", "model_call_index", "turn_id", "model_call_id", "usage_provenance",
+            "usage", "cost",
+          ],
           decoder: decoder
         )
+        try tagged.requireFields(["cost"], decoder: decoder)
         self = .transcriptModelCallUsage(
           try SignalboxTranscriptModelCallUsage(from: decoder)
         )
@@ -892,10 +947,30 @@ public struct SignalboxModelAliasSummary: Decodable, Equatable, Identifiable, Se
   }
 }
 
-public enum SignalboxImportedConversationSourceFormat: String, Decodable, Equatable, Sendable {
-  case claudeCodeSessionJSONLV1 = "claude_code_session_jsonl_v1"
-  case claudeCodeSessionJSONLV2 = "claude_code_session_jsonl_v2"
-  case codexRolloutJSONLV1 = "codex_rollout_jsonl_v1"
+public enum SignalboxImportedConversationSourceFormat: Decodable, Equatable, Sendable {
+  case claudeCodeSessionJSONLV1
+  case claudeCodeSessionJSONLV2
+  case codexRolloutJSONLV1
+  case unknown(String)
+
+  public var rawValue: String {
+    switch self {
+    case .claudeCodeSessionJSONLV1: return "claude_code_session_jsonl_v1"
+    case .claudeCodeSessionJSONLV2: return "claude_code_session_jsonl_v2"
+    case .codexRolloutJSONLV1: return "codex_rollout_jsonl_v1"
+    case .unknown(let value): return value
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "claude_code_session_jsonl_v1": self = .claudeCodeSessionJSONLV1
+    case "claude_code_session_jsonl_v2": self = .claudeCodeSessionJSONLV2
+    case "codex_rollout_jsonl_v1": self = .codexRolloutJSONLV1
+    default: self = .unknown(value)
+    }
+  }
 }
 
 public struct SignalboxImportedTextPreview: Decodable, Equatable, Sendable {
@@ -966,18 +1041,6 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
       SignalboxImportedTextPreview.self,
       forKey: .textPreview
     )
-    switch sourceSpeaker {
-    case .notAttested, .attestedAbsent, .attested:
-      break
-    case .unknown(let kind, _):
-      throw DecodingError.dataCorrupted(
-        .init(
-          codingPath: decoder.codingPath + [CodingKeys.sourceSpeaker],
-          debugDescription:
-            "Imported conversation entry source_speaker variant \(kind) is not admitted."
-        )
-      )
-    }
     let admitsTextPreview: Bool
     switch contentKind {
     case .text:
@@ -985,6 +1048,8 @@ public struct SignalboxImportedConversationEntry: Decodable, Equatable, Sendable
     case .sourceEvent, .sourceMessageBlock, .toolCall, .toolResult, .thinking,
       .redactedThinking, .document, .messageContentAbsent:
       admitsTextPreview = false
+    case .unknown:
+      admitsTextPreview = true
     }
     guard textPreview == nil || admitsTextPreview else {
       throw DecodingError.dataCorrupted(
@@ -1338,13 +1403,124 @@ public struct SignalboxTranscriptModelCallUsage: Decodable, Equatable, Sendable 
   public let modelCallIndex: SignalboxCanonicalUInt64
   public let turnID: SignalboxCanonicalUUID
   public let modelCallID: SignalboxCanonicalUUID
+  public let usageProvenance: SignalboxUsageProvenance
   public let usage: SignalboxModelCallTokenUsage
+  public let cost: SignalboxModelCallDollarCost?
 
   public init(from decoder: Decoder) throws {
     modelCallIndex = try decoder.decode("model_call_index")
     turnID = try decoder.decode("turn_id")
     modelCallID = try decoder.decode("model_call_id")
+    usageProvenance = try decoder.decode("usage_provenance")
     usage = try decoder.decode("usage")
+    cost = try decoder.decodeIfPresent("cost")
+    guard cost == nil
+      || usage.inputTokens != nil
+      || usage.outputTokens != nil
+      || usage.cacheCreationInputTokens != nil
+      || usage.cacheReadInputTokens != nil
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Model-call cost requires at least one present usage axis."
+        )
+      )
+    }
+  }
+}
+
+public enum SignalboxUsageProvenance: String, Decodable, Equatable, Sendable {
+  case reported
+  case estimated
+}
+
+public enum SignalboxModelCallCostLabel: String, Decodable, Equatable, Sendable {
+  case real
+  case meteredEquivalent = "metered_equivalent"
+}
+
+public struct SignalboxCanonicalDollarAmount: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(from decoder: Decoder) throws {
+    let spelling = try decoder.singleValueContainer().decode(String.self)
+    let components = spelling.split(separator: ".", omittingEmptySubsequences: false)
+    let integer = components.first.map(String.init) ?? ""
+    let fraction = components.count == 2 ? String(components[1]) : nil
+    let integerIsCanonical = integer == "0"
+      || (!integer.hasPrefix("0") && integer.allSatisfy(\.isASCII)
+        && integer.allSatisfy(\.isNumber))
+    let fractionIsCanonical = fraction.map {
+      !$0.isEmpty && $0.utf8.count <= 28 && $0.allSatisfy(\.isASCII)
+        && $0.allSatisfy(\.isNumber) && !$0.hasSuffix("0")
+    } ?? true
+    let coefficient = String(spelling.filter { $0 != "." }.drop(while: { $0 == "0" }))
+    let maximumCoefficient = "79228162514264337593543950335"
+    let coefficientFits = coefficient.count < maximumCoefficient.count
+      || (coefficient.count == maximumCoefficient.count
+        && (coefficient == maximumCoefficient
+          || coefficient.lexicographicallyPrecedes(maximumCoefficient)))
+    guard !spelling.isEmpty,
+      spelling.utf8.count <= 30,
+      components.count <= 2,
+      integerIsCanonical,
+      fractionIsCanonical,
+      coefficientFits
+    else {
+      throw SignalboxCanonicalValueError.dollarAmount
+    }
+    rawValue = spelling
+  }
+}
+
+public struct SignalboxBillingRateVersion: Decodable, Equatable, Sendable {
+  public let rawValue: String
+
+  public init(from decoder: Decoder) throws {
+    let spelling = try decoder.singleValueContainer().decode(String.self)
+    let beginsWithProtocolTrimWhitespace = spelling.unicodeScalars.first.map {
+      signalboxIsProtocolTrimWhitespace($0)
+    } ?? false
+    let endsWithProtocolTrimWhitespace = spelling.unicodeScalars.last.map {
+      signalboxIsProtocolTrimWhitespace($0)
+    } ?? false
+    guard !spelling.isEmpty,
+      spelling.utf8.count <= 128,
+      !beginsWithProtocolTrimWhitespace,
+      !endsWithProtocolTrimWhitespace,
+      !spelling.contains("\0")
+    else {
+      throw SignalboxCanonicalValueError.rateVersion
+    }
+    rawValue = spelling
+  }
+}
+
+private func signalboxIsProtocolTrimWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+  switch scalar.value {
+  case 0x0009...0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+    0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+    return true
+  default:
+    return false
+  }
+}
+
+public struct SignalboxModelCallDollarCost: Decodable, Equatable, Sendable {
+  public let amountUSD: SignalboxCanonicalDollarAmount
+  public let rateVersion: SignalboxBillingRateVersion
+  public let label: SignalboxModelCallCostLabel
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["amount_usd", "rate_version", "label"], decoder: decoder)
+    try payload.requireFields(
+      ["amount_usd", "rate_version", "label"], decoder: decoder)
+    amountUSD = try decoder.decode("amount_usd")
+    rateVersion = try decoder.decode("rate_version")
+    label = try decoder.decode("label")
   }
 }
 
@@ -1593,22 +1769,50 @@ public struct SignalboxFailedTerminalModelCall: Decodable, Equatable, Sendable {
   }
 }
 
-public enum SignalboxFailedModelCallDisposition: String, Decodable, Equatable, Sendable {
-  case knownFailed = "known_failed"
+public enum SignalboxFailedModelCallDisposition: Decodable, Equatable, Sendable {
+  case knownFailed
   case cancelled
+  case unknown(String)
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "known_failed": self = .knownFailed
+    case "cancelled": self = .cancelled
+    default: self = .unknown(value)
+    }
+  }
 }
 
-public enum SignalboxFailedModelCallCause: String, Decodable, Equatable, Sendable {
-  case credentialRejected = "credential_rejected"
-  case permissionDenied = "permission_denied"
-  case invalidRequest = "invalid_request"
-  case targetNotFound = "target_not_found"
-  case requestTooLarge = "request_too_large"
-  case rateLimited = "rate_limited"
-  case quotaExhausted = "quota_exhausted"
+public enum SignalboxFailedModelCallCause: Decodable, Equatable, Sendable {
+  case credentialRejected
+  case permissionDenied
+  case invalidRequest
+  case targetNotFound
+  case requestTooLarge
+  case rateLimited
+  case quotaExhausted
   case overloaded
-  case providerInternal = "provider_internal"
+  case providerInternal
   case unrecognized
+  case unknown(String)
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "credential_rejected": self = .credentialRejected
+    case "permission_denied": self = .permissionDenied
+    case "invalid_request": self = .invalidRequest
+    case "target_not_found": self = .targetNotFound
+    case "request_too_large": self = .requestTooLarge
+    case "rate_limited": self = .rateLimited
+    case "quota_exhausted": self = .quotaExhausted
+    case "overloaded": self = .overloaded
+    case "provider_internal": self = .providerInternal
+    case "unrecognized": self = .unrecognized
+    default: self = .unknown(value)
+    }
+  }
 }
 
 public struct SignalboxCurrentModelCall: Decodable, Equatable, Sendable {
@@ -1664,6 +1868,11 @@ public struct SignalboxTranscriptEntryMessage: Decodable, Equatable, Sendable {
 }
 
 public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
+  case modelIdentityChanged(
+    turnID: SignalboxCanonicalUUID,
+    defaultsVersion: SignalboxCanonicalUInt64,
+    selectedModelID: SignalboxCanonicalUUID
+  )
   case assistantToolUse(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID, toolName: String, arguments: String)
@@ -1688,6 +1897,25 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
+      case "model_identity_changed":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "defaults_version", "selected_model_id"],
+          decoder: decoder
+        )
+        let defaultsVersion: SignalboxCanonicalUInt64 = try decoder.decode("defaults_version")
+        guard defaultsVersion.rawValue > 0 else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("defaults_version")],
+              debugDescription: "A model identity defaults version must be greater than zero."
+            )
+          )
+        }
+        self = .modelIdentityChanged(
+          turnID: try decoder.decode("turn_id"),
+          defaultsVersion: defaultsVersion,
+          selectedModelID: try decoder.decode("selected_model_id")
+        )
       case "assistant_tool_use":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "model_call_id", "tool_request_id", "tool_name", "arguments"],
@@ -1762,16 +1990,48 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
   }
 }
 
-public enum SignalboxImportedContentKind: String, Decodable, Equatable, Sendable {
-  case sourceEvent = "source_event"
-  case sourceMessageBlock = "source_message_block"
+public enum SignalboxImportedContentKind: Decodable, Equatable, Sendable {
+  case sourceEvent
+  case sourceMessageBlock
   case text
-  case toolCall = "tool_call"
-  case toolResult = "tool_result"
+  case toolCall
+  case toolResult
   case thinking
-  case redactedThinking = "redacted_thinking"
+  case redactedThinking
   case document
-  case messageContentAbsent = "message_content_absent"
+  case messageContentAbsent
+  case unknown(String)
+
+  public var rawValue: String {
+    switch self {
+    case .sourceEvent: return "source_event"
+    case .sourceMessageBlock: return "source_message_block"
+    case .text: return "text"
+    case .toolCall: return "tool_call"
+    case .toolResult: return "tool_result"
+    case .thinking: return "thinking"
+    case .redactedThinking: return "redacted_thinking"
+    case .document: return "document"
+    case .messageContentAbsent: return "message_content_absent"
+    case .unknown(let value): return value
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "source_event": self = .sourceEvent
+    case "source_message_block": self = .sourceMessageBlock
+    case "text": self = .text
+    case "tool_call": self = .toolCall
+    case "tool_result": self = .toolResult
+    case "thinking": self = .thinking
+    case "redacted_thinking": self = .redactedThinking
+    case "document": self = .document
+    case "message_content_absent": self = .messageContentAbsent
+    default: self = .unknown(value)
+    }
+  }
 }
 
 public enum SignalboxImportedSourceSpeaker: Decodable, Equatable, Sendable {
@@ -1798,9 +2058,19 @@ public enum SignalboxImportedSourceSpeaker: Decodable, Equatable, Sendable {
   }
 }
 
-public enum SignalboxImportedSpeaker: String, Decodable, Equatable, Sendable {
+public enum SignalboxImportedSpeaker: Decodable, Equatable, Sendable {
   case user
   case assistant
+  case unknown(String)
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "user": self = .user
+    case "assistant": self = .assistant
+    default: self = .unknown(value)
+    }
+  }
 }
 
 public struct SignalboxTranscriptTextEntryMessage: Decodable, Equatable, Sendable {
@@ -2123,12 +2393,25 @@ public enum SignalboxModelCallState: Decodable, Equatable, Sendable {
   }
 }
 
-public enum SignalboxModelCallDisposition: String, Decodable, Equatable, Sendable {
+public enum SignalboxModelCallDisposition: Decodable, Equatable, Sendable {
   case completed
-  case knownFailed = "known_failed"
+  case knownFailed
   case refused
   case cancelled
   case ambiguous
+  case unknown(String)
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "completed": self = .completed
+    case "known_failed": self = .knownFailed
+    case "refused": self = .refused
+    case "cancelled": self = .cancelled
+    case "ambiguous": self = .ambiguous
+    default: self = .unknown(value)
+    }
+  }
 }
 
 public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
@@ -2155,17 +2438,51 @@ public enum SignalboxToolBatchState: Decodable, Equatable, Sendable {
   }
 }
 
-public enum SignalboxProcessErrorCode: String, Decodable, Equatable, Sendable {
-  case malformedFrame = "malformed_frame"
-  case unsupportedVersion = "unsupported_version"
-  case invalidRequest = "invalid_request"
-  case notFound = "not_found"
-  case conflictingReuse = "conflicting_reuse"
+public enum SignalboxProcessErrorCode: Decodable, Equatable, Sendable {
+  case malformedFrame
+  case unsupportedVersion
+  case invalidRequest
+  case notFound
+  case conflictingReuse
   case rejected
-  case resyncRequired = "resync_required"
+  case resyncRequired
   case unavailable
-  case commitAmbiguous = "commit_ambiguous"
+  case commitAmbiguous
   case `internal`
+  case unknown(String)
+
+  public var rawValue: String {
+    switch self {
+    case .malformedFrame: return "malformed_frame"
+    case .unsupportedVersion: return "unsupported_version"
+    case .invalidRequest: return "invalid_request"
+    case .notFound: return "not_found"
+    case .conflictingReuse: return "conflicting_reuse"
+    case .rejected: return "rejected"
+    case .resyncRequired: return "resync_required"
+    case .unavailable: return "unavailable"
+    case .commitAmbiguous: return "commit_ambiguous"
+    case .internal: return "internal"
+    case .unknown(let value): return value
+    }
+  }
+
+  public init(from decoder: Decoder) throws {
+    let value = try decoder.singleValueContainer().decode(String.self)
+    switch value {
+    case "malformed_frame": self = .malformedFrame
+    case "unsupported_version": self = .unsupportedVersion
+    case "invalid_request": self = .invalidRequest
+    case "not_found": self = .notFound
+    case "conflicting_reuse": self = .conflictingReuse
+    case "rejected": self = .rejected
+    case "resync_required": self = .resyncRequired
+    case "unavailable": self = .unavailable
+    case "commit_ambiguous": self = .commitAmbiguous
+    case "internal": self = .internal
+    default: self = .unknown(value)
+    }
+  }
 }
 
 public struct SignalboxProcessError: Decodable, Equatable, Sendable {

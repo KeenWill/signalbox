@@ -15,10 +15,12 @@ use crate::bounded::{
 };
 use crate::descriptor::{descriptor_path_from_fd, file_identity};
 use crate::failure::LocalGitFailure;
+use crate::layout::valid_reference_name;
+use crate::limits::MAX_REFERENCE_BYTES;
 use crate::objects::{PackRoot, persist_objects};
 use crate::pack_install::pack_entry_is_owned;
 use crate::packed_reference::packed_reference_exists;
-use crate::pinning::{PinnedRepository, open_pinned_repository};
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
 use crate::reference_lock::{CreatedReferenceDirectories, reference_installation_modes};
 use crate::result::BranchResult;
 
@@ -26,32 +28,40 @@ pub(super) fn branch_create<ValidateRoot>(
     repository: &Repository,
     authority: &PinnedRepository,
     captured_objects: &Odb<'_>,
+    pinned_objects: &PinnedObjectDatabase,
     arguments: GitBranchCreateArguments,
     validate_root_before_publish: ValidateRoot,
 ) -> Result<BranchResult, LocalGitFailure>
 where
     ValidateRoot: FnOnce() -> Result<(), LocalGitFailure>,
 {
-    let commit = resolve_bounded_commit(repository, authority, &arguments.start)?;
+    let reference_name = format!("refs/heads/{}", arguments.name);
+    if reference_name.len() > MAX_REFERENCE_BYTES
+        || !valid_reference_name(reference_name.as_bytes())
+    {
+        return Err(LocalGitFailure::Operation);
+    }
+    let (commit, revision_snapshot) =
+        resolve_bounded_commit(repository, authority, &arguments.start)?;
     let head = commit.id().to_string();
-    let absent_objects = Odb::new().map_err(|_| LocalGitFailure::Operation)?;
+    let absent_objects =
+        Odb::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
     persist_objects(
         authority,
         repository,
         &absent_objects,
         captured_objects,
+        pinned_objects,
         &[PackRoot::Commit(commit.id())],
     )?;
-    let reference_name = format!("refs/heads/{}", arguments.name);
     if packed_reference_exists(authority, &reference_name)? {
         return Err(LocalGitFailure::Operation);
     }
-    create_loose_branch_reference(
-        authority,
-        &arguments.name,
-        commit.id(),
-        validate_root_before_publish,
-    )?;
+    revision_snapshot.validate(authority)?;
+    create_loose_branch_reference(authority, &arguments.name, commit.id(), || {
+        validate_root_before_publish()?;
+        revision_snapshot.validate(authority)
+    })?;
     Ok(BranchResult {
         branch: arguments.name,
         head,
@@ -104,7 +114,9 @@ where
         Mode::empty(),
     )
     .map_err(|_| LocalGitFailure::Operation)?;
-    let (directory_mode, file_mode) = reference_installation_modes(&refs)?;
+    let installation_modes = reference_installation_modes(&refs)?;
+    let directory_mode = installation_modes.directory;
+    let file_mode = installation_modes.file;
     let mut created_directories = CreatedReferenceDirectories::default();
     let mut directory =
         created_directories.open_or_create(&refs, OsStr::new("heads"), directory_mode)?;
@@ -180,6 +192,9 @@ where
     if outcome.is_err() && still_owned {
         let _ = unlinkat(&directory, &lock_name, AtFlags::empty());
     }
+    if outcome.is_ok() {
+        created_directories.keep();
+    }
     outcome
 }
 
@@ -187,13 +202,18 @@ pub(super) fn validate_live_branch_target(
     authority: &PinnedRepository,
     target: git2::Oid,
 ) -> Result<(), LocalGitFailure> {
-    let repository = open_pinned_repository(
-        &authority.root,
-        &authority.git_directory,
-        &authority._config,
-    )
-    .map_err(|_| LocalGitFailure::Operation)?;
+    let repository = authority
+        .open_repository_shell()
+        .map_err(|_| LocalGitFailure::Operation)?;
+    let pinned_objects = PinnedObjectDatabase::capture(authority)?;
+    let object_database =
+        Odb::new_ext(authority.object_format).map_err(|_| LocalGitFailure::Operation)?;
+    pinned_objects.add_to(&object_database)?;
+    repository
+        .set_odb(&object_database)
+        .map_err(|_| LocalGitFailure::Operation)?;
     let commit = find_bounded_commit(&repository, target)?;
     let tree = find_bounded_tree(&repository, commit.tree_id())?;
-    validate_tree_discovery(&repository, &tree)
+    validate_tree_discovery(&repository, &tree)?;
+    pinned_objects.validate_live(authority)
 }

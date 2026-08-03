@@ -7,14 +7,13 @@ use signalbox_application::{
     OperatorFailureClass, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
     ToolExecutionInvocation, ToolExecutor,
 };
-use signalbox_domain::{NormalizedToolArguments, ToolName};
+use signalbox_domain::{NormalizedToolArguments, ToolApprovalPosture, ToolName};
 use signalbox_model_runtime::CredentialAccess;
 use signalbox_persistence::plan::SessionPlanRepository;
 use signalbox_tools_basic::{
     CURRENT_TIME_NAME, CurrentTimeClock, CurrentTimeExecutor, CurrentTimeTool, ECHO_NAME,
-    EchoExecutor, EchoTool, PostgresSessionStatusWriter, ReqwestWebFetchTransport,
-    SESSION_STATUS_UPDATE_NAME, SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
-    WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
+    EchoExecutor, EchoTool, PostgresSessionStatusWriter, SESSION_STATUS_UPDATE_NAME,
+    SessionStatusExecutor, SessionStatusTool, SessionStatusWriter,
 };
 use signalbox_tools_code_host::{
     CODE_HOST_TOOL_NAMES, CodeHostExecutor, CodeHostTools, CodeHostTransport,
@@ -28,6 +27,10 @@ use signalbox_tools_github::{
     GitHubTransport,
 };
 use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
+use signalbox_tools_web::{
+    ReqwestWebFetchTransport, WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool,
+    WebFetchTransport,
+};
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES,
     WorkspaceDirectoryRead, WorkspaceEntryKind, WorkspaceFileBytes, WorkspaceFileMutation,
@@ -39,7 +42,10 @@ use signalbox_tools_workspace::{
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-use crate::{FileCredentialAccess, PostgresConversationIntrospection};
+use crate::{
+    FileCredentialAccess, PostgresConversationIntrospection,
+    goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor, GoalDeclarationTool},
+};
 
 /// Daemon-local filesystem adapter that shares one pinned root across both
 /// workspace suites.
@@ -137,6 +143,7 @@ struct ComposedToolFamilies<
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
+    goal: Option<GoalDeclarationTool>,
 }
 
 /// The complete daemon-local declarations and their matching dispatch executor.
@@ -205,6 +212,8 @@ impl<Clock>
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
+        let goal = GoalDeclarationTool::try_new(pool.clone())
+            .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -218,6 +227,7 @@ impl<Clock>
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
                 plan,
+                goal: Some(goal),
             },
         )
     }
@@ -235,6 +245,8 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
+        let goal = GoalDeclarationTool::try_new(pool.clone())
+            .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(credentials, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
@@ -250,6 +262,7 @@ impl<Clock>
                 workspace_mutation: None,
                 conversations: None,
                 plan,
+                goal: Some(goal),
             },
         )
     }
@@ -324,6 +337,7 @@ where
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
                 plan,
+                goal: None,
             },
         )
     }
@@ -350,6 +364,7 @@ where
             workspace_mutation,
             conversations,
             plan,
+            goal,
         } = families;
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
             .map_err(|_| DaemonToolsConstructionError::CurrentTime)?
@@ -365,6 +380,7 @@ where
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
+        let goal = goal.map(GoalDeclarationTool::into_parts);
         let mut catalogs = vec![
             current_time_catalog,
             echo_catalog,
@@ -381,6 +397,7 @@ where
                 .map(|(catalog, _)| catalog.clone()),
         );
         catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
+        catalogs.extend(goal.as_ref().map(|(catalog, _)| catalog.clone()));
         let catalog = DaemonToolCatalog::try_new(catalogs)
             .map_err(|_| DaemonToolsConstructionError::Duplicate)?;
         Ok(Self {
@@ -397,6 +414,7 @@ where
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
+                goal: goal.map(|(_, executor)| executor),
             },
         })
     }
@@ -447,6 +465,8 @@ pub enum DaemonToolsConstructionError {
     Conversations,
     /// The plan declarations or session plan port were invalid.
     Plan,
+    /// The goal declaration or its static validation details were invalid.
+    GoalDeclaration,
     /// Two declarations unexpectedly shared one name.
     Duplicate,
 }
@@ -464,6 +484,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
+            Self::GoalDeclaration => "goal_declare tool construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
     }
@@ -481,6 +502,15 @@ struct DaemonToolCatalogEntry {
 #[derive(Clone, Debug)]
 pub struct DaemonToolCatalog {
     entries: BTreeMap<ToolName, DaemonToolCatalogEntry>,
+}
+
+/// Statically selected daemon tool families available before runtime assembly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DaemonToolComposition {
+    /// Process-local and always-compiled tool families only.
+    Base,
+    /// Base tools plus families enabled by complete deployment mappings.
+    WithMappedFamilies,
 }
 
 impl DaemonToolCatalog {
@@ -507,10 +537,102 @@ impl DaemonToolCatalog {
         }
         Ok(Self { entries })
     }
+
+    /// Validates deployment postures against the statically selected
+    /// composition before database-backed tool dependencies are constructed.
+    pub fn validate_approval_postures_for_composition(
+        postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
+        composition: DaemonToolComposition,
+    ) -> Result<(), ConfiguredApprovalPostureError> {
+        for (name, posture) in postures {
+            if !configured_composition_contains(&name, composition) {
+                return Err(ConfiguredApprovalPostureError::UnknownTool { name });
+            }
+            match posture {
+                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
+                ToolApprovalPosture::Delegated => {
+                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies explicit deployment postures that the current runtime can enforce.
+    pub fn with_approval_postures(
+        mut self,
+        postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
+    ) -> Result<Self, ConfiguredApprovalPostureError> {
+        for (name, posture) in postures {
+            let Some(entry) = self.entries.get_mut(&name) else {
+                return Err(ConfiguredApprovalPostureError::UnknownTool { name });
+            };
+            match posture {
+                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
+                ToolApprovalPosture::Delegated => {
+                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+                }
+            }
+            entry.definition = entry.definition.clone().with_approval_posture(posture);
+        }
+        Ok(self)
+    }
+}
+
+fn configured_composition_contains(name: &ToolName, composition: DaemonToolComposition) -> bool {
+    let name = name.as_str();
+    let mapped_family_contains = match composition {
+        DaemonToolComposition::Base => false,
+        DaemonToolComposition::WithMappedFamilies => {
+            GITHUB_TOOL_NAMES.contains(&name)
+                || WORKSPACE_READ_TOOL_NAMES.contains(&name)
+                || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
+                || CONVERSATION_TOOL_NAMES.contains(&name)
+        }
+    };
+    name == CURRENT_TIME_NAME
+        || name == ECHO_NAME
+        || name == WEB_FETCH_NAME
+        || name == SESSION_STATUS_UPDATE_NAME
+        || name == GOAL_DECLARE_NAME
+        || CODE_HOST_TOOL_NAMES.contains(&name)
+        || PLAN_TOOL_NAMES.contains(&name)
+        || mapped_family_contains
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DuplicateDaemonTool;
+
+/// A configured approval posture cannot be enforced by this daemon runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfiguredApprovalPostureError {
+    /// The configured name is absent from the composed catalog.
+    UnknownTool { name: ToolName },
+    /// Delegated judging is not wired into this runtime yet.
+    DelegatedJudgeUnavailable { name: ToolName },
+}
+
+impl ConfiguredApprovalPostureError {
+    /// Borrows the configured tool name without exposing it to startup telemetry.
+    pub const fn name(&self) -> &ToolName {
+        match self {
+            Self::UnknownTool { name } | Self::DelegatedJudgeUnavailable { name } => name,
+        }
+    }
+}
+
+impl fmt::Display for ConfiguredApprovalPostureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UnknownTool { .. } => "configured approval posture names an unknown tool",
+            Self::DelegatedJudgeUnavailable { .. } => {
+                "delegated approval posture requires judge wiring"
+            }
+        })
+    }
+}
+
+impl Error for ConfiguredApprovalPostureError {}
 
 impl ToolCatalog for DaemonToolCatalog {
     fn definitions(&self) -> Box<[ToolDefinition]> {
@@ -602,6 +724,7 @@ pub struct DaemonToolExecutor<
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
+    goal: Option<GoalDeclarationExecutor>,
 }
 
 /// Sanitized aggregate executor failure.
@@ -726,6 +849,13 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if CONVERSATION_TOOL_NAMES.contains(&name) => self
                 .conversations
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            GOAL_DECLARE_NAME => self
+                .goal
                 .as_mut()
                 .ok_or_else(DaemonToolExecutorError::unknown_tool)?
                 .execute(invocation)
@@ -904,6 +1034,105 @@ mod tests {
     }
 
     #[test]
+    fn composed_catalog_applies_an_enforceable_posture() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+        let configured = catalog
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Human)])
+            .expect("known tool posture is applied");
+
+        assert_eq!(
+            configured
+                .definition(&echo)
+                .expect("configured tool remains present")
+                .approval_posture(),
+            Some(ToolApprovalPosture::Human)
+        );
+    }
+
+    #[test]
+    fn composed_catalog_rejects_an_unknown_posture_name() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let unknown = ToolName::try_new(String::from("unknown_tool"))
+            .expect("unknown fixture name is structurally valid");
+        let rejected = catalog
+            .with_approval_postures([(unknown.clone(), ToolApprovalPosture::Human)])
+            .expect_err("unknown tool posture fails closed");
+
+        assert_eq!(rejected.name(), &unknown);
+    }
+
+    #[test]
+    fn base_composition_prevalidation_rejects_an_uncomposed_mapped_tool() {
+        let mapped = ToolName::try_new(String::from(PULL_REQUEST_METADATA_NAME))
+            .expect("mapped fixture name is valid");
+        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped.clone(), ToolApprovalPosture::Human)],
+            DaemonToolComposition::Base,
+        )
+        .expect_err("base composition excludes mapped families");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::UnknownTool { name: mapped }
+        );
+    }
+
+    #[test]
+    fn mapped_composition_prevalidation_accepts_a_mapped_tool() {
+        let mapped = ToolName::try_new(String::from(PULL_REQUEST_METADATA_NAME))
+            .expect("mapped fixture name is valid");
+
+        DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped, ToolApprovalPosture::Human)],
+            DaemonToolComposition::WithMappedFamilies,
+        )
+        .expect("mapped composition includes configured families");
+    }
+
+    #[test]
+    fn composition_prevalidation_rejects_delegated_without_judge_wiring() {
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(echo.clone(), ToolApprovalPosture::Delegated)],
+            DaemonToolComposition::Base,
+        )
+        .expect_err("delegated posture fails before database construction");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+        );
+    }
+
+    #[test]
+    fn composed_catalog_rejects_delegated_posture_without_judge_wiring() {
+        let (echo_catalog, _executor) = EchoTool::try_new()
+            .expect("echo fixture compiles")
+            .into_parts();
+        let catalog = DaemonToolCatalog::try_new([echo_catalog])
+            .expect("single-tool fixture has unique names");
+        let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
+
+        let rejected = catalog
+            .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
+            .expect_err("delegated posture fails closed without judge dispatch");
+
+        assert_eq!(
+            rejected,
+            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+        );
+    }
+
+    #[test]
     fn pinned_workspace_filesystem_shares_one_root_after_path_replacement() {
         let parent = tempfile::tempdir().expect("fixture parent exists");
         let configured_root = parent.path().join("workspace");
@@ -974,6 +1203,7 @@ mod tests {
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
+                goal: None,
             },
         )
         .expect("base daemon tools compile")

@@ -242,6 +242,14 @@ mod tests {
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
                 DirectModelSelection::from_uuid(Uuid::from_u128(2)),
             )),
+            signalbox_domain::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: signalbox_domain::SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: signalbox_domain::VersionedSessionPlacement::initial(
+                    signalbox_domain::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("test session facts are fully correlated")

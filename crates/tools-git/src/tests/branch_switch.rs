@@ -207,7 +207,7 @@ fn branch_switch_checks_out_root_level_change() {
 }
 
 #[test]
-fn branch_switch_allows_a_clean_file_to_directory_transition() {
+fn branch_switch_rejects_a_file_to_directory_transition() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let initial_tree = repository
@@ -243,16 +243,16 @@ fn branch_switch_allows_a_clean_file_to_directory_transition() {
     commit_all(&repository, "flat source");
     let executor = fixture.executor();
 
-    execute(
-        &executor,
-        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
             name: FIX_BRANCH.to_owned(),
-        }),
-    );
+        }))
+        .expect_err("file-to-directory transition rejects");
 
+    assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
-        fs::read(fixture.root().join("src/main.txt")).expect("nested fixture content reads"),
-        b"nested\n"
+        fs::read(fixture.root().join("src")).expect("flat fixture content reads"),
+        b"flat\n"
     );
 }
 
@@ -363,7 +363,7 @@ fn branch_switch_rejects_an_index_over_the_entry_budget() {
         )
         .expect_err("over-budget index rejects before staged-path collection");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]
@@ -519,7 +519,7 @@ fn branch_switch_preserves_assume_valid_on_an_unchanged_path() {
 }
 
 #[test]
-fn branch_switch_preserves_skip_worktree_on_a_changed_path() {
+fn branch_switch_rejects_skip_worktree_on_a_changed_path() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let initial = repository
@@ -530,7 +530,7 @@ fn branch_switch_preserves_skip_worktree_on_a_changed_path() {
         .expect("fixture branch creates");
     fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
         .expect("current-branch fixture file writes");
-    commit_all(&repository, MODEL_MESSAGE);
+    let current = commit_all(&repository, MODEL_MESSAGE);
     let mut index = repository.index().expect("fixture index opens");
     let mut entry = clone_index_entry(
         &index
@@ -544,24 +544,16 @@ fn branch_switch_preserves_skip_worktree_on_a_changed_path() {
     index.write().expect("skip-worktree fixture index writes");
     let executor = fixture.executor();
 
-    execute(
-        &executor,
-        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
             name: FIX_BRANCH.to_owned(),
-        }),
-    );
-    let switched_repository =
-        Repository::open(fixture.root()).expect("switched repository reopens");
-    let switched_index = switched_repository
-        .index()
-        .expect("switched fixture index opens");
-    let switched_entry = switched_index
-        .get_path(Path::new(TRACKED_PATH), 0)
-        .expect("changed switched entry exists");
+        }))
+        .expect_err("skip-worktree index rejects switching");
 
+    assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
-        switched_entry.flags_extended & INDEX_SKIP_WORKTREE,
-        entry.flags_extended & INDEX_SKIP_WORKTREE
+        repository.head().expect("HEAD remains").target(),
+        Some(current)
     );
 }
 

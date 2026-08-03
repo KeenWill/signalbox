@@ -1,0 +1,1431 @@
+//! PostgreSQL storage for session-scoped commissioned goals.
+//!
+//! The event stream is authoritative. Loads decode every durable event and
+//! replay it through the domain aggregate; no mutable current-state row exists.
+
+use std::{error::Error, fmt, num::NonZeroU64};
+
+use rust_decimal::Decimal;
+use signalbox_domain::{
+    DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockProvenance, GoalBlockedReasonKind,
+    GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind, GoalEventOrdinal,
+    GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
+    GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport, GoalSchedulerProvenance,
+    GoalState, GoalStatement, GoalTextError, GoalTransitionError, GoalTransitionFailure,
+    GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias,
+    ModelSelectionOverride, OriginConfiguration, ReconstitutedGoalCommand, SessionId, TurnId,
+};
+use sqlx::{PgConnection, PgPool, Row, types::Uuid};
+
+use crate::{
+    command_registry::{self, CommandKind, GOAL_KIND, RegistryCorruption, RegistryInspectionError},
+    commit_failure_is_ambiguous,
+    goal_turn::{
+        GoalTurnAcceptancePosition, GoalTurnCandidates, GoalTurnContinuationOutcome,
+        GoalTurnInsertion, GoalTurnTerminalState, continuation_exists, current_goal_turn,
+        goal_turn_frozen_alias_definition, goal_turn_generation, goal_turn_terminal_state,
+        insert_goal_turn, next_goal_turn_acceptance_position,
+        retired_queued_goal_turn_without_outbox,
+    },
+    mapping::{
+        DurableCommandIdMappingError, GoalEventDiscriminator, GoalOperationKind,
+        PositiveOrdinalMappingError, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        goal_blocked_reason_from_str, goal_blocked_reason_to_str, goal_command_rejection_from_str,
+        goal_command_rejection_to_str, goal_event_kind_from_str, goal_event_kind_to_str,
+        goal_model_blocked_reason_from_str, goal_operation_from_str, goal_operation_to_str,
+        positive_u64_from_numeric, session_id_to_uuid, tool_request_id_from_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+    },
+    outbox::{self, OutboxEvent},
+    session::SessionCorruption,
+};
+
+const STORAGE_VERSION: i16 = 1;
+
+/// Result of handling a user-global goal command identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoalCommandHandlingOutcome {
+    /// First handling or structurally equal replay returns the durable result.
+    Recorded(GoalCommandResult),
+    /// The identity already has another user-global meaning.
+    ConflictingReuse {
+        /// The retained conflicting command identity.
+        command_id: DurableCommandId,
+    },
+}
+
+/// Result of a scheduler- or model-provenance transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoalTransitionOutcome {
+    /// The transition appended this event.
+    Applied(GoalEvent),
+    /// The session has no attached goal.
+    GoalNotAttached,
+    /// The current state rejected the requested transition.
+    Rejected(GoalTransitionError),
+    /// Scheduler provenance did not name a turn in the current goal generation.
+    NotCurrentGoalTurn,
+}
+
+/// A durable goal shape that cannot reconstruct domain values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GoalCorruption {
+    /// One required row or field is absent.
+    Missing(&'static str),
+    /// A closed discriminator is unsupported.
+    Unsupported {
+        /// The unsupported field.
+        field: &'static str,
+        /// The exact stored spelling.
+        value: String,
+    },
+    /// Stored variant fields or relationships disagree.
+    Inconsistent(&'static str),
+    /// A PostgreSQL column could not decode into its declared Rust representation.
+    Column(&'static str),
+    /// A positive stored ordinal cannot map to the domain.
+    InvalidOrdinal(PositiveOrdinalMappingError),
+    /// Stored bounded text cannot map to the domain.
+    InvalidText(GoalTextError),
+    /// Stored user-command provenance uses a sentinel identity.
+    InvalidCommandId(DurableCommandIdMappingError),
+    /// The complete history failed domain-owned replay.
+    Domain(GoalReconstitutionFailure),
+    /// The session configuration needed to accept a goal turn is corrupt.
+    Session(SessionCorruption),
+}
+impl fmt::Display for GoalCorruption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing(field) => write!(formatter, "missing goal {field}"),
+            Self::Unsupported { field, value } => {
+                write!(formatter, "unsupported goal {field}: {value}")
+            }
+            Self::Inconsistent(relationship) => {
+                write!(formatter, "inconsistent goal {relationship}")
+            }
+            Self::Column(reason) => {
+                write!(formatter, "invalid goal column representation: {reason}")
+            }
+            Self::InvalidOrdinal(reason) => write!(formatter, "invalid goal ordinal: {reason}"),
+            Self::InvalidText(reason) => write!(formatter, "invalid goal text: {reason}"),
+            Self::InvalidCommandId(reason) => {
+                write!(formatter, "invalid goal command identity: {reason}")
+            }
+            Self::Domain(reason) => write!(formatter, "goal reconstitution failed: {reason:?}"),
+            Self::Session(reason) => write!(formatter, "goal turn Session is invalid: {reason}"),
+        }
+    }
+}
+
+impl Error for GoalCorruption {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidOrdinal(error) => Some(error),
+            Self::InvalidText(error) => Some(error),
+            Self::InvalidCommandId(error) => Some(error),
+            Self::Session(error) => Some(error),
+            Self::Missing(_)
+            | Self::Unsupported { .. }
+            | Self::Inconsistent(_)
+            | Self::Column(_)
+            | Self::Domain(_) => None,
+        }
+    }
+}
+
+/// A database failure, ambiguous commit, wrong load purpose, or corruption.
+#[derive(Debug)]
+pub enum GoalRepositoryError {
+    /// PostgreSQL could not complete the operation.
+    Database(sqlx::Error),
+    /// PostgreSQL did not reveal whether the final commit took effect.
+    CommitAmbiguous(sqlx::Error),
+    /// A purpose-specific load named another admitted command kind.
+    DifferentCommandKind {
+        /// The user-global identity naming another command kind.
+        command_id: DurableCommandId,
+    },
+    /// Durable rows cannot reconstruct the requested value.
+    Corruption(GoalCorruption),
+}
+
+impl fmt::Display for GoalRepositoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(error) => write!(formatter, "goal database failure: {error}"),
+            Self::CommitAmbiguous(error) => {
+                write!(formatter, "goal commit outcome is ambiguous: {error}")
+            }
+            Self::DifferentCommandKind { command_id } => {
+                write!(
+                    formatter,
+                    "durable command {command_id:?} does not name a goal command"
+                )
+            }
+            Self::Corruption(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for GoalRepositoryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
+            Self::DifferentCommandKind { .. } => None,
+            Self::Corruption(error) => Some(error),
+        }
+    }
+}
+
+impl From<sqlx::Error> for GoalRepositoryError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl From<GoalCorruption> for GoalRepositoryError {
+    fn from(error: GoalCorruption) -> Self {
+        Self::Corruption(error)
+    }
+}
+
+/// PostgreSQL implementation of goal commands, transitions, and history loads.
+#[derive(Clone, Debug)]
+pub struct GoalRepository {
+    pool: PgPool,
+}
+
+impl GoalRepository {
+    /// Uses the supplied pool for independent goal transactions.
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// Claims and handles an unseen user command, atomically scheduling a turn
+    /// for each applied pursuing transition, or resolves its durable meaning.
+    pub async fn handle_user_command<SelectDefinition>(
+        &self,
+        command: GoalUserCommand,
+        candidates: Option<GoalTurnCandidates>,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
+        let command_id = command.command_id();
+        let mut transaction = self.pool.begin().await?;
+        if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
+            let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
+            transaction.rollback().await?;
+            return Ok(outcome);
+        }
+
+        let claimed = sqlx::query(
+            "INSERT INTO durable_command
+                (command_id, command_kind, storage_version, claimed_at)
+             VALUES ($1, $2, $3, transaction_timestamp())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(durable_command_id_to_uuid(command_id))
+        .bind(GOAL_KIND)
+        .bind(STORAGE_VERSION)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+        if !claimed {
+            let kind = inspect_registry(&mut transaction, command_id)
+                .await?
+                .ok_or(GoalCorruption::Inconsistent(
+                    "winner command claim disappeared",
+                ))?;
+            let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
+            transaction.rollback().await?;
+            return Ok(outcome);
+        }
+
+        let session_exists = lock_session(&mut transaction, command.session()).await?;
+        let mut result = if !session_exists {
+            GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
+        } else {
+            apply_user_command(&mut transaction, &command).await?
+        };
+        let starts_pursuit = match &result {
+            GoalCommandResult::Applied(event) => event_starts_pursuit(event),
+            GoalCommandResult::Rejected(_) => false,
+        };
+        match &result {
+            GoalCommandResult::Applied(_) => {
+                lock_scheduler(&mut transaction, command.session()).await?;
+            }
+            GoalCommandResult::Rejected(_) => {}
+        }
+        let turn_admission = if starts_pursuit {
+            match current_origin_configuration(
+                &mut transaction,
+                command.session(),
+                select_definition,
+            )
+            .await?
+            {
+                CurrentOriginConfiguration::Selected(configuration) => {
+                    match next_goal_turn_acceptance_position(&mut transaction, command.session())
+                        .await?
+                    {
+                        GoalTurnAcceptancePosition::Available(position) => {
+                            Some((configuration, position))
+                        }
+                        GoalTurnAcceptancePosition::Exhausted { .. } => {
+                            result = GoalCommandResult::Rejected(
+                                GoalCommandRejection::AcceptancePositionExhausted,
+                            );
+                            None
+                        }
+                    }
+                }
+                CurrentOriginConfiguration::UnknownAlias(_) => {
+                    result = GoalCommandResult::Rejected(GoalCommandRejection::UnknownModelAlias);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        insert_command(&mut transaction, &command, &result).await?;
+        match &result {
+            GoalCommandResult::Applied(event) => {
+                insert_event(&mut transaction, command.session(), event).await?;
+                if event_may_retire_queued_turn(event)
+                    && let Some(retired) =
+                        retired_queued_goal_turn_without_outbox(&mut transaction, command.session())
+                            .await?
+                {
+                    outbox::append(
+                        &mut transaction,
+                        OutboxEvent::GoalTurnRetired {
+                            session: command.session(),
+                            turn: retired,
+                        },
+                    )
+                    .await?;
+                }
+                if event_starts_pursuit(event) {
+                    let candidates = candidates.ok_or(GoalCorruption::Missing(
+                        "turn candidates for pursuing command",
+                    ))?;
+                    let (configuration, position) = turn_admission.ok_or(
+                        GoalCorruption::Missing("turn admission for pursuing command"),
+                    )?;
+                    let goal = load_goal_from_connection(&mut transaction, command.session())
+                        .await?
+                        .ok_or(GoalCorruption::Missing("scheduled command goal"))?;
+                    insert_goal_turn(
+                        &mut transaction,
+                        command.session(),
+                        goal.current().generation(),
+                        GoalTurnSource::UserEvent(event.ordinal()),
+                        pursuit_input(&goal, event)?,
+                        &configuration,
+                        GoalTurnInsertion::new(position, candidates),
+                    )
+                    .await?;
+                }
+            }
+            GoalCommandResult::Rejected(_) => {}
+        }
+        commit(transaction).await?;
+        Ok(GoalCommandHandlingOutcome::Recorded(result))
+    }
+
+    /// Loads the exact assistant-text part immediately preceding a correlated
+    /// `goal_declare` request when it is the final part of the same provider response.
+    pub async fn load_model_declaration_text(
+        &self,
+        session: SessionId,
+        provenance: GoalModelProvenance,
+    ) -> Result<Option<String>, GoalRepositoryError> {
+        let text = sqlx::query_scalar::<_, String>(
+            "SELECT declaration.assistant_text_value
+               FROM tool_request AS request
+               JOIN semantic_transcript_entry AS tool_use
+                 ON tool_use.source_session_id = request.session_id
+                AND tool_use.producing_model_call_id = request.producing_model_call_id
+                AND tool_use.payload_kind = 'assistant_tool_use'
+                AND tool_use.assistant_tool_request_id = request.request_id
+               JOIN semantic_transcript_entry AS declaration
+                 ON declaration.source_session_id = tool_use.source_session_id
+                AND declaration.producing_model_call_id = tool_use.producing_model_call_id
+                AND declaration.payload_kind = 'assistant_text'
+                AND declaration.assistant_response_part_ordinal + 1 =
+                    tool_use.assistant_response_part_ordinal
+              WHERE request.request_id = $1
+                AND request.session_id = $2
+                AND request.turn_id = $3
+                AND request.tool_name = 'goal_declare'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM semantic_transcript_entry AS later_part
+                     WHERE later_part.source_session_id = tool_use.source_session_id
+                       AND later_part.producing_model_call_id =
+                           tool_use.producing_model_call_id
+                       AND later_part.assistant_response_part_ordinal >
+                           tool_use.assistant_response_part_ordinal
+                )",
+        )
+        .bind(tool_request_id_to_uuid(provenance.tool_request()))
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(provenance.turn()))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(text)
+    }
+
+    /// Loads one complete durable user-command receipt.
+    pub async fn load_command(
+        &self,
+        command_id: DurableCommandId,
+    ) -> Result<Option<ReconstitutedGoalCommand>, GoalRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        match inspect_registry(&mut connection, command_id).await? {
+            None => Ok(None),
+            Some(CommandKind::Goal) => {
+                load_command_from_connection(&mut connection, command_id).await
+            }
+            Some(_) => Err(GoalRepositoryError::DifferentCommandKind { command_id }),
+        }
+    }
+
+    /// Loads and domain-replays a session's full goal lineage.
+    pub async fn load_goal(&self, session: SessionId) -> Result<Option<Goal>, GoalRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        load_goal_from_connection(&mut connection, session).await
+    }
+
+    /// Reconciles one current goal turn's durable terminal disposition.
+    ///
+    /// Nonterminal work is left alone, completion queues one idempotent
+    /// successor, and every unsuccessful terminal or successor-admission failure
+    /// blocks pursuit with scheduler-only execution-failure provenance.
+    pub async fn reconcile_current_after_execution<SelectDefinition>(
+        &self,
+        session: SessionId,
+        candidates: GoalTurnCandidates,
+        failure_need: GoalNeed,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
+        let mut transaction = self.pool.begin().await?;
+        if !lock_session(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        }
+        let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::NotPursuing);
+        };
+        match goal.current().state() {
+            GoalState::Pursuing => {}
+            GoalState::Blocked { .. }
+            | GoalState::Achieved { .. }
+            | GoalState::UserStopped
+            | GoalState::Superseded { .. } => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::NotPursuing);
+            }
+        }
+        let generation = goal.current().generation();
+        let predecessor = current_goal_turn(&mut transaction, session, generation)
+            .await?
+            .ok_or(GoalCorruption::Missing("current goal turn"))?;
+        match goal_turn_terminal_state(&mut transaction, session, predecessor).await? {
+            GoalTurnTerminalState::NotTerminal => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::NotTerminal);
+            }
+            GoalTurnTerminalState::Unsuccessful => {
+                return block_goal_continuation(
+                    transaction,
+                    session,
+                    goal,
+                    failure_need,
+                    predecessor,
+                )
+                .await;
+            }
+            GoalTurnTerminalState::Completed => {}
+        }
+        if continuation_exists(&mut transaction, session, predecessor).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTurnContinuationOutcome::AlreadyScheduled);
+        }
+        let frozen_alias =
+            goal_turn_frozen_alias_definition(&mut transaction, session, predecessor).await?;
+        let configuration = match current_origin_configuration(&mut transaction, session, |alias| {
+            select_definition_with_frozen_fallback(alias, select_definition(alias), frozen_alias)
+        })
+        .await?
+        {
+            CurrentOriginConfiguration::Selected(configuration) => configuration,
+            CurrentOriginConfiguration::UnknownAlias(alias) => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::UnknownModelAlias { alias });
+            }
+        };
+        let position = match next_goal_turn_acceptance_position(&mut transaction, session).await? {
+            GoalTurnAcceptancePosition::Available(position) => position,
+            GoalTurnAcceptancePosition::Exhausted { last } => {
+                transaction.rollback().await?;
+                return Ok(GoalTurnContinuationOutcome::AcceptancePositionExhausted { last });
+            }
+        };
+        insert_goal_turn(
+            &mut transaction,
+            session,
+            generation,
+            GoalTurnSource::SuccessfulTurn(predecessor),
+            goal.current().statement().as_str(),
+            &configuration,
+            GoalTurnInsertion::new(position, candidates),
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(GoalTurnContinuationOutcome::Scheduled {
+            turn: candidates.turn(),
+        })
+    }
+
+    /// Appends a model-declared blocked transition.
+    pub async fn declare_blocked(
+        &self,
+        session: SessionId,
+        reason: GoalModelBlockedReasonKind,
+        need: GoalNeed,
+        provenance: GoalModelProvenance,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
+        self.handle_system_transition(
+            session,
+            SystemTransition::Blocked {
+                reason,
+                need,
+                provenance,
+            },
+        )
+        .await
+    }
+
+    /// Appends a model-declared achievement and final report reference.
+    pub async fn declare_achieved(
+        &self,
+        session: SessionId,
+        report: GoalReport,
+        provenance: GoalModelProvenance,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
+        self.handle_system_transition(session, SystemTransition::Achieved { report, provenance })
+            .await
+    }
+
+    /// Appends scheduler-only execution-failure blocking without retry.
+    pub async fn block_execution_failure(
+        &self,
+        session: SessionId,
+        need: GoalNeed,
+        provenance: GoalSchedulerProvenance,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
+        self.handle_system_transition(
+            session,
+            SystemTransition::ExecutionFailure { need, provenance },
+        )
+        .await
+    }
+
+    async fn handle_system_transition(
+        &self,
+        session: SessionId,
+        transition: SystemTransition,
+    ) -> Result<GoalTransitionOutcome, GoalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        if !lock_session(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::GoalNotAttached);
+        }
+        let Some(goal) = load_goal_from_connection(&mut transaction, session).await? else {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::GoalNotAttached);
+        };
+        match transition.authority() {
+            SystemTransitionAuthority::ModelDeclaration => {}
+            SystemTransitionAuthority::SchedulerFailure => {
+                if let Some(event) = recorded_scheduler_failure(&goal, transition.turn()) {
+                    let event = event.clone();
+                    transaction.rollback().await?;
+                    return Ok(GoalTransitionOutcome::Applied(event));
+                }
+            }
+        }
+        let generation = goal_turn_generation(&mut transaction, session, transition.turn()).await?;
+        if generation != Some(goal.current().generation()) {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        }
+        if current_goal_turn(&mut transaction, session, goal.current().generation()).await?
+            != Some(transition.turn())
+        {
+            transaction.rollback().await?;
+            return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+        }
+        match transition.authority() {
+            SystemTransitionAuthority::ModelDeclaration => {}
+            SystemTransitionAuthority::SchedulerFailure => {
+                if goal_turn_terminal_state(&mut transaction, session, transition.turn()).await?
+                    != GoalTurnTerminalState::Unsuccessful
+                {
+                    transaction.rollback().await?;
+                    return Ok(GoalTransitionOutcome::NotCurrentGoalTurn);
+                }
+            }
+        }
+        let transitioned = match transition {
+            SystemTransition::Blocked {
+                reason,
+                need,
+                provenance,
+            } => goal.declare_blocked(reason, need, provenance),
+            SystemTransition::Achieved { report, provenance } => {
+                goal.declare_achieved(report, provenance)
+            }
+            SystemTransition::ExecutionFailure { need, provenance } => {
+                goal.block_execution_failure(need, provenance)
+            }
+        };
+        let goal = match transitioned {
+            Ok(goal) => goal,
+            Err(error) => {
+                transaction.rollback().await?;
+                return Ok(GoalTransitionOutcome::Rejected(error));
+            }
+        };
+        let event = latest_event(&goal)?;
+        insert_event(&mut transaction, session, &event).await?;
+        commit(transaction).await?;
+        Ok(GoalTransitionOutcome::Applied(event))
+    }
+}
+
+fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {
+    goal.events().iter().find(|event| match event.kind() {
+        GoalEventKind::Blocked { block, .. } => match block {
+            signalbox_domain::GoalBlockProvenance::ExecutionFailure { provenance } => {
+                provenance.turn() == turn
+            }
+            signalbox_domain::GoalBlockProvenance::Model { .. } => false,
+        },
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. }
+        | GoalEventKind::Superseded { .. } => false,
+    })
+}
+
+fn event_may_retire_queued_turn(event: &GoalEvent) -> bool {
+    match event.kind() {
+        GoalEventKind::UserStopped { .. } | GoalEventKind::Superseded { .. } => true,
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Blocked { .. }
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Achieved { .. } => false,
+    }
+}
+
+fn scheduler_failure_rejection(
+    failure: GoalTransitionFailure,
+) -> Result<GoalTurnContinuationOutcome, GoalCorruption> {
+    match failure {
+        GoalTransitionFailure::EventOrdinalExhausted => {
+            Ok(GoalTurnContinuationOutcome::EventOrdinalExhausted)
+        }
+        GoalTransitionFailure::RequiresPursuing
+        | GoalTransitionFailure::RequiresBlocked
+        | GoalTransitionFailure::RequiresPursuingOrBlocked
+        | GoalTransitionFailure::RequiresNoActiveGoal
+        | GoalTransitionFailure::GenerationExhausted => Err(GoalCorruption::Inconsistent(
+            "pursuing goal rejected scheduler failure blocking",
+        )),
+    }
+}
+
+fn event_starts_pursuit(event: &GoalEvent) -> bool {
+    match event.kind() {
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Superseded { .. } => true,
+        GoalEventKind::Blocked { .. }
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. } => false,
+    }
+}
+
+fn pursuit_input<'a>(goal: &'a Goal, event: &'a GoalEvent) -> Result<&'a str, GoalCorruption> {
+    match event.kind() {
+        GoalEventKind::Resumed {
+            guidance: Some(guidance),
+            ..
+        } => Ok(guidance.as_str()),
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Resumed { guidance: None, .. }
+        | GoalEventKind::Superseded { .. } => Ok(goal.current().statement().as_str()),
+        GoalEventKind::Blocked { .. }
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. } => Err(GoalCorruption::Inconsistent(
+            "non-pursuing event scheduled a turn",
+        )),
+    }
+}
+
+fn select_definition_with_frozen_fallback(
+    requested: ModelAlias,
+    current: Option<FrozenAliasDefinition>,
+    frozen: Option<(ModelAlias, FrozenAliasDefinition)>,
+) -> Option<FrozenAliasDefinition> {
+    current.or_else(|| {
+        frozen
+            .filter(|(alias, _)| *alias == requested)
+            .map(|(_, definition)| definition)
+    })
+}
+
+enum CurrentOriginConfiguration {
+    Selected(OriginConfiguration),
+    UnknownAlias(ModelAlias),
+}
+
+async fn current_origin_configuration<SelectDefinition>(
+    connection: &mut PgConnection,
+    session: SessionId,
+    select_definition: SelectDefinition,
+) -> Result<CurrentOriginConfiguration, GoalRepositoryError>
+where
+    SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+{
+    let current = match crate::session::load_session_from_connection(connection, session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return Err(GoalCorruption::Missing("goal turn session").into()),
+        Err(crate::session::SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(crate::session::SessionRepositoryError::Corruption(error)) => {
+            return Err(GoalCorruption::Session(error).into());
+        }
+    };
+    let defaults = current.current_configuration_defaults();
+    let checked = defaults
+        .derive_request(
+            defaults.version(),
+            ModelSelectionOverride::UseSessionDefault,
+        )
+        .map_err(|_| GoalCorruption::Inconsistent("current goal turn defaults version"))?;
+    Ok(
+        match OriginConfiguration::freeze(checked, select_definition) {
+            Ok(configuration) => CurrentOriginConfiguration::Selected(configuration),
+            Err(error) => CurrentOriginConfiguration::UnknownAlias(error.alias()),
+        },
+    )
+}
+
+enum SystemTransition {
+    Blocked {
+        reason: GoalModelBlockedReasonKind,
+        need: GoalNeed,
+        provenance: GoalModelProvenance,
+    },
+    Achieved {
+        report: GoalReport,
+        provenance: GoalModelProvenance,
+    },
+    ExecutionFailure {
+        need: GoalNeed,
+        provenance: GoalSchedulerProvenance,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemTransitionAuthority {
+    ModelDeclaration,
+    SchedulerFailure,
+}
+
+impl SystemTransition {
+    const fn authority(&self) -> SystemTransitionAuthority {
+        match self {
+            Self::Blocked { .. } | Self::Achieved { .. } => {
+                SystemTransitionAuthority::ModelDeclaration
+            }
+            Self::ExecutionFailure { .. } => SystemTransitionAuthority::SchedulerFailure,
+        }
+    }
+
+    const fn turn(&self) -> TurnId {
+        match self {
+            Self::Blocked { provenance, .. } | Self::Achieved { provenance, .. } => {
+                provenance.turn()
+            }
+            Self::ExecutionFailure { provenance, .. } => provenance.turn(),
+        }
+    }
+}
+
+async fn apply_user_command(
+    connection: &mut PgConnection,
+    command: &GoalUserCommand,
+) -> Result<GoalCommandResult, GoalRepositoryError> {
+    let existing = load_goal_from_connection(connection, command.session()).await?;
+    let transitioned = match (command.action(), existing) {
+        (GoalUserAction::Attach(statement), None) => Ok(Goal::commission(
+            command.session(),
+            statement.clone(),
+            GoalUserProvenance::new(command.command_id()),
+        )),
+        (GoalUserAction::Attach(statement), Some(goal)) => goal.commission_successor(
+            statement.clone(),
+            GoalUserProvenance::new(command.command_id()),
+        ),
+        (GoalUserAction::Resume(_), None)
+        | (GoalUserAction::Stop, None)
+        | (GoalUserAction::Supersede(_), None) => {
+            return Ok(GoalCommandResult::Rejected(
+                GoalCommandRejection::GoalNotAttached,
+            ));
+        }
+        (GoalUserAction::Resume(guidance), Some(goal)) => goal.resume(
+            guidance.clone(),
+            GoalUserProvenance::new(command.command_id()),
+        ),
+        (GoalUserAction::Stop, Some(goal)) => {
+            goal.stop(GoalUserProvenance::new(command.command_id()))
+        }
+        (GoalUserAction::Supersede(statement), Some(goal)) => goal.supersede(
+            statement.clone(),
+            GoalUserProvenance::new(command.command_id()),
+        ),
+    };
+    match transitioned {
+        Ok(goal) => Ok(GoalCommandResult::Applied(latest_event(&goal)?)),
+        Err(error) => Ok(GoalCommandResult::Rejected(rejection_from_transition(
+            error.failure(),
+        )?)),
+    }
+}
+
+fn latest_event(goal: &Goal) -> Result<GoalEvent, GoalCorruption> {
+    goal.events()
+        .last()
+        .cloned()
+        .ok_or(GoalCorruption::Missing("latest event"))
+}
+
+fn rejection_from_transition(
+    failure: GoalTransitionFailure,
+) -> Result<GoalCommandRejection, GoalCorruption> {
+    match failure {
+        GoalTransitionFailure::RequiresBlocked => Ok(GoalCommandRejection::RequiresBlocked),
+        GoalTransitionFailure::RequiresPursuingOrBlocked => {
+            Ok(GoalCommandRejection::RequiresPursuingOrBlocked)
+        }
+        GoalTransitionFailure::RequiresNoActiveGoal => {
+            Ok(GoalCommandRejection::GoalAlreadyAttached)
+        }
+        GoalTransitionFailure::GenerationExhausted => Ok(GoalCommandRejection::GenerationExhausted),
+        GoalTransitionFailure::EventOrdinalExhausted => {
+            Ok(GoalCommandRejection::EventOrdinalExhausted)
+        }
+        GoalTransitionFailure::RequiresPursuing => Err(GoalCorruption::Inconsistent(
+            "user command produced a model-only rejection",
+        )),
+    }
+}
+
+async fn block_goal_continuation(
+    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    goal: Goal,
+    need: GoalNeed,
+    predecessor: TurnId,
+) -> Result<GoalTurnContinuationOutcome, GoalRepositoryError> {
+    let transitioned =
+        match goal.block_execution_failure(need, GoalSchedulerProvenance::new(predecessor)) {
+            Ok(goal) => goal,
+            Err(error) => {
+                transaction.rollback().await?;
+                return scheduler_failure_rejection(error.failure()).map_err(Into::into);
+            }
+        };
+    let event = latest_event(&transitioned)?;
+    insert_event(&mut transaction, session, &event).await?;
+    commit(transaction).await?;
+    Ok(GoalTurnContinuationOutcome::Blocked {
+        event: event.ordinal(),
+    })
+}
+
+async fn lock_session(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, sqlx::Error> {
+    Ok(
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some(),
+    )
+}
+
+async fn lock_scheduler(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), GoalRepositoryError> {
+    let scheduler_exists =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+            .bind(session_id_to_uuid(session))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some();
+    if !scheduler_exists {
+        return Err(GoalCorruption::Missing("session scheduler row").into());
+    }
+    Ok(())
+}
+
+async fn commit(
+    transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), GoalRepositoryError> {
+    match transaction.commit().await {
+        Ok(()) => Ok(()),
+        Err(error) if commit_failure_is_ambiguous(&error) => {
+            Err(GoalRepositoryError::CommitAmbiguous(error))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn existing_or_conflicting(
+    connection: &mut PgConnection,
+    command: &GoalUserCommand,
+    kind: CommandKind,
+) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError> {
+    if kind != CommandKind::Goal {
+        return Ok(GoalCommandHandlingOutcome::ConflictingReuse {
+            command_id: command.command_id(),
+        });
+    }
+    let recorded = load_command_from_connection(connection, command.command_id())
+        .await?
+        .ok_or(GoalCorruption::Inconsistent("registry entry disappeared"))?;
+    if recorded.command() == command {
+        Ok(GoalCommandHandlingOutcome::Recorded(
+            recorded.result().clone(),
+        ))
+    } else {
+        Ok(GoalCommandHandlingOutcome::ConflictingReuse {
+            command_id: command.command_id(),
+        })
+    }
+}
+
+async fn inspect_registry(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<Option<CommandKind>, GoalRepositoryError> {
+    command_registry::inspect(connection, command_id)
+        .await
+        .map_err(|error| match error {
+            RegistryInspectionError::Database(error) => GoalRepositoryError::Database(error),
+            RegistryInspectionError::Corruption(corruption) => {
+                GoalRepositoryError::Corruption(registry_corruption(corruption))
+            }
+        })
+}
+
+fn registry_corruption(value: RegistryCorruption) -> GoalCorruption {
+    match value {
+        RegistryCorruption::UnsupportedKind(value) => GoalCorruption::Unsupported {
+            field: "command kind",
+            value,
+        },
+        RegistryCorruption::UnsupportedVersion(value) => GoalCorruption::Unsupported {
+            field: "storage version",
+            value: value.to_string(),
+        },
+        RegistryCorruption::MissingTypedRecord(_) => {
+            GoalCorruption::Missing("typed command record")
+        }
+        RegistryCorruption::ConflictingTypedRecords => {
+            GoalCorruption::Inconsistent("conflicting typed command records")
+        }
+    }
+}
+
+async fn insert_command(
+    connection: &mut PgConnection,
+    command: &GoalUserCommand,
+    result: &GoalCommandResult,
+) -> Result<(), GoalRepositoryError> {
+    let operation = goal_operation_to_str(command.action());
+    let statement = match command.action() {
+        GoalUserAction::Attach(value) | GoalUserAction::Supersede(value) => Some(value.as_str()),
+        GoalUserAction::Resume(_) | GoalUserAction::Stop => None,
+    };
+    let guidance = match command.action() {
+        GoalUserAction::Resume(value) => value.as_ref().map(GoalGuidance::as_str),
+        GoalUserAction::Attach(_) | GoalUserAction::Stop | GoalUserAction::Supersede(_) => None,
+    };
+    let (result_kind, rejection_kind, result_ordinal) = match result {
+        GoalCommandResult::Applied(event) => {
+            ("applied", None, Some(Decimal::from(event.ordinal().get())))
+        }
+        GoalCommandResult::Rejected(reason) => (
+            "rejected",
+            Some(goal_command_rejection_to_str(*reason)),
+            None,
+        ),
+    };
+    sqlx::query(
+        "INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, guidance, result_kind,
+             rejection_kind, result_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .bind(GOAL_KIND)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(command.session()))
+    .bind(operation)
+    .bind(statement)
+    .bind(guidance)
+    .bind(result_kind)
+    .bind(rejection_kind)
+    .bind(result_ordinal)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn insert_event(
+    connection: &mut PgConnection,
+    session: SessionId,
+    event: &GoalEvent,
+) -> Result<(), GoalRepositoryError> {
+    let encoded = EncodedEvent::from_event(event);
+    sqlx::query(
+        "INSERT INTO goal_event
+            (session_id, event_ordinal, generation, event_kind, statement,
+             blocked_reason, need, guidance, report, user_command_id,
+             model_turn_id, model_tool_request_id, scheduler_turn_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(Decimal::from(event.ordinal().get()))
+    .bind(Decimal::from(event.generation().get()))
+    .bind(encoded.kind)
+    .bind(encoded.statement)
+    .bind(encoded.blocked_reason)
+    .bind(encoded.need)
+    .bind(encoded.guidance)
+    .bind(encoded.report)
+    .bind(encoded.user_command)
+    .bind(encoded.model_turn)
+    .bind(encoded.model_tool_request)
+    .bind(encoded.scheduler_turn)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+struct EncodedEvent<'a> {
+    kind: &'static str,
+    statement: Option<&'a str>,
+    blocked_reason: Option<&'static str>,
+    need: Option<&'a str>,
+    guidance: Option<&'a str>,
+    report: Option<&'a str>,
+    user_command: Option<Uuid>,
+    model_turn: Option<Uuid>,
+    model_tool_request: Option<Uuid>,
+    scheduler_turn: Option<Uuid>,
+}
+
+impl<'a> EncodedEvent<'a> {
+    fn from_event(event: &'a GoalEvent) -> Self {
+        let mut encoded = Self {
+            kind: goal_event_kind_to_str(event.kind()),
+            statement: None,
+            blocked_reason: None,
+            need: None,
+            guidance: None,
+            report: None,
+            user_command: None,
+            model_turn: None,
+            model_tool_request: None,
+            scheduler_turn: None,
+        };
+        match event.kind() {
+            GoalEventKind::Commissioned {
+                statement,
+                provenance,
+            } => {
+                encoded.statement = Some(statement.as_str());
+                encoded.user_command = Some(durable_command_id_to_uuid(provenance.command()));
+            }
+            GoalEventKind::Blocked { block, need } => {
+                encoded.blocked_reason = Some(goal_blocked_reason_to_str(block.reason_kind()));
+                encoded.need = Some(need.as_str());
+                match block {
+                    GoalBlockProvenance::Model { provenance, .. } => {
+                        encoded.model_turn = Some(turn_id_to_uuid(provenance.turn()));
+                        encoded.model_tool_request =
+                            Some(tool_request_id_to_uuid(provenance.tool_request()));
+                    }
+                    GoalBlockProvenance::ExecutionFailure { provenance } => {
+                        encoded.scheduler_turn = Some(turn_id_to_uuid(provenance.turn()));
+                    }
+                }
+            }
+            GoalEventKind::Resumed {
+                guidance,
+                provenance,
+            } => {
+                encoded.guidance = guidance.as_ref().map(GoalGuidance::as_str);
+                encoded.user_command = Some(durable_command_id_to_uuid(provenance.command()));
+            }
+            GoalEventKind::Achieved { report, provenance } => {
+                encoded.report = Some(report.as_str());
+                encoded.model_turn = Some(turn_id_to_uuid(provenance.turn()));
+                encoded.model_tool_request =
+                    Some(tool_request_id_to_uuid(provenance.tool_request()));
+            }
+            GoalEventKind::UserStopped { provenance } => {
+                encoded.user_command = Some(durable_command_id_to_uuid(provenance.command()));
+            }
+            GoalEventKind::Superseded {
+                replacement_statement,
+                provenance,
+            } => {
+                encoded.statement = Some(replacement_statement.as_str());
+                encoded.user_command = Some(durable_command_id_to_uuid(provenance.command()));
+            }
+        }
+        encoded
+    }
+}
+
+async fn load_goal_from_connection(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<Goal>, GoalRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT event_ordinal, generation, event_kind, statement,
+                blocked_reason, need, guidance, report, user_command_id,
+                model_turn_id, model_tool_request_id, scheduler_turn_id
+           FROM goal_event
+          WHERE session_id = $1
+          ORDER BY event_ordinal",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let events = rows
+        .iter()
+        .map(decode_event)
+        .collect::<Result<Vec<_>, _>>()?;
+    GoalReconstitutionInput::new(session, events)
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| GoalCorruption::Domain(error.failure()).into())
+}
+
+fn decode_event(row: &sqlx::postgres::PgRow) -> Result<GoalEvent, GoalCorruption> {
+    let ordinal = positive(column(row, "event_ordinal")?)?;
+    let generation = positive(column(row, "generation")?)?;
+    let kind: String = column(row, "event_kind")?;
+    let statement: Option<String> = column(row, "statement")?;
+    let blocked_reason: Option<String> = column(row, "blocked_reason")?;
+    let need: Option<String> = column(row, "need")?;
+    let guidance: Option<String> = column(row, "guidance")?;
+    let report: Option<String> = column(row, "report")?;
+    let user_command: Option<Uuid> = column(row, "user_command_id")?;
+    let model_turn: Option<Uuid> = column(row, "model_turn_id")?;
+    let model_tool_request: Option<Uuid> = column(row, "model_tool_request_id")?;
+    let scheduler_turn: Option<Uuid> = column(row, "scheduler_turn_id")?;
+    let discriminator =
+        goal_event_kind_from_str(&kind).ok_or_else(|| GoalCorruption::Unsupported {
+            field: "event kind",
+            value: kind.clone(),
+        })?;
+    let kind = match discriminator {
+        GoalEventDiscriminator::Commissioned => GoalEventKind::Commissioned {
+            statement: goal_statement(required(statement, "commission statement")?)?,
+            provenance: GoalUserProvenance::new(
+                durable_command_id_from_uuid(required(user_command, "commission command")?)
+                    .map_err(GoalCorruption::InvalidCommandId)?,
+            ),
+        },
+        GoalEventDiscriminator::Blocked => {
+            let reason = required(blocked_reason, "blocked reason")?;
+            let reason_kind = goal_blocked_reason_from_str(&reason).ok_or_else(|| {
+                GoalCorruption::Unsupported {
+                    field: "blocked reason",
+                    value: reason.clone(),
+                }
+            })?;
+            let block = match reason_kind {
+                GoalBlockedReasonKind::UserInputRequired
+                | GoalBlockedReasonKind::ExternalChangeRequired
+                | GoalBlockedReasonKind::AuthorizationRequired => GoalBlockProvenance::Model {
+                    reason: goal_model_blocked_reason_from_str(&reason).ok_or_else(|| {
+                        GoalCorruption::Unsupported {
+                            field: "model blocked reason",
+                            value: reason.clone(),
+                        }
+                    })?,
+                    provenance: GoalModelProvenance::new(
+                        turn_id_from_uuid(required(model_turn, "blocked model turn")?),
+                        tool_request_id_from_uuid(required(
+                            model_tool_request,
+                            "blocked model tool request",
+                        )?),
+                    ),
+                },
+                GoalBlockedReasonKind::ExecutionFailure => GoalBlockProvenance::ExecutionFailure {
+                    provenance: GoalSchedulerProvenance::new(turn_id_from_uuid(required(
+                        scheduler_turn,
+                        "failed scheduler turn",
+                    )?)),
+                },
+            };
+            GoalEventKind::Blocked {
+                block,
+                need: goal_need(required(need, "blocked need")?)?,
+            }
+        }
+        GoalEventDiscriminator::Resumed => GoalEventKind::Resumed {
+            guidance: guidance.map(goal_guidance).transpose()?,
+            provenance: GoalUserProvenance::new(
+                durable_command_id_from_uuid(required(user_command, "resume command")?)
+                    .map_err(GoalCorruption::InvalidCommandId)?,
+            ),
+        },
+        GoalEventDiscriminator::Achieved => GoalEventKind::Achieved {
+            report: goal_report(required(report, "achievement report")?)?,
+            provenance: GoalModelProvenance::new(
+                turn_id_from_uuid(required(model_turn, "achievement model turn")?),
+                tool_request_id_from_uuid(required(
+                    model_tool_request,
+                    "achievement model tool request",
+                )?),
+            ),
+        },
+        GoalEventDiscriminator::UserStopped => GoalEventKind::UserStopped {
+            provenance: GoalUserProvenance::new(
+                durable_command_id_from_uuid(required(user_command, "stop command")?)
+                    .map_err(GoalCorruption::InvalidCommandId)?,
+            ),
+        },
+        GoalEventDiscriminator::Superseded => GoalEventKind::Superseded {
+            replacement_statement: goal_statement(required(statement, "replacement statement")?)?,
+            provenance: GoalUserProvenance::new(
+                durable_command_id_from_uuid(required(user_command, "supersede command")?)
+                    .map_err(GoalCorruption::InvalidCommandId)?,
+            ),
+        },
+    };
+    Ok(GoalEvent::from_stored_parts(
+        GoalEventOrdinal::new(ordinal),
+        GoalGeneration::new(generation),
+        kind,
+    ))
+}
+
+async fn load_command_from_connection(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<Option<ReconstitutedGoalCommand>, GoalRepositoryError> {
+    let row = sqlx::query(
+        "SELECT session_id, operation_kind, statement, guidance,
+                result_kind, rejection_kind, result_event_ordinal
+           FROM goal_command
+          WHERE command_id = $1",
+    )
+    .bind(durable_command_id_to_uuid(command_id))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let session_uuid: Uuid = column(&row, "session_id")?;
+    let session = signalbox_domain::SessionId::from_uuid(session_uuid);
+    let operation: String = column(&row, "operation_kind")?;
+    let statement: Option<String> = column(&row, "statement")?;
+    let guidance: Option<String> = column(&row, "guidance")?;
+    let action = action_from_stored(&operation, statement, guidance)?;
+    let command = GoalUserCommand::new(command_id, session, action);
+    let result_kind: String = column(&row, "result_kind")?;
+    let rejection: Option<String> = column(&row, "rejection_kind")?;
+    let result_ordinal: Option<Decimal> = column(&row, "result_event_ordinal")?;
+    let result = match result_kind.as_str() {
+        "applied" => {
+            let ordinal = positive(required(result_ordinal, "command result event ordinal")?)?;
+            let goal = load_goal_from_connection(connection, session)
+                .await?
+                .ok_or(GoalCorruption::Missing("command result goal"))?;
+            let event = goal
+                .events()
+                .iter()
+                .find(|event| event.ordinal() == GoalEventOrdinal::new(ordinal))
+                .cloned()
+                .ok_or(GoalCorruption::Missing("command result event"))?;
+            GoalCommandResult::Applied(event)
+        }
+        "rejected" => {
+            let rejection = required(rejection, "command rejection")?;
+            GoalCommandResult::Rejected(goal_command_rejection_from_str(&rejection).ok_or(
+                GoalCorruption::Unsupported {
+                    field: "command rejection",
+                    value: rejection,
+                },
+            )?)
+        }
+        _ => {
+            return Err(GoalCorruption::Unsupported {
+                field: "command result kind",
+                value: result_kind,
+            }
+            .into());
+        }
+    };
+    Ok(Some(ReconstitutedGoalCommand::new(command, result)))
+}
+
+fn positive(value: Decimal) -> Result<NonZeroU64, GoalCorruption> {
+    let value = positive_u64_from_numeric(value).map_err(GoalCorruption::InvalidOrdinal)?;
+    NonZeroU64::new(value).ok_or(GoalCorruption::InvalidOrdinal(
+        PositiveOrdinalMappingError::NonPositive,
+    ))
+}
+
+fn required<T>(value: Option<T>, field: &'static str) -> Result<T, GoalCorruption> {
+    value.ok_or(GoalCorruption::Missing(field))
+}
+
+fn goal_statement(value: String) -> Result<GoalStatement, GoalCorruption> {
+    GoalStatement::try_new(value).map_err(GoalCorruption::InvalidText)
+}
+
+fn goal_need(value: String) -> Result<GoalNeed, GoalCorruption> {
+    GoalNeed::try_new(value).map_err(GoalCorruption::InvalidText)
+}
+
+fn goal_guidance(value: String) -> Result<GoalGuidance, GoalCorruption> {
+    GoalGuidance::try_new(value).map_err(GoalCorruption::InvalidText)
+}
+
+fn goal_report(value: String) -> Result<GoalReport, GoalCorruption> {
+    GoalReport::try_new(value).map_err(GoalCorruption::InvalidText)
+}
+
+fn action_from_stored(
+    operation: &str,
+    statement: Option<String>,
+    guidance: Option<String>,
+) -> Result<GoalUserAction, GoalCorruption> {
+    let operation =
+        goal_operation_from_str(operation).ok_or_else(|| GoalCorruption::Unsupported {
+            field: "command operation",
+            value: operation.to_owned(),
+        })?;
+    match operation {
+        GoalOperationKind::Attach => Ok(GoalUserAction::Attach(goal_statement(required(
+            statement,
+            "attach statement",
+        )?)?)),
+        GoalOperationKind::Resume => Ok(GoalUserAction::Resume(
+            guidance.map(goal_guidance).transpose()?,
+        )),
+        GoalOperationKind::Stop => Ok(GoalUserAction::Stop),
+        GoalOperationKind::Supersede => Ok(GoalUserAction::Supersede(goal_statement(required(
+            statement,
+            "supersede statement",
+        )?)?)),
+    }
+}
+
+fn column<'row, T>(
+    row: &'row sqlx::postgres::PgRow,
+    field: &'static str,
+) -> Result<T, GoalCorruption>
+where
+    T: sqlx::Decode<'row, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
+{
+    row.try_get(field)
+        .map_err(|_| GoalCorruption::Column(field))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inv048_scheduler_event_ordinal_exhaustion_is_a_typed_continuation_outcome() {
+        let outcome = scheduler_failure_rejection(GoalTransitionFailure::EventOrdinalExhausted)
+            .expect("event ordinal exhaustion is typed, not corruption");
+
+        assert_eq!(outcome, GoalTurnContinuationOutcome::EventOrdinalExhausted);
+    }
+
+    #[test]
+    fn successful_continuation_reuses_frozen_alias_when_catalog_entry_is_absent() {
+        let alias = ModelAlias::from_uuid(Uuid::from_u128(0xa11));
+        let frozen = FrozenAliasDefinition::selecting(
+            signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xa12)),
+        );
+
+        assert_eq!(
+            select_definition_with_frozen_fallback(alias, None, Some((alias, frozen))),
+            Some(frozen)
+        );
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn goal_corruption_forwards_its_typed_session_source() {
+        let session = SessionCorruption::Missing("current defaults");
+        let corruption = GoalCorruption::Session(session.clone());
+
+        assert_eq!(
+            corruption.source().map(ToString::to_string),
+            Some(session.to_string())
+        );
+    }
+
+    #[test]
+    fn changed_unknown_alias_does_not_reuse_an_unrelated_frozen_definition() {
+        let requested = ModelAlias::from_uuid(Uuid::from_u128(0xa21));
+        let prior = ModelAlias::from_uuid(Uuid::from_u128(0xa22));
+        let frozen = FrozenAliasDefinition::selecting(
+            signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xa23)),
+        );
+
+        assert_eq!(
+            select_definition_with_frozen_fallback(requested, None, Some((prior, frozen))),
+            None
+        );
+    }
+}

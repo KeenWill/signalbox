@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, os::unix::ffi::OsStrExt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Component, Path, PathBuf},
+};
 
 use git2::{Index, Repository};
 
@@ -9,6 +13,46 @@ use crate::limits::{
 };
 use crate::pinning::PinnedRepository;
 use crate::reference_read::resolve_pinned_reference_chain_from;
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct RevisionSnapshot {
+    revision: Option<String>,
+    chain: Vec<String>,
+    target: git2::Oid,
+}
+
+impl RevisionSnapshot {
+    pub(super) fn capture(
+        authority: &PinnedRepository,
+        revision: &str,
+    ) -> Result<Self, LocalGitFailure> {
+        if let Some(target) = crate::layout::parse_full_object_id(revision, authority.object_format)
+        {
+            return Ok(Self {
+                revision: None,
+                chain: Vec::new(),
+                target,
+            });
+        }
+        let (chain, target) = resolve_pinned_reference_chain_from(authority, revision, None)?;
+        Ok(Self {
+            revision: Some(revision.to_owned()),
+            chain,
+            target: target.ok_or(LocalGitFailure::Operation)?,
+        })
+    }
+
+    pub(super) fn validate(&self, authority: &PinnedRepository) -> Result<(), LocalGitFailure> {
+        let Some(revision) = &self.revision else {
+            return Ok(());
+        };
+        if Self::capture(authority, revision)? == *self {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
+    }
+}
 
 pub(super) fn tree_files(
     repository: &Repository,
@@ -23,6 +67,7 @@ pub(super) fn tree_files(
         for entry in &tree {
             let mut path = prefix.clone();
             path.push(std::ffi::OsStr::from_bytes(entry.name_bytes()));
+            validate_repository_data_path(&path)?;
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => pending.push((entry.id(), path)),
                 Some(git2::ObjectType::Blob) => {
@@ -78,6 +123,7 @@ pub(super) fn validate_tree_discovery_with_symlinks(
             inspected = inspected.saturating_add(1);
             let mut path = prefix.clone();
             path.push(std::ffi::OsStr::from_bytes(entry.name_bytes()));
+            validate_repository_data_path(&path)?;
             inspected_path_bytes =
                 inspected_path_bytes.saturating_add(path.as_os_str().as_bytes().len());
             if inspected > MAX_WORKTREE_INSPECTIONS
@@ -126,7 +172,13 @@ pub(super) fn validate_index_objects(
     validate_index_entry_count(index)?;
     let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
     let mut blob_bytes = 0_usize;
-    for entry in index.iter().filter(|entry| entry.flags & 0x3000 == 0) {
+    for entry in index.iter() {
+        validate_repository_data_path(&PathBuf::from(std::ffi::OsString::from_vec(
+            entry.path.clone(),
+        )))?;
+        if entry.flags & 0x3000 != 0 {
+            continue;
+        }
         if entry.mode == GITLINK_MODE {
             continue;
         }
@@ -139,6 +191,22 @@ pub(super) fn validate_index_objects(
             || blob_bytes > MAX_TREE_BLOB_BYTES
         {
             return Err(LocalGitFailure::Operation);
+        }
+    }
+    Ok(())
+}
+
+fn validate_repository_data_path(path: &Path) -> Result<(), LocalGitFailure> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(LocalGitFailure::Operation);
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if !name.as_bytes().eq_ignore_ascii_case(b".git") => {}
+            Component::Normal(_) | Component::CurDir | Component::ParentDir => {
+                return Err(LocalGitFailure::Operation);
+            }
+            Component::RootDir | Component::Prefix(_) => return Err(LocalGitFailure::Operation),
         }
     }
     Ok(())
@@ -195,11 +263,14 @@ pub(super) fn resolve_bounded_commit<'repository>(
     repository: &'repository Repository,
     authority: &PinnedRepository,
     revision: &str,
-) -> Result<git2::Commit<'repository>, LocalGitFailure> {
-    let mut oid = resolve_exact_revision_oid(authority, revision)?;
+) -> Result<(git2::Commit<'repository>, RevisionSnapshot), LocalGitFailure> {
+    let snapshot = RevisionSnapshot::capture(authority, revision)?;
+    let mut oid = snapshot.target;
     for _depth in 0..16 {
         match validate_object_header(repository, oid)? {
-            git2::ObjectType::Commit => return find_bounded_commit(repository, oid),
+            git2::ObjectType::Commit => {
+                return Ok((find_bounded_commit(repository, oid)?, snapshot));
+            }
             git2::ObjectType::Tag => {
                 oid = repository
                     .find_tag(oid)
@@ -216,12 +287,13 @@ pub(super) fn resolve_bounded_tree<'repository>(
     repository: &'repository Repository,
     authority: &PinnedRepository,
     revision: &str,
-) -> Result<git2::Tree<'repository>, LocalGitFailure> {
-    let mut oid = resolve_exact_revision_oid(authority, revision)?;
+) -> Result<(git2::Tree<'repository>, RevisionSnapshot), LocalGitFailure> {
+    let snapshot = RevisionSnapshot::capture(authority, revision)?;
+    let mut oid = snapshot.target;
     for _depth in 0..16 {
         match validate_object_header(repository, oid)? {
-            git2::ObjectType::Commit => return tree_for_commit(repository, oid),
-            git2::ObjectType::Tree => return find_bounded_tree(repository, oid),
+            git2::ObjectType::Commit => return Ok((tree_for_commit(repository, oid)?, snapshot)),
+            git2::ObjectType::Tree => return Ok((find_bounded_tree(repository, oid)?, snapshot)),
             git2::ObjectType::Tag => {
                 oid = repository
                     .find_tag(oid)
@@ -232,17 +304,6 @@ pub(super) fn resolve_bounded_tree<'repository>(
         }
     }
     Err(LocalGitFailure::Operation)
-}
-
-pub(super) fn resolve_exact_revision_oid(
-    authority: &PinnedRepository,
-    revision: &str,
-) -> Result<git2::Oid, LocalGitFailure> {
-    if let Ok(oid) = git2::Oid::from_str(revision) {
-        return Ok(oid);
-    }
-    let (_, target) = resolve_pinned_reference_chain_from(authority, revision, None)?;
-    target.ok_or(LocalGitFailure::Operation)
 }
 
 pub(super) fn bounded_text(value: &str, max_bytes: usize) -> (String, bool) {

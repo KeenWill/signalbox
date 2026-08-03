@@ -767,6 +767,10 @@ async fn insert_prepared_activation(
             AND candidate.origin_accepted_input_id = $7
             AND candidate.acceptance_position = $8
             AND candidate.state_kind = 'queued'
+            AND goal_turn_is_runtime_relevant(
+                candidate.session_id,
+                candidate.turn_id
+            )
             AND NOT EXISTS (
                 SELECT 1
                   FROM turn_lifecycle AS active

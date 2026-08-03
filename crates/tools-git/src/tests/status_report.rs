@@ -12,6 +12,7 @@ use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::LocalOperation;
 use crate::catalog::LocalGitTools;
+use crate::construction::LocalGitToolsConstructionError;
 use crate::limits::MAX_STATUS_PATH_BYTES;
 use crate::tests::support::{
     CHANGED_CONTENT, FIX_BRANCH, Fixture, RENAMED_TRACKED_PATH, TRACKED_PATH,
@@ -72,7 +73,7 @@ fn status_reports_the_symbolic_branch_selected_by_head() {
 }
 
 #[test]
-fn status_marks_non_utf8_symbolic_branch_identity_incomplete() {
+fn status_construction_rejects_a_non_utf8_symbolic_branch() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let reference_name = b"refs/heads/non-utf8-\xff";
@@ -85,13 +86,10 @@ fn status_marks_non_utf8_symbolic_branch_identity_incomplete() {
     repository
         .set_head_bytes(reference_name)
         .expect("non-UTF-8 fixture HEAD selects");
-    let executor = fixture.executor();
+    let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+        .expect_err("non-UTF-8 symbolic branch rejects");
 
-    let status = execute(&executor, LocalOperation::Status);
-
-    assert_eq!(status["branch"], "non-utf8-�");
-    assert_eq!(status["branch_truncated"], true);
-    assert_eq!(status["head"], fixture.initial.to_string());
+    assert!(matches!(error, LocalGitToolsConstructionError::Repository));
 }
 
 #[test]

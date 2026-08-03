@@ -6,7 +6,6 @@ use git2::Repository;
 use rustix::fs::{CWD, Mode, mkfifoat};
 
 use crate::arguments::{GitDiffArguments, LocalOperation};
-use crate::diff::diff;
 use crate::failure::LocalGitFailure;
 use crate::tests::planting::{over_budget_tree_commit, oversized_root_tree_commit};
 use crate::tests::support::{
@@ -45,25 +44,9 @@ fn revision_diff_rejects_a_fifo_reference_without_blocking() {
     let reference_path = fixture.root().join(".git").join(reference_name);
     mkfifoat(CWD, &reference_path, Mode::RUSR | Mode::WUSR)
         .expect("revision fixture FIFO constructs");
-    let repository = executor
-        .repository_authority
-        .repository()
-        .expect("pinned fixture repository opens");
+    let failure = executor.repository_authority.repository();
 
-    let failure = diff(
-        &repository,
-        &executor.repository_authority,
-        GitDiffArguments::Revisions {
-            base: fixture.initial.to_string(),
-            head: reference_name.to_owned(),
-        },
-        &executor.filesystem,
-        &executor.root,
-        Vec::new(),
-    )
-    .expect_err("FIFO revision rejects without libgit2 reopen");
-
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(matches!(failure, Err(LocalGitFailure::Repository)));
 }
 
 #[test]
@@ -164,5 +147,5 @@ fn revision_diff_rejects_an_oversized_root_tree_before_parsing() {
         }))
         .expect_err("oversized root tree rejects before parsing");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }

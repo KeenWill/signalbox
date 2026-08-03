@@ -1,8 +1,12 @@
-use std::{error::Error, fmt, io};
+use std::{
+    error::Error,
+    fmt, io,
+    path::{Path, PathBuf},
+};
 
 use signalbox_process_protocol::{
-    ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError,
-    RejectionDetail,
+    ConversationImportRejectionClass, ErrorCode, ErrorDetail, FailedModelCallCause,
+    FrameDecodeError, FrameEncodeError, GoalCommandRejection, RejectionDetail,
 };
 
 #[derive(Debug)]
@@ -10,6 +14,10 @@ pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
     SystemPromptFile(io::Error),
+    GoalTextFile {
+        path: PathBuf,
+        source: io::Error,
+    },
     ReviewInputFile(io::Error),
     ReviewInputJson(serde_json::Error),
     ReviewInputExceedsFrame,
@@ -52,6 +60,13 @@ impl ClientError {
         Self::SystemPromptFile(error)
     }
 
+    pub(crate) fn goal_text_file(path: &Path, source: io::Error) -> Self {
+        Self::GoalTextFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     pub(crate) fn review_input_file(error: io::Error) -> Self {
         Self::ReviewInputFile(error)
     }
@@ -73,6 +88,7 @@ impl ClientError {
             Self::Remote { .. }
             | Self::SourceFile(_)
             | Self::SystemPromptFile(_)
+            | Self::GoalTextFile { .. }
             | Self::ReviewInputFile(_)
             | Self::ReviewInputJson(_)
             | Self::ReviewInputExceedsFrame
@@ -108,6 +124,11 @@ impl fmt::Display for ClientError {
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
             }
+            Self::GoalTextFile { path, source } => write!(
+                formatter,
+                "the goal text file '{}' could not be read: {source}",
+                path.display()
+            ),
             Self::ReviewInputFile(_) => {
                 formatter.write_str("the review JSON input file could not be read")
             }
@@ -173,6 +194,7 @@ impl Error for ClientError {
             Self::Io(error)
             | Self::SourceFile(error)
             | Self::SystemPromptFile(error)
+            | Self::GoalTextFile { source: error, .. }
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
             Self::ReviewInputJson(error) => Some(error),
@@ -242,6 +264,20 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
     }
 }
 
+const fn goal_command_rejection_name(reason: GoalCommandRejection) -> &'static str {
+    match reason {
+        GoalCommandRejection::SessionNotFound => "session_not_found",
+        GoalCommandRejection::GoalAlreadyAttached => "goal_already_attached",
+        GoalCommandRejection::GoalNotAttached => "goal_not_attached",
+        GoalCommandRejection::UnknownModelAlias => "unknown_model_alias",
+        GoalCommandRejection::AcceptancePositionExhausted => "acceptance_position_exhausted",
+        GoalCommandRejection::RequiresBlocked => "requires_blocked",
+        GoalCommandRejection::RequiresPursuingOrBlocked => "requires_pursuing_or_blocked",
+        GoalCommandRejection::GenerationExhausted => "generation_exhausted",
+        GoalCommandRejection::EventOrdinalExhausted => "event_ordinal_exhausted",
+    }
+}
+
 struct RejectionDisplay(RejectionDetail);
 
 impl fmt::Display for RejectionDisplay {
@@ -250,6 +286,11 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::GoalCommandRejected { session_id, reason } => write!(
+                formatter,
+                "goal_command_rejected session={session_id} reason={}",
+                goal_command_rejection_name(reason)
+            ),
             RejectionDetail::ActiveTurnPresent {
                 session_id,
                 active_turn_id,
@@ -381,14 +422,96 @@ impl fmt::Display for RejectionDisplay {
                 requested_position.value(),
                 last_position.value()
             ),
+            RejectionDetail::ConversationImportAlreadyInProgress {} => {
+                formatter.write_str("conversation_import_already_in_progress")
+            }
+            RejectionDetail::ConversationImportNotInProgress {} => {
+                formatter.write_str("conversation_import_not_in_progress")
+            }
+            RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes,
+                declared_size_bytes,
+                actual_size_bytes: None,
+            } => write!(
+                formatter,
+                "conversation_import_source_too_large limit_bytes={} declared_size_bytes={}",
+                limit_bytes.value(),
+                declared_size_bytes.value()
+            ),
+            RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes,
+                declared_size_bytes,
+                actual_size_bytes: Some(actual_size_bytes),
+            } => write!(
+                formatter,
+                "conversation_import_source_too_large limit_bytes={} declared_size_bytes={} \
+                 actual_size_bytes={}",
+                limit_bytes.value(),
+                declared_size_bytes.value(),
+                actual_size_bytes.value()
+            ),
+            RejectionDetail::ConversationImportSourceSizeMismatch {
+                declared_size_bytes,
+                actual_size_bytes,
+            } => write!(
+                formatter,
+                "conversation_import_source_size_mismatch declared_size_bytes={} \
+                 actual_size_bytes={}",
+                declared_size_bytes.value(),
+                actual_size_bytes.value()
+            ),
+            RejectionDetail::ConversationImportConversionFailed {
+                class,
+                record_ordinal: None,
+            } => write!(
+                formatter,
+                "conversation_import_conversion_failed class={}",
+                conversation_import_rejection_class_name(class)
+            ),
+            RejectionDetail::ConversationImportConversionFailed {
+                class,
+                record_ordinal: Some(record_ordinal),
+            } => write!(
+                formatter,
+                "conversation_import_conversion_failed class={} record_ordinal={}",
+                conversation_import_rejection_class_name(class),
+                record_ordinal.value()
+            ),
         }
+    }
+}
+
+const fn conversation_import_rejection_class_name(
+    class: ConversationImportRejectionClass,
+) -> &'static str {
+    match class {
+        ConversationImportRejectionClass::EmptySource => "empty_source",
+        ConversationImportRejectionClass::BlankLine => "blank_line",
+        ConversationImportRejectionClass::InvalidUtf8 => "invalid_utf8",
+        ConversationImportRejectionClass::InvalidJson => "invalid_json",
+        ConversationImportRejectionClass::JsonDepthExceeded => "json_depth_exceeded",
+        ConversationImportRejectionClass::TopLevelNotObject => "top_level_not_object",
+        ConversationImportRejectionClass::InvalidRecordType => "invalid_record_type",
+        ConversationImportRejectionClass::InvalidSourceMetadata => "invalid_source_metadata",
+        ConversationImportRejectionClass::InvalidMessageEnvelope => "invalid_message_envelope",
+        ConversationImportRejectionClass::InvalidMessageRole => "invalid_message_role",
+        ConversationImportRejectionClass::MessageRoleMismatch => "message_role_mismatch",
+        ConversationImportRejectionClass::InvalidMessageContent => "invalid_message_content",
+        ConversationImportRejectionClass::InvalidContentBlock => "invalid_content_block",
+        ConversationImportRejectionClass::InvalidToolResultBlock => "invalid_tool_result_block",
+        ConversationImportRejectionClass::InvalidReasoning => "invalid_reasoning",
+        ConversationImportRejectionClass::InvalidToolCall => "invalid_tool_call",
+        ConversationImportRejectionClass::InvalidToolResult => "invalid_tool_result",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_process_protocol::{ErrorCode, ErrorDetail, FailedModelCallCause};
+    use signalbox_process_protocol::{
+        CanonicalU64, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
+        FailedModelCallCause, RejectionDetail,
+    };
 
     use super::ClientError;
 
@@ -398,6 +521,39 @@ mod tests {
             ClientError::TurnFailed(Some(FailedModelCallCause::QuotaExhausted)).to_string(),
             "the submitted turn failed: the provider quota is exhausted"
         );
+    }
+
+    #[test]
+    fn conversation_import_conversion_evidence_names_only_class_and_ordinal() {
+        let error = ClientError::remote(
+            ErrorCode::InvalidRequest,
+            "conversation import was rejected".to_owned(),
+            ErrorDetail::invalid_request(RejectionDetail::ConversationImportConversionFailed {
+                class: ConversationImportRejectionClass::InvalidToolResult,
+                record_ordinal: Some(CanonicalU64::new(17)),
+            }),
+        );
+
+        expect![[r#"
+            invalid_request: conversation import was rejected (conversation_import_conversion_failed class=invalid_tool_result record_ordinal=17)"#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn conversation_import_bound_evidence_names_limit_and_both_sizes() {
+        let error = ClientError::remote(
+            ErrorCode::InvalidRequest,
+            "conversation import was rejected".to_owned(),
+            ErrorDetail::invalid_request(RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes: CanonicalU64::new(8),
+                declared_size_bytes: CanonicalU64::new(7),
+                actual_size_bytes: Some(CanonicalU64::new(9)),
+            }),
+        );
+
+        expect![[r#"
+            invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
+        .assert_eq(&error.to_string());
     }
 
     #[test]

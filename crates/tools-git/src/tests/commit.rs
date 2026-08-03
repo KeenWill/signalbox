@@ -12,7 +12,7 @@ use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::{GitCommitArguments, GitStageArguments, LocalOperation};
 use crate::catalog::LocalGitTools;
-use crate::commit::{COMMIT_REFLOG_ACTION, commit, publish_commit_reference_with_hook};
+use crate::commit::{COMMIT_REFLOG_ACTION, commit, publish_commit_reference};
 use crate::failure::LocalGitFailure;
 use crate::pinning::PinnedObjectDatabase;
 use crate::reference_lock::ReferenceLock;
@@ -53,7 +53,7 @@ fn commit_preserves_message_with_injected_identity() {
 }
 
 #[test]
-fn repeated_commits_pack_only_objects_created_by_each_operation() {
+fn commit_rejects_an_unchanged_index_without_publishing_objects() {
     let fixture = Fixture::new();
     fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
     let executor = fixture.executor();
@@ -70,20 +70,16 @@ fn repeated_commits_pack_only_objects_created_by_each_operation() {
             message: MODEL_MESSAGE.to_owned(),
         }),
     );
-    execute(
-        &executor,
-        LocalOperation::Commit(GitCommitArguments {
+    let before = packed_object_counts(fixture.root());
+    let failure = executor
+        .execute_operation(LocalOperation::Commit(GitCommitArguments {
             message: INITIAL_MESSAGE.to_owned(),
-        }),
-    );
-    execute(
-        &executor,
-        LocalOperation::Commit(GitCommitArguments {
-            message: CHANGED_CONTENT.to_owned(),
-        }),
-    );
+        }))
+        .expect_err("unchanged index rejects an empty commit");
+    let after = packed_object_counts(fixture.root());
 
-    assert_eq!(packed_object_counts(fixture.root()), vec![1, 1, 1, 2]);
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(after, before);
 }
 
 #[test]
@@ -136,8 +132,11 @@ fn commit_revalidates_the_injected_root_before_reference_publication() {
             message: MODEL_MESSAGE.to_owned(),
         },
         &executor.repository_authority,
-        &persistent_object_database,
-        &object_database,
+        (
+            &persistent_object_database,
+            &object_database,
+            &pinned_objects,
+        ),
         || {
             fs::rename(&root, &retired).expect("original workspace retires");
             fs::create_dir(&root).expect("replacement workspace constructs");
@@ -451,7 +450,7 @@ fn commit_publishes_reflogs_while_the_target_reference_lock_is_held() {
         .signature()
         .expect("fixture signature constructs");
 
-    publish_commit_reference_with_hook(
+    publish_commit_reference(
         &executor.repository_authority,
         update_lock,
         update_reference,
@@ -474,6 +473,7 @@ fn commit_publishes_reflogs_while_the_target_reference_lock_is_held() {
                     .expect("published branch reflog reads")
                     .contains(&new.to_string())
             );
+            Ok(())
         },
     )
     .expect("fixture reference and reflogs publish");

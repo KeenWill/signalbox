@@ -177,6 +177,10 @@ GITHUB_CREDENTIAL="$TEMPORARY_ROOT/github-token"
 cat >"$MODEL_CONFIGURATION" <<'EOF'
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"

@@ -7,11 +7,11 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    AcceptedInputId, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
-    DecideToolRequest, EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities,
-    ModelCallId, PreparedDecideToolRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
-    SessionId, ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptId, ToolBatch,
-    ToolEffectClass, ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
+    AcceptedInputId, CorrelatedToolAttemptObservation, CurrentToolAttempt, DecideToolRequest,
+    EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId,
+    PreparedDecideToolRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptId, ToolBatch,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
 };
 
 use crate::ClassifyOperatorFailure;
@@ -69,12 +69,16 @@ impl ResolvedToolConversationEntry {
 }
 
 /// Authoritative reread after an ambiguous attempt-authorization commit.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the rare in-flight reread owns its complete sealed dispatch authority"
+)]
 #[derive(Debug, Eq, PartialEq)]
 pub enum ToolAttemptAuthorizationStatus {
     /// Authorization did not commit; the exact attempt remains prepared.
     Prepared(CurrentToolAttempt),
     /// Authorization committed; this exact fence may enter the executor.
-    InFlight(AuthorizedToolAttempt),
+    InFlight(ToolDispatchAuthority),
 }
 
 /// Transaction consuming one user decision and advancing the exact wait.
@@ -232,7 +236,7 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
 
     /// Rereads whether an ambiguously acknowledged authorization committed.
     fn reread_ambiguous_authorization(

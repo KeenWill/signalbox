@@ -6,7 +6,7 @@ use std::{
 };
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as _};
 
 use crate::limits::{
     DEFAULT_LOG_ENTRIES, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
@@ -24,12 +24,14 @@ pub struct GitStatusArguments {}
 pub enum GitDiffArguments {
     /// Includes both staged and unstaged worktree changes against HEAD.
     Worktree,
-    /// Compares the trees named by two revisions.
+    /// Compares trees named by exact revision identifiers.
     Revisions {
-        /// Older revision expression.
+        /// Older `HEAD`, full `refs/...` name, or full object ID.
+        #[serde(deserialize_with = "deserialize_revision")]
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         base: String,
-        /// Newer revision expression.
+        /// Newer `HEAD`, full `refs/...` name, or full object ID.
+        #[serde(deserialize_with = "deserialize_revision")]
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         head: String,
     },
@@ -47,14 +49,31 @@ pub(super) fn default_log_entries() -> usize {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitLogArguments {
-    /// Revision expression at which traversal starts.
-    #[serde(default = "default_log_revision")]
+    /// Starting `HEAD`, full `refs/...` name, or full object ID.
+    #[serde(
+        default = "default_log_revision",
+        deserialize_with = "deserialize_revision"
+    )]
     #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
     pub(super) revision: String,
     /// Maximum commits returned.
-    #[serde(default = "default_log_entries")]
+    #[serde(
+        default = "default_log_entries",
+        deserialize_with = "deserialize_log_entries"
+    )]
     #[schemars(range(min = 1, max = MAX_LOG_ENTRIES))]
     pub(super) max_entries: usize,
+}
+
+fn deserialize_log_entries<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let max_entries = usize::deserialize(deserializer)?;
+    if !(1..=MAX_LOG_ENTRIES).contains(&max_entries) {
+        return Err(D::Error::custom("invalid bounded log entry count"));
+    }
+    Ok(max_entries)
 }
 
 /// Exact root-relative paths to stage.
@@ -62,8 +81,20 @@ pub struct GitLogArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitStageArguments {
     /// Files to add, update, or remove from the index.
+    #[serde(deserialize_with = "deserialize_stage_paths")]
     #[schemars(length(min = 1, max = MAX_STAGE_PATHS))]
     pub(super) paths: Vec<String>,
+}
+
+fn deserialize_stage_paths<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let paths = Vec::<String>::deserialize(deserializer)?;
+    if paths.is_empty() || paths.len() > MAX_STAGE_PATHS {
+        return Err(D::Error::custom("invalid bounded stage path count"));
+    }
+    Ok(paths)
 }
 
 /// Verbatim commit-message arguments.
@@ -71,8 +102,23 @@ pub struct GitStageArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitCommitArguments {
     /// Exact commit message, interpreted only as UTF-8 data.
-    #[schemars(length(max = MAX_COMMIT_MESSAGE_BYTES))]
+    #[serde(deserialize_with = "deserialize_commit_message")]
+    #[schemars(length(min = 1, max = MAX_COMMIT_MESSAGE_BYTES))]
     pub(super) message: String,
+}
+
+fn deserialize_commit_message<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let message = String::deserialize(deserializer)?;
+    if message.is_empty()
+        || message.len() > MAX_COMMIT_MESSAGE_BYTES
+        || message.as_bytes().contains(&0)
+    {
+        return Err(D::Error::custom("invalid bounded commit message"));
+    }
+    Ok(message)
 }
 
 /// Local branch creation arguments.
@@ -80,9 +126,11 @@ pub struct GitCommitArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitBranchCreateArguments {
     /// New local branch shorthand.
+    #[serde(deserialize_with = "deserialize_branch_name")]
     #[schemars(length(min = 1, max = MAX_BRANCH_BYTES))]
     pub(super) name: String,
-    /// Revision resolving to the branch's initial commit.
+    /// Initial `HEAD`, full `refs/...` name, or full object ID.
+    #[serde(deserialize_with = "deserialize_revision")]
     #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
     pub(super) start: String,
 }
@@ -92,8 +140,42 @@ pub struct GitBranchCreateArguments {
 #[serde(deny_unknown_fields)]
 pub struct GitBranchSwitchArguments {
     /// Existing local branch shorthand.
+    #[serde(deserialize_with = "deserialize_branch_name")]
     #[schemars(length(min = 1, max = MAX_BRANCH_BYTES))]
     pub(super) name: String,
+}
+
+fn deserialize_revision<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_string(deserializer, MAX_REVISION_BYTES, "invalid bounded revision")
+}
+
+fn deserialize_branch_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_bounded_string(
+        deserializer,
+        MAX_BRANCH_BYTES,
+        "invalid bounded branch name",
+    )
+}
+
+fn deserialize_bounded_string<'de, D>(
+    deserializer: D,
+    max_bytes: usize,
+    error: &'static str,
+) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || value.len() > max_bytes || value.as_bytes().contains(&0) {
+        return Err(D::Error::custom(error));
+    }
+    Ok(value)
 }
 
 #[derive(Debug)]
@@ -125,8 +207,11 @@ pub(super) fn checked_relative_path(value: &str) -> Result<PathBuf, InvalidGitAr
             }
         }
     }
-    let first = normalized.components().next().ok_or(InvalidGitArguments)?;
-    if is_repository_administration_component(first) {
+    if normalized.as_os_str().is_empty()
+        || normalized
+            .components()
+            .any(is_repository_administration_component)
+    {
         return Err(InvalidGitArguments);
     }
     Ok(normalized)

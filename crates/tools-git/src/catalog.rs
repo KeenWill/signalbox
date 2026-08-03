@@ -11,7 +11,6 @@ use signalbox_tools_workspace::{LocalWorkspaceFileSystem, WorkspaceFileSystem, W
 use crate::construction::LocalGitToolsConstructionError;
 use crate::contracts::{LocalToolKind, kind_for_name};
 use crate::decode::{GitArgumentValidator, decode_operation};
-use crate::descriptor::FileIdentity;
 use crate::executor::{LocalGitExecutor, LocalGitExecutorError};
 use crate::failure::LocalGitFailure;
 use crate::identity::GitIdentity;
@@ -44,21 +43,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
         let supplied_root = root_path.as_ref();
         let root_path = fs::canonicalize(supplied_root)
             .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        let repository_identity = validate_repository_layout(&root_path)?;
         let root = WorkspaceRoot::try_new(&filesystem, supplied_root)
             .map_err(LocalGitToolsConstructionError::Root)?;
-        let opened_identity = root
-            .identity()
-            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        if (FileIdentity {
-            device: opened_identity.device(),
-            inode: opened_identity.inode(),
-        }) != repository_identity.root
-        {
-            return Err(LocalGitToolsConstructionError::Repository);
-        }
+        let repository_identity = validate_repository_layout(&root_path, root.identity())?;
         let repository_authority = PinnedRepository::open(&root_path, repository_identity)?;
-        let identity_after_root_open = validate_repository_layout(&root_path)?;
+        let identity_after_root_open = validate_repository_layout(&root_path, root.identity())?;
         if identity_after_root_open != repository_identity {
             return Err(LocalGitToolsConstructionError::Repository);
         }

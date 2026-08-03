@@ -158,7 +158,7 @@ fn fifo_repository_config_is_rejected_without_blocking() {
 }
 
 #[test]
-fn pinned_config_never_opens_replacement_fifo() {
+fn pinned_config_rejects_a_live_replacement_fifo_without_opening_it() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
     let config_path = fixture.root().join(".git/config");
@@ -170,7 +170,7 @@ fn pinned_config_never_opens_replacement_fifo() {
     let opened_without_wait =
         repository_uses_pinned_config_without_fifo_wait(executor, config_path);
 
-    assert!(opened_without_wait);
+    assert!(!opened_without_wait);
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn executor_rejects_replacement_at_the_injected_root_path() {
 }
 
 #[test]
-fn pinned_repository_uses_portable_dev_fd_alias() {
+fn pinned_repository_shell_uses_portable_dev_fd_alias() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
     let repository = executor
@@ -270,10 +270,8 @@ fn pinned_repository_uses_portable_dev_fd_alias() {
             .git_path("HEAD")
             .starts_with("/dev/fd/")
     );
-    assert_eq!(
-        repository.head().expect("HEAD exists").target(),
-        Some(fixture.initial)
-    );
+    assert!(repository.is_bare());
+    assert!(repository.head().is_err());
 }
 
 #[test]

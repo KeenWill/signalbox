@@ -12,13 +12,14 @@ use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 use crate::arguments::{GitBranchCreateArguments, LocalOperation};
 use crate::branch::{branch_create, create_loose_branch_reference_with_hook};
 use crate::catalog::LocalGitTools;
+use crate::construction::LocalGitToolsConstructionError;
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_WORKTREE_INSPECTIONS;
 use crate::pinning::PinnedObjectDatabase;
 use crate::reference_read::read_pinned_reference;
 use crate::tests::support::{
     FIX_BRANCH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, TRACKED_PATH, commit_all, execute,
-    identity, plant_linear_history, raw_commit_with_tree,
+    identity, plant_linear_history,
 };
 
 #[test]
@@ -49,84 +50,18 @@ fn branch_create_writes_real_non_forced_reference() {
 }
 
 #[test]
-fn branch_create_persists_pruned_ancestry_across_a_removed_shallow_boundary() {
+fn branch_create_rejects_nonempty_shallow_state() {
     let fixture = Fixture::new();
-    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
-    let tree = repository
-        .find_commit(fixture.initial)
-        .expect("fixture initial commit opens")
-        .tree_id();
-    let parent = raw_commit_with_tree(&repository, tree, fixture.initial);
-    let target = raw_commit_with_tree(&repository, tree, parent);
-    let executor = fixture.executor();
-    let pinned_objects =
-        PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
-    let object_database = Odb::new().expect("fixture object database constructs");
-    pinned_objects
-        .add_to(&object_database)
-        .expect("pinned objects attach");
-    let pinned_repository = executor
-        .repository_authority
-        .repository()
-        .expect("pinned fixture repository opens");
-    pinned_repository
-        .set_odb(&object_database)
-        .expect("pinned object database installs");
-    let target_text = target.to_string();
-    let parent_text = parent.to_string();
-    let loose_target = fixture
-        .root()
-        .join(".git/objects")
-        .join(&target_text[..2])
-        .join(&target_text[2..]);
-    let loose_parent = fixture
-        .root()
-        .join(".git/objects")
-        .join(&parent_text[..2])
-        .join(&parent_text[2..]);
-    fs::remove_file(loose_target).expect("live target object prunes");
-    fs::remove_file(loose_parent).expect("live parent object prunes");
-    let shallow = fixture.root().join(".git/shallow");
-    fs::write(&shallow, format!("{target}\n")).expect("temporary shallow boundary writes");
-
-    branch_create(
-        &pinned_repository,
-        &executor.repository_authority,
-        &object_database,
-        GitBranchCreateArguments {
-            name: FIX_BRANCH.to_owned(),
-            start: target_text,
-        },
-        || {
-            fs::remove_file(&shallow).expect("temporary shallow boundary removes");
-            Ok(())
-        },
+    fs::write(
+        fixture.root().join(".git/shallow"),
+        format!("{}\n", fixture.initial),
     )
-    .expect("captured target persists before branch publication");
-    drop(pinned_repository);
-    let live_repository = Repository::open(fixture.root()).expect("live fixture repository opens");
+    .expect("shallow boundary writes");
 
-    assert_eq!(
-        live_repository
-            .find_reference("refs/heads/agent/fix")
-            .expect("created branch exists")
-            .target(),
-        Some(target)
-    );
-    assert_eq!(
-        live_repository
-            .find_commit(target)
-            .expect("published target remains live")
-            .tree_id(),
-        tree
-    );
-    assert_eq!(
-        live_repository
-            .find_commit(parent)
-            .expect("published target parent remains live")
-            .tree_id(),
-        tree
-    );
+    let error = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+        .expect_err("nonempty shallow state rejects");
+
+    assert!(matches!(error, LocalGitToolsConstructionError::Repository));
 }
 
 #[test]
@@ -172,6 +107,7 @@ fn branch_create_rejects_an_alternates_fifo_planted_after_object_pinning() {
         &repository,
         &executor.repository_authority,
         &object_database,
+        &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
             start: fixture.initial.to_string(),
@@ -196,27 +132,9 @@ fn branch_create_rejects_a_replaced_refs_hierarchy() {
         .expect("outside refs hierarchy constructs");
     symlink(outside.path(), fixture.root().join(".git/refs"))
         .expect("replacement refs symlink constructs");
-    let repository = executor
-        .repository_authority
-        .repository()
-        .expect("pinned fixture repository opens");
-    let object_database = repository
-        .odb()
-        .expect("fixture object database opens before replacement");
+    let failure = executor.repository_authority.repository();
 
-    let failure = branch_create(
-        &repository,
-        &executor.repository_authority,
-        &object_database,
-        GitBranchCreateArguments {
-            name: FIX_BRANCH.to_owned(),
-            start: fixture.initial.to_string(),
-        },
-        || Ok(()),
-    )
-    .expect_err("replaced refs hierarchy rejects");
-
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(matches!(failure, Err(LocalGitFailure::Repository)));
     assert!(!outside.path().join("heads/agent/fix").exists());
 }
 
@@ -240,11 +158,14 @@ fn branch_create_revalidates_the_injected_root_before_publication() {
     let object_database = repository
         .odb()
         .expect("original object database opens before replacement");
+    let pinned_objects =
+        PinnedObjectDatabase::capture(&executor.repository_authority).expect("fixture objects pin");
 
     let failure = branch_create(
         &repository,
         &executor.repository_authority,
         &object_database,
+        &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
             start: initial.to_string(),
@@ -258,7 +179,7 @@ fn branch_create_revalidates_the_injected_root_before_publication() {
     )
     .expect_err("replaced root rejects branch publication");
 
-    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(failure, LocalGitFailure::Operation);
     assert!(!retired.join(".git/refs/heads/agent/fix").exists());
     assert!(!root.join(".git/refs/heads/agent/fix").exists());
 }

@@ -1909,6 +1909,40 @@ async fn omitted_cache_counters_remain_unreported() {
     );
 }
 
+#[tokio::test]
+async fn partial_usage_records_only_the_axes_codex_reports() {
+    let result = execute_scenario(
+        "usage_partial_axes",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).usage,
+        TokenUsage {
+            input_tokens: None,
+            output_tokens: Some(fixtures::OUTPUT_TOKENS),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(fixtures::CACHE_READ_INPUT_TOKENS),
+        }
+    );
+}
+
+#[tokio::test]
+async fn total_only_usage_does_not_invent_axis_counts() {
+    let result = execute_scenario(
+        "usage_total_only",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(completed(&result.evidence).usage, TokenUsage::unreported());
+}
+
 /// INV-025, INV-026: pre-dispatch cancellation performs no process spawn.
 #[tokio::test]
 async fn cancellation_before_spawn_is_proven_unsent() {

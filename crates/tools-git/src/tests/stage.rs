@@ -191,7 +191,7 @@ fn stage_rejects_an_index_over_the_entry_budget_before_staging() {
         }))
         .expect_err("oversized index rejects staging");
 
-    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(failure, LocalGitFailure::Repository);
 }
 
 #[test]

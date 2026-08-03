@@ -271,14 +271,14 @@ fn status_rejects_oversized_loose_ref_before_libgit2_parsing() {
 }
 
 #[test]
-fn status_parses_bound_index_snapshot_after_path_replacement() {
+fn status_rejects_a_live_index_replacement_after_binding_its_snapshot() {
     let fixture = Fixture::new();
     let executor = fixture.executor();
     let index_path = fixture.root().join(".git/index");
 
     let completed = status_uses_bound_index_without_fifo_wait(executor, index_path);
 
-    assert!(completed);
+    assert!(!completed);
 }
 
 #[test]

@@ -5,6 +5,7 @@ use std::{fs, os::unix::fs::symlink, path::Path};
 use git2::Repository;
 
 use crate::arguments::{GitDiffArguments, LocalOperation};
+use crate::failure::LocalGitFailure;
 use crate::limits::INDEX_ASSUME_VALID;
 use crate::tests::support::{
     CHANGED_CONTENT, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, MODEL_MESSAGE, SUBMODULE_PATH,
@@ -60,7 +61,7 @@ fn status_and_worktree_diff_preserve_an_assume_unchanged_staged_edit() {
 }
 
 #[test]
-fn worktree_diff_ignores_submodule_repository_outside_root() {
+fn worktree_diff_rejects_submodule_repository_outside_root() {
     let fixture = Fixture::new();
     let outside = tempfile::tempdir().expect("outside repository root constructs");
     let outside_repository =
@@ -82,10 +83,11 @@ fn worktree_diff_ignores_submodule_repository_outside_root() {
         .expect("outside fixture change writes");
     let executor = fixture.executor();
 
-    let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+    let failure = executor
+        .execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree))
+        .expect_err("external submodule repository rejects");
 
-    assert_eq!(diff["patch"], "");
-    assert_eq!(diff["truncated"], false);
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]

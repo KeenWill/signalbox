@@ -434,6 +434,14 @@ mod tests {
             session_id(2),
             version(1),
             SessionConfigurationDefaults::new(direct(3)),
+            signalbox_domain::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session_id(2),
+                current_pointer_version: signalbox_domain::SessionPlacementVersion::INITIAL,
+                selected_event_session: session_id(2),
+                selected_event: signalbox_domain::VersionedSessionPlacement::initial(
+                    signalbox_domain::SessionPlacement::pathless(),
+                ),
+            },
         )
         .reconstitute()
         .expect("test facts form one complete current session")
