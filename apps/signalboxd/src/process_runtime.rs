@@ -1096,10 +1096,12 @@ where
                 writer,
                 version,
                 request_id,
-                command_id.into_uuid(),
-                initial_model_selection,
-                model_settings,
-                system_prompt,
+                WireCreateSessionRequest {
+                    command_uuid: command_id.into_uuid(),
+                    initial_model_selection,
+                    model_settings,
+                    system_prompt,
+                },
                 services,
             )
             .await
@@ -6255,20 +6257,24 @@ const fn wire_imported_speaker_attestation(
     }
 }
 
+struct WireCreateSessionRequest {
+    command_uuid: uuid::Uuid,
+    initial_model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
+    system_prompt: SystemPromptMember,
+}
+
 async fn handle_create_session<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    command_id: uuid::Uuid,
-    initial_model_selection: WireModelSelection,
-    model_settings: WireModelSettingsOverlay,
-    system_prompt: SystemPromptMember,
+    wire_request: WireCreateSessionRequest,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+    let Ok(system_prompt) = domain_system_prompt(wire_request.system_prompt) else {
         return write_error(
             writer,
             version,
@@ -6277,11 +6283,11 @@ where
         )
         .await;
     };
-    let model_selection = domain_model_selection(initial_model_selection);
+    let model_selection = domain_model_selection(wire_request.initial_model_selection);
     let model_settings = match validate_session_model_settings(
         services.model_configuration.as_ref(),
         model_selection,
-        model_settings,
+        wire_request.model_settings,
     ) {
         Ok(settings) => settings,
         Err(error) => {
@@ -6295,7 +6301,7 @@ where
         }
     };
     let request = CreateSessionRequest::try_new(
-        DurableCommandId::from_uuid(command_id),
+        DurableCommandId::from_uuid(wire_request.command_uuid),
         SessionConfigurationDefaults::complete_with_model_settings(
             model_selection,
             DangerousToolAutoApproval::Disabled,
