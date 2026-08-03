@@ -464,7 +464,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return try semanticRecord(
         message,
         event: .processModelIdentity(
-          SignalboxProcessModelIdentityEvent(
+          try SignalboxProcessModelIdentityEvent(
             turnID: turnID,
             defaultsVersion: defaultsVersion,
             selectedModelID: selectedModelID

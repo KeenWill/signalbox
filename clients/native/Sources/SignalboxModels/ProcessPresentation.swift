@@ -474,7 +474,15 @@ public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
     turnID: SignalboxCanonicalUUID,
     defaultsVersion: SignalboxCanonicalUInt64,
     selectedModelID: SignalboxCanonicalUUID
-  ) {
+  ) throws {
+    guard defaultsVersion.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: [],
+          debugDescription: "Model-identity defaults version must be positive."
+        )
+      )
+    }
     self.kind = "process_model_identity"
     self.turnID = turnID
     self.defaultsVersion = defaultsVersion
@@ -488,6 +496,26 @@ public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
     case selectedModelID = "selected_model_id"
   }
 
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_model_identity" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not model-identity evidence."
+      )
+    }
+    try self.init(
+      turnID: container.decode(SignalboxCanonicalUUID.self, forKey: .turnID),
+      defaultsVersion: container.decode(
+        SignalboxCanonicalUInt64.self,
+        forKey: .defaultsVersion
+      ),
+      selectedModelID: container.decode(SignalboxCanonicalUUID.self, forKey: .selectedModelID)
+    )
+  }
+
   init(closedFrom decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     try payload.rejectUnadmittedFields(
@@ -495,14 +523,6 @@ public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
       decoder: decoder
     )
     self = try Self(from: decoder)
-    guard defaultsVersion.rawValue > 0 else {
-      throw DecodingError.dataCorrupted(
-        .init(
-          codingPath: decoder.codingPath,
-          debugDescription: "Model-identity defaults version must be positive."
-        )
-      )
-    }
   }
 }
 

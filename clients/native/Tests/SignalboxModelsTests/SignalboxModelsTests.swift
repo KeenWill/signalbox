@@ -302,6 +302,34 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testProcessModelIdentityInitializerRejectsZeroDefaultsVersion() throws {
+        let turnID = try SignalboxCanonicalUUID(validating: Self.storedTurnID)
+        let selectedModelID = try SignalboxCanonicalUUID(validating: Self.storedModelCallID)
+
+        XCTAssertThrowsError(
+            try SignalboxProcessModelIdentityEvent(
+                turnID: turnID,
+                defaultsVersion: SignalboxCanonicalUInt64(
+                    rawValue: Self.zeroDefaultsVersionValue
+                ),
+                selectedModelID: selectedModelID
+            )
+        )
+    }
+
+    func testProcessModelIdentityDirectDecodeRejectsZeroDefaultsVersion() {
+        let data = Data(
+            #"{"kind":"process_model_identity","turn_id":"\#(Self.storedTurnID)","defaults_version":"\#(Self.zeroDefaultsVersion)","selected_model_id":"\#(Self.storedModelCallID)"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try SignalboxJSONCoding.decoder().decode(
+                SignalboxProcessModelIdentityEvent.self,
+                from: data
+            )
+        )
+    }
+
     func testInconsistentImportedAttributionDegradesToPayloadPreservingUnknown() throws {
         let data = Data(
             #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_message","role":"assistant","text":"Fixture text","source_attribution":"\#(Self.importedUserAttribution)"}}"#.utf8
@@ -401,7 +429,8 @@ final class SignalboxModelsTests: XCTestCase {
     private static let unknownUsageProvenance = "fixture_future_provenance"
     private static let storedUsageCostAmount = "0.01"
     private static let storedUsageCostLabel = "real"
-    private static let zeroDefaultsVersion = "0"
+    private static let zeroDefaultsVersionValue: UInt64 = 0
+    private static let zeroDefaultsVersion = zeroDefaultsVersionValue.description
     private static let importedUserAttribution = "imported_user_role"
     private static let importedSpeakerAbsentAttribution = "imported_speaker_absent"
     private static let futureSpeakerKind = "fixture_future_speaker"
