@@ -58,6 +58,10 @@ use signalbox_process_protocol::{
     InputDelivery, ProtocolVersion, RequestId, ServerMessage, ToolDecision, decode_server_line,
     encode_client_line,
 };
+use signalbox_tools_web::{
+    WEB_FETCH_NAME, WEB_SEARCH_NAME, WebSearchRequest, WebSearchTransport,
+    WebSearchTransportFailure, WebSearchTransportOutcome,
+};
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
     CHANGE_REQUEST_CI_JOB_LOG_NAME, CHANGE_REQUEST_COMMENT_NAME,
@@ -73,18 +77,18 @@ use signalboxd::{
     ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
     GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
     HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
-    LocalWorkspaceFileSystem, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
-    PostgresConversationIntrospection, PostgresProviderModelExecution,
-    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
-    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
-    ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose, ReviewThread,
-    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
-    SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
-    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
-    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
-    WebFetchTransport, WebFetchTransportFailure,
+    LocalWorkspaceFileSystem, MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME,
+    PULL_REQUEST_PUBLISH_REVIEW_NAME, PostgresConversationIntrospection,
+    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
+    ProcessRuntime, READ_FILE_NAME, REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME,
+    RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult,
+    ReviewGatePurpose, ReviewThread, ReviewThreadComment, ReviewThreadFields,
+    ReviewThreadInventoryFields, ReviewThreadInventoryItem, ReviewThreadResolution,
+    ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus,
+    SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields,
+    StackStateResult, ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult,
+    TranscriptPage, WRITE_FILE_NAME, WebFetchBodyCompleteness, WebFetchEgressPolicy,
+    WebFetchRequest, WebFetchResponse, WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -762,13 +766,15 @@ fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 37);
+    assert_eq!(names.len(), 38);
     assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
     assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
     assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
     assert!(names.contains(&READ_FILE_NAME));
     assert!(names.contains(&WRITE_FILE_NAME));
     assert!(names.contains(&signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME));
+    assert!(names.contains(&WEB_FETCH_NAME));
+    assert!(names.contains(&WEB_SEARCH_NAME));
 }
 
 fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
@@ -1007,6 +1013,19 @@ impl WebFetchTransport for OfflineWebTransport {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct UnusedWebSearchTransport;
+
+impl WebSearchTransport for UnusedWebSearchTransport {
+    async fn search(
+        &mut self,
+        _request: WebSearchRequest,
+        credential: &CredentialValue,
+    ) -> WebSearchTransportOutcome {
+        WebSearchTransportOutcome::failed(WebSearchTransportFailure::RequestFailed, credential)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct OfflineCodeHostCredentials;
 
 impl CredentialAccess for OfflineCodeHostCredentials {
@@ -1076,6 +1095,7 @@ impl ConversationIntrospectionPort for UnusedConversationPort {
 type OfflineDaemonTools<Writer, HostTransport> = DaemonTools<
     fn() -> SystemTime,
     OfflineWebTransport,
+    UnusedWebSearchTransport,
     Writer,
     OfflineCodeHostCredentials,
     HostTransport,
@@ -1098,10 +1118,14 @@ fn offline_daemon_tools<Writer, HostTransport>(
     DaemonTools::try_new(
         epoch as fn() -> SystemTime,
         web,
+        MappedDaemonCredentialInputs {
+            web_search: OfflineCodeHostCredentials,
+            code_host: OfflineCodeHostCredentials,
+            github: OfflineCodeHostCredentials,
+        },
+        UnusedWebSearchTransport,
         writer,
-        OfflineCodeHostCredentials,
         code_host,
-        OfflineCodeHostCredentials,
         UnusedGitHubTransport,
         GitHubEgressPolicy::github_api_only(),
         LocalWorkspaceFileSystem,
@@ -1177,6 +1201,7 @@ impl GitHubTransport for RecordingGitHubTransport {
 type CommissionedDaemonTools<HostTransport, GitHubTransportType> = DaemonTools<
     fn() -> SystemTime,
     OfflineWebTransport,
+    UnusedWebSearchTransport,
     UnusedSessionStatusWriter,
     OfflineCodeHostCredentials,
     HostTransport,
@@ -1199,10 +1224,14 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
     DaemonTools::try_new(
         epoch as fn() -> SystemTime,
         OfflineWebTransport::unused(),
+        MappedDaemonCredentialInputs {
+            web_search: OfflineCodeHostCredentials,
+            code_host: OfflineCodeHostCredentials,
+            github: OfflineCodeHostCredentials,
+        },
+        UnusedWebSearchTransport,
         UnusedSessionStatusWriter,
-        OfflineCodeHostCredentials,
         code_host,
-        OfflineCodeHostCredentials,
         github,
         GitHubEgressPolicy::github_api_only(),
         LocalWorkspaceFileSystem,
@@ -2308,7 +2337,7 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
     let arguments = serde_json::json!({"url": expected_url}).to_string();
     let (execution, runtime) = fixture.execution(
         [
-            tool_use_script(&[("web_fetch", arguments.as_str())]),
+            tool_use_script(&[(WEB_FETCH_NAME, arguments.as_str())]),
             completion_script("fetch observed"),
         ],
         tool_catalog,
@@ -2319,6 +2348,10 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
+    fixture
+        .decide(request, ToolApprovalDecision::Approve)
+        .await?;
+    execution.resume_active(fixture.session).await?;
     let fetched = web.requests();
     let [physical_request] = fetched.as_slice() else {
         panic!("one physical fetch crosses the injected transport")
@@ -2337,7 +2370,7 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
     assert_eq!(
         continuation_tool_exchange(&runtime)?,
         vec![
-            expected_tool_call(request, "web_fetch", &arguments),
+            expected_tool_call(request, WEB_FETCH_NAME, &arguments),
             expected_successful_tool_result(request, expected_result),
         ]
     );
