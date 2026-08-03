@@ -137,11 +137,12 @@ pub use model_execution::{
 };
 pub use model_settings::{
     AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
-    EffectiveModelSettings, FastMode, FastModeSupport, ModelCapabilities, ModelCapabilityCatalog,
-    ModelCapabilityCatalogError, ModelCapabilityDefinition, ModelChangeAdjustment,
-    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
-    ReasoningLevel, ResolvedModelSettings, ServiceTier, SessionModelSettingsChanged,
-    SettingOverlay, TurnModelSettingsResolved, UnsupportedModelSetting, ValidatedModelSettings,
+    EffectiveModelSettings, FastMode, FastModeOverlay, FastModeSupport, ModelCapabilities,
+    ModelCapabilityCatalog, ModelCapabilityCatalogError, ModelCapabilityDefinition,
+    ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+    OpenAiServiceTier, ReasoningLevel, ResolvedModelSettings, ServiceTier,
+    SessionModelSettingsChanged, SettingOverlay, TurnModelSettingsResolved,
+    UnsupportedModelSetting, ValidatedModelSettings,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
