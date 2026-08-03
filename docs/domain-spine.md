@@ -4637,6 +4637,18 @@ impl ReconstitutedReplaceSessionMetadata {
 }
 ```
 
+## application: approval_judge
+
+```rust
+pub trait ApprovalJudgeAuthorization {
+    fn request(&self) -> &ToolRequest;
+    fn call(&self) -> ModelCallId;
+    fn selection(&self) -> DirectModelSelection;
+    fn target(&self) -> ResolvedProviderTarget;
+    fn credential_reference(&self) -> &str;
+}
+```
+
 ## application: conversation_import
 
 ```rust
@@ -8820,6 +8832,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
 | **signalbox-domain total**                         | **711 (+7 free fn)** |
+| application: approval_judge                        | 1 (incl. 1 trait)    |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
@@ -8838,4 +8851,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **200**              |
+| **signalbox-application total**                    | **201**              |

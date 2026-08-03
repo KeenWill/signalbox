@@ -1,7 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs,
-    io::Write,
+    io::{Read, Seek, Write},
     os::unix::fs::PermissionsExt,
     path::{Component, Path},
 };
@@ -13,7 +13,9 @@ use crate::arguments::GitBranchCreateArguments;
 use crate::bounded::{
     find_bounded_commit, find_bounded_tree, resolve_bounded_commit, validate_tree_discovery,
 };
-use crate::descriptor::{descriptor_path_from_fd, file_identity};
+use crate::descriptor::{
+    FileIdentity, descriptor_path_from_fd, file_identity, file_snapshot_identity,
+};
 use crate::failure::LocalGitFailure;
 use crate::layout::valid_reference_name;
 use crate::limits::MAX_REFERENCE_BYTES;
@@ -139,17 +141,19 @@ where
     let lock = openat(
         &directory,
         &lock_name,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         file_mode,
     )
     .map_err(|_| LocalGitFailure::Operation)?;
     let mut lock = fs::File::from(lock);
     let identity = file_identity(&lock.metadata().map_err(|_| LocalGitFailure::Operation)?);
     let lock_path = descriptor_path_from_fd(&directory).join(&lock_name);
+    let expected_lock = format!("{target}\n").into_bytes();
     let outcome = (|| {
         lock.set_permissions(fs::Permissions::from_mode(file_mode.bits()))
             .map_err(|_| LocalGitFailure::Operation)?;
-        writeln!(lock, "{target}").map_err(|_| LocalGitFailure::Operation)?;
+        lock.write_all(&expected_lock)
+            .map_err(|_| LocalGitFailure::Operation)?;
         lock.sync_all().map_err(|_| LocalGitFailure::Operation)?;
         post_write();
         let reference_name = format!("refs/heads/{branch}");
@@ -168,6 +172,9 @@ where
         }
         validate_root_before_publish()?;
         validate_live_branch_target(authority, target)?;
+        if !branch_lock_matches(&mut lock, identity, &expected_lock) {
+            return Err(LocalGitFailure::Operation);
+        }
         renameat_with(
             &directory,
             &lock_name,
@@ -188,7 +195,8 @@ where
     })();
     let still_owned = fs::symlink_metadata(&lock_path)
         .map(|metadata| file_identity(&metadata) == identity)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && branch_lock_matches(&mut lock, identity, &expected_lock);
     if outcome.is_err() && still_owned {
         let _ = unlinkat(&directory, &lock_name, AtFlags::empty());
     }
@@ -196,6 +204,35 @@ where
         created_directories.keep();
     }
     outcome
+}
+
+fn branch_lock_matches(lock: &mut fs::File, identity: FileIdentity, expected: &[u8]) -> bool {
+    let before = lock
+        .metadata()
+        .ok()
+        .map(|metadata| file_snapshot_identity(&metadata));
+    if before
+        .as_ref()
+        .is_none_or(|snapshot| snapshot.file != identity)
+    {
+        return false;
+    }
+    if lock.rewind().is_err() {
+        return false;
+    }
+    let mut bytes = Vec::with_capacity(expected.len());
+    if Read::by_ref(lock)
+        .take((MAX_REFERENCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+    let after = lock
+        .metadata()
+        .ok()
+        .map(|metadata| file_snapshot_identity(&metadata));
+    before == after && bytes == expected
 }
 
 pub(super) fn validate_live_branch_target(
