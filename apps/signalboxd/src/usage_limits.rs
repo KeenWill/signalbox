@@ -133,6 +133,23 @@ pub fn context_compaction_usage_exceeds_configured_limits(
     target: ResolvedProviderTarget,
     usage: TokenUsage,
 ) -> Option<bool> {
+    dedicated_model_usage_exceeds_configured_limits(configuration, target, usage)
+}
+
+/// Classifies dedicated approval-judge usage against immutable model limits.
+pub fn approval_judge_usage_exceeds_configured_limits(
+    configuration: &HubModelConfiguration,
+    target: ResolvedProviderTarget,
+    usage: TokenUsage,
+) -> Option<bool> {
+    dedicated_model_usage_exceeds_configured_limits(configuration, target, usage)
+}
+
+fn dedicated_model_usage_exceeds_configured_limits(
+    configuration: &HubModelConfiguration,
+    target: ResolvedProviderTarget,
+    usage: TokenUsage,
+) -> Option<bool> {
     let models = configuration.runtime_model_catalog();
     let definition = models.resolve(target)?;
     let adapter = configuration.adapter_for_provider_model(definition.provider_model())?;
