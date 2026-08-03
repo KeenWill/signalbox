@@ -44,6 +44,9 @@ const TITLE: &str = "Persist repository-watch facts";
 const BODY: &str = "A complete fixture pull request body.";
 const AUTHOR: &str = "fixture-author";
 const LABEL: &str = "watch-me";
+const U64_MAX_NUMERIC: &str = "18446744073709551615";
+const U64_OVERFLOW_NUMERIC: &str = "18446744073709551616";
+const OVERLONG_LABEL: &str = "123456789012345678901234567890123456789012345678901";
 const PULL_REQUEST: u64 = 41;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -593,6 +596,68 @@ async fn pull_request_target_constraint_rejects_a_null_number() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_target_constraint_rejects_a_number_beyond_u64() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4::numeric,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(U64_OVERFLOW_NUMERIC)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_target_constraint_accepts_u64_maximum() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4::numeric,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(U64_MAX_NUMERIC)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn comment_reaction_constraint_rejects_a_null_subject_id() -> Result<(), Box<dyn Error>> {
     let (_container, pool, repository) = migrated_cursor_fixture().await?;
     let insert = sqlx::query(
@@ -628,6 +693,79 @@ async fn comment_reaction_constraint_rejects_a_null_subject_id() -> Result<(), B
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn comment_reaction_constraint_rejects_a_subject_id_beyond_u64() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft,
+            reaction_subject_kind, reaction_subject_id, reaction_reactor,
+            reaction_content, reaction_change
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
+            'issue_comment', $11::numeric, $12, '+1', 'added'
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(U64_OVERFLOW_NUMERIC)
+    .bind(AUTHOR)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn comment_reaction_constraint_accepts_a_u64_maximum_subject_id() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft,
+            reaction_subject_kind, reaction_subject_id, reaction_reactor,
+            reaction_content, reaction_change
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
+            'issue_comment', $11::numeric, $12, '+1', 'added'
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(U64_MAX_NUMERIC)
+    .bind(AUTHOR)
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn label_array_constraint_rejects_a_null_member() -> Result<(), Box<dyn Error>> {
     let (_container, pool, repository) = migrated_cursor_fixture().await?;
     let insert = sqlx::query(
@@ -651,6 +789,135 @@ async fn label_array_constraint_rejects_a_null_member() -> Result<(), Box<dyn Er
     .bind(TITLE)
     .bind(BODY)
     .bind(LABEL)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn label_array_constraint_rejects_an_overlong_member() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft, label_name
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[$11, $12]::text[], false, $11
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(LABEL)
+    .bind(OVERLONG_LABEL)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn label_array_constraint_rejects_multiple_dimensions() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft, label_name
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[[$11], [$11]]::text[][], false, $11
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(LABEL)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn label_array_constraint_rejects_a_noncanonical_lower_bound() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft, label_name
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $5, $6, $7, $8, $9, $10, ('[0:0]={' || $11 || '}')::text[], false, $11
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(LABEL)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn label_name_constraint_rejects_an_overlong_value() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft, label_name
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'unlabeled', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false, $11
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(OVERLONG_LABEL)
     .execute(&pool)
     .await;
 

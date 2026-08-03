@@ -18,6 +18,24 @@ CREATE TABLE repo_watch_cursor (
     CHECK ((cursor_payload ->> 'storage_version')::bigint = storage_version)
 );
 
+CREATE FUNCTION repo_watch_labels_are_valid(candidate text[])
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT COALESCE(array_ndims(candidate), 1) = 1
+       AND COALESCE(array_lower(candidate, 1), 1) = 1
+       AND NOT EXISTS (
+            SELECT 1
+            FROM unnest(candidate) AS label(value)
+            WHERE value IS NULL
+               OR octet_length(value) NOT BETWEEN 1 AND 200
+               OR char_length(value) > 50
+       )
+$$;
+
 CREATE TABLE repo_watch_event (
     event_id uuid PRIMARY KEY,
     repository text NOT NULL,
@@ -95,6 +113,7 @@ CREATE TABLE repo_watch_event (
             AND event_kind <> 'branch_workflow_run_completed'
             AND pull_request_number IS NOT NULL
             AND pull_request_number > 0
+            AND pull_request_number <= 18446744073709551615
             AND head_sha IS NOT NULL
             AND head_repository IS NOT NULL
             AND base_branch IS NOT NULL
@@ -148,6 +167,7 @@ CREATE TABLE repo_watch_event (
             reaction_subject_kind IN ('issue_comment', 'review_comment')
             AND reaction_subject_id IS NOT NULL
             AND reaction_subject_id > 0
+            AND reaction_subject_id <= 18446744073709551615
         )
         OR (reaction_subject_kind IS NULL AND reaction_subject_id IS NULL)
     ),
@@ -175,7 +195,7 @@ CREATE TABLE repo_watch_event (
     CHECK (previous_sha IS NULL OR previous_sha <> current_sha),
     CHECK (current_sha IS NULL OR current_sha = head_sha),
     CHECK (advanced_branch IS NULL OR advanced_branch = base_branch),
-    CHECK (labels IS NULL OR array_position(labels, NULL) IS NULL),
+    CHECK (labels IS NULL OR repo_watch_labels_are_valid(labels)),
     CHECK (event_kind <> 'labeled' OR label_name = ANY(labels)),
     CHECK (event_kind <> 'unlabeled' OR NOT (label_name = ANY(labels))),
     CHECK (head_repository IS NULL OR octet_length(head_repository) BETWEEN 1 AND 201),
@@ -183,7 +203,13 @@ CREATE TABLE repo_watch_event (
     CHECK (head_branch IS NULL OR octet_length(head_branch) BETWEEN 1 AND 255),
     CHECK (title IS NULL OR octet_length(title) BETWEEN 1 AND 1024),
     CHECK (body IS NULL OR octet_length(body) <= 262144),
-    CHECK (label_name IS NULL OR octet_length(label_name) BETWEEN 1 AND 200),
+    CHECK (
+        label_name IS NULL
+        OR (
+            octet_length(label_name) BETWEEN 1 AND 200
+            AND char_length(label_name) <= 50
+        )
+    ),
     CHECK (thread_id IS NULL OR octet_length(thread_id) BETWEEN 1 AND 256),
     CHECK (check_run_name IS NULL OR octet_length(check_run_name) BETWEEN 1 AND 256),
     CHECK (workflow_name IS NULL OR octet_length(workflow_name) BETWEEN 1 AND 256),
