@@ -14974,6 +14974,12 @@ async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE turn_model_settings_resolved
+            DROP CONSTRAINT turn_model_settings_resolved_turn_fk",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;

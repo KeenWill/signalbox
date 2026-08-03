@@ -12045,8 +12045,7 @@ mod tests {
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
-        wire_model_call_state, wire_model_settings, wire_model_settings_overlay,
-        wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
     };
@@ -14334,8 +14333,10 @@ context_window_tokens = 200000
         );
     }
 
+    /// INV-033: a recorded session settings change reaches the wire as its
+    /// typed projection without losing either settings snapshot.
     #[test]
-    fn session_model_settings_change_projects_to_the_closed_wire_shape() {
+    fn inv033_session_model_settings_change_projects_to_the_closed_wire_shape() {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
         let command = DurableCommandId::from_uuid(Uuid::from_u128(2));
         let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(3));
@@ -14344,8 +14345,30 @@ context_window_tokens = 200000
         let installed_version = prior_version
             .checked_next()
             .expect("the initial defaults version has a successor");
-        let settings = ValidatedModelSettings::provider_defaults();
-        let caller_override = ModelSettingsOverlay::inherit_all();
+        let prior_settings = ValidatedModelSettings::provider_defaults();
+        let inherited = ModelSettingsOverlay::inherit_all();
+        let installed_precedence = ModelSettingsPrecedence::new(
+            inherited,
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::Low),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            inherited,
+            inherited,
+        );
+        let installed_settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(installed_selection, installed_precedence)
+        .expect("the fixture capability admits low reasoning");
+        let caller_override = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::Low),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
         let changed = SessionModelSettingsChanged::try_new(
             session,
             command,
@@ -14353,8 +14376,8 @@ context_window_tokens = 200000
             installed_version,
             ModelSelectionRequest::Direct(prior_selection),
             ModelSelectionRequest::Direct(installed_selection),
-            settings,
-            settings,
+            prior_settings,
+            installed_settings,
             caller_override,
             Vec::new(),
         )
@@ -14380,16 +14403,66 @@ context_window_tokens = 200000
                 installed_model: signalbox_process_protocol::ModelSelection::Direct {
                     selection_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
                 },
-                prior_settings: wire_model_settings(settings),
-                installed_settings: wire_model_settings(settings),
-                caller_override: wire_model_settings_overlay(caller_override),
+                prior_settings: signalbox_process_protocol::ModelSettingsSnapshot {
+                    precedence: signalbox_process_protocol::ModelSettingsPrecedence {
+                        per_call: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        session: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        profile: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        global_default:
+                            signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                    },
+                    effective: signalbox_process_protocol::EffectiveModelSettings {
+                        reasoning_level: None,
+                        fast_mode: signalbox_process_protocol::FastMode::Disabled,
+                        service_tier: None,
+                    },
+                    reasoning_source: None,
+                    fast_mode_source: None,
+                    service_tier_source: None,
+                    validated_for_selection_id: None,
+                },
+                installed_settings: signalbox_process_protocol::ModelSettingsSnapshot {
+                    precedence: signalbox_process_protocol::ModelSettingsPrecedence {
+                        per_call: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        session: signalbox_process_protocol::ModelSettingsOverlay {
+                            reasoning_level: signalbox_process_protocol::SettingOverlay::Value(
+                                signalbox_process_protocol::ReasoningLevel::Low,
+                            ),
+                            fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+                            service_tier: signalbox_process_protocol::SettingOverlay::Inherit,
+                        },
+                        profile: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        global_default:
+                            signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                    },
+                    effective: signalbox_process_protocol::EffectiveModelSettings {
+                        reasoning_level: Some(signalbox_process_protocol::ReasoningLevel::Low),
+                        fast_mode: signalbox_process_protocol::FastMode::Disabled,
+                        service_tier: None,
+                    },
+                    reasoning_source: Some(signalbox_process_protocol::ModelSettingSource::Session,),
+                    fast_mode_source: None,
+                    service_tier_source: None,
+                    validated_for_selection_id: Some(CanonicalUuid::from_uuid(
+                        installed_selection.into_uuid(),
+                    )),
+                },
+                caller_override: signalbox_process_protocol::ModelSettingsOverlay {
+                    reasoning_level: signalbox_process_protocol::SettingOverlay::Value(
+                        signalbox_process_protocol::ReasoningLevel::Low,
+                    ),
+                    fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+                    service_tier: signalbox_process_protocol::SettingOverlay::Inherit,
+                },
                 adjustments: Vec::new(),
             }
         );
     }
 
+    /// INV-033: a recorded per-turn settings resolution reaches the wire with
+    /// its requested alias and exact resolved-settings evidence.
     #[test]
-    fn turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
+    fn inv033_turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
         let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
         let turn = TurnId::from_uuid(Uuid::from_u128(6));
         let requested_alias = ModelAlias::from_uuid(Uuid::from_u128(3));
@@ -14447,8 +14520,32 @@ context_window_tokens = 200000
                     alias_id: CanonicalUuid::from_uuid(requested_alias.into_uuid()),
                 },
                 selected_direct_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
-                per_call_override: wire_model_settings_overlay(caller_override),
-                settings: wire_model_settings(settings),
+                per_call_override: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                settings: signalbox_process_protocol::ModelSettingsSnapshot {
+                    precedence: signalbox_process_protocol::ModelSettingsPrecedence {
+                        per_call: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        session: signalbox_process_protocol::ModelSettingsOverlay {
+                            reasoning_level:
+                                signalbox_process_protocol::SettingOverlay::ProviderDefault,
+                            fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+                            service_tier: signalbox_process_protocol::SettingOverlay::Inherit,
+                        },
+                        profile: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        global_default:
+                            signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                    },
+                    effective: signalbox_process_protocol::EffectiveModelSettings {
+                        reasoning_level: None,
+                        fast_mode: signalbox_process_protocol::FastMode::Disabled,
+                        service_tier: None,
+                    },
+                    reasoning_source: Some(signalbox_process_protocol::ModelSettingSource::Session,),
+                    fast_mode_source: None,
+                    service_tier_source: None,
+                    validated_for_selection_id: Some(CanonicalUuid::from_uuid(
+                        installed_selection.into_uuid(),
+                    )),
+                },
                 adjusted_from_selection_id: Some(CanonicalUuid::from_uuid(
                     prior_selection.into_uuid(),
                 )),
