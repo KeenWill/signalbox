@@ -1069,6 +1069,20 @@ impl DelegationProvenance {
     // accessors: tool_request(), child_turn(), parent_command() returning the sealed authority
 }
 
+pub enum DelegationProvenanceReconstitutionInput {
+    ChildTurn { session: SessionId, turn: TurnId },
+    ParentTurnCommand {
+        session: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: SessionId,
+        generation: GoalGeneration,
+        command: DurableCommandId,
+    },
+}
+
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
 // sealed: SessionDelegation::deliver_message
@@ -1095,7 +1109,13 @@ pub struct DelegationOutcome { /* private validated kind + content + reason + pr
 impl DelegationOutcome {
     pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
         -> Option<Self>;
-    // accessors: kind(), content(), reason(), provenance()
+    pub fn reconstitute(
+        kind: DelegationOutcomeKind,
+        content: Option<DelegationContent>,
+        reason: DelegationOutcomeReason,
+        provenance: DelegationProvenanceReconstitutionInput,
+    ) -> Option<Self>;
+    // accessors: kind(), content(), reason(), provenance(), reconstitution_provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
 // sealed: DelegationWait::foreground_subject
@@ -3596,6 +3616,28 @@ pub enum SemanticTranscriptEntryPayload {
         accepted_input: AcceptedInputId,
         source_turn: TurnId,
     },
+    DelegatedTask {
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    DelegationMessage {
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    DelegationResult {
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        mode: DelegationWaitMode,
+        delivery_sequence: Option<NonZeroU64>,
+        outcome: Box<DelegationOutcome>,
+    },
     ModelIdentityChanged {
         turn: TurnId,
         defaults_version: SessionConfigurationDefaultsVersion,
@@ -5040,6 +5082,30 @@ pub enum ModelConversationMessage {
         accepted_input: AcceptedInputId,
         content: UserContent,
     },
+    DelegatedTask {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    DelegationMessage {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    BackgroundDelegationResult {
+        source: SemanticTranscriptEntryRef,
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        delivery_sequence: NonZeroU64,
+        outcome: DelegationOutcome,
+    },
     Assistant {
         source: SemanticTranscriptEntryRef,
         producing_call: ModelCallId,
@@ -5072,6 +5138,7 @@ pub enum ModelToolResultContent {
     ExecutionError(ToolExecutionError),
     Denied { reason: Option<ToolDenialReason> },
     ClosedByTurnEnd,
+    Delegation(DelegationOutcome),
 }
 
 pub struct PreparedModelOperation { /* private */ }
@@ -5096,6 +5163,7 @@ pub enum ModelFrontierRenderingError {
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
     UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
     MissingProjectedEntry { entry: SemanticTranscriptEntryRef },
+    InvalidDelegationDelivery { entry: SemanticTranscriptEntryRef },
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure
@@ -8722,7 +8790,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                    |
 | domain: session_placement                          | 18                   |
 | domain: session                                    | 22                   |
-| domain: session_delegation                         | 31                   |
+| domain: session_delegation                         | 32                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8751,7 +8819,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **710 (+7 free fn)** |
+| **signalbox-domain total**                         | **711 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

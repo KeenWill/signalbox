@@ -688,6 +688,9 @@ impl ModelCallExecution {
                     .get(accepted_input)
                     .map(|content| (*accepted_input, content.clone())),
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+                | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+                | SemanticTranscriptEntryPayload::DelegationResult { .. }
                 | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3265,6 +3268,9 @@ fn reconstitute(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3639,6 +3645,9 @@ fn frontier_closes_latest_tool_round(
         .filter_map(|entry| match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
             SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
@@ -3676,6 +3685,9 @@ fn frontier_closes_latest_tool_round(
             } => result_request == request && tool_denial_correlations.contains(result_request),
             SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -3705,6 +3717,9 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
             Some(*producing_call)
         }
         SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+        | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+        | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+        | SemanticTranscriptEntryPayload::DelegationResult { .. }
         | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | SemanticTranscriptEntryPayload::ContextSummary { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

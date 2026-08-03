@@ -234,6 +234,86 @@ mod tests {
             SubmitInputRepositoryError::CommitAmbiguous(_)
         ));
     }
+
+    #[test]
+    fn delegation_child_result_decoder_restores_exact_typed_outcome() {
+        let child = Uuid::from_u128(0xd101);
+        let turn = Uuid::from_u128(0xd102);
+        let content = DelegationContent::try_new(String::from("checked result"))
+            .expect("fixture content is valid");
+        let outcome = DelegationOutcome::reconstitute(
+            decode_delegation_outcome_kind("result_returned")
+                .expect("fixture outcome kind is supported"),
+            Some(content.clone()),
+            decode_delegation_outcome_reason("child_completed")
+                .expect("fixture reason is supported"),
+            decode_delegation_provenance("child_turn", child, Some(turn), None, None)
+                .expect("fixture provenance is complete"),
+        )
+        .expect("fixture outcome is internally consistent");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
+        assert_eq!(outcome.content(), Some(&content));
+        assert_eq!(
+            outcome.reconstitution_provenance(),
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: session_id_from_uuid(child),
+                turn: turn_id_from_uuid(turn),
+            }
+        );
+    }
+
+    #[test]
+    fn delegation_parent_result_decoder_restores_command_provenance() {
+        let parent = Uuid::from_u128(0xd111);
+        let turn = Uuid::from_u128(0xd112);
+        let command = Uuid::from_u128(0xd113);
+        let outcome = DelegationOutcome::reconstitute(
+            decode_delegation_outcome_kind("continue_running")
+                .expect("fixture outcome kind is supported"),
+            None,
+            decode_delegation_outcome_reason("parent_stopped_parent_and_descendants")
+                .expect("fixture reason is supported"),
+            decode_delegation_provenance(
+                "parent_turn_command",
+                parent,
+                Some(turn),
+                None,
+                Some(command),
+            )
+            .expect("fixture provenance is complete"),
+        )
+        .expect("fixture outcome is internally consistent");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ContinueRunning);
+        assert_eq!(outcome.content(), None);
+        assert_eq!(
+            outcome.reconstitution_provenance(),
+            DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                session: session_id_from_uuid(parent),
+                turn: turn_id_from_uuid(turn),
+                command: durable_command_id_from_uuid(command)
+                    .expect("fixture command identity is valid"),
+            }
+        );
+    }
+
+    #[test]
+    fn delegation_result_decoder_rejects_incomplete_parent_provenance() {
+        let error = decode_delegation_provenance(
+            "parent_goal_command",
+            Uuid::from_u128(0xd121),
+            None,
+            None,
+            Some(Uuid::from_u128(0xd122)),
+        )
+        .expect_err("parent goal provenance requires its generation");
+
+        assert_eq!(
+            error,
+            SubmitInputCorruption::Inconsistent("delegation result provenance")
+        );
+    }
 }
 
 /// The committed outcome of handling one canonical input submission.
@@ -3299,7 +3379,7 @@ pub(crate) async fn load_scheduling_projection(
                     child: session_id_from_uuid(child),
                     mode,
                     delivery_sequence,
-                    outcome,
+                    outcome: Box::new(outcome),
                 },
             ));
             continue;
@@ -3833,7 +3913,9 @@ fn decode_delegation_provenance(
             Ok(DelegationProvenanceReconstitutionInput::ParentTurnCommand {
                 session: session_id_from_uuid(session),
                 turn: turn_id_from_uuid(turn),
-                command: durable_command_id_from_uuid(command),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("delegation provenance command")
+                })?,
             })
         }
         ("parent_goal_command", None, Some(generation), Some(command)) => {
@@ -3846,7 +3928,9 @@ fn decode_delegation_provenance(
             Ok(DelegationProvenanceReconstitutionInput::ParentGoalCommand {
                 session: session_id_from_uuid(session),
                 generation: GoalGeneration::new(generation),
-                command: durable_command_id_from_uuid(command),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("delegation provenance command")
+                })?,
             })
         }
         _ => Err(SubmitInputCorruption::Inconsistent(

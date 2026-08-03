@@ -500,6 +500,9 @@ fn delegation_content_from_live_completed(
                 value,
             } => (producing_call, value),
             crate::SemanticTranscriptEntryPayload::Imported { .. }
+            | crate::SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | crate::SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | crate::SemanticTranscriptEntryPayload::DelegationResult { .. }
             | crate::SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | crate::SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | crate::SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
@@ -771,7 +774,13 @@ pub struct DelegationOutcome {
     kind: DelegationOutcomeKind,
     content: Option<DelegationContent>,
     reason: DelegationOutcomeReason,
-    provenance: DelegationProvenance,
+    provenance: DelegationOutcomeProvenance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum DelegationOutcomeProvenance {
+    ChildTurn(TerminalChildTurn),
+    ParentCommand(ParentTerminationAuthority),
 }
 
 /// Stored proof source supplied to checked delegation-outcome reconstitution.
@@ -843,7 +852,7 @@ impl DelegationOutcome {
             kind,
             content,
             reason: terminal.reason,
-            provenance: DelegationProvenance::from_terminal_child(terminal),
+            provenance: DelegationOutcomeProvenance::ChildTurn(terminal),
         })
     }
 
@@ -993,7 +1002,7 @@ impl DelegationOutcome {
                     kind,
                     content: None,
                     reason,
-                    provenance: DelegationProvenance::from_parent_termination(authority),
+                    provenance: DelegationOutcomeProvenance::ParentCommand(authority),
                 })
             }
         }
@@ -1025,7 +1034,7 @@ impl DelegationOutcome {
                     kind: DelegationOutcomeKind::AlreadyTerminal,
                     content: None,
                     reason,
-                    provenance: DelegationProvenance::from_parent_termination(authority),
+                    provenance: DelegationOutcomeProvenance::ParentCommand(authority),
                 })
             }
         }
@@ -1044,7 +1053,41 @@ impl DelegationOutcome {
     }
 
     pub const fn provenance(&self) -> DelegationProvenance {
-        self.provenance
+        match self.provenance {
+            DelegationOutcomeProvenance::ChildTurn(terminal) => {
+                DelegationProvenance::from_terminal_child(terminal)
+            }
+            DelegationOutcomeProvenance::ParentCommand(authority) => {
+                DelegationProvenance::from_parent_termination(authority)
+            }
+        }
+    }
+
+    pub const fn reconstitution_provenance(&self) -> DelegationProvenanceReconstitutionInput {
+        match self.provenance {
+            DelegationOutcomeProvenance::ChildTurn(terminal) => {
+                DelegationProvenanceReconstitutionInput::ChildTurn {
+                    session: terminal.session(),
+                    turn: terminal.turn(),
+                }
+            }
+            DelegationOutcomeProvenance::ParentCommand(authority) => match authority.source() {
+                ParentTerminationCommandSource::Turn { turn } => {
+                    DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                        session: authority.parent(),
+                        turn,
+                        command: authority.command(),
+                    }
+                }
+                ParentTerminationCommandSource::Goal { generation } => {
+                    DelegationProvenanceReconstitutionInput::ParentGoalCommand {
+                        session: authority.parent(),
+                        generation,
+                        command: authority.command(),
+                    }
+                }
+            },
+        }
     }
 }
 /// Exact subject retained by a foreground parent turn wait.

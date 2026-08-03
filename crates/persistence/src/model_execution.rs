@@ -2946,6 +2946,9 @@ async fn load_origin_contents(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -3355,6 +3358,9 @@ async fn load_tool_conversation_entries(
                 attempt_ids.insert(*attempt);
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -3452,6 +3458,9 @@ async fn load_tool_conversation_entries(
                 resolved.push(ResolvedToolConversationEntry::Closed { source, request });
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

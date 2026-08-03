@@ -1606,38 +1606,34 @@ fn render_delegation_outcome(outcome: &DelegationOutcome) -> String {
         DelegationOutcomeReason::ParentStopped { .. } => "parent_stopped",
         DelegationOutcomeReason::ParentCancelled { .. } => "parent_cancelled",
     };
-    let provenance = match outcome.provenance() {
-        provenance if provenance.child_turn().is_some() => {
-            let (session, turn) = provenance
-                .child_turn()
-                .expect("matched child-turn delegation provenance");
+    let provenance = match outcome.reconstitution_provenance() {
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn { session, turn } => {
             format!(
                 r#"{{"type":"child_turn","child_session_id":"{}","child_turn_id":"{}"}}"#,
                 session.into_uuid(),
                 turn.into_uuid()
             )
         }
-        provenance if provenance.parent_command().is_some() => {
-            let authority = provenance
-                .parent_command()
-                .expect("matched parent-command delegation provenance");
-            match (authority.turn(), authority.goal_generation()) {
-                (Some(turn), None) => format!(
-                    r#"{{"type":"parent_turn_command","parent_session_id":"{}","parent_turn_id":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
-                    authority.parent().into_uuid(),
-                    turn.into_uuid(),
-                    authority.command().into_uuid()
-                ),
-                (None, Some(generation)) => format!(
-                    r#"{{"type":"parent_goal_command","parent_session_id":"{}","goal_generation":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
-                    authority.parent().into_uuid(),
-                    generation.get(),
-                    authority.command().into_uuid()
-                ),
-                _ => unreachable!("sealed parent-command provenance has one source"),
-            }
-        }
-        _ => unreachable!("delegation outcomes carry terminal or parent-command provenance"),
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        } => format!(
+            r#"{{"type":"parent_turn_command","parent_session_id":"{}","parent_turn_id":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+            session.into_uuid(),
+            turn.into_uuid(),
+            command.into_uuid()
+        ),
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ParentGoalCommand {
+            session,
+            generation,
+            command,
+        } => format!(
+            r#"{{"type":"parent_goal_command","parent_session_id":"{}","goal_generation":"{}","command_id":"{}","descendant_scope":"parent_and_descendants"}}"#,
+            session.into_uuid(),
+            generation.get(),
+            command.into_uuid()
+        ),
     };
     format!(r#"{{"outcome":"{outcome_kind}","reason":"{reason}","provenance":{provenance}}}"#)
 }
@@ -1895,9 +1891,13 @@ mod tests {
     };
 
     use expect_test::expect;
-    use signalbox_application::{ClassifyOperatorFailure, ModelConversationMessage};
+    use signalbox_application::{
+        ClassifyOperatorFailure, ModelConversationMessage, ModelToolResultContent,
+    };
     use signalbox_domain::{
-        AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
+        AssistantText, DelegationContent, DelegationMessageId, DelegationOutcome,
+        DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
+        DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
         ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelCallFailureCause,
         ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
         SessionConfigurationDefaultsVersion, SessionId, ToolExecutionError, ToolExecutionErrorKind,
@@ -1956,6 +1956,120 @@ mod tests {
             SessionId::from_uuid(Uuid::from_u128(10)),
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value)),
         )
+    }
+
+    #[test]
+    fn delegation_inputs_render_with_exact_provider_neutral_prefixes() {
+        let parent = SessionId::from_uuid(Uuid::from_u128(20));
+        let child = SessionId::from_uuid(Uuid::from_u128(21));
+        let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(22));
+        let awaiting_request = ToolRequestId::from_uuid(Uuid::from_u128(23));
+        let task_content =
+            DelegationContent::try_new("task bytes".into()).expect("fixture task is valid");
+        let message_content =
+            DelegationContent::try_new("message bytes".into()).expect("fixture message is valid");
+        let result_content =
+            DelegationContent::try_new("child result".into()).expect("fixture result is valid");
+        let outcome = DelegationOutcome::reconstitute(
+            DelegationOutcomeKind::ResultReturned,
+            Some(result_content.clone()),
+            DelegationOutcomeReason::ChildCompleted,
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: TurnId::from_uuid(Uuid::from_u128(24)),
+            },
+        )
+        .expect("fixture result is correlated");
+
+        let rendered = render_runtime_messages(&[
+            ModelConversationMessage::DelegatedTask {
+                source: source(25),
+                spawning_request,
+                parent_session: parent,
+                parent_turn: TurnId::from_uuid(Uuid::from_u128(26)),
+                content: task_content.clone(),
+            },
+            ModelConversationMessage::DelegationMessage {
+                source: source(27),
+                spawning_request,
+                message: DelegationMessageId::from_uuid(Uuid::from_u128(28)),
+                sender: parent,
+                recipient: child,
+                delivery_sequence: std::num::NonZeroU64::MIN,
+                content: message_content.clone(),
+            },
+            ModelConversationMessage::BackgroundDelegationResult {
+                source: source(29),
+                awaiting_request,
+                spawning_request,
+                child,
+                delivery_sequence: std::num::NonZeroU64::new(2).expect("two is positive"),
+                outcome,
+            },
+        ]);
+
+        assert_eq!(
+            rendered,
+            vec![
+                ConversationMessage::user_text(format!(
+                    "Signalbox delegated task:\n{}",
+                    task_content.as_str()
+                )),
+                ConversationMessage::user_text(format!(
+                    "Signalbox delegation message from session {}:\n{}",
+                    parent.into_uuid(),
+                    message_content.as_str()
+                )),
+                ConversationMessage::user_text(format!(
+                    "Signalbox background child result from session {}:\n{}",
+                    child.into_uuid(),
+                    result_content.as_str()
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn foreground_child_failure_renders_compact_typed_tool_result() {
+        let child = SessionId::from_uuid(Uuid::from_u128(30));
+        let child_turn = TurnId::from_uuid(Uuid::from_u128(31));
+        let request = ToolRequestId::from_uuid(Uuid::from_u128(32));
+        let outcome = DelegationOutcome::reconstitute(
+            DelegationOutcomeKind::ChildFailed,
+            None,
+            DelegationOutcomeReason::ChildExecutionFailed,
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: child_turn,
+            },
+        )
+        .expect("fixture failure is correlated");
+
+        let rendered = render_runtime_messages(&[ModelConversationMessage::ToolResult {
+            source: source(33),
+            request,
+            content: ModelToolResultContent::Delegation(outcome),
+        }]);
+
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            rendered[0].role,
+            signalbox_model_runtime::ConversationRole::User
+        );
+        assert_eq!(
+            rendered[0].parts,
+            vec![signalbox_model_runtime::MessagePart::ToolResult(
+                signalbox_model_runtime::ToolResultRecord {
+                    tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+                    content: format!(
+                        r#"{{"outcome":"failed","reason":"child_execution_failed","provenance":{{"type":"child_turn","child_session_id":"{}","child_turn_id":"{}"}}}}"#,
+                        child.into_uuid(),
+                        child_turn.into_uuid()
+                    ),
+                    is_error: true,
+                },
+            )]
+        );
     }
 
     fn request(value: u128, arguments: &str) -> ToolRequest {

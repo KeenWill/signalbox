@@ -590,6 +590,9 @@ async fn insert_prepared_activation(
             *accepted_input
         }
         InitialSemanticTranscriptEntryPayload::Imported { .. }
+        | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+        | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+        | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
         | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
         | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -670,6 +673,9 @@ async fn insert_prepared_activation(
                 })?;
             }
             InitialSemanticTranscriptEntryPayload::Imported { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
             | InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
             | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }

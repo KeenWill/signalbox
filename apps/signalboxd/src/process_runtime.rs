@@ -11550,7 +11550,7 @@ mod tests {
         ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
         ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId,
         SessionInputPosition, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
-        TurnAttemptId, TurnId,
+        ToolRequestId, TurnAttemptId, TurnId,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,

@@ -3170,6 +3170,9 @@ fn reconstitute_inner(
             InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
             | InitialSemanticTranscriptEntryPayload::ToolClosed { .. } => {}
+            InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | InitialSemanticTranscriptEntryPayload::DelegationResult { .. } => {}
             InitialSemanticTranscriptEntryPayload::TurnCompleted { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
                     return Err(
@@ -4489,6 +4492,9 @@ fn reconstitute_inner(
                                             true
                                         }
                                         SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                                        | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+                                        | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+                                        | SemanticTranscriptEntryPayload::DelegationResult { .. }
                                         | SemanticTranscriptEntryPayload::Imported { .. }
                                         | SemanticTranscriptEntryPayload::ModelIdentityChanged {
                                             ..

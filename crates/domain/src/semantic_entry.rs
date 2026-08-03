@@ -87,7 +87,7 @@ pub enum SemanticTranscriptEntryPayload {
         child: SessionId,
         mode: DelegationWaitMode,
         delivery_sequence: Option<NonZeroU64>,
-        outcome: DelegationOutcome,
+        outcome: Box<DelegationOutcome>,
     },
     /// An injected boundary informing a turn of its newly selected model.
     ModelIdentityChanged {
