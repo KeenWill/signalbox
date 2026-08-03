@@ -713,6 +713,57 @@ impl AuthorizedToolAttempt {
     }
 }
 
+/// Exact immutable request and issued physical dispatch authority.
+///
+/// Construction is sealed to a complete [`crate::ToolBatch`], which binds the
+/// canonical request inventory to the freshly authorized or reconstituted
+/// in-flight attempt before this authority can cross into an executor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolDispatchAuthority {
+    request: ToolRequest,
+    attempt: CurrentToolAttempt,
+    fence: IssuedExecutorFence,
+}
+
+impl ToolDispatchAuthority {
+    pub(crate) fn try_new(
+        request: ToolRequest,
+        authorized: &AuthorizedToolAttempt,
+    ) -> Option<Self> {
+        let attempt = authorized.attempt();
+        (request.id() == attempt.request()
+            && request.session() == attempt.session()
+            && request.turn() == attempt.turn())
+        .then(|| Self {
+            request,
+            attempt: attempt.clone(),
+            fence: authorized.executor_fence(),
+        })
+    }
+
+    /// Borrows the exact immutable request content authority.
+    pub const fn request(&self) -> &ToolRequest {
+        &self.request
+    }
+
+    /// Borrows the exact durable in-flight attempt.
+    pub const fn attempt(&self) -> &CurrentToolAttempt {
+        &self.attempt
+    }
+
+    /// Returns the complete durable dispatch correlation.
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
+        self.fence.correlation()
+    }
+
+    /// Mints the executor fence retained by this issued authority.
+    pub const fn executor_fence(&self) -> IssuedExecutorFence {
+        IssuedExecutorFence {
+            correlation: self.fence.correlation,
+        }
+    }
+}
+
 /// Immutable terminal physical-attempt history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EndedToolAttempt {

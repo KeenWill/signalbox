@@ -226,6 +226,39 @@ messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
+**Committed unimplemented functionality (session-delegation foundation
+proposal).** No present renderer admits the delegation semantic variants. The
+implementing delegation child pull requests add these mappings:
+
+- `DelegatedTask` renders as a structured provider-neutral delegated-task
+  message retaining the child, parent session and turn, and exact spawning
+  request. The provider bridge emits one injected user-role message with exact
+  prefix `Signalbox delegated task:\n` followed by the checked task bytes. The
+  transport role does not create an accepted input or `Actor::User`; the
+  structured value retains model/tool-authored spawn provenance;
+- `DelegationMessage` renders as a structured provider-neutral session event
+  retaining the relationship, message, sender, recipient, and recipient-wide
+  delivery sequence. The provider bridge emits one injected user-role message
+  with exact prefix
+  `Signalbox delegation message from session {sender_session_id}:\n` followed by
+  the immutable message content, replacing the braces with the canonical UUID.
+  The transport role does not reclassify the sender as the user;
+- a foreground `DelegationResult` resolves its exact `await_session` request and
+  renders through the ordinary paired tool-result path. A returned result uses
+  the delivered bytes; another outcome uses the compact closed
+  outcome/reason/provenance JSON defined by the delegation process contract: one
+  object whose members appear in the exact order `outcome`, `reason`,
+  `provenance`, encoded without insignificant whitespace. A background result
+  instead renders as a structured provider-neutral session event retaining its
+  awaiting request and recipient-wide delivery sequence. Its injected user-role
+  form is
+  `Signalbox background child result from session {child_session_id}:\n{content}`
+  for returned content, or
+  `Signalbox background child outcome from session {child_session_id}: {compact_json}`
+  for another outcome. Braces are replaced by the canonical child UUID, exact
+  returned bytes, or that same exact compact JSON respectively. These transport
+  messages are neither accepted input nor child transcript access.
+
 The prepared model operation carries one immutable `ExecutableToolSnapshot`, not
 the unfiltered process registry. Preparation includes every daemon-only tool;
 includes a combined-locus tool whenever its daemon executor is available; and

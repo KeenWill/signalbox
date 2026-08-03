@@ -45,7 +45,8 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE,
+    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
     DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
@@ -382,6 +383,17 @@ const fn anthropic_construction_cause(error: &AnthropicConstructionError) -> &'s
         AnthropicConstructionError::InvalidExchangeTimeout => "anthropic_invalid_timeout",
         AnthropicConstructionError::InvalidSseRecordLimit => "anthropic_invalid_record_limit",
         AnthropicConstructionError::ClientConstruction { .. } => "anthropic_client_construction",
+    }
+}
+
+const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureError) -> &'static str {
+    match error {
+        ConfiguredApprovalPostureError::UnknownTool { .. } => {
+            "tool_approval_posture_names_unknown_tool"
+        }
+        ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { .. } => {
+            "delegated_tool_approval_requires_judge_wiring"
+        }
     }
 }
 
@@ -886,6 +898,20 @@ async fn run_hub(
             )
         })?;
     let daemon_tool_configuration = model_configuration.daemon_tools();
+    let tool_composition = match daemon_tool_configuration {
+        Some(_) => DaemonToolComposition::WithMappedFamilies,
+        None => DaemonToolComposition::Base,
+    };
+    DaemonToolCatalog::validate_approval_postures_for_composition(
+        model_configuration.tool_approval_postures(),
+        tool_composition,
+    )
+    .map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
+        )
+    })?;
     let template_configuration = SessionTemplateConfiguration::read(
         configuration.template_configuration_file(),
         || env::var_os("HOME").map(PathBuf::from),
@@ -1003,6 +1029,19 @@ async fn run_hub(
             return Err(failure);
         }
     };
+
+    let tool_catalog =
+        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();

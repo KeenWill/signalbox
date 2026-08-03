@@ -138,9 +138,10 @@ impl SessionRepository {
     /// by that pointer. Imported ancestry additionally joins its one-to-one
     /// seed record and seed-frontier header as a constant-size proof. Native
     /// template provenance additionally correlates the creation command's
-    /// storage version. It intentionally loads no imported aggregate, frontier
-    /// membership, semantic entry, creation receipt, turn, command history, or
-    /// unselected defaults version.
+    /// storage version. The selected placement is then checked against its
+    /// complete authenticated event-and-receipt chain on the same connection.
+    /// It intentionally loads no imported aggregate, frontier membership,
+    /// semantic entry, turn history, or unselected defaults version.
     pub async fn load_session(
         &self,
         requested_session: SessionId,
@@ -202,6 +203,12 @@ pub(crate) async fn load_session_from_connection(
             ,placement_native_creation.command_id AS current_native_creation_command_id
             ,placement_imported_creation.command_id AS current_imported_creation_command_id
             ,placement_update.command_id AS current_placement_update_command_id
+            ,EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+             ) AS current_placement_later_event_exists
          FROM session AS s
          LEFT JOIN session_current_defaults AS p
            ON p.session_id = s.session_id
@@ -240,7 +247,9 @@ pub(crate) async fn load_session_from_connection(
            ON placement_update.command_id = placement.provenance_command_id
           AND placement_update.session_id = placement.session_id
           AND placement_update.result_kind = 'applied'
+          AND placement_update.rejection_kind IS NULL
           AND placement_update.result_version = placement.version
+          AND placement_update.result_current_version IS NULL
           AND placement_update.expected_version = placement.prior_version
           AND placement_update.replacement_path
                 IS NOT DISTINCT FROM placement.placement_path
@@ -262,7 +271,21 @@ pub(crate) async fn load_session_from_connection(
         );
     }
 
-    decode_complete(row, requested_session).map(Some)
+    let history_head_state =
+        crate::session_placement::PlacementHistoryHeadState::from_later_event_exists(required(
+            &row,
+            "current_placement_later_event_exists",
+        )?);
+    let session = decode_complete(row, requested_session)?;
+    crate::session_placement::authenticate_loaded_current(
+        connection,
+        requested_session,
+        session.current_placement().clone(),
+        history_head_state,
+    )
+    .await
+    .map_err(map_placement_error)?;
+    Ok(Some(session))
 }
 
 fn decode_complete(
@@ -476,6 +499,25 @@ fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositor
             SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
                 "imported load reported an impossible identity collision",
             ))
+        }
+    }
+}
+
+fn map_placement_error(
+    error: crate::session_placement::SessionPlacementRepositoryError,
+) -> SessionRepositoryError {
+    use crate::session_placement::SessionPlacementRepositoryError;
+
+    match error {
+        SessionPlacementRepositoryError::Database(error)
+        | SessionPlacementRepositoryError::CommitAmbiguous(error) => {
+            SessionRepositoryError::Database(error)
+        }
+        SessionPlacementRepositoryError::InvalidCommandId => {
+            SessionCorruption::Inconsistent("current placement command identity").into()
+        }
+        SessionPlacementRepositoryError::Corruption(reason) => {
+            SessionCorruption::Inconsistent(reason).into()
         }
     }
 }

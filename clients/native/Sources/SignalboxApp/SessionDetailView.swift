@@ -165,6 +165,7 @@ struct SessionDetailScreen: View {
         case .tool(let tool):
             ToolInvocationCard(
                 tool: tool,
+                decisionAvailable: tool.decisionAvailable,
                 onApprove: { Task { await viewModel.approve(invocationID: tool.invocationID) } },
                 onDeny: { Task { await viewModel.deny(invocationID: tool.invocationID) } }
             )

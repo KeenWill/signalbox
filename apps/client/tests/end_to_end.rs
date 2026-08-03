@@ -73,8 +73,8 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_terminal_client";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
-/// A synthetic source larger than any complete import request can admit.
-const OVERSIZED_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
+/// A synthetic source larger than one complete import request can carry.
+const MULTIFRAME_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 const IMPORT_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -1415,14 +1415,14 @@ async fn s28_inv038_terminal_client_scan_selects_recursive_files_in_sorted_path_
     Ok(())
 }
 
-/// S28 / INV-038: scan mode reports an oversized selected source as skipped
-/// without truncating it or hiding the failure total.
+/// S28 / INV-038: scan mode routes a source larger than one frame to the
+/// process transport instead of rejecting or truncating it locally.
 #[tokio::test]
-async fn s28_inv038_terminal_client_scan_skips_oversized_source_without_truncation()
+async fn s28_inv038_terminal_client_scan_routes_multiframe_source_to_transport()
 -> Result<(), Box<dyn Error>> {
     let source_directory = tempfile::tempdir()?;
     let oversized_path = source_directory.path().join("oversized.jsonl");
-    std::fs::File::create(&oversized_path)?.set_len(OVERSIZED_IMPORT_BYTES)?;
+    std::fs::File::create(&oversized_path)?.set_len(MULTIFRAME_IMPORT_BYTES)?;
     let arguments = vec![
         String::from("import"),
         String::from("--format"),
@@ -1442,8 +1442,10 @@ async fn s28_inv038_terminal_client_scan_skips_oversized_source_without_truncati
     assert_eq!(
         String::from_utf8(skipped.stdout)?,
         format!(
-            "skipped path={:?} reason=the conversation import source cannot fit within the process \
-             frame bound\nscan_summary imported=0 already_imported=0 skipped=1\n",
+            concat!(
+                "skipped path={:?} reason=local process communication failed\n",
+                "scan_summary imported=0 already_imported=0 skipped=1\n",
+            ),
             oversized_path,
         )
     );

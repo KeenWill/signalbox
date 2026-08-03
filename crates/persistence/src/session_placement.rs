@@ -18,13 +18,14 @@ use crate::command_registry::{
 use crate::lock_inventory;
 use crate::mapping::{
     SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-    durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-    session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+    durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
+    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
     session_placement_rejection_from_str, session_placement_rejection_to_str,
     session_placement_result_kind_from_str, session_placement_result_kind_to_str,
 };
 
 const STORAGE_VERSION: i16 = 1;
+const AUTHENTICATION_PAGE_SIZE: i64 = 64;
 
 /// First handling/equal replay or conflicting durable-command reuse.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -284,7 +285,13 @@ pub(crate) async fn load_current(
                 event.placement_path, event.root_global_read_intent,
                 native_registry.command_id AS native_creation_command_id,
                 imported_registry.command_id AS imported_creation_command_id,
-                placement_update_registry.command_id AS placement_update_command_id
+                placement_update_registry.command_id AS placement_update_command_id,
+                EXISTS (
+                    SELECT 1
+                      FROM session_placement_event AS later_event
+                     WHERE later_event.session_id = head.session_id
+                       AND later_event.version > head.current_version
+                ) AS later_event_exists
            FROM session
            LEFT JOIN session_current_placement AS head
              ON head.session_id = session.session_id
@@ -325,7 +332,9 @@ pub(crate) async fn load_current(
             AND placement_update.command_kind = 'update_session_placement'
             AND placement_update.storage_version = 1
             AND placement_update.result_kind = 'applied'
+            AND placement_update.rejection_kind IS NULL
             AND placement_update.result_version = event.version
+            AND placement_update.result_current_version IS NULL
             AND placement_update.expected_version = event.prior_version
             AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
             AND placement_update.root_global_read_intent = event.root_global_read_intent
@@ -353,19 +362,26 @@ pub(crate) async fn load_current(
             "session placement event missing",
         ));
     }
+    let history_head_state =
+        PlacementHistoryHeadState::from_later_event_exists(row.try_get("later_event_exists")?);
     let current = decode_authenticated_placement(row)?;
-    authenticate_loaded_current(connection, session, current)
+    authenticate_loaded_current(connection, session, current, history_head_state)
         .await
         .map(Some)
 }
 
-async fn load_authenticated_version(
+pub(crate) async fn load_authenticated_version(
     connection: &mut PgConnection,
     session: SessionId,
     version: SessionPlacementVersion,
 ) -> Result<Option<VersionedSessionPlacement>, SessionPlacementRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT session_row.ancestry_kind,
+    let mut authenticated: Option<VersionedSessionPlacement> = None;
+    loop {
+        let after_version = authenticated.as_ref().map_or(Decimal::ZERO, |placement| {
+            version_to_numeric(placement.version())
+        });
+        let rows = sqlx::query(
+            "SELECT session_row.ancestry_kind,
                 event.version, event.prior_version, event.event_kind,
                 event.placement_path, event.root_global_read_intent,
                 native_registry.command_id AS native_creation_command_id,
@@ -409,7 +425,9 @@ async fn load_authenticated_version(
             AND placement_update.command_kind = 'update_session_placement'
             AND placement_update.storage_version = 1
             AND placement_update.result_kind = 'applied'
+            AND placement_update.rejection_kind IS NULL
             AND placement_update.result_version = event.version
+            AND placement_update.result_current_version IS NULL
             AND placement_update.expected_version = event.prior_version
             AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
             AND placement_update.root_global_read_intent = event.root_global_read_intent
@@ -418,26 +436,34 @@ async fn load_authenticated_version(
             AND placement_update_registry.command_kind = placement_update.command_kind
             AND placement_update_registry.storage_version = placement_update.storage_version
           WHERE session_row.session_id = $1
-          ORDER BY event.version",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(version_to_numeric(version))
-    .fetch_all(&mut *connection)
-    .await?;
-    let mut authenticated: Option<VersionedSessionPlacement> = None;
-    for row in rows {
-        let placement = decode_authenticated_placement(row)?;
-        let expected_version = authenticated
-            .as_ref()
-            .map_or(Some(SessionPlacementVersion::INITIAL), |predecessor| {
-                predecessor.version().next()
-            });
-        if expected_version != Some(placement.version()) {
-            return Err(SessionPlacementRepositoryError::Corruption(
-                "session placement predecessor chain",
-            ));
+            AND event.version <= $2
+            AND event.version > $3
+          ORDER BY event.version
+          LIMIT $4",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(version_to_numeric(version))
+        .bind(after_version)
+        .bind(AUTHENTICATION_PAGE_SIZE)
+        .fetch_all(&mut *connection)
+        .await?;
+        if rows.is_empty() {
+            break;
         }
-        authenticated = Some(placement);
+        for row in rows {
+            let placement = decode_authenticated_placement(row)?;
+            let expected_version = authenticated
+                .as_ref()
+                .map_or(Some(SessionPlacementVersion::INITIAL), |predecessor| {
+                    predecessor.version().next()
+                });
+            if expected_version != Some(placement.version()) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement predecessor chain",
+                ));
+            }
+            authenticated = Some(placement);
+        }
     }
     match authenticated {
         Some(placement) if placement.version() == version => Ok(Some(placement)),
@@ -445,10 +471,27 @@ async fn load_authenticated_version(
     }
 }
 
-async fn authenticate_loaded_current(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlacementHistoryHeadState {
+    MatchesLatestEvent,
+    BehindLaterEvent,
+}
+
+impl PlacementHistoryHeadState {
+    pub(crate) fn from_later_event_exists(later_event_exists: bool) -> Self {
+        if later_event_exists {
+            Self::BehindLaterEvent
+        } else {
+            Self::MatchesLatestEvent
+        }
+    }
+}
+
+pub(crate) async fn authenticate_loaded_current(
     connection: &mut PgConnection,
     session: SessionId,
     current: VersionedSessionPlacement,
+    history_head_state: PlacementHistoryHeadState,
 ) -> Result<VersionedSessionPlacement, SessionPlacementRepositoryError> {
     let authenticated = load_authenticated_version(connection, session, current.version())
         .await?
@@ -460,7 +503,14 @@ async fn authenticate_loaded_current(
             "session placement predecessor chain",
         ));
     }
-    Ok(authenticated)
+    match history_head_state {
+        PlacementHistoryHeadState::MatchesLatestEvent => Ok(authenticated),
+        PlacementHistoryHeadState::BehindLaterEvent => {
+            Err(SessionPlacementRepositoryError::Corruption(
+                "session placement head behind event history",
+            ))
+        }
+    }
 }
 
 async fn load_current_for_update(
@@ -473,11 +523,34 @@ async fn load_current_for_update(
         .await?;
     if let Some(row) = row {
         let current = decode_authenticated_placement(row)?;
-        return authenticate_loaded_current(connection, session, current)
+        let history_head_state =
+            load_history_head_state(connection, session, current.version()).await?;
+        return authenticate_loaded_current(connection, session, current, history_head_state)
             .await
             .map(Some);
     }
     missing_head_result(connection, session).await
+}
+
+async fn load_history_head_state(
+    connection: &mut PgConnection,
+    session: SessionId,
+    version: SessionPlacementVersion,
+) -> Result<PlacementHistoryHeadState, sqlx::Error> {
+    let later_event_exists = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM session_placement_event
+             WHERE session_id = $1 AND version > $2
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(version_to_numeric(version))
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(PlacementHistoryHeadState::from_later_event_exists(
+        later_event_exists,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -509,10 +582,11 @@ fn decode_authenticated_placement(
             ));
         }
     };
-    let native_creation: Option<sqlx::types::Uuid> = row.try_get("native_creation_command_id")?;
-    let imported_creation: Option<sqlx::types::Uuid> =
-        row.try_get("imported_creation_command_id")?;
-    let update: Option<sqlx::types::Uuid> = row.try_get("placement_update_command_id")?;
+    let native_creation =
+        decode_receipt_command_identity(row.try_get("native_creation_command_id")?)?;
+    let imported_creation =
+        decode_receipt_command_identity(row.try_get("imported_creation_command_id")?)?;
+    let update = decode_receipt_command_identity(row.try_get("placement_update_command_id")?)?;
     let receipt_is_valid = match event_kind {
         SessionPlacementEventKind::Created => {
             version == SessionPlacementVersion::INITIAL
@@ -546,6 +620,20 @@ fn decode_authenticated_placement(
     Ok(VersionedSessionPlacement::reconstitute(version, placement))
 }
 
+fn decode_receipt_command_identity(
+    stored: Option<sqlx::types::Uuid>,
+) -> Result<Option<DurableCommandId>, SessionPlacementRepositoryError> {
+    stored
+        .map(|command| {
+            durable_command_id_from_uuid(command).map_err(|_| {
+                SessionPlacementRepositoryError::Corruption(
+                    "session placement provenance command identity",
+                )
+            })
+        })
+        .transpose()
+}
+
 async fn missing_head_result(
     connection: &mut PgConnection,
     session: SessionId,
@@ -565,7 +653,9 @@ async fn missing_head_result(
     match row {
         Some(row) => {
             let current = decode_authenticated_placement(row)?;
-            authenticate_loaded_current(connection, session, current)
+            let history_head_state =
+                load_history_head_state(connection, session, current.version()).await?;
+            authenticate_loaded_current(connection, session, current, history_head_state)
                 .await
                 .map(Some)
         }
@@ -657,7 +747,13 @@ async fn load_record(
                 event.event_kind AS result_event_kind,
                 event.placement_path AS result_path,
                 event.root_global_read_intent AS result_root_intent,
-                event.provenance_command_id AS result_provenance_command_id
+                event.provenance_command_id AS result_provenance_command_id,
+                EXISTS (
+                    SELECT 1
+                      FROM session_placement_event AS later_event
+                     WHERE later_event.session_id = head.session_id
+                       AND later_event.version > head.current_version
+                ) AS current_placement_later_event_exists
            FROM update_session_placement_command AS command
            LEFT JOIN session_current_placement AS head
              ON head.session_id = command.session_id
@@ -672,10 +768,45 @@ async fn load_record(
     let Some(row) = row else {
         return Ok(None);
     };
+    let session = session_id_from_uuid(row.try_get("session_id")?);
+    let current_head_version = row
+        .try_get::<Option<Decimal>, _>("current_placement_version")?
+        .map(decode_version)
+        .transpose()?;
+    let authenticated_head_version = match current_head_version {
+        Some(version) => load_authenticated_version(connection, session, version)
+            .await?
+            .map(|placement| placement.version()),
+        None => None,
+    };
+    if authenticated_head_version != current_head_version {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement head event",
+        ));
+    }
+    let history_head_state = PlacementHistoryHeadState::from_later_event_exists(
+        row.try_get("current_placement_later_event_exists")?,
+    );
+    match history_head_state {
+        PlacementHistoryHeadState::MatchesLatestEvent => {}
+        PlacementHistoryHeadState::BehindLaterEvent => {
+            return Err(SessionPlacementRepositoryError::Corruption(
+                "session placement head behind event history",
+            ));
+        }
+    }
+    let authenticated_result_version = match row.try_get::<Option<Decimal>, _>("result_version")? {
+        Some(version) => {
+            let version = decode_version(version)?;
+            load_authenticated_version(connection, session, version)
+                .await?
+                .map(|placement| placement.version())
+        }
+        None => None,
+    };
     let authenticated_rejection_version =
         match row.try_get::<Option<Decimal>, _>("result_current_version")? {
             Some(version) => {
-                let session = session_id_from_uuid(row.try_get("session_id")?);
                 let version = decode_version(version)?;
                 load_authenticated_version(connection, session, version)
                     .await?
@@ -683,12 +814,19 @@ async fn load_record(
             }
             None => None,
         };
-    decode_record(row, command_id, authenticated_rejection_version).map(Some)
+    decode_record(
+        row,
+        command_id,
+        authenticated_result_version,
+        authenticated_rejection_version,
+    )
+    .map(Some)
 }
 
 fn decode_record(
     row: PgRow,
     command_id: DurableCommandId,
+    authenticated_result_version: Option<SessionPlacementVersion>,
     authenticated_rejection_version: Option<SessionPlacementVersion>,
 ) -> Result<(UpdateSessionPlacement, UpdateSessionPlacementResult), SessionPlacementRepositoryError>
 {
@@ -771,6 +909,11 @@ fn decode_record(
             if recorded_result_version != event_result_version {
                 return Err(SessionPlacementRepositoryError::Corruption(
                     "applied result version",
+                ));
+            }
+            if authenticated_result_version != Some(recorded_result_version) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "applied placement event",
                 ));
             }
             let event = SessionPlacementEvent::updated(session, prior, placement, command_id)
@@ -1091,8 +1234,18 @@ mod tests {
         assert_eq!(reason, expected_reason);
     }
 
+    #[track_caller]
+    fn assert_provenance_command_identity_corruption(stored: sqlx::types::Uuid) {
+        let Err(SessionPlacementRepositoryError::Corruption(reason)) =
+            decode_receipt_command_identity(Some(stored))
+        else {
+            panic!("sentinel provenance must fail with typed corruption")
+        };
+        assert_eq!(reason, "session placement provenance command identity");
+    }
+
     #[test]
-    fn replay_terminal_shapes_reject_every_stray_result_field() {
+    fn inv012_replay_terminal_shapes_reject_every_stray_result_field() {
         assert_terminal_field_corruption(validate_terminal_field_shape(
             SessionPlacementResultStorageKind::Applied,
             None,
@@ -1135,5 +1288,11 @@ mod tests {
             validate_typed_header(UPDATE_SESSION_PLACEMENT_KIND, STORAGE_VERSION + 1),
             "typed command storage version",
         );
+    }
+
+    #[test]
+    fn inv002_placement_history_rejects_each_sentinel_command_provenance() {
+        assert_provenance_command_identity_corruption(sqlx::types::Uuid::nil());
+        assert_provenance_command_identity_corruption(sqlx::types::Uuid::max());
     }
 }

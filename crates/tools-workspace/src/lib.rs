@@ -24,7 +24,7 @@ pub use mutation::{
 pub use path::{
     LocalWorkspaceFileSystem, WorkspaceDirectoryEntry, WorkspaceDirectoryRead, WorkspaceEntryKind,
     WorkspaceFileBytes, WorkspaceFileSystem, WorkspacePathRejection, WorkspaceResolveError,
-    WorkspaceRoot, WorkspaceRootError,
+    WorkspaceRoot, WorkspaceRootError, WorkspaceRootIdentity,
 };
 pub use read::{
     GLOB_FILES_NAME, GlobFilesArguments, GlobFilesResult, GlobMatch, LIST_DIRECTORY_NAME,

@@ -166,18 +166,18 @@ regardless of placement.
 ### Delegation and ancestry
 
 Session creation cause and transcript ancestry are independent immutable facts.
-[sessions-and-transcript](spec/sessions-and-transcript.md) limits the first
-implementable cause to user initiation and represents ancestry as none or one
-exact source frontier. Session configuration defaults are a separate versioned
-value: creation establishes the first version, while later updates affect only
-future input acceptance. The open
-[delegation decision](open-questions.md#delegation) must add a delegated-cause
-variant with an exact parent-work identity before delegation creates related
-sessions; its parent-side wait, result, and cancellation transitions likewise
-remain reserved and are not variants in the first implementable turn state
-machine. Forking initializes a user-created session from a selected transcript
-frontier without claiming that the new session was delegated. Future merging
-remains open.
+[sessions-and-transcript](spec/sessions-and-transcript.md) defines user
+initiation and commits an exact spawning tool request as the delegated
+session-creation cause, while ancestry remains none or one exact source
+frontier. Session configuration defaults are a separate versioned value:
+creation establishes the first version, while later updates affect only future
+input acceptance. The owning
+[turn-lifecycle contract](spec/turn-lifecycle-and-scheduling.md) defines
+delegated wait, result, and parent-termination transitions. Imported-frontier
+forking initializes a user-created session without claiming that the new session
+was delegated. Native frontier selection remains unimplemented. Future merging
+remains an open
+[transcript-ancestry question](open-questions.md#transcript-ancestry).
 
 ## Dependency direction
 
@@ -228,11 +228,11 @@ implemented active phase, including approval and recovery waits, retains the
 session slot. A running turn owns exactly one current attempt, while a waiting
 turn carries its exact wait subject and no attempt. The complete state,
 stop-cause, and terminal-guard algebra, including live closed-boundary fatal
-handling, is normative in
+handling and delegated foreground/background waits, is normative in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Future
-child waits require the open delegation decision and will retain the slot unless
-it defines explicit branching semantics. Initial scheduler mechanics are fixed
-in the same page; their listed operational refinements remain open.
+branching beyond the accepted foreground/background wait modes remains separate
+scope. Initial scheduler mechanics are fixed in the same page; their listed
+operational refinements remain open.
 
 ## Explicitly open boundaries
 

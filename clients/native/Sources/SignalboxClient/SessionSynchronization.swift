@@ -144,7 +144,7 @@ public struct SignalboxSynchronizationSnapshot: Equatable, Sendable {
   public let cursor: SignalboxCanonicalUInt64
   public let records: [Record]
 
-  fileprivate init(
+  init(
     sessionID: SignalboxCanonicalUUID,
     cursor: SignalboxCanonicalUInt64,
     records: [Record]
@@ -472,12 +472,9 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
             ?? "A malformed followed event could not be decoded."
         )
       }
-      guard !followed.event.hasUnknownNestedState else {
-        return protocolFailure(
-          stage: .replay,
-          message: "A known followed event contained an unknown closed state."
-        )
-      }
+      // Unknown nested states are retained as visible evidence by the projector.
+      // Only malformed envelopes fail replay before cursor validation.
+      // This keeps snapshot catch-up tolerant of newer closed-state variants.
       let observedCursor = replayBufferLastCursor ?? snapshotCursor
       guard followed.cursor > observedCursor else {
         return diagnosticEffects(for: followed, stage: .replay)
@@ -594,12 +591,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
           ?? "A malformed followed event could not be decoded."
       )
     }
-    guard !followed.event.hasUnknownNestedState else {
-      return protocolFailure(
-        stage: .steady,
-        message: "A known followed event contained an unknown closed state."
-      )
-    }
+    // Unknown nested states remain visible evidence after synchronization.
+    // They do not invalidate an otherwise well-formed followed event.
+    // The diagnostic path below reports their unrecognized protocol content.
+    // Cursor validation still governs whether the event advances the stream.
     guard followed.cursor > cursor else {
       return reportDiagnostics ? diagnosticEffects(for: followed, stage: .steady) : []
     }
@@ -1021,6 +1016,12 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         kind: .protocolViolation,
         permitsRetry: false
       )
+    case .unknown:
+      return enterRecovery(
+        stage: failedStage,
+        message: message,
+        kind: .protocolViolation
+      )
     }
   }
 
@@ -1063,7 +1064,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: failedStage,
       message: message
     )
-    retainDiagnostic(diagnostic)
+    let retainedDiagnostic = retainDiagnostic(diagnostic)
     accumulator = nil
     clearReplayBuffer()
     activeRefresh = nil
@@ -1089,15 +1090,15 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       )
     }
     effects.append(.closeFollow(generation: oldGeneration))
-    effects.append(.reportDiagnostic(diagnostic))
+    effects.append(.reportDiagnostic(retainedDiagnostic))
     guard permitsRetry else {
       let terminal = SignalboxSynchronizationDiagnostic(
         kind: .terminalFailure,
         stage: failedStage,
         message: "Synchronization stopped after a non-retriable protocol failure."
       )
-      retainDiagnostic(terminal)
-      effects.append(.reportDiagnostic(terminal))
+      let retainedTerminal = retainDiagnostic(terminal)
+      effects.append(.reportDiagnostic(retainedTerminal))
       effects.append(.terminalFailure)
       return effects
     }
@@ -1109,8 +1110,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
         stage: failedStage,
         message: "The bounded synchronization retry policy was exhausted."
       )
-      retainDiagnostic(exhausted)
-      effects.append(.reportDiagnostic(exhausted))
+      let retainedExhausted = retainDiagnostic(exhausted)
+      effects.append(.reportDiagnostic(retainedExhausted))
       effects.append(.retryLimitReached)
     }
     return effects
@@ -1124,8 +1125,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: staleStage,
       message: "Ignored a completion from superseded synchronization work."
     )
-    retainDiagnostic(diagnostic)
-    return [.reportDiagnostic(diagnostic)]
+    let retainedDiagnostic = retainDiagnostic(diagnostic)
+    return [.reportDiagnostic(retainedDiagnostic)]
   }
 
   private mutating func unknownFrame(
@@ -1159,48 +1160,48 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       stage: currentStage,
       message: message
     )
-    retainDiagnostic(diagnostic)
-    return [.reportDiagnostic(diagnostic)]
+    let retainedDiagnostic = retainDiagnostic(diagnostic)
+    return [.reportDiagnostic(retainedDiagnostic)]
   }
 
   private mutating func diagnosticEffects(
     for followed: SignalboxFollowedSessionEvent,
     stage currentStage: SignalboxSynchronizationStage
   ) -> [SignalboxSessionSynchronizationEffect] {
-    guard
-      case .unknown(let kind, _, let decodingDiagnostic) = followed.event
-    else {
+    guard let unrecognized = followed.event.unrecognizedContent else {
       return []
     }
     let message =
-      decodingDiagnostic?.message
-      ?? "Preserved an unrecognized session-event kind: \(kind)."
+      unrecognized.decodingDiagnostic?.message
+      ?? "Preserved unrecognized session-event content: \(unrecognized.kind)."
     let diagnostic = SignalboxSynchronizationDiagnostic(
       kind: .decoding,
       stage: currentStage,
       message: message
     )
-    retainDiagnostic(diagnostic)
-    return [.reportDiagnostic(diagnostic)]
+    let retainedDiagnostic = retainDiagnostic(diagnostic)
+    return [.reportDiagnostic(retainedDiagnostic)]
   }
 
   private mutating func retainDiagnostic(
     _ diagnostic: SignalboxSynchronizationDiagnostic
-  ) {
-    diagnostics.append(
-      SignalboxSynchronizationDiagnostic(
-        kind: diagnostic.kind,
-        stage: diagnostic.stage,
-        message: retainedDiagnosticMessage(diagnostic.message)
-      )
+  ) -> SignalboxSynchronizationDiagnostic {
+    let retainedDiagnostic = SignalboxSynchronizationDiagnostic(
+      kind: diagnostic.kind,
+      stage: diagnostic.stage,
+      message: Self.retainedDiagnosticMessage(diagnostic.message)
     )
+    diagnostics.append(retainedDiagnostic)
     let overflow = diagnostics.count - Self.maximumRetainedDiagnostics
     if overflow > 0 {
       diagnostics.removeFirst(overflow)
     }
+    return retainedDiagnostic
   }
 
-  private func retainedDiagnosticMessage(_ message: String) -> String {
+  /// Bounds protocol-derived text to prevent retained-history memory exhaustion
+  /// and UI layout stalls from an oversized diagnostic.
+  public static func retainedDiagnosticMessage(_ message: String) -> String {
     let scalars = message.unicodeScalars
     var retainedEnd = scalars.startIndex
     var retainedBytes = 0
@@ -1318,7 +1319,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition:
+    case .sessionCreated, .inputAccepted, .modelCallTransition, .turnActivated:
       return false
     }
   }
@@ -1381,6 +1382,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   let capacity: SignalboxSynchronizationSnapshotCapacity
   private var records: [SignalboxSynchronizationSnapshot.Record] = []
   private var turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64] = [:]
+  private var firstTurnID: SignalboxCanonicalUUID?
+  private var queuedTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var modelCallOwningTurnIDs: Set<SignalboxCanonicalUUID> = []
   private var unmatchedTerminalModelCallOwners:
     [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
@@ -1389,6 +1392,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
   private var modelCallIDs: Set<SignalboxCanonicalUUID> = []
   private var entryIDs: Set<SignalboxSnapshotEntryIdentity> = []
+  private var modelIdentityTurns = SignalboxSnapshotModelIdentityTurns()
+  private var pendingModelIdentityTurnID: SignalboxCanonicalUUID?
   private var priorAcceptancePosition: UInt64?
   private var priorModelCallTurnAcceptancePosition: UInt64?
   private var priorModelCallID: String?
@@ -1401,7 +1406,6 @@ private struct SignalboxSnapshotAccumulator: Sendable {
   private var contentEntryIndex: UInt64?
   private var expectedFragmentIndex: UInt64 = 0
   private var retainedUTF8Bytes: UInt = 0
-
   init(
     boundary: SignalboxTranscriptSnapshotBoundary,
     capacity: SignalboxSynchronizationSnapshotCapacity
@@ -1409,7 +1413,6 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     self.boundary = boundary
     self.capacity = capacity
   }
-
   mutating func ingest(
     _ message: SignalboxProcessServerMessage,
     expectedSessionID: SignalboxCanonicalUUID
@@ -1422,6 +1425,9 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     }
     switch message {
     case .transcriptTurn(let turn):
+      if let malformed = turn.state.malformedStoredProjection {
+        return .diagnostic(kind: malformed.kind, decodingDiagnostic: malformed.diagnostic)
+      }
       let ownership = turn.state.snapshotModelCallOwnership
       let exposedModelCallID = ownership.exposedModelCallID
       guard
@@ -1456,12 +1462,18 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         modelCallOwningTurnIDs.insert(turn.turnID)
         forbiddenModelCallOwners[forbiddenModelCallID] = turn.turnID
       }
+      if firstTurnID == nil {
+        firstTurnID = turn.turnID
+      }
+      if case .queued = turn.state {
+        queuedTurnIDs.insert(turn.turnID)
+      }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
       guard append(.turn(turn)) else {
         return .invalid("Snapshot exceeded the configured native-client capacity.")
       }
-      return .accepted
+      return turn.state.snapshotUnknownDiagnostic ?? .accepted
     case .transcriptModelCallUsage(let evidence):
       guard let turnAcceptancePosition = turnAcceptancePositions[evidence.turnID] else {
         return .invalid("Snapshot model-call usage order or identities were invalid.")
@@ -1509,16 +1521,23 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       return .accepted
     case .transcriptEntry(let entry):
       entriesStarted = true
+      if let malformed = entry.entry.malformedStoredProjection {
+        return .diagnostic(kind: malformed.kind, decodingDiagnostic: malformed.diagnostic)
+      }
       guard
-        modelCallsEnded,
-        !entry.entry.hasUnknownStoredVariant,
+        modelCallsEnded && pendingModelIdentityTurnID == nil,
+        !entry.entry.hasMalformedStoredProjection && entry.entry.modelIdentityTurnIsKnown(in: turnAcceptancePositions),
+        entry.entry.modelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
+        entry.entry.modelIdentityTurnID == nil || entry.entry.modelIdentityTurnID != firstTurnID,
+        entry.entry.modelIdentityTurnID.map({ !queuedTurnIDs.contains($0) }) ?? true,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
             sourceSessionID: entry.sourceSessionID,
             entryID: entry.entryID
           )
-        ).inserted
+        ).inserted,
+        entry.entry.admitsModelIdentityTurn(&modelIdentityTurns.markers, &pendingModelIdentityTurnID)
       else {
         return .invalid("Snapshot entry indices or source-qualified identities were invalid.")
       }
@@ -1529,9 +1548,13 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       return .accepted
     case .transcriptTextEntry(let entry):
       entriesStarted = true
+      if let malformed = entry.entry.malformedStoredProjection {
+        return .diagnostic(kind: malformed.kind, decodingDiagnostic: malformed.diagnostic)
+      }
       guard
         modelCallsEnded,
-        !entry.entry.hasUnknownStoredVariant,
+        pendingModelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
+        !entry.entry.hasMalformedStoredProjection && consumesModelIdentityTurnOrigin(entry.entry),
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1555,7 +1578,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         end.cursor == boundary.cursor,
         end.turnCount.rawValue == turnCount,
         end.entryCount.rawValue == entryCount,
-        modelCallsEnded
+        modelCallsEnded && pendingModelIdentityTurnID == nil
       else {
         return .invalid("Snapshot terminal identity, cursor, or counts were invalid.")
       }
@@ -1623,7 +1646,6 @@ private struct SignalboxSnapshotAccumulator: Sendable {
     return true
   }
 }
-
 extension SignalboxSynchronizationSnapshot.Record {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
@@ -1643,10 +1665,21 @@ extension SignalboxSynchronizationSnapshot.Record {
 }
 
 extension SignalboxTranscriptTurnState {
+  fileprivate var malformedStoredProjection:
+    (kind: String, diagnostic: SignalboxDecodingDiagnostic)?
+  {
+    guard case .unknown(let kind, _, let decodingDiagnostic) = self,
+      let decodingDiagnostic
+    else {
+      return nil
+    }
+    return ("transcript_turn.state.\(kind)", decodingDiagnostic)
+  }
+
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued, .unknown:
-      return .impossible
+    case .queued: return .impossible
+    case .unknown: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1676,15 +1709,15 @@ extension SignalboxTranscriptTurnState {
 
   fileprivate var isInvalidStoredProjection: Bool {
     switch self {
-    case .activeRunning(_, let currentModelCall):
-      return currentModelCall?.state.hasUnknownStoredVariant ?? false
     case .failed(_, let terminalAttemptID, let terminalModelCall):
-      return terminalModelCall != nil && terminalAttemptID == nil
-    case .unknown:
-      return true
-    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
-      .reconciliationRequired, .toolReconciliationRequired:
+      return terminalModelCall != nil
+        && terminalAttemptID == nil
+    case .unknown(_, _, let decodingDiagnostic):
+      return decodingDiagnostic != nil
+    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
+      .refused, .cancelled, .reconciliationRequired,
+      .toolReconciliationRequired:
       return false
     }
   }
@@ -1693,13 +1726,13 @@ extension SignalboxTranscriptTurnState {
     switch self {
     case .queued(_, let content):
       return UInt(content.utf8.count)
-    case .activeRunning(_, let currentModelCall):
-      return currentModelCall?.state.retainedUTF8Bytes ?? 0
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
+    case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return 0
     }
@@ -1719,18 +1752,27 @@ extension SignalboxSnapshotModelCallOwnership {
   }
 }
 
-extension SignalboxCurrentModelCallState {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
+private struct SignalboxSnapshotModelIdentityTurns {
+  var markers: Set<SignalboxCanonicalUUID> = []
+  var origins: Set<SignalboxCanonicalUUID> = []
+}
 
+extension SignalboxSnapshotAccumulator {
+  fileprivate mutating func consumesModelIdentityTurnOrigin(
+    _ entry: SignalboxTranscriptTextEntry
+  ) -> Bool {
+    entry.consumesTurnOrigin(
+      &pendingModelIdentityTurnID,
+      seenTurnIDs: &modelIdentityTurns.origins
+    )
+  }
+}
+
+extension SignalboxCurrentModelCallState {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .unknown(_, let payload):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
     case .prepared, .inFlight, .cancellationRequested:
       return 0
     }
@@ -1738,16 +1780,52 @@ extension SignalboxCurrentModelCallState {
 }
 
 extension SignalboxTranscriptEntry {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    switch self {
-    case .imported(_, _, let sourceSpeaker, _):
-      return sourceSpeaker.hasUnknownStoredVariant
-    case .unknown:
+  fileprivate var malformedStoredProjection:
+    (kind: String, diagnostic: SignalboxDecodingDiagnostic)?
+  {
+    guard case .unknown(let kind, _, let decodingDiagnostic) = self,
+      let decodingDiagnostic
+    else {
+      return nil
+    }
+    return (kind, decodingDiagnostic)
+  }
+
+  fileprivate var modelIdentityTurnID: SignalboxCanonicalUUID? {
+    if case .modelIdentityChanged(let turnID, _, _) = self {
+      return turnID
+    }
+    return nil
+  }
+
+  fileprivate func modelIdentityTurnIsKnown(
+    in turnAcceptancePositions: [SignalboxCanonicalUUID: UInt64]
+  ) -> Bool {
+    if case .modelIdentityChanged(let turnID, _, _) = self {
+      return turnAcceptancePositions[turnID] != nil
+    }
+    return true
+  }
+
+  fileprivate func admitsModelIdentityTurn(
+    _ turnIDs: inout Set<SignalboxCanonicalUUID>,
+    _ pendingTurnID: inout SignalboxCanonicalUUID?
+  ) -> Bool {
+    guard let modelIdentityTurnID else {
       return true
-    case .assistantToolUse, .toolExecutionResult, .toolDenied, .toolClosed,
-      .turnCompleted, .turnFailed, .turnCancelled:
+    }
+    guard turnIDs.insert(modelIdentityTurnID).inserted else {
       return false
     }
+    pendingTurnID = modelIdentityTurnID
+    return true
+  }
+
+  fileprivate var hasMalformedStoredProjection: Bool {
+    if case .unknown(_, _, let decodingDiagnostic) = self {
+      return decodingDiagnostic != nil
+    }
+    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
@@ -1758,35 +1836,62 @@ extension SignalboxTranscriptEntry {
       .toolDenied(_, let content),
       .toolClosed(_, let content):
       return UInt(content.utf8.count)
-    case .imported(_, _, let sourceSpeaker, _):
-      return sourceSpeaker.retainedUTF8Bytes
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .imported(_, _, let sourceSpeaker, let contentKind):
+      return sourceSpeaker.retainedUTF8Bytes.saturatedAdding(contentKind.retainedUTF8Bytes)
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count)
+        .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .turnCompleted, .turnFailed, .turnCancelled:
+    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled:
       return 0
     }
   }
 }
 
 extension SignalboxTranscriptTextEntry {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    switch self {
-    case .imported(_, _, let sourceSpeaker):
-      return sourceSpeaker.hasUnknownStoredVariant
-    case .unknown:
+  fileprivate var malformedStoredProjection:
+    (kind: String, diagnostic: SignalboxDecodingDiagnostic)?
+  {
+    guard case .unknown(let kind, _, let decodingDiagnostic) = self,
+      let decodingDiagnostic
+    else {
+      return nil
+    }
+    return (kind, decodingDiagnostic)
+  }
+
+  fileprivate func consumesTurnOrigin(
+    _ pendingTurnID: inout SignalboxCanonicalUUID?,
+    seenTurnIDs: inout Set<SignalboxCanonicalUUID>
+  ) -> Bool {
+    guard case .user(_, let turnID) = self else {
+      return pendingTurnID == nil
+    }
+    guard let expectedTurnID = pendingTurnID else {
+      seenTurnIDs.insert(turnID)
       return true
-    case .user, .assistant, .contextSummary:
+    }
+    guard turnID == expectedTurnID, seenTurnIDs.insert(turnID).inserted else {
       return false
     }
+    pendingTurnID = nil
+    return true
+  }
+
+  fileprivate var hasMalformedStoredProjection: Bool {
+    if case .unknown(_, _, let decodingDiagnostic) = self {
+      return decodingDiagnostic != nil
+    }
+    return false
   }
 
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .imported(_, _, let sourceSpeaker):
       return sourceSpeaker.retainedUTF8Bytes
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count)
+        .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .user, .assistant, .contextSummary:
       return 0
@@ -1795,34 +1900,79 @@ extension SignalboxTranscriptTextEntry {
 }
 
 extension SignalboxImportedSourceSpeaker {
-  fileprivate var hasUnknownStoredVariant: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .unknown(_, let payload):
-      return payload.encodedUTF8Bytes
-    case .notAttested, .attestedAbsent, .attested:
+    case .unknown(let kind, let payload):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
+    case .attested(let speaker):
+      return speaker.retainedUTF8Bytes
+    case .notAttested, .attestedAbsent:
       return 0
     }
   }
 }
 
+extension SignalboxFailedTerminalModelCall {
+  fileprivate var retainedUTF8Bytes: UInt {
+    disposition.retainedUTF8Bytes.saturatedAdding(cause?.retainedUTF8Bytes ?? 0)
+  }
+}
+
+extension SignalboxFailedModelCallDisposition {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxFailedModelCallCause {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxImportedContentKind {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
+extension SignalboxImportedSpeaker {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
+    }
+    return 0
+  }
+}
+
 extension SignalboxProcessSessionEvent {
-  fileprivate var hasUnknownNestedState: Bool {
+  fileprivate var unrecognizedContent: (
+    kind: String, decodingDiagnostic: SignalboxDecodingDiagnostic?
+  )? {
     switch self {
-    case .modelCallTransition(_, _, let state):
-      return state.isUnknown
-    case .toolBatchTransition(_, _, let state):
-      return state.isUnknown
-    case .sessionCreated, .inputAccepted, .turnActivated, .contextCompacted, .turnCompleted,
-      .turnFailed, .turnRefused, .turnCancelled, .turnReconciliationRequired,
-      .turnToolReconciliationRequired, .unknown:
-      return false
+    case .modelCallTransition(_, _, .unknown(let kind, _)):
+      return ("model_call_transition.state.\(kind)", nil)
+    case .modelCallTransition(_, _, .terminal(.unknown(let disposition))):
+      let kind = "model_call_transition.state.terminal.disposition.\(disposition)"
+      return (kind, nil)
+    case .toolBatchTransition(_, _, .unknown(let kind, _)):
+      return ("tool_batch_transition.state.\(kind)", nil)
+    case .unknown(let kind, _, let diagnostic):
+      return (kind, diagnostic)
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+      .turnToolReconciliationRequired:
+      return nil
     }
   }
 
@@ -1841,8 +1991,9 @@ extension SignalboxProcessSessionEvent {
       return state.retainedUTF8Bytes
     case .toolBatchTransition(_, _, let state):
       return state.retainedUTF8Bytes
-    case .unknown(_, let payload, let diagnostic):
-      return payload.encodedUTF8Bytes
+    case .unknown(let kind, let payload, let diagnostic):
+      return UInt(kind.utf8.count)
+        .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
     case .sessionCreated, .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
@@ -1853,34 +2004,57 @@ extension SignalboxProcessSessionEvent {
 }
 
 extension SignalboxModelCallState {
-  fileprivate var isUnknown: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
-    if case .unknown(_, let payload) = self {
-      return payload.encodedUTF8Bytes
+    switch self {
+    case .unknown(let kind, let payload):
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
+    case .terminal(let disposition):
+      return disposition.retainedUTF8Bytes
+    case .prepared, .inFlight, .cancellationRequested:
+      return 0
+    }
+  }
+}
+
+extension SignalboxModelCallDisposition {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .unknown(let value) = self {
+      return UInt(value.utf8.count)
     }
     return 0
   }
 }
 
 extension SignalboxToolBatchState {
-  fileprivate var isUnknown: Bool {
-    if case .unknown = self {
-      return true
-    }
-    return false
-  }
-
   fileprivate var retainedUTF8Bytes: UInt {
-    if case .unknown(_, let payload) = self {
-      return payload.encodedUTF8Bytes
+    if case .unknown(let kind, let payload) = self {
+      return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
     }
     return 0
+  }
+}
+
+extension SignalboxTranscriptTurnState {
+  fileprivate var snapshotUnknownDiagnostic: SignalboxSnapshotAccumulatorOutcome? {
+    switch self {
+    case .activeRunning(_, let currentModelCall):
+      guard case .unknown(let kind, _) = currentModelCall?.state else {
+        return nil
+      }
+      return .diagnostic(
+        kind: "transcript_turn.state.active_running.current_model_call.state.\(kind)",
+        decodingDiagnostic: nil
+      )
+    case .unknown(let kind, _, _):
+      return .diagnostic(
+        kind: "transcript_turn.state.\(kind)",
+        decodingDiagnostic: nil
+      )
+    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
+      return nil
+    }
   }
 }
 

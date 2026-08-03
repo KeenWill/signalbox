@@ -5,8 +5,8 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError,
-    GoalCommandRejection, RejectionDetail,
+    ConversationImportRejectionClass, ErrorCode, ErrorDetail, FailedModelCallCause,
+    FrameDecodeError, FrameEncodeError, GoalCommandRejection, RejectionDetail,
 };
 
 #[derive(Debug)]
@@ -442,14 +442,96 @@ impl fmt::Display for RejectionDisplay {
                 requested_position.value(),
                 last_position.value()
             ),
+            RejectionDetail::ConversationImportAlreadyInProgress {} => {
+                formatter.write_str("conversation_import_already_in_progress")
+            }
+            RejectionDetail::ConversationImportNotInProgress {} => {
+                formatter.write_str("conversation_import_not_in_progress")
+            }
+            RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes,
+                declared_size_bytes,
+                actual_size_bytes: None,
+            } => write!(
+                formatter,
+                "conversation_import_source_too_large limit_bytes={} declared_size_bytes={}",
+                limit_bytes.value(),
+                declared_size_bytes.value()
+            ),
+            RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes,
+                declared_size_bytes,
+                actual_size_bytes: Some(actual_size_bytes),
+            } => write!(
+                formatter,
+                "conversation_import_source_too_large limit_bytes={} declared_size_bytes={} \
+                 actual_size_bytes={}",
+                limit_bytes.value(),
+                declared_size_bytes.value(),
+                actual_size_bytes.value()
+            ),
+            RejectionDetail::ConversationImportSourceSizeMismatch {
+                declared_size_bytes,
+                actual_size_bytes,
+            } => write!(
+                formatter,
+                "conversation_import_source_size_mismatch declared_size_bytes={} \
+                 actual_size_bytes={}",
+                declared_size_bytes.value(),
+                actual_size_bytes.value()
+            ),
+            RejectionDetail::ConversationImportConversionFailed {
+                class,
+                record_ordinal: None,
+            } => write!(
+                formatter,
+                "conversation_import_conversion_failed class={}",
+                conversation_import_rejection_class_name(class)
+            ),
+            RejectionDetail::ConversationImportConversionFailed {
+                class,
+                record_ordinal: Some(record_ordinal),
+            } => write!(
+                formatter,
+                "conversation_import_conversion_failed class={} record_ordinal={}",
+                conversation_import_rejection_class_name(class),
+                record_ordinal.value()
+            ),
         }
+    }
+}
+
+const fn conversation_import_rejection_class_name(
+    class: ConversationImportRejectionClass,
+) -> &'static str {
+    match class {
+        ConversationImportRejectionClass::EmptySource => "empty_source",
+        ConversationImportRejectionClass::BlankLine => "blank_line",
+        ConversationImportRejectionClass::InvalidUtf8 => "invalid_utf8",
+        ConversationImportRejectionClass::InvalidJson => "invalid_json",
+        ConversationImportRejectionClass::JsonDepthExceeded => "json_depth_exceeded",
+        ConversationImportRejectionClass::TopLevelNotObject => "top_level_not_object",
+        ConversationImportRejectionClass::InvalidRecordType => "invalid_record_type",
+        ConversationImportRejectionClass::InvalidSourceMetadata => "invalid_source_metadata",
+        ConversationImportRejectionClass::InvalidMessageEnvelope => "invalid_message_envelope",
+        ConversationImportRejectionClass::InvalidMessageRole => "invalid_message_role",
+        ConversationImportRejectionClass::MessageRoleMismatch => "message_role_mismatch",
+        ConversationImportRejectionClass::InvalidMessageContent => "invalid_message_content",
+        ConversationImportRejectionClass::InvalidContentBlock => "invalid_content_block",
+        ConversationImportRejectionClass::InvalidToolResultBlock => "invalid_tool_result_block",
+        ConversationImportRejectionClass::InvalidReasoning => "invalid_reasoning",
+        ConversationImportRejectionClass::InvalidToolCall => "invalid_tool_call",
+        ConversationImportRejectionClass::InvalidToolResult => "invalid_tool_result",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use signalbox_process_protocol::{ErrorCode, ErrorDetail, FailedModelCallCause};
+    use signalbox_process_protocol::{
+        CanonicalU64, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
+        FailedModelCallCause, RejectionDetail,
+    };
 
     use super::ClientError;
 
@@ -459,6 +541,39 @@ mod tests {
             ClientError::TurnFailed(Some(FailedModelCallCause::QuotaExhausted)).to_string(),
             "the submitted turn failed: the provider quota is exhausted"
         );
+    }
+
+    #[test]
+    fn conversation_import_conversion_evidence_names_only_class_and_ordinal() {
+        let error = ClientError::remote(
+            ErrorCode::InvalidRequest,
+            "conversation import was rejected".to_owned(),
+            ErrorDetail::invalid_request(RejectionDetail::ConversationImportConversionFailed {
+                class: ConversationImportRejectionClass::InvalidToolResult,
+                record_ordinal: Some(CanonicalU64::new(17)),
+            }),
+        );
+
+        expect![[r#"
+            invalid_request: conversation import was rejected (conversation_import_conversion_failed class=invalid_tool_result record_ordinal=17)"#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn conversation_import_bound_evidence_names_limit_and_both_sizes() {
+        let error = ClientError::remote(
+            ErrorCode::InvalidRequest,
+            "conversation import was rejected".to_owned(),
+            ErrorDetail::invalid_request(RejectionDetail::ConversationImportSourceTooLarge {
+                limit_bytes: CanonicalU64::new(8),
+                declared_size_bytes: CanonicalU64::new(7),
+                actual_size_bytes: Some(CanonicalU64::new(9)),
+            }),
+        );
+
+        expect![[r#"
+            invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
+        .assert_eq(&error.to_string());
     }
 
     #[test]

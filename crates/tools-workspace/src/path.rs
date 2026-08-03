@@ -81,10 +81,30 @@ impl Error for WorkspaceRootError {
     }
 }
 
+/// Stable filesystem identity of one pinned workspace-root descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceRootIdentity {
+    /// Device containing the pinned directory.
+    pub device: u64,
+    /// Inode of the pinned directory on that device.
+    pub inode: u64,
+}
+
+fn workspace_root_identity_from_stat(status: &rustix::fs::Stat) -> WorkspaceRootIdentity {
+    // rustix exposes the host's native stat field widths. Normalize them to the
+    // stable public representation used by `std::os::unix::fs::MetadataExt`.
+    #[allow(clippy::unnecessary_cast)]
+    WorkspaceRootIdentity {
+        device: status.st_dev as u64,
+        inode: status.st_ino as u64,
+    }
+}
+
 /// Descriptor authority boundary injected into one workspace tool family.
 #[derive(Clone)]
 pub struct WorkspaceRoot {
     descriptor: Arc<OwnedFd>,
+    identity: WorkspaceRootIdentity,
 }
 
 impl fmt::Debug for WorkspaceRoot {
@@ -98,6 +118,11 @@ impl fmt::Debug for WorkspaceRoot {
 impl WorkspaceRoot {
     pub(crate) fn descriptor(&self) -> &OwnedFd {
         self.descriptor.as_ref()
+    }
+
+    /// Returns the filesystem identity captured from the pinned root descriptor.
+    pub const fn identity(&self) -> WorkspaceRootIdentity {
+        self.identity
     }
 
     /// Opens and pins one injected directory without following a final symlink.
@@ -122,6 +147,7 @@ impl WorkspaceRoot {
         }
         Ok(Self {
             descriptor: Arc::new(descriptor),
+            identity: workspace_root_identity_from_stat(&status),
         })
     }
 
@@ -535,6 +561,16 @@ fn entry_kind(file_type: FileType) -> WorkspaceEntryKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_root_identity_reports_the_pinned_descriptor() {
+        let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+        let root = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, workspace.path())
+            .expect("fixture root is valid");
+        let status = fstat(root.descriptor()).expect("pinned descriptor status reads");
+
+        assert_eq!(root.identity(), workspace_root_identity_from_stat(&status));
+    }
 
     #[test]
     fn absolute_path_has_typed_rejection() {

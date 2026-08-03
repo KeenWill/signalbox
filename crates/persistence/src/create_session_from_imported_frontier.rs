@@ -22,7 +22,8 @@ use signalbox_domain::{
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementEventKind,
-    SessionPlacementVersion, TranscriptAncestry, VersionedSessionPlacement,
+    SessionPlacementReconstitutionFacts, SessionPlacementVersion, TranscriptAncestry,
+    VersionedSessionPlacement,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -677,6 +678,12 @@ async fn load_creation_from_connection(
             v.system_prompt AS stored_system_prompt,
             placement_head.current_version AS current_placement_head_version,
             current_placement.version AS current_placement_event_version,
+            EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+            ) AS current_placement_later_event_exists,
             initial_placement.version AS initial_placement_version,
             initial_placement.prior_version AS initial_placement_prior_version,
             initial_placement.event_kind AS initial_placement_event_kind,
@@ -818,6 +825,20 @@ fn validate_initial_placement_effect(row: &PgRow) -> Result<(), ImportedSessionR
     if head != current_event {
         return Err(ImportedSessionCorruption::Inconsistent("current placement head event").into());
     }
+    let history_head_state =
+        crate::session_placement::PlacementHistoryHeadState::from_later_event_exists(required(
+            row,
+            "current_placement_later_event_exists",
+        )?);
+    match history_head_state {
+        crate::session_placement::PlacementHistoryHeadState::MatchesLatestEvent => {}
+        crate::session_placement::PlacementHistoryHeadState::BehindLaterEvent => {
+            return Err(ImportedSessionCorruption::Inconsistent(
+                "session placement head behind event history",
+            )
+            .into());
+        }
+    }
     let initial =
         crate::session_placement::decode_version(required(row, "initial_placement_version")?)
             .map_err(|_| ImportedSessionCorruption::Inconsistent("initial placement version"))?;
@@ -942,10 +963,12 @@ pub(crate) fn reconstitute_bounded_current(
         defaults_session,
         defaults_version,
         defaults,
-        current_placement_session,
-        current_placement_version,
-        placement_session,
-        current_placement,
+        SessionPlacementReconstitutionFacts {
+            current_pointer_session: current_placement_session,
+            current_pointer_version: current_placement_version,
+            selected_event_session: placement_session,
+            selected_event: current_placement,
+        },
         seed_records,
         seed_headers,
     )
@@ -978,10 +1001,12 @@ pub(crate) async fn load_complete_current(
         session.id(),
         current_defaults.version(),
         current_defaults.defaults().clone(),
-        session.id(),
-        session.current_placement().version(),
-        session.id(),
-        session.current_placement().clone(),
+        SessionPlacementReconstitutionFacts {
+            current_pointer_session: session.id(),
+            current_pointer_version: session.current_placement().version(),
+            selected_event_session: session.id(),
+            selected_event: session.current_placement().clone(),
+        },
         conversation,
         projection.seed_records,
         projection.seed_snapshots,
