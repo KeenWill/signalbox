@@ -395,6 +395,7 @@ fn valid_github_account(value: &str) -> bool {
         && value.len() <= MAX_GITHUB_ACCOUNT_BYTES
         && !value.starts_with('-')
         && !value.ends_with('-')
+        && !value.contains("--")
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '-')
@@ -3473,6 +3474,19 @@ mod tests {
             "base": CREATE_BASE
         })))
         .expect_err("an account-qualified head over the total byte bound is rejected");
+
+        assert_eq!(rejection, InvalidGitHubArguments);
+    }
+
+    #[test]
+    fn create_rejects_an_account_qualified_head_with_adjacent_hyphens() {
+        let rejection = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": "contributor--fork:agent/fix",
+            "base": CREATE_BASE
+        })))
+        .expect_err("an account name with adjacent hyphens is rejected before dispatch");
 
         assert_eq!(rejection, InvalidGitHubArguments);
     }
