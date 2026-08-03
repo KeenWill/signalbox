@@ -3774,7 +3774,8 @@ async fn approval_judge_completion_replay_rejects_another_continuation_identity(
 
     assert_eq!(
         error.operator_failure_class(),
-        OperatorFailureClass::FailClosedCorruption
+        OperatorFailureClass::FailClosedCorruption,
+        "unexpected replay error: {error:?}"
     );
 
     pool.close().await;

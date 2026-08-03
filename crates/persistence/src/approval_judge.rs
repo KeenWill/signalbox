@@ -735,18 +735,19 @@ async fn exact_completed(
         && row.try_get::<Option<Decimal>, _>("cache_creation_input_tokens")?
             == encoded.cache_creation
         && row.try_get::<Option<Decimal>, _>("cache_read_input_tokens")? == encoded.cache_read;
+    if !exact {
+        return Ok(None);
+    }
     let continuation_exact = recommendation == DelegateApprovalRecommendation::EscalateToHuman
         || exact_completion_continuation(connection, prepared, continuation_attempt).await?;
-    Ok(
-        (exact && continuation_exact).then_some(match recommendation {
-            DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny => {
-                CompleteApprovalJudgeOutcome::Decided
-            }
-            DelegateApprovalRecommendation::EscalateToHuman => {
-                CompleteApprovalJudgeOutcome::EscalatedToHuman
-            }
-        }),
-    )
+    Ok(continuation_exact.then_some(match recommendation {
+        DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny => {
+            CompleteApprovalJudgeOutcome::Decided
+        }
+        DelegateApprovalRecommendation::EscalateToHuman => {
+            CompleteApprovalJudgeOutcome::EscalatedToHuman
+        }
+    }))
 }
 
 async fn exact_completion_continuation(
@@ -754,32 +755,24 @@ async fn exact_completion_continuation(
     prepared: &PreparedApprovalJudge,
     continuation_attempt: TurnAttemptId,
 ) -> Result<bool, ApprovalJudgeRepositoryError> {
-    let later_unresolved_at_completion: bool = sqlx::query_scalar(
+    let completion_was_nonfinal: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM tool_request AS later
-            JOIN tool_approval_decision AS decision
-              ON decision.request_id = later.tool_request_id
+            LEFT JOIN tool_approval_decision AS decision
+              ON decision.request_id = later.request_id
            WHERE later.producing_model_call_id = $1
              AND later.request_ordinal > $2
-             AND decision.decision_source NOT IN ('policy_auto', 'session_blanket')
-        ) OR EXISTS (
-            SELECT 1 FROM turn_lifecycle AS lifecycle
-            JOIN tool_request AS waiting
-              ON waiting.tool_request_id = lifecycle.approval_tool_request_id
-           WHERE lifecycle.turn_id = $3 AND lifecycle.session_id = $4
-             AND lifecycle.state_kind = 'active'
-             AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
-             AND waiting.producing_model_call_id = $1
-             AND waiting.request_ordinal > $2
+             AND (
+                 decision.request_id IS NULL
+                 OR decision.decision_source NOT IN ('policy_auto', 'session_blanket')
+             )
         )",
     )
     .bind(prepared.request.producing_call().into_uuid())
     .bind(Decimal::from(prepared.request.ordinal().as_u32()))
-    .bind(turn_id_to_uuid(prepared.request.turn()))
-    .bind(session_id_to_uuid(prepared.request.session()))
     .fetch_one(&mut *connection)
     .await?;
-    if later_unresolved_at_completion {
+    if completion_was_nonfinal {
         return Ok(true);
     }
     let persisted_continuation: Option<Uuid> = sqlx::query_scalar(
