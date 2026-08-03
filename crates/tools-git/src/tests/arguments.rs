@@ -35,3 +35,13 @@ fn revision_argument_rejects_unbounded_ancestry_expression_before_execution() {
 
     assert!(decode_operation(LocalToolKind::Log, &arguments, ObjectFormat::Sha1).is_err());
 }
+
+#[test]
+fn branch_argument_rejects_the_reserved_head_shorthand_before_execution() {
+    let arguments = NormalizedToolArguments::try_from_provider_text(
+        serde_json::json!({"name": "HEAD", "start": "HEAD"}).to_string(),
+    )
+    .expect("JSON arguments normalize");
+
+    assert!(decode_operation(LocalToolKind::BranchCreate, &arguments, ObjectFormat::Sha1).is_err());
+}

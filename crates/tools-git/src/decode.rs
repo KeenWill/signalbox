@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use bstr::BStr;
 use git2::ObjectFormat;
 use signalbox_application::ToolArgumentValidator;
 use signalbox_domain::{NormalizedToolArguments, ToolExecutionErrorDetail};
@@ -9,7 +10,7 @@ use crate::arguments::{
     checked_relative_path,
 };
 use crate::contracts::LocalToolKind;
-use crate::layout::parse_full_object_id;
+use crate::layout::{parse_full_object_id, valid_reference_name};
 use crate::limits::{
     MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REVISION_BYTES,
     MAX_STAGE_PATHS,
@@ -88,7 +89,9 @@ pub(super) fn validate_branch(value: &str) -> Result<(), InvalidGitArguments> {
     if value.is_empty() || value.len() > MAX_BRANCH_BYTES || value.contains('\0') {
         return Err(InvalidGitArguments);
     }
-    git2::Reference::is_valid_name(&format!("refs/heads/{value}"))
+    let reference = format!("refs/heads/{value}");
+    gix_validate::reference::branch_name(BStr::new(reference.as_bytes()))
+        .is_ok()
         .then_some(())
         .ok_or(InvalidGitArguments)
 }
@@ -99,7 +102,7 @@ pub(super) fn validate_revision(
 ) -> Result<(), InvalidGitArguments> {
     let exact_object = parse_full_object_id(value, object_format).is_some();
     let exact_reference =
-        value == "HEAD" || (value.starts_with("refs/") && git2::Reference::is_valid_name(value));
+        value == "HEAD" || (value.starts_with("refs/") && valid_reference_name(value.as_bytes()));
     (value.len() <= MAX_REVISION_BYTES && (exact_object || exact_reference))
         .then_some(())
         .ok_or(InvalidGitArguments)

@@ -656,12 +656,19 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let Some(entry) = current_index.get_path(path, 0) else {
             return match self.filesystem.entry_kind(&self.root, path) {
                 Err(WorkspaceResolveError::Io { source, .. })
-                    if matches!(
-                        source.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                    ) =>
+                    if source.kind() == std::io::ErrorKind::NotFound =>
                 {
                     Ok(())
+                }
+                Err(WorkspaceResolveError::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotADirectory =>
+                {
+                    self.validate_clean_checkout_ancestors(
+                        path,
+                        current_index,
+                        filemode,
+                        checkout_paths,
+                    )
                 }
                 Ok(WorkspaceEntryKind::Directory) => self.validate_clean_checkout_directory(
                     path,
@@ -687,6 +694,53 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             return Err(LocalGitFailure::Operation);
         }
         self.validate_clean_indexed_file(&read.bytes, read.mode, &entry, filemode)
+    }
+
+    fn validate_clean_checkout_ancestors(
+        &self,
+        path: &Path,
+        current_index: &Index,
+        filemode: bool,
+        checkout_paths: &BTreeSet<PathBuf>,
+    ) -> Result<(), LocalGitFailure> {
+        for ancestor in path
+            .ancestors()
+            .skip(1)
+            .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        {
+            match self.filesystem.entry_kind(&self.root, ancestor) {
+                Ok(WorkspaceEntryKind::Directory) => {}
+                Err(WorkspaceResolveError::Io { source, .. })
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Ok(WorkspaceEntryKind::File) if checkout_paths.contains(ancestor) => {
+                    let entry = current_index
+                        .get_path(ancestor, 0)
+                        .ok_or(LocalGitFailure::Operation)?;
+                    if entry.mode == GITLINK_MODE {
+                        return Err(LocalGitFailure::Operation);
+                    }
+                    let read = self
+                        .filesystem
+                        .read_file_prefix(&self.root, ancestor, MAX_OBJECT_BYTES)
+                        .map_err(|error| match error {
+                            WorkspaceResolveError::Rejected(_) => LocalGitFailure::Path,
+                            WorkspaceResolveError::Io { .. } => LocalGitFailure::Operation,
+                        })?;
+                    if read.truncated || read.total_bytes != read.bytes.len() as u64 {
+                        return Err(LocalGitFailure::Operation);
+                    }
+                    self.validate_clean_indexed_file(&read.bytes, read.mode, &entry, filemode)?;
+                }
+                Err(WorkspaceResolveError::Rejected(_)) => return Err(LocalGitFailure::Path),
+                Ok(_) | Err(WorkspaceResolveError::Io { .. }) => {
+                    return Err(LocalGitFailure::Operation);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_clean_checkout_directory(

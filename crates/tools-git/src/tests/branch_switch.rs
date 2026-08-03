@@ -132,6 +132,68 @@ fn branch_switch_preserves_an_untracked_obstruction_when_safe_checkout_refuses()
 }
 
 #[test]
+fn branch_switch_preserves_an_untracked_obstruction_in_a_target_ancestor() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists")
+        .tree()
+        .expect("fixture initial tree opens");
+    let target_blob = repository
+        .blob(TARGET_CONTENT.as_bytes())
+        .expect("target fixture blob writes");
+    let mut nested_builder = repository
+        .treebuilder(None)
+        .expect("nested fixture tree builder opens");
+    nested_builder
+        .insert("target.txt", target_blob, 0o100644)
+        .expect("nested target file inserts");
+    let nested_tree = nested_builder.write().expect("nested fixture tree writes");
+    let mut ancestor_builder = repository
+        .treebuilder(None)
+        .expect("ancestor fixture tree builder opens");
+    ancestor_builder
+        .insert("nested", nested_tree, 0o040000)
+        .expect("nested target directory inserts");
+    let ancestor_tree = ancestor_builder
+        .write()
+        .expect("ancestor fixture tree writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&initial_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("ancestor", ancestor_tree, 0o040000)
+        .expect("target ancestor directory inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    fs::write(
+        fixture.root().join("ancestor"),
+        UNTRACKED_CONTENT.as_bytes(),
+    )
+    .expect("untracked ancestor obstruction writes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }))
+        .expect_err("untracked ancestor obstruction rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join("ancestor")).expect("untracked ancestor obstruction reads"),
+        UNTRACKED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
 fn branch_switch_resolves_symbolic_local_branch() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
