@@ -175,7 +175,7 @@ async fn prepare_raw_delegation(
     let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
     let await_arguments = serde_json::json!({
         "child_session_id": child.as_uuid().to_string(),
-        "mode": "foreground",
+        "mode": "background",
     })
     .to_string();
     let (parent, _repository, _observation, requests) = checkpoint_confirmed_tool_batch(
@@ -338,7 +338,7 @@ async fn insert_raw_delegation(
     .bind(fixture.spawning_request.into_uuid())
     .bind(fixture.parent.into_uuid())
     .bind(fixture.parent_turn.into_uuid())
-    .execute(connection)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
@@ -351,7 +351,7 @@ async fn insert_raw_wait_and_message(
         "INSERT INTO session_delegation_wait
             (awaiting_tool_request_id, spawning_tool_request_id,
              parent_session_id, parent_turn_id, child_session_id, wait_mode)
-         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+         VALUES ($1, $2, $3, $4, $5, 'background')",
     )
     .bind(fixture.awaiting_request.into_uuid())
     .bind(fixture.spawning_request.into_uuid())
@@ -360,31 +360,7 @@ async fn insert_raw_wait_and_message(
     .bind(fixture.child.into_uuid())
     .execute(&mut *connection)
     .await?;
-    sqlx::query(
-        "INSERT INTO session_delegation_event
-            (spawning_tool_request_id, event_ordinal, event_kind,
-             provenance_kind, provenance_session_id, provenance_turn_id,
-             provenance_tool_request_id)
-         VALUES ($1, 2, 'message_delivered', 'tool_request', $2, $3, $4)",
-    )
-    .bind(fixture.spawning_request.into_uuid())
-    .bind(fixture.parent.into_uuid())
-    .bind(fixture.parent_turn.into_uuid())
-    .bind(fixture.message_request.into_uuid())
-    .execute(&mut *connection)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_message
-            (message_id, spawning_tool_request_id, event_ordinal,
-             event_kind, direction, content_text)
-         VALUES ($1, $2, 2, 'message_delivered',
-                 'parent_to_child', $3)",
-    )
-    .bind(fixture.message_id)
-    .bind(fixture.spawning_request.into_uuid())
-    .bind(RAW_DELEGATED_MESSAGE)
-    .execute(connection)
-    .await?;
+    insert_raw_message(connection, fixture, "parent_to_child", fixture.child).await?;
     Ok(())
 }
 
@@ -413,7 +389,23 @@ async fn insert_raw_failed_outcome(
          VALUES ($1, 3, 'outcome_recorded', 'child_failed', NULL)",
     )
     .bind(fixture.spawning_request.into_uuid())
-    .execute(connection)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "WITH pending AS (
+            INSERT INTO session_pending_delivery
+                (recipient_session_id, delivery_sequence, delivery_kind)
+            VALUES ($1, 1, 'background_result')
+         )
+         INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($2, $3, $1, 1, 'background_result')",
+    )
+    .bind(fixture.parent.into_uuid())
+    .bind(fixture.awaiting_request.into_uuid())
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
@@ -455,7 +447,7 @@ async fn append_raw_delegation_update(
                 CASE WHEN $2 = 'session_message' THEN NULL ELSE $9 END,
                 CASE WHEN $2 = 'child_spawned' THEN 'background' END,
                 NULL, NULL, $4,
-                CASE WHEN $2 = 'child_waiting' THEN 'foreground' END,
+                CASE WHEN $2 = 'child_waiting' THEN 'background' END,
                 $5, $6,
                 CASE WHEN $2 IN (
                     'child_lifecycle_disposition', 'child_result'
@@ -576,7 +568,7 @@ async fn insert_raw_wait_and_message_with_delivery(
         connection,
         fixture,
         RawDelegationUpdate {
-            session: fixture.child,
+            session: fixture.parent,
             kind: "child_waiting",
             awaiting_request: Some(fixture.awaiting_request.into_uuid()),
             event_ordinal: None,
@@ -607,6 +599,7 @@ async fn insert_raw_message(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
     direction: &str,
+    recipient: SessionId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH event AS (
@@ -630,6 +623,22 @@ async fn insert_raw_message(
     .bind(fixture.message_id)
     .bind(direction)
     .bind(RAW_DELEGATED_MESSAGE)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "WITH pending AS (
+            INSERT INTO session_pending_delivery
+                (recipient_session_id, delivery_sequence, delivery_kind)
+            VALUES ($1, 1, 'message')
+         )
+         INSERT INTO session_message_delivery
+            (message_id, spawning_tool_request_id, recipient_session_id,
+             delivery_sequence, delivery_kind)
+         VALUES ($2, $3, $1, 1, 'message')",
+    )
+    .bind(recipient.into_uuid())
+    .bind(fixture.message_id)
+    .bind(fixture.spawning_request.into_uuid())
     .execute(connection)
     .await?;
     Ok(())
@@ -720,7 +729,7 @@ async fn delegation_outbox_closes_update_subjects_and_separates_wakes() -> Resul
         &mut transaction,
         fixture,
         RawDelegationUpdate {
-            session: fixture.child,
+            session: fixture.parent,
             kind: "child_waiting",
             awaiting_request: Some(fixture.awaiting_request.into_uuid()),
             event_ordinal: None,
@@ -856,7 +865,7 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
         "INSERT INTO session_delegation_wait
             (awaiting_tool_request_id, spawning_tool_request_id,
              parent_session_id, parent_turn_id, child_session_id, wait_mode)
-         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+         VALUES ($1, $2, $3, $4, $5, 'background')",
     )
     .bind(fixture.awaiting_request.into_uuid())
     .bind(fixture.spawning_request.into_uuid())
@@ -868,7 +877,7 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
     let wait_update_error = wait_only
         .commit()
         .await
-        .expect_err("a wait cannot commit without its child-stream update");
+        .expect_err("a wait cannot commit without its parent-stream update");
 
     let mut outcome_only = pool.begin().await?;
     sqlx::query(
@@ -896,7 +905,13 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
         .expect_err("an outcome cannot commit without its parent-stream lifecycle update");
 
     let mut message_without_update = pool.begin().await?;
-    insert_raw_message(&mut message_without_update, fixture, "parent_to_child").await?;
+    insert_raw_message(
+        &mut message_without_update,
+        fixture,
+        "parent_to_child",
+        fixture.child,
+    )
+    .await?;
     append_raw_message_wake(&mut message_without_update, fixture, fixture.child).await?;
     let message_update_error = message_without_update
         .commit()
@@ -933,7 +948,13 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
         .expect_err("a result cannot commit without its parent-stream result update");
 
     let mut message_without_wake = pool.begin().await?;
-    insert_raw_message(&mut message_without_wake, fixture, "parent_to_child").await?;
+    insert_raw_message(
+        &mut message_without_wake,
+        fixture,
+        "parent_to_child",
+        fixture.child,
+    )
+    .await?;
     append_raw_message_update(
         &mut message_without_wake,
         fixture,
@@ -990,7 +1011,13 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
         .expect_err("every result requires its distinct parent wake");
 
     let mut wrong_parent_to_child = pool.begin().await?;
-    insert_raw_message(&mut wrong_parent_to_child, fixture, "parent_to_child").await?;
+    insert_raw_message(
+        &mut wrong_parent_to_child,
+        fixture,
+        "parent_to_child",
+        fixture.child,
+    )
+    .await?;
     append_raw_message_update(
         &mut wrong_parent_to_child,
         fixture,
@@ -1014,7 +1041,13 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
     )
     .execute(&mut *wrong_child_to_parent)
     .await?;
-    insert_raw_message(&mut wrong_child_to_parent, fixture, "child_to_parent").await?;
+    insert_raw_message(
+        &mut wrong_child_to_parent,
+        fixture,
+        "child_to_parent",
+        fixture.parent,
+    )
+    .await?;
     append_raw_message_update(
         &mut wrong_child_to_parent,
         fixture,
@@ -1032,7 +1065,13 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
     wrong_child_to_parent.rollback().await?;
 
     let mut cross_endpoint_duplicate = pool.begin().await?;
-    insert_raw_message(&mut cross_endpoint_duplicate, fixture, "parent_to_child").await?;
+    insert_raw_message(
+        &mut cross_endpoint_duplicate,
+        fixture,
+        "parent_to_child",
+        fixture.child,
+    )
+    .await?;
     append_raw_message_update(
         &mut cross_endpoint_duplicate,
         fixture,
@@ -1062,7 +1101,13 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
     )
     .await?;
     append_raw_message_wake(&mut reverse_order, fixture, fixture.child).await?;
-    insert_raw_message(&mut reverse_order, fixture, "parent_to_child").await?;
+    insert_raw_message(
+        &mut reverse_order,
+        fixture,
+        "parent_to_child",
+        fixture.child,
+    )
+    .await?;
     reverse_order.commit().await?;
 
     assert_eq!(
@@ -1359,7 +1404,7 @@ async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(),
              root_turn_id, root_goal_generation,
              termination_kind, descendant_scope, disposition_count)
          VALUES ($1, $2, 'goal_command', NULL, 1,
-                 'stopped', 'parent_and_descendants', 2)",
+                 'stopped', 'parent_and_descendants', 1)",
     )
     .bind(root_command.into_uuid())
     .bind(source.parent.into_uuid())

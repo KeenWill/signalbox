@@ -1105,9 +1105,9 @@ with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
-disposition, result, or message. Spawn, lifecycle, and result updates go only to
-the parent stream, waiting updates only to the child stream, and message updates
-only to the payload recipient. Every result and message appends exactly one
+disposition, result, or message. Spawn, waiting, lifecycle, and result updates
+go only to the parent stream, and message updates only to the payload recipient.
+Every result and message appends exactly one
 distinct `delegation_wake` record for that same recipient in the same
 transaction, even when the recipient is already active and may ignore the nudge;
 the internal wake subject does not stand in for the client-visible result or
