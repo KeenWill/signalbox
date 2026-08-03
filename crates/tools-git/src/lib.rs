@@ -109,6 +109,7 @@ const REPOSITORY_REJECTED_DETAIL: &str = "injected Git repository was rejected";
 const PATH_REJECTED_DETAIL: &str = "Git path was rejected by the workspace boundary";
 const OPERATION_FAILED_DETAIL: &str = "local Git operation failed";
 const PUSH_REJECTED_DETAIL: &str = "configured Git push was rejected";
+const PUSH_UNRESOLVED_DETAIL: &str = "configured Git push branch was not resolved";
 const MAX_REMOTE_NAME_BYTES: usize = 255;
 const MAX_REMOTE_URL_BYTES: usize = 4096;
 
@@ -3696,9 +3697,10 @@ impl GitPushRequest {
         &self.commit
     }
 
-    /// Returns the non-forced exact branch refspec.
+    /// Returns the non-forced refspec whose source is the resolved commit,
+    /// so a branch that moves after approval cannot redirect the push.
     pub fn refspec(&self) -> String {
-        format!("refs/heads/{0}:refs/heads/{0}", self.branch)
+        format!("{}:refs/heads/{}", self.commit, self.branch)
     }
 }
 
@@ -3846,6 +3848,9 @@ impl<Transport> GitPushTools<Transport> {
         let repository_detail =
             ToolExecutionErrorDetail::try_new(REPOSITORY_REJECTED_DETAIL.to_owned())
                 .map_err(|_| GitPushToolsConstructionError::ErrorDetail)?;
+        let unresolved_detail =
+            ToolExecutionErrorDetail::try_new(PUSH_UNRESOLVED_DETAIL.to_owned())
+                .map_err(|_| GitPushToolsConstructionError::ErrorDetail)?;
         let rejected_detail = ToolExecutionErrorDetail::try_new(PUSH_REJECTED_DETAIL.to_owned())
             .map_err(|_| GitPushToolsConstructionError::ErrorDetail)?;
         let definition = compile_contract_definition::<PushContract>(
@@ -3873,6 +3878,7 @@ impl<Transport> GitPushTools<Transport> {
                 remote,
                 transport,
                 repository_detail,
+                unresolved_detail,
                 rejected_detail,
             },
         })
@@ -3928,6 +3934,7 @@ pub struct GitPushExecutor<Transport> {
     remote: ConfiguredGitRemote,
     transport: Transport,
     repository_detail: ToolExecutionErrorDetail,
+    unresolved_detail: ToolExecutionErrorDetail,
     rejected_detail: ToolExecutionErrorDetail,
 }
 
@@ -3968,6 +3975,9 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
             Err(GitPushFailure::Repository) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.repository_detail.clone()),
             },
+            Err(GitPushFailure::Unresolved) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.unresolved_detail.clone()),
+            },
             Err(GitPushFailure::Rejected) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.rejected_detail.clone()),
             },
@@ -3984,6 +3994,7 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GitPushFailure {
     Repository,
+    Unresolved,
     Rejected,
     PreDispatchInfrastructure,
     DispatchUnknown,
@@ -4030,7 +4041,7 @@ impl<Transport: GitPushTransport> GitPushExecutor<Transport> {
             .map_err(|_| GitPushFailure::Repository)?;
         let reference = format!("refs/heads/{}", arguments.branch);
         let commit = resolve_bounded_commit(&repository, &reference)
-            .map_err(|_| GitPushFailure::Rejected)?
+            .map_err(|_| GitPushFailure::Unresolved)?
             .id()
             .to_string();
         let request = GitPushRequest {
@@ -4283,7 +4294,6 @@ mod tests {
     const INITIAL_MESSAGE: &str = "initial";
     const MODEL_MESSAGE: &str = "subject\n\nmodel data: $(not interpreted)\n";
     const FIX_BRANCH: &str = "agent/fix";
-    const FIX_REFSPEC: &str = "refs/heads/agent/fix:refs/heads/agent/fix";
     const TRACKED_PATH: &str = "tracked.txt";
     const UNTRACKED_PATH: &str = "untracked.txt";
     const INITIAL_CONTENT: &str = "before\n";
@@ -8369,7 +8379,11 @@ mod tests {
         assert_eq!(request.remote().url(), REMOTE_URL);
         assert_eq!(request.branch(), branch);
         assert_eq!(request.commit(), fixture.initial.to_string());
-        assert_eq!(request.refspec(), FIX_REFSPEC);
+        assert_eq!(
+            request.refspec(),
+            format!("{}:refs/heads/{}", request.commit(), branch)
+        );
+        assert!(request.refspec().starts_with(&fixture.initial.to_string()));
         assert_eq!(result["remote"], REMOTE_NAME);
         assert_eq!(result["branch"], request.branch());
         assert_eq!(result["commit"], fixture.initial.to_string());

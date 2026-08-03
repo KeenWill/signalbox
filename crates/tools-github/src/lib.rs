@@ -81,6 +81,7 @@ const MAX_OPAQUE_ID_BYTES: usize = 512;
 const MIN_INLINE_COMMENT_LINE: u32 = 1;
 const MAX_INLINE_COMMENTS: usize = 50;
 const MAX_GIT_REF_BYTES: usize = 255;
+const MAX_GITHUB_OWNER_BYTES: usize = 39;
 const ERROR_TRUNCATION_SUFFIX: &str = " … [truncated]";
 const INVALID_ARGUMENTS_DETAIL: &str = "GitHub pull-request tool arguments are invalid";
 const CREDENTIAL_UNAVAILABLE_DETAIL: &str = "GitHub credential is unavailable";
@@ -356,7 +357,7 @@ impl CreatePullRequestArguments {
     fn validate(&self) -> Result<(), InvalidGitHubArguments> {
         if valid_text(&self.title, TextPresence::Required)
             && valid_text(&self.body, TextPresence::Optional)
-            && valid_git_ref(&self.head)
+            && valid_head_selector(&self.head)
             && valid_git_ref(&self.base)
         {
             Ok(())
@@ -367,7 +368,48 @@ impl CreatePullRequestArguments {
 }
 
 fn valid_git_ref(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_GIT_REF_BYTES && !value.chars().any(char::is_control)
+    if value.is_empty() || value.len() > MAX_GIT_REF_BYTES {
+        return false;
+    }
+    if value.starts_with('-') || value.starts_with('/') || value.starts_with('.') {
+        return false;
+    }
+    if value.ends_with('/') || value.ends_with('.') || value.ends_with(".lock") {
+        return false;
+    }
+    if value.contains("..") || value.contains("//") || value.contains("@{") || value.contains("/.")
+    {
+        return false;
+    }
+    if value == "@" {
+        return false;
+    }
+    value.chars().all(|character| {
+        !character.is_control()
+            && !character.is_whitespace()
+            && !matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    })
+}
+
+/// Accepts one local ref or one `owner:ref` cross-repository head selector.
+fn valid_head_selector(value: &str) -> bool {
+    if valid_git_ref(value) {
+        return true;
+    }
+    match value.split_once(':') {
+        Some((owner, reference)) => valid_github_owner(owner) && valid_git_ref(reference),
+        None => false,
+    }
+}
+
+fn valid_github_owner(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_GITHUB_OWNER_BYTES
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
 }
 
 /// Review action accepted by GitHub.
@@ -3373,10 +3415,62 @@ mod tests {
         let body = create_pull_request_body(&arguments).expect("creation body serializes");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("creation body is JSON");
 
-        assert_eq!(body["title"], CREATE_TITLE);
-        assert_eq!(body["body"], CREATE_BODY);
-        assert_eq!(body["head"], CREATE_HEAD);
-        assert_eq!(body["base"], CREATE_BASE);
+        assert_eq!(body["title"], arguments.title());
+        assert_eq!(body["body"], arguments.body());
+        assert_eq!(body["head"], arguments.head());
+        assert_eq!(body["base"], arguments.base());
+    }
+
+    #[test]
+    fn create_rejects_a_whitespace_bearing_base_selector() {
+        let rejection = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": "release branch"
+        })))
+        .expect_err("a whitespace-bearing base selector is rejected before dispatch");
+
+        assert_eq!(rejection, InvalidGitHubArguments);
+    }
+
+    #[test]
+    fn create_rejects_an_owner_qualified_base_selector() {
+        let rejection = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": CREATE_HEAD,
+            "base": "contributor:main"
+        })))
+        .expect_err("an owner-qualified base selector is rejected before dispatch");
+
+        assert_eq!(rejection, InvalidGitHubArguments);
+    }
+
+    #[test]
+    fn create_admits_an_owner_qualified_head_selector() {
+        let arguments = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": "contributor:agent/fix-invariant",
+            "base": CREATE_BASE
+        })))
+        .expect("a well-formed cross-repository head selector is admitted");
+
+        assert_eq!(arguments.head(), "contributor:agent/fix-invariant");
+    }
+
+    #[test]
+    fn create_rejects_a_doubly_qualified_head_selector() {
+        let rejection = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": "contributor:fork:agent/fix",
+            "base": CREATE_BASE
+        })))
+        .expect_err("a doubly qualified head selector is rejected before dispatch");
+
+        assert_eq!(rejection, InvalidGitHubArguments);
     }
 
     #[test]
@@ -3396,10 +3490,10 @@ mod tests {
         let normalized =
             normalize_created_pull_request(&response, &arguments).expect("response normalizes");
 
-        assert_eq!(normalized["number"], CREATED_PULL_REQUEST_NUMBER);
-        assert_eq!(normalized["url"], CREATED_PULL_REQUEST_URL);
-        assert_eq!(normalized["head"], CREATE_HEAD);
-        assert_eq!(normalized["base"], CREATE_BASE);
+        assert_eq!(normalized["number"], response["number"]);
+        assert_eq!(normalized["url"], response["html_url"]);
+        assert_eq!(normalized["head"], arguments.head());
+        assert_eq!(normalized["base"], arguments.base());
     }
 
     #[test]
