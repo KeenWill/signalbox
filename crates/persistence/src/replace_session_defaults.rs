@@ -840,10 +840,12 @@ fn decode_complete(
             required(&row, "command_model_kind")?,
             row.try_get("command_direct_id")?,
             row.try_get("command_alias_id")?,
-            required(&row, "command_tool_auto_approval")?,
-            row.try_get("command_system_prompt")?,
-            required(&row, "command_model_settings")?,
-            typed_version,
+            StoredConfigurationFields {
+                dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
+                system_prompt: row.try_get("command_system_prompt")?,
+                model_settings: required(&row, "command_model_settings")?,
+                storage_version: typed_version,
+            },
             "command model selection",
         )?,
         model_settings_overlay_from_json(required(&row, "caller_model_settings")?)
@@ -875,10 +877,12 @@ fn decode_complete(
                 required(&row, "installed_model_kind")?,
                 row.try_get("installed_direct_id")?,
                 row.try_get("installed_alias_id")?,
-                required(&row, "installed_tool_auto_approval")?,
-                row.try_get("installed_system_prompt")?,
-                required(&row, "installed_model_settings")?,
-                typed_version,
+                StoredConfigurationFields {
+                    dangerous_tool_auto_approval: required(&row, "installed_tool_auto_approval")?,
+                    system_prompt: row.try_get("installed_system_prompt")?,
+                    model_settings: required(&row, "installed_model_settings")?,
+                    storage_version: typed_version,
+                },
                 "installed model selection",
             )?;
             ReplaceSessionDefaultsReconstitutionInput::applied(
@@ -1040,14 +1044,18 @@ fn decode_optional_ordinal(
         .transpose()
 }
 
-fn decode_selection(
-    kind: String,
-    direct: Option<Uuid>,
-    alias: Option<Uuid>,
+struct StoredConfigurationFields {
     dangerous_tool_auto_approval: String,
     system_prompt: Option<String>,
     model_settings: Value,
     storage_version: i16,
+}
+
+fn decode_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    stored: StoredConfigurationFields,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ReplaceSessionDefaultsRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -1064,16 +1072,16 @@ fn decode_selection(
             );
         }
     };
-    let dangerous_tool_auto_approval =
-        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
-            ReplaceSessionDefaultsRepositoryError::from(
-                ReplaceSessionDefaultsCorruption::Unsupported {
-                    field: "dangerous tool auto approval",
-                    value: dangerous_tool_auto_approval,
-                },
-            )
-        })?;
-    if storage_version == 1
+    let dangerous_tool_auto_approval = dangerous_tool_auto_approval_from_str(
+        &stored.dangerous_tool_auto_approval,
+    )
+    .ok_or_else(|| {
+        ReplaceSessionDefaultsRepositoryError::from(ReplaceSessionDefaultsCorruption::Unsupported {
+            field: "dangerous tool auto approval",
+            value: stored.dangerous_tool_auto_approval,
+        })
+    })?;
+    if stored.storage_version == 1
         && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -1081,20 +1089,21 @@ fn decode_selection(
         )
         .into());
     }
-    if storage_version <= 2 && system_prompt.is_some() {
+    if stored.storage_version <= 2 && stored.system_prompt.is_some() {
         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
             "pre-version-three system prompt",
         )
         .into());
     }
-    let system_prompt = system_prompt
+    let system_prompt = stored
+        .system_prompt
         .map(|value| {
             signalbox_domain::SessionSystemPrompt::try_new(value).map_err(|_| {
                 ReplaceSessionDefaultsCorruption::Inconsistent("system prompt admission")
             })
         })
         .transpose()?;
-    let model_settings = model_settings_from_json(model_settings)
+    let model_settings = model_settings_from_json(stored.model_settings)
         .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("model settings"))?;
     Ok(SessionConfigurationDefaults::complete_with_model_settings(
         model,
