@@ -1216,6 +1216,67 @@ fn stage_does_not_preserve_a_symlink_mode_for_a_regular_file() {
 }
 
 #[test]
+fn stage_defaults_a_new_file_to_non_executable_when_filemode_is_disabled() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.filemode", false)
+        .expect("fixture filemode disables");
+    let new_path = "new-script";
+    let new_content = b"#!/bin/sh\n";
+    fs::write(fixture.root().join(new_path), new_content).expect("fixture script writes");
+    fs::set_permissions(
+        fixture.root().join(new_path),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("fixture script mode sets");
+    let executor = fixture.executor();
+
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![new_path.to_owned()],
+        }),
+    );
+    let staged_repository = Repository::open(fixture.root()).expect("staged repository reopens");
+    let index = staged_repository.index().expect("staged index reopens");
+    let entry = index
+        .get_path(Path::new(new_path), 0)
+        .expect("staged script exists");
+
+    assert_eq!(entry.mode, 0o100644);
+}
+
+#[test]
+fn status_does_not_treat_a_case_alias_as_untracked_when_ignorecase_is_enabled() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.ignorecase", true)
+        .expect("fixture ignorecase enables");
+    let case_alias = TRACKED_PATH.to_ascii_uppercase();
+    fs::rename(
+        fixture.root().join(TRACKED_PATH),
+        fixture.root().join(&case_alias),
+    )
+    .expect("fixture case alias renames");
+    let executor = fixture.executor();
+
+    let status = execute(&executor, LocalOperation::Status);
+    let entries = status["entries"]
+        .as_array()
+        .expect("status entries are an array");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], TRACKED_PATH);
+    assert_eq!(entries[0]["worktree"], "deleted");
+}
+
+#[test]
 fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");

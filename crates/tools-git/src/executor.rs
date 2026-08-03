@@ -42,7 +42,9 @@ use crate::limits::{
 };
 use crate::log::log;
 use crate::objects::{PackRoot, persist_objects};
-use crate::pinning::{PinnedObjectDatabase, PinnedRepository, repository_filemode};
+use crate::pinning::{
+    PinnedObjectDatabase, PinnedRepository, repository_filemode, repository_ignorecase,
+};
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain_from;
 use crate::result::{BranchResult, LocalGitResult, StageResult, encode_result};
@@ -500,14 +502,29 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .iter()
             .map(|entry| PathBuf::from(OsString::from_vec(entry.path)))
             .collect::<BTreeSet<_>>();
+        let ignorecase = repository_ignorecase(repository)?;
+        let tracked_directory_keys = ignorecase.then(|| {
+            tracked_directories
+                .iter()
+                .map(|path| ignorecase_path(path))
+                .collect::<BTreeSet<_>>()
+        });
+        let tracked_path_keys = ignorecase.then(|| {
+            tracked_paths
+                .iter()
+                .map(|path| ignorecase_path(path))
+                .collect::<BTreeSet<_>>()
+        });
         let mut pending = vec![PathBuf::from(".")];
         let mut untracked = Vec::new();
         let mut inspected = 0_usize;
         let mut inspected_path_bytes = 0_usize;
         while let Some(directory) = pending.pop() {
-            if !tracked_directories.contains(&directory)
-                && self.is_embedded_repository(&directory)?
-            {
+            let directory_is_tracked = tracked_directory_keys.as_ref().map_or_else(
+                || tracked_directories.contains(&directory),
+                |keys| keys.contains(&ignorecase_path(&directory)),
+            );
+            if !directory_is_tracked && self.is_embedded_repository(&directory)? {
                 untracked.push(directory);
                 continue;
             }
@@ -556,7 +573,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     WorkspaceEntryKind::File
                     | WorkspaceEntryKind::Symlink
                     | WorkspaceEntryKind::Other => {
-                        if !tracked_paths.contains(&entry.path) {
+                        let path_is_tracked = tracked_path_keys.as_ref().map_or_else(
+                            || tracked_paths.contains(&entry.path),
+                            |keys| keys.contains(&ignorecase_path(&entry.path)),
+                        );
+                        if !path_is_tracked {
                             untracked.push(entry.path);
                         }
                     }
@@ -1181,8 +1202,13 @@ pub(super) fn regular_file_mode(observed: u32, indexed: Option<u32>, filemode: b
     match indexed {
         Some(0o100644) => 0o100644,
         Some(0o100755) => 0o100755,
-        Some(_) | None => observed,
+        Some(_) => observed,
+        None => 0o100644,
     }
+}
+
+fn ignorecase_path(path: &Path) -> Vec<u8> {
+    path.as_os_str().as_bytes().to_ascii_lowercase()
 }
 
 pub(super) fn clone_index_entry(entry: &IndexEntry) -> IndexEntry {

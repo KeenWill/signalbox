@@ -1361,6 +1361,17 @@ pub(super) fn repository_filemode(repository: &Repository) -> Result<bool, Local
     }
 }
 
+pub(super) fn repository_ignorecase(repository: &Repository) -> Result<bool, LocalGitFailure> {
+    let config = repository
+        .config()
+        .map_err(|_| LocalGitFailure::Repository)?;
+    match config.get_bool("core.ignorecase") {
+        Ok(ignorecase) => Ok(ignorecase),
+        Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
+        Err(_) => Err(LocalGitFailure::Repository),
+    }
+}
+
 pub(super) fn pin_optional_git_file(
     path: &Path,
     max_bytes: usize,
