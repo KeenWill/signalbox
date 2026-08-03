@@ -17,8 +17,9 @@
 use core::fmt;
 
 use crate::{
-    AdjustedModelSettings, DangerousToolAutoApproval, ModelCapabilityCatalog,
-    ModelChangeAdjustment, ModelSettingsOverlay, UnsupportedModelSetting, ValidatedModelSettings,
+    AdjustedModelSettings, DangerousToolAutoApproval, EffectiveModelSettings, FastMode,
+    ModelCapabilityCatalog, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
+    ResolvedModelSettings, UnsupportedModelSetting, ValidatedModelSettings,
 };
 
 crate::define_identity!(
@@ -773,6 +774,54 @@ impl OriginConfiguration {
         })
     }
 
+    /// Reconstitutes stored settings-aware provenance without consulting a
+    /// deployment capability catalog that may have changed since acceptance.
+    ///
+    /// The stored adjustment sequence is accepted only when it rewrites an
+    /// inherited value, preserves the fixed knob order, and reproduces the
+    /// complete stored precedence and source evidence exactly.
+    pub fn reconstitute_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        frozen_model: FrozenModelSelection,
+        stored_settings: ValidatedModelSettings,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self> {
+        let VersionCheckedConfigurationRequest {
+            mut request,
+            session_defaults_version,
+        } = checked;
+        if !frozen_selection_matches_request(frozen_model, request.model()) {
+            return None;
+        }
+        let selected = frozen_model.selected_direct();
+        if stored_settings.validated_for() != Some(selected) {
+            return None;
+        }
+        let precedence = request
+            .model_settings
+            .precedence()
+            .with_per_call(request.per_call_model_settings);
+        let prior = precedence.resolve();
+        let adjusted = apply_recorded_model_change_adjustments(prior, &adjustments)?;
+        let expected_precedence = precedence.with_effective_adjustment(prior, adjusted);
+        if stored_settings.precedence() != expected_precedence
+            || stored_settings.resolved() != expected_precedence.resolve()
+        {
+            return None;
+        }
+        request.model_settings = stored_settings;
+        Some(Self {
+            requested: request,
+            session_defaults_version,
+            effective: EffectiveConfiguration::with_model_settings(
+                frozen_model,
+                request.dangerous_tool_auto_approval(),
+                stored_settings,
+            ),
+            model_settings_adjustments: adjustments.into_boxed_slice(),
+        })
+    }
+
     /// Borrows the derived configuration request.
     pub const fn requested(&self) -> &ConfigurationRequest {
         &self.requested
@@ -792,6 +841,96 @@ impl OriginConfiguration {
     pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment] {
         &self.model_settings_adjustments
     }
+}
+
+fn frozen_selection_matches_request(
+    frozen: FrozenModelSelection,
+    requested: ModelSelectionRequest,
+) -> bool {
+    match (frozen, requested) {
+        (FrozenModelSelection::Direct(stored), ModelSelectionRequest::Direct(requested)) => {
+            stored == requested
+        }
+        (
+            FrozenModelSelection::FrozenAlias { alias: stored, .. },
+            ModelSelectionRequest::Alias(requested),
+        ) => stored == requested,
+        (FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. }, _) => false,
+    }
+}
+
+fn apply_recorded_model_change_adjustments(
+    prior: ResolvedModelSettings,
+    adjustments: &[ModelChangeAdjustment],
+) -> Option<EffectiveModelSettings> {
+    let mut effective = prior.effective();
+    let mut last_knob = 0_u8;
+    for adjustment in adjustments {
+        let knob = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { from, to } => {
+                if last_knob > 1
+                    || prior.reasoning_source() == Some(ModelSettingSource::PerCall)
+                    || effective.reasoning_level() != Some(*from)
+                    || to >= from
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    Some(*to),
+                    effective.fast_mode(),
+                    effective.service_tier(),
+                );
+                1
+            }
+            ModelChangeAdjustment::ReasoningLevelCleared { from } => {
+                if last_knob > 1
+                    || prior.reasoning_source() == Some(ModelSettingSource::PerCall)
+                    || effective.reasoning_level() != Some(*from)
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    None,
+                    effective.fast_mode(),
+                    effective.service_tier(),
+                );
+                1
+            }
+            ModelChangeAdjustment::FastModeDisabled => {
+                if last_knob > 2
+                    || prior.fast_mode_source() == Some(ModelSettingSource::PerCall)
+                    || effective.fast_mode() != FastMode::Enabled
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    effective.reasoning_level(),
+                    FastMode::Disabled,
+                    effective.service_tier(),
+                );
+                2
+            }
+            ModelChangeAdjustment::ServiceTierCleared { from } => {
+                if last_knob > 3
+                    || prior.service_tier_source() == Some(ModelSettingSource::PerCall)
+                    || effective.service_tier() != Some(*from)
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    effective.reasoning_level(),
+                    effective.fast_mode(),
+                    None,
+                );
+                3
+            }
+        };
+        if knob == last_knob {
+            return None;
+        }
+        last_knob = knob;
+    }
+    Some(effective)
 }
 
 /// Why settings-aware origin freezing could not produce durable provenance.
@@ -1086,6 +1225,17 @@ mod tests {
             origin.requested().per_call_model_settings(),
             ModelSettingsOverlay::inherit_all()
         );
+        let reconstituted = OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            FrozenModelSelection::FrozenAlias {
+                alias: alias(1),
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+            origin.effective().model_settings(),
+            origin.model_settings_adjustments().to_vec(),
+        )
+        .expect("stored resolution evidence reconstructs without the live catalog");
+        assert_eq!(reconstituted, origin);
     }
 
     /// INV-008: comparison uses constructible semantic values; a direct

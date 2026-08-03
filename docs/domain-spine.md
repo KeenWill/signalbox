@@ -1631,6 +1631,12 @@ impl OriginConfiguration {
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
         capabilities: &ModelCapabilityCatalog,
     ) -> Result<Self, OriginModelSettingsError>;
+    pub fn reconstitute_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        frozen_model: FrozenModelSelection,
+        stored_settings: ValidatedModelSettings,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
     // accessors: requested(), session_defaults_version(), effective(), model_settings_adjustments()
 }
 
