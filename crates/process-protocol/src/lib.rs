@@ -90,7 +90,7 @@ pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
 /// Maximum exact required tags in one metadata-list filter.
 pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
-/// Maximum ASCII bytes in one complete dotted session-placement path.
+/// Maximum ASCII bytes in one newly submitted dotted session-placement path.
 pub const MAX_SESSION_PLACEMENT_PATH_BYTES: usize = 4000;
 
 /// Maximum UTF-8 bytes in one session system prompt.
@@ -1381,7 +1381,8 @@ impl SessionPlacement {
     /// Constructs and validates a non-root placement.
     pub fn try_scoped(path: String) -> Result<Self, CanonicalValueError> {
         let placement = Self::Scoped { path };
-        validate_session_placement(&placement).map_err(|_| CanonicalValueError::Placement)?;
+        validate_submitted_session_placement(&placement)
+            .map_err(|_| CanonicalValueError::Placement)?;
         Ok(placement)
     }
 
@@ -1391,7 +1392,8 @@ impl SessionPlacement {
             path,
             intent: RootPlacementGlobalReadIntent::Acknowledged,
         };
-        validate_session_placement(&placement).map_err(|_| CanonicalValueError::Placement)?;
+        validate_submitted_session_placement(&placement)
+            .map_err(|_| CanonicalValueError::Placement)?;
         Ok(placement)
     }
 }
@@ -1402,7 +1404,9 @@ impl Default for SessionPlacement {
     }
 }
 
-fn validate_session_placement(placement: &SessionPlacement) -> Result<(), FrameValidationError> {
+fn validate_session_placement_shape(
+    placement: &SessionPlacement,
+) -> Result<(), FrameValidationError> {
     let (path, root) = match placement {
         SessionPlacement::Pathless {} => return Ok(()),
         SessionPlacement::Scoped { path } => (path, false),
@@ -1410,7 +1414,6 @@ fn validate_session_placement(placement: &SessionPlacement) -> Result<(), FrameV
     };
     let segments = path.split('.').collect::<Vec<_>>();
     let shape_valid = !path.is_empty()
-        && path.len() <= MAX_SESSION_PLACEMENT_PATH_BYTES
         && segments.len() <= 64
         && segments.iter().all(|segment| {
             !segment.is_empty()
@@ -1425,6 +1428,21 @@ fn validate_session_placement(placement: &SessionPlacement) -> Result<(), FrameV
     } else {
         Err(FrameValidationError::PlacementShape)
     }
+}
+
+fn validate_submitted_session_placement(
+    placement: &SessionPlacement,
+) -> Result<(), FrameValidationError> {
+    validate_session_placement_shape(placement)?;
+    let within_submission_bound = match placement {
+        SessionPlacement::Pathless {} => true,
+        SessionPlacement::Scoped { path } | SessionPlacement::RootGlobalRead { path, .. } => {
+            path.len() <= MAX_SESSION_PLACEMENT_PATH_BYTES
+        }
+    };
+    within_submission_bound
+        .then_some(())
+        .ok_or(FrameValidationError::PlacementShape)
 }
 
 /// One exact complete session-metadata object.
@@ -2832,7 +2850,7 @@ impl ClientRequest {
             | Self::UpdateSessionPlacement {
                 replacement: placement,
                 ..
-            } => validate_session_placement(placement)?,
+            } => validate_submitted_session_placement(placement)?,
             _ => {}
         }
         if let Self::UpdateSessionPlacement {
@@ -4974,8 +4992,13 @@ impl ServerMessage {
                 placement_version,
                 placement,
                 ..
+            } => {
+                if placement_version.value() == 0 {
+                    return Err(FrameValidationError::PlacementShape);
+                }
+                validate_session_placement_shape(placement)?;
             }
-            | Self::SessionPlacementUpdated {
+            Self::SessionPlacementUpdated {
                 placement_version,
                 placement,
                 ..
@@ -4983,7 +5006,7 @@ impl ServerMessage {
                 if placement_version.value() == 0 {
                     return Err(FrameValidationError::PlacementShape);
                 }
-                validate_session_placement(placement)?;
+                validate_submitted_session_placement(placement)?;
             }
             Self::ConversationPageEnd {
                 conversation_count,
@@ -5195,7 +5218,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         RejectionDetail::SessionPlacementVersionExhausted {
             current_placement_version,
             ..
-        } => current_placement_version.value() > 0,
+        } => current_placement_version.value() == u64::MAX,
         RejectionDetail::SessionNotFound { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
@@ -5932,6 +5955,22 @@ mod tests {
         )
         .expect_err("incoherent placement mismatch evidence is rejected");
         assert_eq!(error, FrameValidationError::ErrorDetailShape);
+    }
+
+    fn placement_version_exhaustion_frame(
+        current: u64,
+    ) -> Result<ServerFrame, FrameValidationError> {
+        ServerFrame::try_new(
+            request(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("placement version exhausted"),
+                detail: ErrorDetail::rejected(RejectionDetail::SessionPlacementVersionExhausted {
+                    session_id: uuid(2),
+                    current_placement_version: CanonicalU64::new(current),
+                }),
+            },
+        )
     }
 
     #[track_caller]
@@ -8949,20 +8988,44 @@ mod tests {
     }
 
     #[test]
-    fn inv033_session_placement_decoder_rejects_paths_over_the_total_byte_bound() {
-        let segment_valid_path_over_total_bound = vec!["x".repeat(64); 63].join(".");
+    fn inv033_session_placement_frames_separate_submission_and_legacy_summary_bounds() {
+        let segment_valid_path_over_total_bound = vec!["x".repeat(64); 64].join(".");
         let frame = format!(
             r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{segment_valid_path_over_total_bound}"}}}}}}"#
         );
 
         assert_client_malformed(&frame);
+        let response = ServerFrame::try_new(
+            request(2).expect("fixture request identity is admitted"),
+            ServerMessage::SessionSummary {
+                session_id: uuid(3),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Alias { alias_id: uuid(4) },
+                placement_version: CanonicalU64::new(1),
+                placement: super::SessionPlacement::Scoped {
+                    path: segment_valid_path_over_total_bound,
+                },
+            },
+        )
+        .expect("legacy structural placement remains response-encodable");
+        let encoded = encode_server_line(&response).expect("response encoding succeeds");
+        assert_eq!(
+            decode_server_line(&encoded).expect("response decoding succeeds"),
+            response
+        );
     }
 
     #[test]
-    fn inv033_session_placement_mismatch_requires_positive_distinct_versions() {
+    fn inv033_session_placement_rejection_versions_are_coherent() {
         assert_placement_version_mismatch_rejected(0, 2);
         assert_placement_version_mismatch_rejected(1, 0);
         assert_placement_version_mismatch_rejected(2, 2);
+        assert_eq!(
+            placement_version_exhaustion_frame(1)
+                .expect_err("nonmaximum placement version cannot be exhausted"),
+            FrameValidationError::ErrorDetailShape
+        );
+        assert!(placement_version_exhaustion_frame(u64::MAX).is_ok());
 
         let valid = ServerFrame::try_new(
             request(1).expect("fixture request identity is admitted"),
