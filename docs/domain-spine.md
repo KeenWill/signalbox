@@ -1739,6 +1739,14 @@ pub struct ValidatedModelSettings { /* private */ }
 // sealed: provider_defaults or ModelCapabilities::validate_precedence
 impl ValidatedModelSettings {
     pub const fn provider_defaults() -> Self;
+    pub fn reconstitute(
+        precedence: ModelSettingsPrecedence,
+        effective: EffectiveModelSettings,
+        reasoning_source: Option<ModelSettingSource>,
+        fast_mode_source: Option<ModelSettingSource>,
+        service_tier_source: Option<ModelSettingSource>,
+        validated_for: Option<DirectModelSelection>,
+    ) -> Option<Self>;
     // accessors: precedence(), resolved(), effective(), validated_for()
 }
 
