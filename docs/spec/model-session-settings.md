@@ -146,14 +146,16 @@ provenance. Creation records version one. A successful defaults replacement that
 changes a setting or model appends one `SessionModelSettingsChanged` event
 carrying the prior and installed defaults versions, prior and installed model
 selections, prior and installed settings, the caller override, and the ordered
-automatic-adjustment list. The event and new current pointer commit atomically.
+automatic-adjustment list. Defaults snapshots never contain a per-call layer.
+The event and new current pointer commit atomically.
 
 Every accepted origin records one `TurnModelSettingsResolved` event carrying the
 accepted-input and turn identities, defaults version, frozen direct selection,
 per-call override, complete effective settings, and ordered automatic
-adjustments. It is committed with input acceptance. This records explicit
-per-call changes and alias-retarget-induced adjustment rather than leaving
-either as process-local preparation state.
+adjustments. When adjustments are present, it also carries the distinct prior
+direct validation identity whose model change caused them. It is committed with
+input acceptance. This records explicit per-call changes and model-change
+adjustment rather than leaving either as process-local preparation state.
 
 Adjustment variants are closed: `reasoning_level_clamped { from, to }`,
 `reasoning_level_cleared { from }`, `fast_mode_disabled`, and
