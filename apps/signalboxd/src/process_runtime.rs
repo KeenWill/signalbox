@@ -1401,7 +1401,17 @@ where
             expected_active_turn_id,
             content,
             expected_defaults_version,
+            model_settings,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_reconcile_turn(
                 writer,
                 version,
@@ -1957,7 +1967,17 @@ where
             expected_active_turn_id,
             content,
             expected_defaults_version,
+            model_settings,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_stop_turn(
                 writer,
                 version,

@@ -439,6 +439,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(activeTurnID, forKey: "expected_active_turn_id")
       try container.encode(content, forKey: "content")
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
     case .decideToolRequest(let commandID, let sessionID, let toolRequestID, let decision):
       try container.encode("decide_tool_request", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -953,7 +954,7 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
     validatedForSelectionID = validatedFor
   }
 
-  fileprivate func matches(_ modelSelection: SignalboxModelSelection) -> Bool {
+  func matches(_ modelSelection: SignalboxModelSelection) -> Bool {
     switch (modelSelection, validatedForSelectionID) {
     case (.direct(let selectionID), .some(let validatedForSelectionID)):
       return selectionID == validatedForSelectionID
@@ -2592,8 +2593,90 @@ public struct SignalboxFollowedSessionEvent: Decodable, Equatable, Sendable {
   }
 }
 
+private enum SignalboxModelChangeAdjustmentShape: Decodable, Equatable {
+  case reasoningLevelClamped
+  case reasoningLevelCleared
+  case fastModeDisabled
+  case serviceTierCleared
+
+  init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "reasoning_level_clamped":
+      try tagged.rejectUnadmittedFields(["type", "from", "to"], decoder: decoder)
+      let _: SignalboxReasoningLevelShape = try decoder.decode("from")
+      let _: SignalboxReasoningLevelShape = try decoder.decode("to")
+      self = .reasoningLevelClamped
+    case "reasoning_level_cleared":
+      try tagged.rejectUnadmittedFields(["type", "from"], decoder: decoder)
+      let _: SignalboxReasoningLevelShape = try decoder.decode("from")
+      self = .reasoningLevelCleared
+    case "fast_mode_disabled":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .fastModeDisabled
+    case "service_tier_cleared":
+      try tagged.rejectUnadmittedFields(["type", "from"], decoder: decoder)
+      let _: SignalboxServiceTierShape = try decoder.decode("from")
+      self = .serviceTierCleared
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown model-settings adjustment."
+        )
+      )
+    }
+  }
+}
+
+private struct SignalboxSessionModelSettingsChangedShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      [
+        "type", "command_id", "prior_defaults_version", "installed_defaults_version",
+        "prior_model", "installed_model", "prior_settings", "installed_settings",
+        "caller_override", "adjustments",
+      ],
+      decoder: decoder
+    )
+    let _: SignalboxCommandID = try decoder.decode("command_id")
+    let _: SignalboxCanonicalUInt64 = try decoder.decode("prior_defaults_version")
+    let _: SignalboxCanonicalUInt64 = try decoder.decode("installed_defaults_version")
+    let _: SignalboxModelSelection = try decoder.decode("prior_model")
+    let _: SignalboxModelSelection = try decoder.decode("installed_model")
+    let _: SignalboxModelSettingsSnapshot = try decoder.decode("prior_settings")
+    let _: SignalboxModelSettingsSnapshot = try decoder.decode("installed_settings")
+    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("caller_override")
+    let _: [SignalboxModelChangeAdjustmentShape] = try decoder.decode("adjustments")
+  }
+}
+
+private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
+  init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      [
+        "type", "accepted_input_id", "turn_id", "defaults_version", "requested_model",
+        "selected_direct_id", "per_call_override", "settings", "adjustments",
+      ],
+      decoder: decoder
+    )
+    let _: SignalboxCanonicalUUID = try decoder.decode("accepted_input_id")
+    let _: SignalboxCanonicalUUID = try decoder.decode("turn_id")
+    let _: SignalboxCanonicalUInt64 = try decoder.decode("defaults_version")
+    let _: SignalboxModelSelection = try decoder.decode("requested_model")
+    let _: SignalboxCanonicalUUID = try decoder.decode("selected_direct_id")
+    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("per_call_override")
+    let _: SignalboxModelSettingsSnapshot = try decoder.decode("settings")
+    let _: [SignalboxModelChangeAdjustmentShape] = try decoder.decode("adjustments")
+  }
+}
+
 public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case sessionCreated
+  case sessionModelSettingsChanged
+  case turnModelSettingsResolved
   case inputAccepted(
     acceptedInputID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID,
     acceptancePosition: SignalboxCanonicalUInt64, content: String)
@@ -2640,6 +2723,12 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
       case "session_created":
         try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
         self = .sessionCreated
+      case "session_model_settings_changed":
+        _ = try SignalboxSessionModelSettingsChangedShape(from: decoder)
+        self = .sessionModelSettingsChanged
+      case "turn_model_settings_resolved":
+        _ = try SignalboxTurnModelSettingsResolvedShape(from: decoder)
+        self = .turnModelSettingsResolved
       case "input_accepted":
         try tagged.rejectUnadmittedFields(
           ["type", "accepted_input_id", "turn_id", "acceptance_position", "content"],
