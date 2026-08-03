@@ -1043,6 +1043,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(projection.activity, ProcessProjectionFixture.unknownFailedActivity)
   }
 
+  func testUnknownFailedDispositionProjectsAsVisibleTimelineCard() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedDisposition()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
+      [ProcessProjectionFixture.unknownDispositionPresentationKind]
+    )
+  }
+
   func testUnknownFailedDispositionActivityIsBounded() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithUnknownFailedDisposition(
       ProcessProjectionFixture.oversizedUnknownState
@@ -5577,6 +5590,9 @@ private enum ProcessProjectionFixture {
   static let anchoredUsageTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .processEvidence, .message,
   ]
+  static let terminalMarkerUsageTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .processEvidence, .turnFailure, .processEvidence,
+  ]
   static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
@@ -6873,6 +6889,72 @@ private enum ProcessProjectionFixture {
           "fragment_index":"0",
           "final_fragment":true,
           "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithFailedUsageAndMarker() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"failed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call":{
+              "model_call_id":"\(ProcessDriverFixture.modelCall)",
+              "disposition":"known_failed"
+            }
+          }
+        }
+        """,
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall),
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        importedMarker(
+          index: 0,
+          entryID: importedSourceEventEntry,
+          speaker: #"{"type":"not_attested"}"#,
+          kind: "source_event"
+        ),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"turn_failed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
         }
         """,
         """
@@ -8442,6 +8524,19 @@ extension ProcessServiceIntegrationTests {
     XCTAssertEqual(
       ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
       ProcessProjectionFixture.anchoredUsageTimelineKinds
+    )
+  }
+
+  func testFailedCallUsageFallsBackToItsTerminalMarkerAnchor() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithFailedUsageAndMarker()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.terminalMarkerUsageTimelineKinds
     )
   }
 

@@ -298,7 +298,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) -> [String: ModelCallAnchor] {
     var anchors: [String: ModelCallAnchor] = [:]
     var modelCallIDsByToolRequestID: [String: String] = [:]
+    var terminalModelCallIDsByTurnID: [String: String] = [:]
     var textModelCall: (id: String, entryIndex: SignalboxCanonicalUInt64)?
+    for case .turn(let turn) in records {
+      if let modelCallID = failedOrCancelledTerminalModelCallID(for: turn.state) {
+        terminalModelCallIDsByTurnID[turn.turnID.rawValue] = modelCallID.rawValue
+      }
+    }
     for (index, record) in records.enumerated() {
       switch record {
       case .textEntry(let message):
@@ -337,8 +343,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               entryIndex: message.entryIndex
             )
           }
-        case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled,
-          .imported, .unknown:
+        case .turnFailed(let turnID), .turnCancelled(let turnID):
+          if let modelCallID = terminalModelCallIDsByTurnID[turnID.rawValue],
+            anchors[modelCallID] == nil
+          {
+            anchors[modelCallID] = ModelCallAnchor(
+              recordIndex: index,
+              entryIndex: message.entryIndex
+            )
+          }
+        case .modelIdentityChanged, .turnCompleted, .imported, .unknown:
           break
         }
       case .turn, .modelCallUsage:
@@ -346,6 +360,21 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
     }
     return anchors
+  }
+
+  private func failedOrCancelledTerminalModelCallID(
+    for state: SignalboxTranscriptTurnState
+  ) -> SignalboxCanonicalUUID? {
+    switch state {
+    case .failed(_, _, let terminalModelCall):
+      return terminalModelCall?.modelCallID
+    case .cancelled(_, _, let terminalModelCallID):
+      return terminalModelCallID
+    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
+      .refused, .reconciliationRequired, .toolReconciliationRequired, .unknown:
+      return nil
+    }
   }
 
   private mutating func projectText(
@@ -658,8 +687,23 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .prepared, .inFlight, .cancellationRequested:
         content = nil
       }
+    case .failed(_, _, let terminalModelCall):
+      guard
+        let terminalModelCall,
+        case .unknown(let disposition) = terminalModelCall.disposition
+      else {
+        content = nil
+        break
+      }
+      content = (
+        SignalboxProcessPresentation.retainedLabel(
+          "model_call_transition.disposition.\(disposition)"
+        ),
+        "Turn \(turn.turnID.rawValue), model call \(terminalModelCall.modelCallID.rawValue): "
+          + "the snapshot retained an unrecognized terminal disposition."
+      )
     case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .failed, .completed, .refused, .cancelled,
+      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       content = nil
     }
