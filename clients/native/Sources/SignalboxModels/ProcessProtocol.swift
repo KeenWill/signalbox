@@ -649,7 +649,10 @@ private struct SignalboxProcessServerWireFrame: Decodable {
 }
 
 public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
-  case sessionCreated(sessionID: SignalboxCanonicalUUID)
+  case sessionCreated(
+    sessionID: SignalboxCanonicalUUID,
+    modelSettings: SignalboxModelSettingsSnapshot
+  )
   case inputSubmitted(SignalboxInputSubmitted)
   case toolRequestDecided(SignalboxToolRequestDecided)
   case sessionDefaults(SignalboxSessionDefaultsRead)
@@ -715,7 +718,14 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "session_created":
-        self = .sessionCreated(sessionID: try decoder.decode("session_id"))
+        try tagged.rejectUnadmittedFields(
+          ["type", "session_id", "model_settings"],
+          decoder: decoder
+        )
+        self = .sessionCreated(
+          sessionID: try decoder.decode("session_id"),
+          modelSettings: try decoder.decode("model_settings")
+        )
       case "input_submitted":
         self = .inputSubmitted(try SignalboxInputSubmitted(from: decoder))
       case "tool_request_decided":
@@ -1495,12 +1505,40 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
   public let acceptedInputID: SignalboxCanonicalUUID
   public let acceptancePosition: SignalboxCanonicalUInt64
   public let turnID: SignalboxCanonicalUUID
+  public let modelSettings: SignalboxModelSettingsSnapshot
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      [
+        "type", "session_id", "accepted_input_id", "acceptance_position", "turn_id",
+        "model_settings",
+      ],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
+    acceptedInputID = try container.decode(
+      SignalboxCanonicalUUID.self,
+      forKey: .acceptedInputID
+    )
+    acceptancePosition = try container.decode(
+      SignalboxCanonicalUInt64.self,
+      forKey: .acceptancePosition
+    )
+    turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+    modelSettings = try container.decode(
+      SignalboxModelSettingsSnapshot.self,
+      forKey: .modelSettings
+    )
+  }
 
   private enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
     case acceptedInputID = "accepted_input_id"
     case acceptancePosition = "acceptance_position"
     case turnID = "turn_id"
+    case modelSettings = "model_settings"
   }
 }
 
