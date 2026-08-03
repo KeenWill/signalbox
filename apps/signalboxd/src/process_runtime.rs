@@ -14027,7 +14027,7 @@ context_window_tokens = 200000
     }
 
     #[test]
-    fn durable_model_settings_events_project_to_the_closed_wire_shapes() {
+    fn session_model_settings_change_projects_to_the_closed_wire_shape() {
         let session = SessionId::from_uuid(Uuid::from_u128(1));
         let command = DurableCommandId::from_uuid(Uuid::from_u128(2));
         let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(3));
@@ -14073,9 +14073,16 @@ context_window_tokens = 200000
                 adjustments: Vec::new(),
             }
         );
+    }
 
+    #[test]
+    fn turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
         let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
         let turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
+        let installed_version = SessionConfigurationDefaultsVersion::initial();
+        let caller_override = ModelSettingsOverlay::inherit_all();
+        let settings = ValidatedModelSettings::provider_defaults();
         let resolved = TurnModelSettingsResolved::try_new(
             accepted_input,
             turn,
