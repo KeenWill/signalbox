@@ -16,7 +16,19 @@ use signalbox_application::{
     ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
     UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
-use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId, TurnId};
+use signalbox_domain::{
+    ActivatedAcceptedInputTurn, AssistantText, DirectModelSelection, ModelCallId,
+    ProviderReportedTokenUsage, SessionId, ToolArgumentsKind, TurnAttemptId, TurnId,
+};
+use signalbox_model_provider_runtime::{
+    ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
+};
+use signalbox_model_runtime::TokenUsage;
+use signalbox_persistence::approval_judge::{
+    ApprovalJudgeRepositoryError, AuthorizeApprovalJudgeOutcome, CompleteApprovalJudgeOutcome,
+    FailedApprovalJudgeDisposition, PostgresApprovalJudgeRepository, PrepareApprovalJudgeOutcome,
+    PreparedApprovalJudge,
+};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
@@ -755,6 +767,8 @@ pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
     /// Tool preparation, execution, evidence commit, or continuation failed.
     Tool(Box<PostgresProviderToolExecutionError<ExecutorError>>),
+    /// Dedicated approval-judge persistence failed closed.
+    ApprovalJudge(ApprovalJudgeRepositoryError),
 }
 
 impl<ProviderError, ExecutorError> fmt::Display
@@ -769,6 +783,7 @@ where
             Self::ResumeExecution { source, .. } => source.fmt(formatter),
             Self::Model(error) => error.fmt(formatter),
             Self::Tool(error) => error.fmt(formatter),
+            Self::ApprovalJudge(error) => error.fmt(formatter),
         }
     }
 }
@@ -785,6 +800,7 @@ where
             Self::ResumeExecution { source, .. } => Some(source),
             Self::Model(error) => Some(error),
             Self::Tool(error) => Some(error),
+            Self::ApprovalJudge(error) => Some(error),
         }
     }
 }
@@ -801,6 +817,7 @@ where
             Self::ResumeExecution { source, .. } => source.operator_failure_class(),
             Self::Model(error) => error.operator_failure_class(),
             Self::Tool(error) => error.operator_failure_class(),
+            Self::ApprovalJudge(error) => error.operator_failure_class(),
         }
     }
 
@@ -810,6 +827,7 @@ where
             Self::ResumeExecution { source, .. } => source.operator_failure_cause_code(),
             Self::Model(error) => error.operator_failure_cause_code(),
             Self::Tool(error) => error.operator_failure_cause_code(),
+            Self::ApprovalJudge(_) => "approval_judge_persistence",
         }
     }
 }
@@ -846,14 +864,19 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
         executor: Executor,
     ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
         let tool_repository = self.repository.tool_loop_repository();
+        let approval_judge_repository = self.repository.approval_judge_repository();
         PostgresProviderToolLoopExecution {
             model_repository: self.repository,
             tool_repository,
+            approval_judge_repository,
             model_gate: self.gate,
             tool_gate: tool_dispatch_gate,
             provider: self.provider,
             catalog,
             executor,
+            approval_judge: None,
+            approval_judge_selection: None,
+            approval_judge_configuration: None,
         }
     }
 }
@@ -916,11 +939,191 @@ where
 pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     model_repository: PostgresModelCallRepository,
     tool_repository: PostgresToolLoopRepository,
+    approval_judge_repository: PostgresApprovalJudgeRepository,
     model_gate: InProcessAttemptDispatchGate,
     tool_gate: InProcessToolDispatchGate,
     provider: Provider,
     catalog: Catalog,
     executor: Executor,
+    approval_judge: Option<std::sync::Arc<dyn ApprovalJudgeModel>>,
+    approval_judge_selection: Option<DirectModelSelection>,
+    approval_judge_configuration: Option<HubModelConfiguration>,
+}
+
+const APPROVAL_JUDGE_SYSTEM_PROMPT: &str = "Decide whether the exact delegated tool request may run. Delegation may only narrow authority. Return escalate_to_human whenever you are unsure or the request exceeds delegated authority. Never approve or deny a human-only request.";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApprovalJudgeLoopOutcome {
+    Continue,
+    Parked,
+}
+
+async fn execute_approval_judge(
+    repository: &PostgresApprovalJudgeRepository,
+    model: &std::sync::Arc<dyn ApprovalJudgeModel>,
+    configured_selection: Option<DirectModelSelection>,
+    configuration: &HubModelConfiguration,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<ApprovalJudgeLoopOutcome, ApprovalJudgeRepositoryError> {
+    let prepared = loop {
+        let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
+        match repository
+            .prepare(session, turn, call, configured_selection)
+            .await
+        {
+            Ok(PrepareApprovalJudgeOutcome::Ready(prepared)) => break *prepared,
+            Ok(PrepareApprovalJudgeOutcome::InFlightAfterRestart(prepared)) => {
+                repository
+                    .fail(
+                        &prepared,
+                        FailedApprovalJudgeDisposition::Ambiguous,
+                        ProviderReportedTokenUsage::unreported(),
+                    )
+                    .await?;
+                return Ok(ApprovalJudgeLoopOutcome::Parked);
+            }
+            Ok(PrepareApprovalJudgeOutcome::NoWork) => {
+                return Ok(ApprovalJudgeLoopOutcome::Parked);
+            }
+            Err(ApprovalJudgeRepositoryError::IdentityCollision) => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let capability = match model
+        .prepare(ApprovalJudgeModelRequest {
+            request: prepared.request().clone(),
+            call: prepared.call(),
+            selection: prepared.selection(),
+            target: prepared.target(),
+            credential_reference: prepared.credential_reference().to_owned(),
+            system_prompt: String::from(APPROVAL_JUDGE_SYSTEM_PROMPT),
+            rendered_request: render_approval_judge_request(&prepared),
+        })
+        .await
+    {
+        Ok(capability) => capability,
+        Err(error) => {
+            repository
+                .fail(
+                    &prepared,
+                    judge_failure_disposition(error),
+                    ProviderReportedTokenUsage::unreported(),
+                )
+                .await?;
+            return Ok(ApprovalJudgeLoopOutcome::Parked);
+        }
+    };
+    let authorization = match repository.authorize(&prepared).await? {
+        AuthorizeApprovalJudgeOutcome::NoSend => return Ok(ApprovalJudgeLoopOutcome::Parked),
+        AuthorizeApprovalJudgeOutcome::Authorized(authorization) => authorization,
+    };
+    let result = capability.execute(*authorization).await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let usage = provider_reported_usage(error.usage());
+            repository
+                .fail(&prepared, judge_failure_disposition(error), usage)
+                .await?;
+            return Ok(ApprovalJudgeLoopOutcome::Parked);
+        }
+    };
+    let usage = provider_reported_usage(result.usage);
+    if result.call != prepared.call() {
+        repository
+            .fail(
+                &prepared,
+                FailedApprovalJudgeDisposition::Ambiguous,
+                ProviderReportedTokenUsage::unreported(),
+            )
+            .await?;
+        return Ok(ApprovalJudgeLoopOutcome::Parked);
+    }
+    if crate::usage_limits::approval_judge_usage_exceeds_configured_limits(
+        configuration,
+        prepared.target(),
+        result.usage,
+    ) != Some(false)
+    {
+        repository
+            .fail(
+                &prepared,
+                FailedApprovalJudgeDisposition::KnownFailed,
+                usage,
+            )
+            .await?;
+        return Ok(ApprovalJudgeLoopOutcome::Parked);
+    }
+    let outcome = loop {
+        match repository
+            .complete(
+                &prepared,
+                result.recommendation,
+                result.rationale.clone(),
+                usage,
+                TurnAttemptId::from_uuid(uuid::Uuid::now_v7()),
+            )
+            .await
+        {
+            Ok(outcome) => break outcome,
+            Err(ApprovalJudgeRepositoryError::IdentityCollision) => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    Ok(match outcome {
+        CompleteApprovalJudgeOutcome::Decided => ApprovalJudgeLoopOutcome::Continue,
+        CompleteApprovalJudgeOutcome::EscalatedToHuman => ApprovalJudgeLoopOutcome::Parked,
+    })
+}
+
+fn render_approval_judge_request(prepared: &PreparedApprovalJudge) -> String {
+    let arguments_kind = match prepared.request().arguments().kind() {
+        ToolArgumentsKind::Json => "json",
+        ToolArgumentsKind::Undecodable => "undecodable",
+    };
+    serde_json::json!({
+        "request_id": prepared.request().id().into_uuid().to_string(),
+        "tool": prepared.request().name().as_str(),
+        "arguments_kind": arguments_kind,
+        "arguments": prepared.request().arguments().as_str(),
+    })
+    .to_string()
+}
+
+const fn judge_failure_disposition(
+    error: ApprovalJudgeModelError,
+) -> FailedApprovalJudgeDisposition {
+    match error {
+        ApprovalJudgeModelError::Refused(_) => FailedApprovalJudgeDisposition::Refused,
+        ApprovalJudgeModelError::CancellationConfirmed => FailedApprovalJudgeDisposition::Cancelled,
+        ApprovalJudgeModelError::BoundaryLoss(_)
+        | ApprovalJudgeModelError::CorrelationMismatch(_) => {
+            FailedApprovalJudgeDisposition::Ambiguous
+        }
+        ApprovalJudgeModelError::UnconfiguredTarget
+        | ApprovalJudgeModelError::InvalidContract
+        | ApprovalJudgeModelError::AuthorizationMismatch
+        | ApprovalJudgeModelError::CancelledBeforeSend
+        | ApprovalJudgeModelError::PreparationCorrelationMismatch
+        | ApprovalJudgeModelError::PreparationFailed
+        | ApprovalJudgeModelError::PreparationDefect
+        | ApprovalJudgeModelError::ProviderError(_)
+        | ApprovalJudgeModelError::ProvenUnsent
+        | ApprovalJudgeModelError::ProviderTargetSubstituted(_)
+        | ApprovalJudgeModelError::IncompleteDecision(_)
+        | ApprovalJudgeModelError::InvalidDecision(_) => {
+            FailedApprovalJudgeDisposition::KnownFailed
+        }
+    }
+}
+
+const fn provider_reported_usage(usage: TokenUsage) -> ProviderReportedTokenUsage {
+    ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(usage.input_tokens)
+        .with_output_tokens(usage.output_tokens)
+        .with_cache_creation_input_tokens(usage.cache_creation_input_tokens)
+        .with_cache_read_input_tokens(usage.cache_read_input_tokens)
 }
 
 impl<Provider, Catalog, Executor> PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
@@ -932,6 +1135,19 @@ where
     Executor: ToolExecutor + Clone + Send + 'static,
     Executor::Error: Send + 'static,
 {
+    /// Enables delegated approval judging through the configured model runtime.
+    pub fn with_approval_judge(
+        mut self,
+        approval_judge: std::sync::Arc<dyn ApprovalJudgeModel>,
+        configured_selection: Option<DirectModelSelection>,
+        configuration: HubModelConfiguration,
+    ) -> Self {
+        self.approval_judge = Some(approval_judge);
+        self.approval_judge_selection = configured_selection;
+        self.approval_judge_configuration = Some(configuration);
+        self
+    }
+
     fn execute_scope(
         &self,
         session: SessionId,
@@ -945,11 +1161,15 @@ where
     + 'static {
         let model_repository = self.model_repository.clone();
         let tool_repository = self.tool_repository.clone();
+        let approval_judge_repository = self.approval_judge_repository.clone();
         let model_gate = self.model_gate.clone();
         let tool_gate = self.tool_gate.clone();
         let provider = self.provider.clone();
         let catalog = self.catalog.clone();
         let executor = self.executor.clone();
+        let approval_judge = self.approval_judge.clone();
+        let approval_judge_selection = self.approval_judge_selection;
+        let approval_judge_configuration = self.approval_judge_configuration.clone();
         async move {
             let mut model = ModelCallExecutionService::new(
                 UuidV7ModelCallExecutionIdGenerator,
@@ -1006,8 +1226,28 @@ where
                             }
                             run_tools = false;
                         }
-                        ToolExecutionServiceOutcome::AwaitingApproval(_)
-                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        ToolExecutionServiceOutcome::AwaitingApproval(_) => {
+                            let (Some(approval_judge), Some(configuration)) =
+                                (&approval_judge, &approval_judge_configuration)
+                            else {
+                                return Ok(());
+                            };
+                            match execute_approval_judge(
+                                &approval_judge_repository,
+                                approval_judge,
+                                approval_judge_selection,
+                                configuration,
+                                session,
+                                turn,
+                            )
+                            .await
+                            .map_err(PostgresProviderToolLoopExecutionError::ApprovalJudge)?
+                            {
+                                ApprovalJudgeLoopOutcome::Continue => continue,
+                                ApprovalJudgeLoopOutcome::Parked => return Ok(()),
+                            }
+                        }
+                        ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
                             return Ok(());
                         }
@@ -1109,7 +1349,8 @@ where
             PostgresProviderToolLoopExecutionError::ResumeExecution { turn, .. } => Some(*turn),
             PostgresProviderToolLoopExecutionError::ResumeLookup(_)
             | PostgresProviderToolLoopExecutionError::Model(_)
-            | PostgresProviderToolLoopExecutionError::Tool(_) => None,
+            | PostgresProviderToolLoopExecutionError::Tool(_)
+            | PostgresProviderToolLoopExecutionError::ApprovalJudge(_) => None,
         }
     }
 }

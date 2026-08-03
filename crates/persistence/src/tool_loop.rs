@@ -41,10 +41,11 @@ use crate::{
     },
     commit_failure_is_ambiguous,
     mapping::{
-        dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_posture_from_str, tool_attempt_id_from_uuid, tool_attempt_id_to_uuid,
-        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        ToolApprovalDecisionSourceStorageKind, dangerous_tool_auto_approval_from_str,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
+        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{insert_prepared_call, insert_snapshot},
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
@@ -273,8 +274,27 @@ impl PostgresToolLoopRepository {
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND state_kind = 'active'
-                AND active_phase_kind = 'running'
-                AND active_tool_round_call_id IS NOT NULL",
+                AND active_tool_round_call_id IS NOT NULL
+                AND (
+                    active_phase_kind = 'running'
+                    OR (
+                        active_phase_kind = 'awaiting_tool_approval'
+                        AND EXISTS (
+                            SELECT 1
+                              FROM tool_request AS request
+                             WHERE request.request_id = approval_tool_request_id
+                               AND request.session_id = turn_lifecycle.session_id
+                               AND request.turn_id = turn_lifecycle.turn_id
+                               AND request.approval_posture = 'delegated'
+                               AND NOT EXISTS (
+                                    SELECT 1
+                                      FROM tool_approval_judge_model_call AS judge
+                                     WHERE judge.request_id = request.request_id
+                                       AND judge.state_kind = 'terminal'
+                               )
+                        )
+                    )
+                )",
         )
         .bind(session_id_to_uuid(session))
         .fetch_optional(&self.pool)
@@ -1654,7 +1674,12 @@ pub(crate) async fn decode_approvals(
     let receipts = load_user_decision_receipts(connection, &user_commands).await?;
     let mut delegate_request_ids = Vec::new();
     for row in &rows {
-        if required::<String>(row, "decision_source")? == "delegate" {
+        if matches!(
+            tool_approval_decision_source_from_str(
+                required::<String>(row, "decision_source")?.as_str()
+            ),
+            Some(ToolApprovalDecisionSourceStorageKind::Delegate)
+        ) {
             delegate_request_ids.push(tool_request_id_from_uuid(required(row, "request_id")?));
         }
     }
@@ -1696,8 +1721,15 @@ async fn decode_approval(
         }
     };
     let user_command: Option<Uuid> = row.try_get("owner_command_id")?;
-    let input = match required::<String>(&row, "decision_source")?.as_str() {
-        "owner_command" => {
+    let source = required::<String>(&row, "decision_source")?;
+    let source_kind = tool_approval_decision_source_from_str(&source).ok_or_else(|| {
+        ToolLoopRepositoryError::from(ToolLoopCorruption::Unsupported {
+            field: "decision_source",
+            value: source,
+        })
+    })?;
+    let input = match source_kind {
+        ToolApprovalDecisionSourceStorageKind::UserCommand => {
             let command_id = durable_command_id_from_uuid(
                 user_command.ok_or(ToolLoopCorruption::Missing("approval user command"))?,
             )
@@ -1716,10 +1748,12 @@ async fn decode_approval(
             }
             ToolApprovalResolutionReconstitutionInput::user_command(command)
         }
-        "policy_auto" if user_command.is_none() && decision == ToolApprovalDecision::Approve => {
+        ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            if user_command.is_none() && decision == ToolApprovalDecision::Approve =>
+        {
             ToolApprovalResolutionReconstitutionInput::policy_auto(request)
         }
-        "session_blanket"
+        ToolApprovalDecisionSourceStorageKind::SessionBlanket
             if user_command.is_none() && decision == ToolApprovalDecision::Approve =>
         {
             ToolApprovalResolutionReconstitutionInput::session_blanket(
@@ -1727,7 +1761,7 @@ async fn decode_approval(
                 load_frozen_dangerous_tool_auto_approval(connection, request).await?,
             )
         }
-        "delegate" if user_command.is_none() => {
+        ToolApprovalDecisionSourceStorageKind::Delegate if user_command.is_none() => {
             let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
             let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
             let rationale: Option<String> = row.try_get("rationale")?;
@@ -1761,15 +1795,12 @@ async fn decode_approval(
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
             ToolApprovalResolutionReconstitutionInput::delegate(approval)
         }
-        "policy_auto" | "session_blanket" => {
+        ToolApprovalDecisionSourceStorageKind::PolicyAuto
+        | ToolApprovalDecisionSourceStorageKind::SessionBlanket => {
             return Err(ToolLoopCorruption::Inconsistent("automatic approval evidence").into());
         }
-        value => {
-            return Err(ToolLoopCorruption::Unsupported {
-                field: "decision_source",
-                value: value.to_owned(),
-            }
-            .into());
+        ToolApprovalDecisionSourceStorageKind::Delegate => {
+            return Err(ToolLoopCorruption::Inconsistent("delegate approval evidence").into());
         }
     };
     input
@@ -2469,6 +2500,15 @@ async fn persist_batch_decision(
             ));
         }
     }
+    outbox::append(
+        connection,
+        OutboxEvent::ToolApprovalDecided {
+            session: decision.batch().session(),
+            turn: decision.batch().turn(),
+            request: applied.resolution().request(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
