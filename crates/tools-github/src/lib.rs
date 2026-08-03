@@ -378,6 +378,9 @@ fn valid_git_ref(value: &str) -> bool {
 
 /// Accepts one local ref or one `account:ref` cross-repository head selector.
 fn valid_head_selector(value: &str) -> bool {
+    if value.len() > MAX_GIT_REF_BYTES {
+        return false;
+    }
     if valid_git_ref(value) {
         return true;
     }
@@ -3456,6 +3459,22 @@ mod tests {
         .expect("a well-formed cross-repository head selector is admitted");
 
         assert_eq!(arguments.head(), "contributor:agent/fix-invariant");
+    }
+
+    #[test]
+    fn create_rejects_an_account_qualified_head_over_the_total_byte_bound() {
+        let account = "a".repeat(MAX_GITHUB_ACCOUNT_BYTES);
+        let reference = "b".repeat(MAX_GIT_REF_BYTES);
+        let head = format!("{account}:{reference}");
+        let rejection = decode_create_pull_request(&normalized(serde_json::json!({
+            "title": CREATE_TITLE,
+            "body": CREATE_BODY,
+            "head": head,
+            "base": CREATE_BASE
+        })))
+        .expect_err("an account-qualified head over the total byte bound is rejected");
+
+        assert_eq!(rejection, InvalidGitHubArguments);
     }
 
     #[test]

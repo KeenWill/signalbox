@@ -106,10 +106,12 @@ impl<Transport: GitPushTransport> ToolExecutor for GitPushExecutor<Transport> {
                 detail: Some(self.rejected_detail.clone()),
             },
             Err(GitPushFailure::PreDispatchInfrastructure) => {
-                return Err(push_infrastructure(false));
+                return Err(push_infrastructure(
+                    PushCommitCertainty::DefinitelyNotCommitted,
+                ));
             }
             Err(GitPushFailure::DispatchUnknown | GitPushFailure::PostDispatchInvalid) => {
-                return Err(push_infrastructure(true));
+                return Err(push_infrastructure(PushCommitCertainty::Ambiguous));
             }
         };
         Ok(invocation.bind(evidence))
@@ -214,7 +216,17 @@ const fn push_caller_bug() -> GitPushExecutorError {
     }
 }
 
-const fn push_infrastructure(commit_ambiguous: bool) -> GitPushExecutorError {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PushCommitCertainty {
+    DefinitelyNotCommitted,
+    Ambiguous,
+}
+
+const fn push_infrastructure(certainty: PushCommitCertainty) -> GitPushExecutorError {
+    let commit_ambiguous = match certainty {
+        PushCommitCertainty::DefinitelyNotCommitted => false,
+        PushCommitCertainty::Ambiguous => true,
+    };
     GitPushExecutorError {
         class: OperatorFailureClass::Infrastructure { commit_ambiguous },
     }
