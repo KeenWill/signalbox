@@ -548,8 +548,11 @@ impl DaemonToolCatalog {
             if !configured_composition_contains(&name, composition) {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             }
-            if posture == ToolApprovalPosture::Delegated {
-                return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+            match posture {
+                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
+                ToolApprovalPosture::Delegated => {
+                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+                }
             }
         }
         Ok(())
@@ -564,8 +567,11 @@ impl DaemonToolCatalog {
             let Some(entry) = self.entries.get_mut(&name) else {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             };
-            if posture == ToolApprovalPosture::Delegated {
-                return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+            match posture {
+                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
+                ToolApprovalPosture::Delegated => {
+                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
+                }
             }
             entry.definition = entry.definition.clone().with_approval_posture(posture);
         }
