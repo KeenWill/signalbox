@@ -43,6 +43,7 @@ const CHANGED_HEAD: &str = "2222222222222222222222222222222222222222";
 const TITLE: &str = "Persist repository-watch facts";
 const BODY: &str = "A complete fixture pull request body.";
 const AUTHOR: &str = "fixture-author";
+const NON_ASCII_AUTHOR: &str = "é";
 const LABEL: &str = "watch-me";
 const U64_MAX_NUMERIC: &str = "18446744073709551615";
 const U64_OVERFLOW_NUMERIC: &str = "18446744073709551616";
@@ -1005,6 +1006,38 @@ async fn actor_login_constraint_rejects_domain_invalid_spelling() -> Result<(), 
     .bind(HEAD_BRANCH)
     .bind(TITLE)
     .bind(BODY)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn actor_login_constraint_rejects_non_ascii_range_members() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft, author
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false, $11
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(NON_ASCII_AUTHOR)
     .execute(&pool)
     .await;
 

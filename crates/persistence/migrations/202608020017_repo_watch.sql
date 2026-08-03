@@ -65,7 +65,7 @@ AS $$
     SELECT candidate = lower(candidate)
        AND octet_length(candidate) BETWEEN 1 AND 44
        AND octet_length(normalized.base) BETWEEN 1 AND 39
-       AND normalized.base ~ '^[a-z0-9_-]+$'
+       AND normalized.base COLLATE "C" ~ '^[a-z0-9_-]+$'
        AND left(normalized.base, 1) <> '-'
        AND right(normalized.base, 1) <> '-'
        AND strpos(normalized.base, '--') = 0
