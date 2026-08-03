@@ -362,11 +362,21 @@ async fn run_live_smoke() -> SmokeResult {
     .await?;
     assert_plan_fold(&current_tool_results(&probe)?, &plan_fixture)?;
 
-    run_automatic_turn(
+    let web_fetch_turn = run_parking_turn(
         &pool,
         &mut connection,
         session,
         "exercise allowed web fetch",
+        &execution,
+    )
+    .await?;
+    decide_requests(
+        &pool,
+        &mut connection,
+        session,
+        web_fetch_turn,
+        &[WEB_FETCH_NAME],
+        DecisionPosture::Approve,
         &execution,
     )
     .await?;
