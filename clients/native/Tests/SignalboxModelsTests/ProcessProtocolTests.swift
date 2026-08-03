@@ -287,6 +287,158 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testToolApprovalDecisionDecodesTypedDelegateProvenance() throws {
+    let requestID = "44444444-4444-4444-8444-444444444444"
+    let selectionID = "55555555-5555-4555-8555-555555555555"
+    let callID = "66666666-6666-4666-8666-666666666666"
+    let rationale = "The requested effect exceeds the delegated scope."
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"\(requestID)",
+            "decision":{"type":"deny","reason":null},
+            "decider":{
+              "type":"delegate",
+              "model_selection_id":"\(selectionID)",
+              "model_call_id":"\(callID)"
+            },
+            "rationale":"\(rationale)"
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 13),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .toolApprovalDecided(
+            turnID: try SignalboxCanonicalUUID(validating: turnID),
+            toolRequestID: try SignalboxCanonicalUUID(validating: requestID),
+            decision: .deny(reason: nil),
+            decider: .delegate(
+              modelSelectionID: try SignalboxCanonicalUUID(validating: selectionID),
+              modelCallID: try SignalboxCanonicalUUID(validating: callID)
+            ),
+            rationale: rationale
+          )
+        )
+      )
+    )
+  }
+
+  func testDelegateRationaleRejectsNUL() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"44444444-4444-4444-8444-444444444444",
+            "decision":{"type":"approve"},
+            "decider":{
+              "type":"delegate",
+              "model_selection_id":"55555555-5555-4555-8555-555555555555",
+              "model_call_id":"66666666-6666-4666-8666-666666666666"
+            },
+            "rationale":"unsafe\\u0000rationale"
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.toolApprovalDecisionDiagnostic(in: frame.message))
+  }
+
+  func testUserDenialReasonAllowsNonPOSIXUnicodeWhitespaceAtEdges() throws {
+    let nonbreakingSpace = "\u{00A0}"
+    let reason = "\(nonbreakingSpace)kept verbatim\(nonbreakingSpace)"
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"44444444-4444-4444-8444-444444444444",
+            "decision":{"type":"deny","reason":"\(reason)"},
+            "decider":{
+              "type":"user",
+              "command_id":"55555555-5555-4555-8555-555555555555"
+            },
+            "rationale":null
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(ProcessProtocolFixture.userDenialReason(in: frame.message), reason)
+  }
+
+  func testUserDenialReasonAllowsUnicodeFormatScalar() throws {
+    let formatScalar = "\u{200D}"
+    let reason = "kept\(formatScalar)verbatim"
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"44444444-4444-4444-8444-444444444444",
+            "decision":{"type":"deny","reason":"\(reason)"},
+            "decider":{
+              "type":"user",
+              "command_id":"55555555-5555-4555-8555-555555555555"
+            },
+            "rationale":null
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(ProcessProtocolFixture.userDenialReason(in: frame.message), reason)
+  }
+
   func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
     let contextCompactionID = "33333333-3333-4333-8333-333333333333"
     let modelCallID = "44444444-4444-4444-8444-444444444444"
@@ -509,8 +661,10 @@ final class ProcessProtocolTests: XCTestCase {
         senderSessionID: try SignalboxCanonicalUUID(
           validating: ProcessProtocolFixture.parentSessionID),
         recipientSessionID: try SignalboxCanonicalUUID(validating: sessionID),
-        ordinal: SignalboxCanonicalUInt64(rawValue: 1),
-        deliverySequence: SignalboxCanonicalUInt64(rawValue: 2),
+        ordinal: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.delegationMessageOrdinal),
+        deliverySequence: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.delegationMessageDeliverySequence),
         content: ProcessProtocolFixture.delegationMessageContent
       )
     )
@@ -584,6 +738,49 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testDelegationResultRejectsContradictoryOutcomeReasonTuple() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null",
+        reason: "child_cancelled"
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
+  func testTranscriptToolApprovalRejectsExplicitNull() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"33333333-3333-4333-8333-333333333333",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(turnID)",
+            "model_call_id":"44444444-4444-4444-8444-444444444444",
+            "tool_request_id":"55555555-5555-4555-8555-555555555555",
+            "tool_name":"publish",
+            "arguments":"{}",
+            "approval":null
+          }
+        }
+      }
+      """.utf8
+    )
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message))
+  }
+
   func testFutureProviderFailureCauseRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
@@ -608,6 +805,16 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(origin.parentSessionID.rawValue, ProcessProtocolFixture.parentSessionID)
     XCTAssertEqual(origin.parentTurnID.rawValue, ProcessProtocolFixture.parentTurnID)
     XCTAssertEqual(origin.content, ProcessProtocolFixture.delegatedTaskContent)
+  }
+
+  func testQueuedDelegationWakeDecodesExactDeliveryRange() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.queuedDelegationWakeTurnFrame(turnID: turnID)
+    )
+    let range = try ProcessProtocolFixture.queuedDelegationWakeRange(in: frame.message)
+
+    XCTAssertEqual(range.first.rawValue, ProcessProtocolFixture.wakeFirstDeliverySequence)
+    XCTAssertEqual(range.through.rawValue, ProcessProtocolFixture.wakeThroughDeliverySequence)
   }
 
   func testTranscriptModelCallCostWithoutAUsageAxisDegradesWithDiagnostic() throws {
@@ -905,7 +1112,11 @@ private enum ProcessProtocolFixture {
   static let parentSessionID = "44444444-4444-4444-8444-444444444444"
   static let parentTurnID = "12121212-1212-4212-8212-121212121212"
   static let delegatedTaskContent = "fixture delegated task"
+  static let wakeFirstDeliverySequence: UInt64 = 3
+  static let wakeThroughDeliverySequence: UInt64 = 5
   static let delegationMessageContent = "fixture delegation message"
+  static let delegationMessageOrdinal: UInt64 = 1
+  static let delegationMessageDeliverySequence: UInt64 = 2
   static let delegationResultContent = "fixture delegation result"
   static let messageID = "55555555-5555-4555-8555-555555555555"
   static let awaitRequestID = "66666666-6666-4666-8666-666666666666"
@@ -1034,8 +1245,8 @@ private enum ProcessProtocolFixture {
             "message_id":"\(messageID)",
             "sender_session_id":"\(parentSessionID)",
             "recipient_session_id":"\(sessionID)",
-            "ordinal":"1",
-            "delivery_sequence":"2",
+            "ordinal":"\(delegationMessageOrdinal)",
+            "delivery_sequence":"\(delegationMessageDeliverySequence)",
             "content":"\(delegationMessageContent)"
           }
         }
@@ -1047,7 +1258,8 @@ private enum ProcessProtocolFixture {
   static func delegationResultEntryFrame(
     sessionID: String,
     mode: String,
-    deliverySequence: String
+    deliverySequence: String,
+    reason: String = "child_completed"
   ) -> Data {
     Data(
       """
@@ -1068,7 +1280,7 @@ private enum ProcessProtocolFixture {
             "delivery_sequence":\(deliverySequence),
             "outcome":"returned",
             "content":"\(delegationResultContent)",
-            "reason":"child_completed",
+            "reason":"\(reason)",
             "provenance":{
               "type":"child_turn",
               "child_session_id":"\(childSessionID)",
@@ -1535,6 +1747,27 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func queuedDelegationWakeTurnFrame(turnID: String) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"2",
+          "state":{
+            "type":"queued_delegation_wake",
+            "first_delivery_sequence":"\(wakeFirstDeliverySequence)",
+            "through_delivery_sequence":"\(wakeThroughDeliverySequence)"
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func failedTurnWithNullCauseFrame(turnID: String) -> Data {
     Data(
       """
@@ -1651,6 +1884,18 @@ private enum ProcessProtocolFixture {
     return (spawningRequestID, parentSessionID, parentTurnID, content)
   }
 
+  static func queuedDelegationWakeRange(
+    in message: SignalboxProcessServerMessage
+  ) throws -> (first: SignalboxCanonicalUInt64, through: SignalboxCanonicalUInt64) {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .queuedDelegationWake(let first, let through) = turn.state
+    else {
+      throw ProcessProtocolFixtureError.missingDelegatedOrigin
+    }
+    return (first, through)
+  }
+
   static func oversizedFrame() -> Data {
     Data(
       repeating: 0x20,
@@ -1674,6 +1919,26 @@ private enum ProcessProtocolFixture {
     in message: SignalboxProcessServerMessage
   ) -> SignalboxDecodingDiagnostic? {
     guard case .unknown(_, _, let diagnostic) = message else {
+      return nil
+    }
+    return diagnostic
+  }
+
+  static func userDenialReason(in message: SignalboxProcessServerMessage) -> String? {
+    guard case .sessionEvent(let followed) = message,
+      case .toolApprovalDecided(_, _, .deny(let reason), .user, nil) = followed.event
+    else {
+      return nil
+    }
+    return reason
+  }
+
+  static func toolApprovalDecisionDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard case .sessionEvent(let followed) = message,
+      case .unknown("tool_approval_decided", _, let diagnostic) = followed.event
+    else {
       return nil
     }
     return diagnostic

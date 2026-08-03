@@ -3,6 +3,7 @@
 //! This crate coordinates domain decisions and external effects while
 //! depending inward on `signalbox-domain`.
 
+mod approval_judge;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -21,7 +22,9 @@ mod submit_input;
 mod tool_dispatch_gate;
 mod tool_loop;
 mod tool_loop_ports;
+mod update_session_placement;
 
+pub use approval_judge::ApprovalJudgeAuthorization;
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
@@ -122,4 +125,8 @@ pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
+pub use update_session_placement::{
+    UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
+    UpdateSessionPlacementTransaction,
 };

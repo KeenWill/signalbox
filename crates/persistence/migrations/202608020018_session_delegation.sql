@@ -186,9 +186,33 @@ CREATE TABLE session_delegation_initial_task (
     semantic_entry_id uuid NOT NULL UNIQUE,
     admission_position numeric(20, 0) NOT NULL CHECK (admission_position = 1),
     defaults_version numeric(20, 0) NOT NULL CHECK (defaults_version = 1),
-    frozen_direct_model_selection_id uuid NOT NULL,
+    requested_model_kind text NOT NULL,
+    requested_direct_model_selection_id uuid,
+    requested_model_alias_id uuid,
+    frozen_model_kind text NOT NULL,
+    frozen_direct_model_selection_id uuid,
+    frozen_model_alias_id uuid,
+    frozen_alias_selected_direct_id uuid,
     task_content text NOT NULL CHECK (
         task_content <> '' AND octet_length(task_content) <= 1048576
+    ),
+    CONSTRAINT session_delegation_initial_task_requested_model_shape CHECK (
+        (requested_model_kind = 'direct'
+            AND requested_direct_model_selection_id IS NOT NULL
+            AND requested_model_alias_id IS NULL)
+        OR (requested_model_kind = 'alias'
+            AND requested_direct_model_selection_id IS NULL
+            AND requested_model_alias_id IS NOT NULL)
+    ),
+    CONSTRAINT session_delegation_initial_task_frozen_model_shape CHECK (
+        (frozen_model_kind = 'direct'
+            AND frozen_direct_model_selection_id IS NOT NULL
+            AND frozen_model_alias_id IS NULL
+            AND frozen_alias_selected_direct_id IS NULL)
+        OR (frozen_model_kind = 'frozen_alias'
+            AND frozen_direct_model_selection_id IS NULL
+            AND frozen_model_alias_id IS NOT NULL
+            AND frozen_alias_selected_direct_id IS NOT NULL)
     ),
     UNIQUE (turn_id, child_session_id, admission_position),
     UNIQUE (spawning_tool_request_id, child_session_id, semantic_entry_id),
@@ -275,7 +299,10 @@ AS $$
                 task.turn_id,
                 NULL::uuid AS source_configuration_turn_id,
                 task.defaults_version,
-                task.frozen_direct_model_selection_id,
+                COALESCE(
+                    task.frozen_direct_model_selection_id,
+                    task.frozen_alias_selected_direct_id
+                ),
                 ARRAY[task.turn_id]::uuid[] AS visited_turn_ids
               FROM session_delegation_initial_task AS task
              WHERE task.turn_id = checked_turn_id
@@ -303,6 +330,97 @@ AS $$
       FROM configuration_chain AS chain
      WHERE chain.defaults_version IS NOT NULL
        AND chain.direct_selection_id IS NOT NULL
+     ORDER BY cardinality(chain.visited_turn_ids) DESC
+     LIMIT 1
+$$;
+
+CREATE FUNCTION turn_origin_exact_model_configuration(
+    checked_turn_id uuid,
+    checked_session_id uuid
+)
+RETURNS TABLE (
+    defaults_version numeric(20, 0),
+    requested_model_kind text,
+    requested_direct_model_selection_id uuid,
+    requested_model_alias_id uuid,
+    frozen_model_kind text,
+    frozen_direct_model_selection_id uuid,
+    frozen_model_alias_id uuid,
+    frozen_alias_selected_direct_id uuid
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE configuration_chain AS (
+        (
+            SELECT
+                origin.turn_id,
+                origin.source_configuration_turn_id,
+                origin.defaults_version,
+                origin.requested_model_kind,
+                origin.requested_direct_model_selection_id,
+                origin.requested_model_alias_id,
+                origin.frozen_model_kind,
+                origin.frozen_direct_model_selection_id,
+                origin.frozen_model_alias_id,
+                origin.frozen_alias_selected_direct_id,
+                ARRAY[origin.turn_id]::uuid[] AS visited_turn_ids
+              FROM queued_input_origin AS origin
+             WHERE origin.turn_id = checked_turn_id
+               AND origin.session_id = checked_session_id
+
+            UNION ALL
+
+            SELECT
+                task.turn_id,
+                NULL::uuid,
+                task.defaults_version,
+                task.requested_model_kind,
+                task.requested_direct_model_selection_id,
+                task.requested_model_alias_id,
+                task.frozen_model_kind,
+                task.frozen_direct_model_selection_id,
+                task.frozen_model_alias_id,
+                task.frozen_alias_selected_direct_id,
+                ARRAY[task.turn_id]::uuid[]
+              FROM session_delegation_initial_task AS task
+             WHERE task.turn_id = checked_turn_id
+               AND task.child_session_id = checked_session_id
+        )
+
+        UNION ALL
+
+        SELECT
+            source.turn_id,
+            source.source_configuration_turn_id,
+            source.defaults_version,
+            source.requested_model_kind,
+            source.requested_direct_model_selection_id,
+            source.requested_model_alias_id,
+            source.frozen_model_kind,
+            source.frozen_direct_model_selection_id,
+            source.frozen_model_alias_id,
+            source.frozen_alias_selected_direct_id,
+            chain.visited_turn_ids || source.turn_id
+          FROM configuration_chain AS chain
+          JOIN queued_input_origin AS source
+            ON source.turn_id = chain.source_configuration_turn_id
+           AND source.session_id = checked_session_id
+         WHERE NOT source.turn_id = ANY(chain.visited_turn_ids)
+    )
+    SELECT
+        chain.defaults_version,
+        chain.requested_model_kind,
+        chain.requested_direct_model_selection_id,
+        chain.requested_model_alias_id,
+        chain.frozen_model_kind,
+        chain.frozen_direct_model_selection_id,
+        chain.frozen_model_alias_id,
+        chain.frozen_alias_selected_direct_id
+      FROM configuration_chain AS chain
+     WHERE chain.defaults_version IS NOT NULL
+       AND chain.requested_model_kind IS NOT NULL
+       AND chain.frozen_model_kind IS NOT NULL
      ORDER BY cardinality(chain.visited_turn_ids) DESC
      LIMIT 1
 $$;
@@ -455,7 +573,7 @@ BEGIN
             ON attempt.request_id = request.request_id
            AND attempt.turn_id = request.turn_id
            AND attempt.session_id = request.session_id
-          JOIN LATERAL turn_origin_effective_model_configuration(
+          JOIN LATERAL turn_origin_exact_model_configuration(
                 relation.parent_turn_id, relation.parent_session_id
           ) AS frozen ON true
           JOIN session_defaults_version AS parent_defaults
@@ -499,7 +617,18 @@ BEGIN
                     )
                 END
            )
-           AND frozen.direct_selection_id = NEW.frozen_direct_model_selection_id
+           AND frozen.requested_model_kind = NEW.requested_model_kind
+           AND frozen.requested_direct_model_selection_id IS NOT DISTINCT FROM
+                NEW.requested_direct_model_selection_id
+           AND frozen.requested_model_alias_id IS NOT DISTINCT FROM
+                NEW.requested_model_alias_id
+           AND frozen.frozen_model_kind = NEW.frozen_model_kind
+           AND frozen.frozen_direct_model_selection_id IS NOT DISTINCT FROM
+                NEW.frozen_direct_model_selection_id
+           AND frozen.frozen_model_alias_id IS NOT DISTINCT FROM
+                NEW.frozen_model_alias_id
+           AND frozen.frozen_alias_selected_direct_id IS NOT DISTINCT FROM
+                NEW.frozen_alias_selected_direct_id
            AND child_defaults.model_selection_kind =
                 parent_defaults.model_selection_kind
            AND child_defaults.model_selection_reference =
@@ -1140,6 +1269,145 @@ BEGIN
 END;
 $$;
 
+-- Once a foreground wait resumes, the fresh current turn attempt directly
+-- continues the ended attempt that issued the batch. Retain that exact history
+-- without treating its already-ended physical attempts as foreign serial
+-- authority.
+DO $migration$
+DECLARE
+    lifecycle_definition text;
+    updated_definition text;
+    prior_attempt_check CONSTANT text := $old$
+                               AND attempt.issuing_turn_attempt_id
+                                   <> lifecycle.current_attempt_id
+$old$;
+    resumed_attempt_check CONSTANT text := $new$
+                               AND attempt.issuing_turn_attempt_id
+                                   <> lifecycle.current_attempt_id
+                               AND NOT (
+                                    EXISTS (
+                                        SELECT 1
+                                          FROM turn_attempt AS resumed
+                                         WHERE resumed.turn_attempt_id =
+                                               lifecycle.current_attempt_id
+                                           AND resumed.turn_id = lifecycle.turn_id
+                                           AND resumed.session_id = lifecycle.session_id
+                                           AND resumed.continued_from_attempt_id =
+                                               attempt.issuing_turn_attempt_id
+                                    )
+                                    AND EXISTS (
+                                        SELECT 1
+                                          FROM tool_attempt AS child_wait
+                                          JOIN tool_request AS waited_request
+                                            ON waited_request.request_id =
+                                               child_wait.request_id
+                                         WHERE waited_request.producing_model_call_id =
+                                               lifecycle.active_tool_round_call_id
+                                           AND child_wait.issuing_turn_attempt_id =
+                                               attempt.issuing_turn_attempt_id
+                                           AND child_wait.state_kind = 'terminal'
+                                           AND child_wait.terminal_disposition_kind =
+                                               'awaiting_child'
+                                    )
+                               )
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_tool_loop_turn_final_state_pre_delegation(uuid)'::regprocedure
+    ) INTO lifecycle_definition;
+    IF strpos(lifecycle_definition, prior_attempt_check) = 0 THEN
+        RAISE EXCEPTION 'delegation could not locate serial authority assertion';
+    END IF;
+    updated_definition := replace(
+        lifecycle_definition,
+        prior_attempt_check,
+        resumed_attempt_check
+    );
+    EXECUTE updated_definition;
+END;
+$migration$;
+
+CREATE OR REPLACE FUNCTION assert_turn_attempt_final_state(
+    checked_turn_attempt_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    attempt_record turn_attempt%ROWTYPE;
+BEGIN
+    SELECT *
+      INTO attempt_record
+      FROM turn_attempt
+     WHERE turn_attempt_id = checked_turn_attempt_id;
+    IF NOT FOUND OR attempt_record.continued_from_attempt_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+          FROM turn_attempt AS predecessor
+          JOIN model_call AS call
+            ON call.turn_attempt_id = predecessor.turn_attempt_id
+           AND call.turn_id = predecessor.turn_id
+           AND call.session_id = predecessor.session_id
+          JOIN tool_round AS round
+            ON round.producing_model_call_id = call.model_call_id
+           AND round.turn_id = call.turn_id
+           AND round.session_id = call.session_id
+         WHERE predecessor.turn_attempt_id =
+               attempt_record.continued_from_attempt_id
+           AND predecessor.turn_id = attempt_record.turn_id
+           AND predecessor.session_id = attempt_record.session_id
+           AND predecessor.state_kind = 'ended'
+           AND predecessor.end_variant = 'without_stop'
+           AND predecessor.end_disposition = 'yielded_to_durable_wait'
+           AND call.state_kind = 'terminal'
+           AND call.terminal_disposition_kind = 'completed'
+           AND round.boundary_kind = 'continuing'
+    ) AND NOT EXISTS (
+        SELECT 1
+          FROM turn_attempt AS predecessor
+          JOIN tool_attempt AS child_wait_attempt
+            ON child_wait_attempt.issuing_turn_attempt_id =
+               predecessor.turn_attempt_id
+           AND child_wait_attempt.turn_id = predecessor.turn_id
+           AND child_wait_attempt.session_id = predecessor.session_id
+          JOIN session_delegation_wait AS waiting
+            ON waiting.awaiting_tool_request_id = child_wait_attempt.request_id
+           AND waiting.spawning_tool_request_id =
+               child_wait_attempt.wait_spawning_request_id
+           AND waiting.child_session_id =
+               child_wait_attempt.wait_child_session_id
+           AND waiting.parent_turn_id = predecessor.turn_id
+           AND waiting.parent_session_id = predecessor.session_id
+           AND waiting.wait_mode = 'foreground'
+          JOIN session_child_result_delivery AS delivery
+            ON delivery.awaiting_tool_request_id =
+               waiting.awaiting_tool_request_id
+           AND delivery.spawning_tool_request_id =
+               waiting.spawning_tool_request_id
+           AND delivery.parent_session_id = waiting.parent_session_id
+           AND delivery.delivery_sequence IS NULL
+         WHERE predecessor.turn_attempt_id =
+               attempt_record.continued_from_attempt_id
+           AND predecessor.turn_id = attempt_record.turn_id
+           AND predecessor.session_id = attempt_record.session_id
+           AND predecessor.state_kind = 'ended'
+           AND predecessor.end_variant = 'without_stop'
+           AND predecessor.end_disposition = 'yielded_to_durable_wait'
+           AND child_wait_attempt.state_kind = 'terminal'
+           AND child_wait_attempt.terminal_disposition_kind = 'awaiting_child'
+    ) THEN
+        RAISE EXCEPTION
+            'turn attempt continuation lacks an exact durable tool yield'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'turn_attempt_continuation_requires_tool_yield';
+    END IF;
+END;
+$$;
+
 -- Scheduling writes one proof row only after the exact parent termination
 -- command applied with descendant scope. Delegation outcomes consume this row
 -- rather than treating an arbitrary parent command as authority. The composite
@@ -1385,6 +1653,92 @@ CREATE CONSTRAINT TRIGGER session_delegation_parent_termination_chain
 AFTER INSERT ON session_delegation_parent_termination
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_delegation_parent_termination_chain();
+
+-- The forward cascade-to-command constraint above is intentionally paired
+-- with these reverse command-to-cascade constraints. An applied
+-- parent-and-descendants command may never commit as an implicit
+-- parent-alone command merely because its scheduling writer omitted the
+-- typed cascade proof.
+CREATE FUNCTION require_applied_goal_command_delegation_cascade()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    applied_generation numeric(20, 0);
+BEGIN
+    IF NEW.operation_kind <> 'stop'
+       OR NEW.result_kind <> 'applied'
+       OR NEW.descendant_scope <> 'parent_and_descendants' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation AS relation
+         WHERE relation.parent_session_id = NEW.session_id
+    ) THEN
+        RETURN NULL;
+    END IF;
+    SELECT event.generation INTO applied_generation
+      FROM goal_event AS event
+     WHERE event.session_id = NEW.session_id
+       AND event.event_ordinal = NEW.result_event_ordinal
+       AND event.event_kind = 'user_stopped';
+    IF applied_generation IS NULL OR NOT EXISTS (
+        SELECT 1 FROM session_delegation_termination_cascade AS cascade
+         WHERE cascade.root_command_id = NEW.command_id
+           AND cascade.root_session_id = NEW.session_id
+           AND cascade.root_source_kind = 'goal_command'
+           AND cascade.root_turn_id IS NULL
+           AND cascade.root_goal_generation = applied_generation
+           AND cascade.termination_kind = 'stopped'
+           AND cascade.descendant_scope = NEW.descendant_scope
+    ) THEN
+        RAISE EXCEPTION 'applied descendant-scoped goal command lacks its cascade proof'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_command_delegation_cascade';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION require_applied_turn_command_delegation_cascade()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.delivery_kind <> 'interrupt'
+       OR NEW.result_kind <> 'applied'
+       OR NEW.descendant_scope <> 'parent_and_descendants' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation AS relation
+         WHERE relation.parent_session_id = NEW.session_id
+    ) THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation_termination_cascade AS cascade
+         WHERE cascade.root_command_id = NEW.command_id
+           AND cascade.root_session_id = NEW.session_id
+           AND cascade.root_source_kind = 'turn_command'
+           AND cascade.root_turn_id = NEW.expected_active_turn_id
+           AND cascade.root_goal_generation IS NULL
+           AND cascade.termination_kind = 'cancelled'
+           AND cascade.descendant_scope = NEW.descendant_scope
+    ) THEN
+        RAISE EXCEPTION 'applied descendant-scoped turn command lacks its cascade proof'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'submit_input_command_delegation_cascade';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER applied_goal_command_requires_delegation_cascade
+AFTER INSERT OR UPDATE ON goal_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_applied_goal_command_delegation_cascade();
+
+CREATE CONSTRAINT TRIGGER applied_turn_command_requires_delegation_cascade
+AFTER INSERT OR UPDATE ON submit_input_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_applied_turn_command_delegation_cascade();
 
 CREATE FUNCTION delegation_cascade_expected_frontier(
     checked_root_session uuid,
@@ -2585,9 +2939,33 @@ CREATE TABLE session_delegation_wake_turn_origin (
     defaults_version numeric(20, 0) NOT NULL CHECK (
         defaults_version BETWEEN 1 AND 18446744073709551615
     ),
-    frozen_direct_model_selection_id uuid NOT NULL,
+    requested_model_kind text NOT NULL,
+    requested_direct_model_selection_id uuid,
+    requested_model_alias_id uuid,
+    frozen_model_kind text NOT NULL,
+    frozen_direct_model_selection_id uuid,
+    frozen_model_alias_id uuid,
+    frozen_alias_selected_direct_id uuid,
     CONSTRAINT session_delegation_wake_delivery_range CHECK (
         first_delivery_sequence <= through_delivery_sequence
+    ),
+    CONSTRAINT session_delegation_wake_requested_model_shape CHECK (
+        (requested_model_kind = 'direct'
+            AND requested_direct_model_selection_id IS NOT NULL
+            AND requested_model_alias_id IS NULL)
+        OR (requested_model_kind = 'alias'
+            AND requested_direct_model_selection_id IS NULL
+            AND requested_model_alias_id IS NOT NULL)
+    ),
+    CONSTRAINT session_delegation_wake_frozen_model_shape CHECK (
+        (frozen_model_kind = 'direct'
+            AND frozen_direct_model_selection_id IS NOT NULL
+            AND frozen_model_alias_id IS NULL
+            AND frozen_alias_selected_direct_id IS NULL)
+        OR (frozen_model_kind = 'frozen_alias'
+            AND frozen_direct_model_selection_id IS NULL
+            AND frozen_model_alias_id IS NOT NULL
+            AND frozen_alias_selected_direct_id IS NOT NULL)
     ),
     UNIQUE (turn_id, recipient_session_id, admission_position),
     UNIQUE (recipient_session_id, through_delivery_sequence),
@@ -2616,14 +2994,26 @@ BEGIN
         OLD.admission_position,
         OLD.first_delivery_sequence,
         OLD.defaults_version,
-        OLD.frozen_direct_model_selection_id
+        OLD.requested_model_kind,
+        OLD.requested_direct_model_selection_id,
+        OLD.requested_model_alias_id,
+        OLD.frozen_model_kind,
+        OLD.frozen_direct_model_selection_id,
+        OLD.frozen_model_alias_id,
+        OLD.frozen_alias_selected_direct_id
     ) IS DISTINCT FROM ROW(
         NEW.turn_id,
         NEW.recipient_session_id,
         NEW.admission_position,
         NEW.first_delivery_sequence,
         NEW.defaults_version,
-        NEW.frozen_direct_model_selection_id
+        NEW.requested_model_kind,
+        NEW.requested_direct_model_selection_id,
+        NEW.requested_model_alias_id,
+        NEW.frozen_model_kind,
+        NEW.frozen_direct_model_selection_id,
+        NEW.frozen_model_alias_id,
+        NEW.frozen_alias_selected_direct_id
     ) OR NEW.through_delivery_sequence <= OLD.through_delivery_sequence
       OR NOT EXISTS (
             SELECT 1 FROM turn_lifecycle AS lifecycle
@@ -3111,7 +3501,10 @@ AS $$
                 task.turn_id,
                 NULL::uuid AS source_configuration_turn_id,
                 task.defaults_version,
-                task.frozen_direct_model_selection_id,
+                COALESCE(
+                    task.frozen_direct_model_selection_id,
+                    task.frozen_alias_selected_direct_id
+                ),
                 ARRAY[task.turn_id]::uuid[] AS visited_turn_ids
               FROM session_delegation_initial_task AS task
              WHERE task.turn_id = checked_turn_id
@@ -3123,7 +3516,10 @@ AS $$
                 wake.turn_id,
                 NULL::uuid AS source_configuration_turn_id,
                 wake.defaults_version,
-                wake.frozen_direct_model_selection_id,
+                COALESCE(
+                    wake.frozen_direct_model_selection_id,
+                    wake.frozen_alias_selected_direct_id
+                ),
                 ARRAY[wake.turn_id]::uuid[] AS visited_turn_ids
               FROM session_delegation_wake_turn_origin AS wake
              WHERE wake.turn_id = checked_turn_id
@@ -3151,6 +3547,115 @@ AS $$
       FROM configuration_chain AS chain
      WHERE chain.defaults_version IS NOT NULL
        AND chain.direct_selection_id IS NOT NULL
+     ORDER BY cardinality(chain.visited_turn_ids) DESC
+     LIMIT 1
+$$;
+
+CREATE OR REPLACE FUNCTION turn_origin_exact_model_configuration(
+    checked_turn_id uuid,
+    checked_session_id uuid
+)
+RETURNS TABLE (
+    defaults_version numeric(20, 0),
+    requested_model_kind text,
+    requested_direct_model_selection_id uuid,
+    requested_model_alias_id uuid,
+    frozen_model_kind text,
+    frozen_direct_model_selection_id uuid,
+    frozen_model_alias_id uuid,
+    frozen_alias_selected_direct_id uuid
+)
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE configuration_chain AS (
+        (
+            SELECT
+                origin.turn_id,
+                origin.source_configuration_turn_id,
+                origin.defaults_version,
+                origin.requested_model_kind,
+                origin.requested_direct_model_selection_id,
+                origin.requested_model_alias_id,
+                origin.frozen_model_kind,
+                origin.frozen_direct_model_selection_id,
+                origin.frozen_model_alias_id,
+                origin.frozen_alias_selected_direct_id,
+                ARRAY[origin.turn_id]::uuid[] AS visited_turn_ids
+              FROM queued_input_origin AS origin
+             WHERE origin.turn_id = checked_turn_id
+               AND origin.session_id = checked_session_id
+
+            UNION ALL
+
+            SELECT
+                task.turn_id,
+                NULL::uuid,
+                task.defaults_version,
+                task.requested_model_kind,
+                task.requested_direct_model_selection_id,
+                task.requested_model_alias_id,
+                task.frozen_model_kind,
+                task.frozen_direct_model_selection_id,
+                task.frozen_model_alias_id,
+                task.frozen_alias_selected_direct_id,
+                ARRAY[task.turn_id]::uuid[]
+              FROM session_delegation_initial_task AS task
+             WHERE task.turn_id = checked_turn_id
+               AND task.child_session_id = checked_session_id
+
+            UNION ALL
+
+            SELECT
+                wake.turn_id,
+                NULL::uuid,
+                wake.defaults_version,
+                wake.requested_model_kind,
+                wake.requested_direct_model_selection_id,
+                wake.requested_model_alias_id,
+                wake.frozen_model_kind,
+                wake.frozen_direct_model_selection_id,
+                wake.frozen_model_alias_id,
+                wake.frozen_alias_selected_direct_id,
+                ARRAY[wake.turn_id]::uuid[]
+              FROM session_delegation_wake_turn_origin AS wake
+             WHERE wake.turn_id = checked_turn_id
+               AND wake.recipient_session_id = checked_session_id
+        )
+
+        UNION ALL
+
+        SELECT
+            source.turn_id,
+            source.source_configuration_turn_id,
+            source.defaults_version,
+            source.requested_model_kind,
+            source.requested_direct_model_selection_id,
+            source.requested_model_alias_id,
+            source.frozen_model_kind,
+            source.frozen_direct_model_selection_id,
+            source.frozen_model_alias_id,
+            source.frozen_alias_selected_direct_id,
+            chain.visited_turn_ids || source.turn_id
+          FROM configuration_chain AS chain
+          JOIN queued_input_origin AS source
+            ON source.turn_id = chain.source_configuration_turn_id
+           AND source.session_id = checked_session_id
+         WHERE NOT source.turn_id = ANY(chain.visited_turn_ids)
+    )
+    SELECT
+        chain.defaults_version,
+        chain.requested_model_kind,
+        chain.requested_direct_model_selection_id,
+        chain.requested_model_alias_id,
+        chain.frozen_model_kind,
+        chain.frozen_direct_model_selection_id,
+        chain.frozen_model_alias_id,
+        chain.frozen_alias_selected_direct_id
+      FROM configuration_chain AS chain
+     WHERE chain.defaults_version IS NOT NULL
+       AND chain.requested_model_kind IS NOT NULL
+       AND chain.frozen_model_kind IS NOT NULL
      ORDER BY cardinality(chain.visited_turn_ids) DESC
      LIMIT 1
 $$;
@@ -3422,7 +3927,13 @@ DECLARE
     predecessor_frontier uuid;
     predecessor_member_count numeric(20, 0);
     predecessor_defaults_version numeric(20, 0);
-    predecessor_direct_selection uuid;
+    predecessor_requested_kind text;
+    predecessor_requested_direct uuid;
+    predecessor_requested_alias uuid;
+    predecessor_frozen_kind text;
+    predecessor_frozen_direct uuid;
+    predecessor_frozen_alias uuid;
+    predecessor_frozen_alias_selected uuid;
     delivery_count bigint;
     incorrect_member_count bigint;
     skipped_earlier_count bigint;
@@ -3471,16 +3982,41 @@ BEGIN
       FROM context_frontier
      WHERE owning_session_id = stored.recipient_session_id
        AND context_frontier_id = predecessor_frontier;
-    SELECT effective.defaults_version, effective.direct_selection_id
-      INTO predecessor_defaults_version, predecessor_direct_selection
-      FROM turn_origin_effective_model_configuration(
+    SELECT
+        exact.defaults_version,
+        exact.requested_model_kind,
+        exact.requested_direct_model_selection_id,
+        exact.requested_model_alias_id,
+        exact.frozen_model_kind,
+        exact.frozen_direct_model_selection_id,
+        exact.frozen_model_alias_id,
+        exact.frozen_alias_selected_direct_id
+      INTO
+        predecessor_defaults_version,
+        predecessor_requested_kind,
+        predecessor_requested_direct,
+        predecessor_requested_alias,
+        predecessor_frozen_kind,
+        predecessor_frozen_direct,
+        predecessor_frozen_alias,
+        predecessor_frozen_alias_selected
+      FROM turn_origin_exact_model_configuration(
             predecessor_turn,
             stored.recipient_session_id
-      ) AS effective;
+      ) AS exact;
     IF predecessor_member_count IS NULL
        OR stored.defaults_version IS DISTINCT FROM predecessor_defaults_version
+       OR stored.requested_model_kind IS DISTINCT FROM predecessor_requested_kind
+       OR stored.requested_direct_model_selection_id IS DISTINCT FROM
+            predecessor_requested_direct
+       OR stored.requested_model_alias_id IS DISTINCT FROM
+            predecessor_requested_alias
+       OR stored.frozen_model_kind IS DISTINCT FROM predecessor_frozen_kind
        OR stored.frozen_direct_model_selection_id IS DISTINCT FROM
-            predecessor_direct_selection THEN
+            predecessor_frozen_direct
+       OR stored.frozen_model_alias_id IS DISTINCT FROM predecessor_frozen_alias
+       OR stored.frozen_alias_selected_direct_id IS DISTINCT FROM
+            predecessor_frozen_alias_selected THEN
         RAISE EXCEPTION 'delegation wake lacks its exact terminal predecessor configuration'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_wake_turn_origin';

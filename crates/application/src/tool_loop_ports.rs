@@ -221,6 +221,14 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
     ) -> impl Future<Output = Result<Option<ToolBatch>, Self::Error>> + Send;
 
+    /// Reopens an exact foreground child wait only after its result is durable.
+    fn resume_child_wait(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        continuation: signalbox_domain::TurnAttemptId,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
     /// Commits the next proposal-order Prepared attempt.
     fn prepare_next_attempt(
         &mut self,

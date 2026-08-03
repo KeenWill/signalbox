@@ -44,6 +44,15 @@ pub enum ToolBatchPhaseReconstitutionInput {
         /// The terminal ambiguous physical attempt.
         attempt: ToolAttemptId,
     },
+    /// One foreground delegation wait remains parked on its child result.
+    AwaitingChild {
+        /// The await request whose result is pending.
+        request: ToolRequestId,
+        /// The spawn request naming the child relationship.
+        spawning_request: ToolRequestId,
+        /// The exact child whose result is pending.
+        child: SessionId,
+    },
 }
 
 /// Complete stored facts for one producing call's logical tool batch.
@@ -138,6 +147,8 @@ pub enum ToolBatchReconstitutionFailure {
     ExecutionPhaseMismatch,
     /// The stored recovery phase does not name the exact ambiguous attempt.
     RecoveryPhaseMismatch,
+    /// The stored child-wait phase does not match its exact ended await attempt.
+    ChildWaitPhaseMismatch,
 }
 
 /// Failed batch reconstitution retaining every stored fact.
@@ -181,6 +192,15 @@ pub enum ToolBatchPhase {
     AwaitingRecovery {
         /// Terminal ambiguous tool attempt.
         attempt: ToolAttemptId,
+    },
+    /// One exact foreground delegation result remains pending.
+    AwaitingChild {
+        /// Await request receiving the result.
+        request: ToolRequestId,
+        /// Spawn request naming the child relationship.
+        spawning_request: ToolRequestId,
+        /// Exact child whose result is pending.
+        child: SessionId,
     },
 }
 
@@ -280,7 +300,9 @@ impl ToolBatch {
                 turn: self.turn,
                 request,
             }),
-            ToolBatchPhase::Executing { .. } | ToolBatchPhase::AwaitingRecovery { .. } => None,
+            ToolBatchPhase::Executing { .. }
+            | ToolBatchPhase::AwaitingRecovery { .. }
+            | ToolBatchPhase::AwaitingChild { .. } => None,
         }
     }
 
@@ -309,7 +331,9 @@ impl ToolBatch {
                         | ReconstitutedToolAttempt::Ended(_) => None,
                     })
             }
-            ToolBatchPhase::AwaitingApproval { .. } | ToolBatchPhase::Executing { .. } => None,
+            ToolBatchPhase::AwaitingApproval { .. }
+            | ToolBatchPhase::Executing { .. }
+            | ToolBatchPhase::AwaitingChild { .. } => None,
         }
     }
 
@@ -904,6 +928,29 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: crate::ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        self.prepare_result_projection_with_delegation(entry_ids, continuation_frontier, None)
+    }
+
+    /// Builds proposal-ordered results including one delivered foreground child result.
+    pub fn prepare_delegation_result_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        continuation_frontier: crate::ContextFrontierId,
+        outcome: crate::DelegationOutcome,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        self.prepare_result_projection_with_delegation(
+            entry_ids,
+            continuation_frontier,
+            Some(outcome),
+        )
+    }
+
+    fn prepare_result_projection_with_delegation(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        continuation_frontier: crate::ContextFrontierId,
+        delegation_outcome: Option<crate::DelegationOutcome>,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
         if !matches!(self.phase, ToolBatchPhase::Executing { .. })
             || entry_ids.len() != self.requests.len()
         {
@@ -921,6 +968,23 @@ impl ToolBatch {
                 failure: ToolResultProjectionFailure::EntryIdentityReuse,
             });
         }
+        let child_wait_count = self
+            .attempts
+            .values()
+            .filter(|attempt| {
+                matches!(
+                    attempt,
+                    ReconstitutedToolAttempt::Ended(ended)
+                        if matches!(ended.end(), ToolAttemptEnd::AwaitingChild { .. })
+                )
+            })
+            .count();
+        if delegation_outcome.is_some() != (child_wait_count == 1) {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
+        }
+        let mut delegation_outcome = delegation_outcome.map(Box::new);
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
@@ -943,6 +1007,29 @@ impl ToolBatch {
                         ToolAttemptEnd::Completed { .. } => {}
                         ToolAttemptEnd::KnownFailed { error }
                             if error.kind() != ToolExecutionErrorKind::CrashLost => {}
+                        ToolAttemptEnd::AwaitingChild {
+                            spawning_request,
+                            child,
+                        } => {
+                            let Some(outcome) = delegation_outcome.take() else {
+                                return Err(ToolResultProjectionError {
+                                    failure: ToolResultProjectionFailure::BatchNotResolved,
+                                });
+                            };
+                            entries.push(SemanticTranscriptEntry::from_validated_parts(
+                                identity,
+                                self.session,
+                                SemanticTranscriptEntryPayload::DelegationResult {
+                                    awaiting_request: request.id(),
+                                    spawning_request: *spawning_request,
+                                    child: *child,
+                                    mode: crate::DelegationWaitMode::Foreground,
+                                    delivery_sequence: None,
+                                    outcome,
+                                },
+                            ));
+                            continue;
+                        }
                         ToolAttemptEnd::KnownFailed { .. } | ToolAttemptEnd::Ambiguous => {
                             return Err(ToolResultProjectionError {
                                 failure: ToolResultProjectionFailure::TurnLevelFailure,
@@ -964,6 +1051,11 @@ impl ToolBatch {
                 self.session,
                 payload,
             ));
+        }
+        if delegation_outcome.is_some() {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
         }
         let snapshot = self
             .yielded_snapshot
@@ -1033,6 +1125,29 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: crate::ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        self.prepare_cancellation_projection_with_delegation(entry_ids, result_frontier, None)
+    }
+
+    /// Builds interrupt closure while retaining one delivered foreground result.
+    pub fn prepare_delegation_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: crate::ContextFrontierId,
+        outcome: crate::DelegationOutcome,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        self.prepare_cancellation_projection_with_delegation(
+            entry_ids,
+            result_frontier,
+            Some(outcome),
+        )
+    }
+
+    fn prepare_cancellation_projection_with_delegation(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: crate::ContextFrontierId,
+        delegation_outcome: Option<crate::DelegationOutcome>,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
         if !matches!(self.phase, ToolBatchPhase::Executing { .. })
             || entry_ids.len() != self.requests.len()
             || self
@@ -1054,6 +1169,23 @@ impl ToolBatch {
                 failure: ToolResultProjectionFailure::EntryIdentityReuse,
             });
         }
+        let child_wait_count = self
+            .attempts
+            .values()
+            .filter(|attempt| {
+                matches!(
+                    attempt,
+                    ReconstitutedToolAttempt::Ended(ended)
+                        if matches!(ended.end(), ToolAttemptEnd::AwaitingChild { .. })
+                )
+            })
+            .count();
+        if delegation_outcome.is_some() != (child_wait_count == 1) {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
+        }
+        let mut delegation_outcome = delegation_outcome.map(Box::new);
         let mut entries = Vec::with_capacity(self.requests.len());
         for (request, identity) in self.requests.iter().zip(entry_ids) {
             let payload = match self.approvals.get(&request.id()) {
@@ -1067,16 +1199,39 @@ impl ToolBatch {
                 Some(resolution) if resolution.is_approved() => {
                     match self.attempts.get(&request.id()) {
                         Some(ReconstitutedToolAttempt::Ended(attempt))
-                            if attempt.end() != &ToolAttemptEnd::Ambiguous =>
+                            if matches!(
+                                attempt.end(),
+                                ToolAttemptEnd::Completed { .. }
+                                    | ToolAttemptEnd::KnownFailed { .. }
+                            ) =>
                         {
                             SemanticTranscriptEntryPayload::ToolExecutionResult {
                                 attempt: attempt.attempt(),
                             }
                         }
-                        Some(ReconstitutedToolAttempt::Ended(_)) => {
-                            return Err(ToolResultProjectionError {
-                                failure: ToolResultProjectionFailure::TurnLevelFailure,
-                            });
+                        Some(ReconstitutedToolAttempt::Ended(attempt)) => {
+                            let ToolAttemptEnd::AwaitingChild {
+                                spawning_request,
+                                child,
+                            } = attempt.end()
+                            else {
+                                return Err(ToolResultProjectionError {
+                                    failure: ToolResultProjectionFailure::TurnLevelFailure,
+                                });
+                            };
+                            let Some(outcome) = delegation_outcome.take() else {
+                                return Err(ToolResultProjectionError {
+                                    failure: ToolResultProjectionFailure::BatchNotResolved,
+                                });
+                            };
+                            SemanticTranscriptEntryPayload::DelegationResult {
+                                awaiting_request: request.id(),
+                                spawning_request: *spawning_request,
+                                child: *child,
+                                mode: crate::DelegationWaitMode::Foreground,
+                                delivery_sequence: None,
+                                outcome,
+                            }
                         }
                         Some(ReconstitutedToolAttempt::Current(_)) => {
                             return Err(ToolResultProjectionError {
@@ -1097,6 +1252,11 @@ impl ToolBatch {
                 self.session,
                 payload,
             ));
+        }
+        if delegation_outcome.is_some() {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
         }
         let snapshot = self
             .yielded_snapshot
@@ -1689,8 +1849,21 @@ fn reconstitute_batch(
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
         ));
     }
+    let has_child_wait_attempt = input.attempts.iter().any(|attempt| {
+        matches!(
+            attempt,
+            ReconstitutedToolAttempt::Ended(ended)
+                if matches!(ended.end(), ToolAttemptEnd::AwaitingChild { .. })
+        )
+    });
     let expected_issuing_attempt = match input.phase {
-        ToolBatchPhaseReconstitutionInput::Executing { turn_attempt } => Some(turn_attempt),
+        ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
+            if !has_child_wait_attempt =>
+        {
+            Some(turn_attempt)
+        }
+        ToolBatchPhaseReconstitutionInput::Executing { .. }
+        | ToolBatchPhaseReconstitutionInput::AwaitingChild { .. } => None,
         ToolBatchPhaseReconstitutionInput::AwaitingRecovery { attempt } => input
             .attempts
             .iter()
@@ -1788,6 +1961,13 @@ fn reconstitute_batch(
                         attempt,
                         ReconstitutedToolAttempt::Ended(ended)
                             if ended.end() == &ToolAttemptEnd::Ambiguous
+                                || (matches!(
+                                    ended.end(),
+                                    ToolAttemptEnd::AwaitingChild { .. }
+                                ) && matches!(
+                                    input.phase,
+                                    ToolBatchPhaseReconstitutionInput::AwaitingChild { .. }
+                                ))
                                 || matches!(
                                     ended.end(),
                                     ToolAttemptEnd::KnownFailed { error }
@@ -1824,52 +2004,103 @@ fn reconstitute_batch(
             ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => None,
         })
         .collect::<Vec<_>>();
-    let phase = match input.phase {
-        ToolBatchPhaseReconstitutionInput::AwaitingApproval { request }
-            if earliest_undecided == Some(request) && attempts.is_empty() =>
-        {
-            ToolBatchPhase::AwaitingApproval { request }
-        }
-        ToolBatchPhaseReconstitutionInput::AwaitingApproval { .. } => {
-            return Err(fail(
-                input,
-                ToolBatchReconstitutionFailure::ApprovalPhaseMismatch,
-            ));
-        }
-        ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
-            if earliest_undecided.is_none() && ambiguous_attempts.is_empty() =>
-        {
-            if attempts.values().any(|attempt| {
-                let (_, _, _, _, issuing_attempt, _) = attempt_facts(attempt);
-                issuing_attempt != turn_attempt
-            }) {
+    let child_waits = attempts
+        .values()
+        .filter_map(|attempt| match attempt {
+            ReconstitutedToolAttempt::Ended(ended) => match ended.end() {
+                ToolAttemptEnd::AwaitingChild {
+                    spawning_request,
+                    child,
+                } => Some((ended.request(), *spawning_request, *child)),
+                ToolAttemptEnd::Completed { .. }
+                | ToolAttemptEnd::KnownFailed { .. }
+                | ToolAttemptEnd::Ambiguous => None,
+            },
+            ReconstitutedToolAttempt::Current(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let phase =
+        match input.phase {
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval { request }
+                if earliest_undecided == Some(request) && attempts.is_empty() =>
+            {
+                ToolBatchPhase::AwaitingApproval { request }
+            }
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval { .. } => {
+                return Err(fail(
+                    input,
+                    ToolBatchReconstitutionFailure::ApprovalPhaseMismatch,
+                ));
+            }
+            ToolBatchPhaseReconstitutionInput::Executing { turn_attempt }
+                if earliest_undecided.is_none()
+                    && ambiguous_attempts.is_empty()
+                    && child_waits.len() <= 1 =>
+            {
+                let child_wait_position = child_waits.first().and_then(|(request, _, _)| {
+                    requests
+                        .iter()
+                        .position(|candidate| candidate.id() == *request)
+                });
+                if attempts.iter().any(|(request, attempt)| {
+                    let (_, _, _, _, issuing_attempt, live) = attempt_facts(attempt);
+                    let request_position = requests
+                        .iter()
+                        .position(|candidate| candidate.id() == *request);
+                    live && issuing_attempt != turn_attempt
+                        || child_wait_position.is_none() && issuing_attempt != turn_attempt
+                        || child_wait_position.zip(request_position).is_some_and(
+                            |(wait, request)| request > wait && issuing_attempt != turn_attempt,
+                        )
+                }) {
+                    return Err(fail(
+                        input,
+                        ToolBatchReconstitutionFailure::ExecutionPhaseMismatch,
+                    ));
+                }
+                ToolBatchPhase::Executing { turn_attempt }
+            }
+            ToolBatchPhaseReconstitutionInput::Executing { .. } => {
                 return Err(fail(
                     input,
                     ToolBatchReconstitutionFailure::ExecutionPhaseMismatch,
                 ));
             }
-            ToolBatchPhase::Executing { turn_attempt }
-        }
-        ToolBatchPhaseReconstitutionInput::Executing { .. } => {
-            return Err(fail(
-                input,
-                ToolBatchReconstitutionFailure::ExecutionPhaseMismatch,
-            ));
-        }
-        ToolBatchPhaseReconstitutionInput::AwaitingRecovery { attempt }
-            if earliest_undecided.is_none()
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery { attempt }
+                if earliest_undecided.is_none()
+                    && live_attempt_count == 0
+                    && ambiguous_attempts == [attempt] =>
+            {
+                ToolBatchPhase::AwaitingRecovery { attempt }
+            }
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery { .. } => {
+                return Err(fail(
+                    input,
+                    ToolBatchReconstitutionFailure::RecoveryPhaseMismatch,
+                ));
+            }
+            ToolBatchPhaseReconstitutionInput::AwaitingChild {
+                request,
+                spawning_request,
+                child,
+            } if earliest_undecided.is_none()
                 && live_attempt_count == 0
-                && ambiguous_attempts == [attempt] =>
-        {
-            ToolBatchPhase::AwaitingRecovery { attempt }
-        }
-        ToolBatchPhaseReconstitutionInput::AwaitingRecovery { .. } => {
-            return Err(fail(
-                input,
-                ToolBatchReconstitutionFailure::RecoveryPhaseMismatch,
-            ));
-        }
-    };
+                && ambiguous_attempts.is_empty()
+                && child_waits == [(request, spawning_request, child)] =>
+            {
+                ToolBatchPhase::AwaitingChild {
+                    request,
+                    spawning_request,
+                    child,
+                }
+            }
+            ToolBatchPhaseReconstitutionInput::AwaitingChild { .. } => {
+                return Err(fail(
+                    input,
+                    ToolBatchReconstitutionFailure::ChildWaitPhaseMismatch,
+                ));
+            }
+        };
     let runner_issuance = attempt_ids
         .iter()
         .chain(&retired_attempts)
@@ -1934,10 +2165,12 @@ fn attempt_facts(
 mod tests {
     use super::*;
     use crate::{
-        DurableCommandId, NormalizedToolArguments, ToolApprovalResolutionReconstitutionInput,
-        ToolArgumentsKind, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-        ToolDecisionSource, ToolDispatchGeneration, ToolName, ToolRequestOrdinal,
-        ToolRequestReconstitutionInput, ToolResultContent, ToolResultText,
+        DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+        DelegationProvenanceReconstitutionInput, DurableCommandId, NormalizedToolArguments,
+        ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDecisionSource,
+        ToolDispatchGeneration, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ToolResultContent, ToolResultText,
         test_support::{
             context_frontier_id, model_call_id, semantic_transcript_entry_id, session_id,
             tool_attempt_id, tool_request_id, turn_attempt_id, turn_id,
@@ -2665,6 +2898,100 @@ mod tests {
             projection.entries()[1].payload(),
             &SemanticTranscriptEntryPayload::ToolDenied {
                 request: tool_request_id(11),
+            }
+        );
+    }
+
+    /// S17 / INV-005 / INV-032: a delivered foreground child wait reopens the
+    /// batch under a fresh turn attempt and projects the typed result once.
+    #[test]
+    fn s17_inv005_inv032_foreground_child_wait_resumes_and_projects_typed_result() {
+        let awaited = request(10, 0);
+        let spawning_request = tool_request_id(11);
+        let child = session_id(9);
+        let waiting_attempt = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(12),
+            awaited.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(13),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild {
+                spawning_request,
+                child,
+            }),
+        )
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
+        let approvals = vec![approval(awaited.id(), ToolApprovalDecision::Approve)];
+        let waiting = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![awaited.clone()],
+            approvals.clone(),
+            vec![waiting_attempt.clone()],
+            ToolBatchPhaseReconstitutionInput::AwaitingChild {
+                request: awaited.id(),
+                spawning_request,
+                child,
+            },
+        )
+        .reconstitute()
+        .expect("the exact foreground child wait reconstitutes");
+        let resumed = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![awaited.clone()],
+            approvals,
+            vec![waiting_attempt],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(14),
+            },
+        )
+        .reconstitute()
+        .expect("a delivered wait resumes under a fresh turn attempt");
+        let content = DelegationContent::try_new(String::from("checked child result"))
+            .expect("the child result is bounded");
+        let outcome = DelegationOutcome::reconstitute(
+            DelegationOutcomeKind::ResultReturned,
+            Some(content.clone()),
+            DelegationOutcomeReason::ChildCompleted,
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: turn_id(15),
+            },
+        )
+        .expect("the child completion outcome is exact");
+        let projection = resumed
+            .prepare_delegation_result_projection(
+                vec![semantic_transcript_entry_id(16)],
+                context_frontier_id(17),
+                outcome.clone(),
+            )
+            .expect("the delivered child result closes the logical request");
+
+        assert_eq!(
+            waiting.phase(),
+            ToolBatchPhase::AwaitingChild {
+                request: awaited.id(),
+                spawning_request,
+                child,
+            }
+        );
+        assert_eq!(
+            projection.entries()[0].payload(),
+            &SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request: awaited.id(),
+                spawning_request,
+                child,
+                mode: crate::DelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: Box::new(outcome),
             }
         );
     }

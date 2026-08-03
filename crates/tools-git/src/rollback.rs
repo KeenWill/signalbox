@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
-    os::fd::OwnedFd,
+    os::fd::{AsFd, OwnedFd},
     path::{Component, Path, PathBuf},
 };
 
@@ -389,7 +389,9 @@ pub(super) fn capture_rollback_identity(
             Mode::empty(),
         ) {
             Ok(directory) => directory,
-            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
+                return Ok(None);
+            }
             Err(_) => return Err(LocalGitFailure::Operation),
         };
     }
@@ -414,8 +416,8 @@ fn rollback_identities_equal(
     }
 }
 
-pub(super) fn open_worktree_parent(
-    root: &fs::File,
+pub(super) fn open_worktree_parent<Root: AsFd>(
+    root: &Root,
     path: &Path,
 ) -> Result<(OwnedFd, OsString), LocalGitFailure> {
     let leaf = path

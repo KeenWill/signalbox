@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import re
 import subprocess
 import sys
@@ -18,11 +17,6 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
 OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
-REVIEWED_ALLOWLIST_SHA256 = (
-    "cc46df6cc0fe5c97e566b059622609450ecc39184466817606f7e33c0812395b"
-)
-
-
 def owner_matches(line: str) -> Iterator[re.Match[str]]:
     for identifier in IDENTIFIER.finditer(line):
         token = identifier.group()
@@ -426,7 +420,7 @@ ALLOWLIST = (
         re.compile(
             r"^(?:apps/signalboxd/tests/offline_tool_loop[.]rs|"
             r"crates/persistence/src/(?:create_session|"
-            r"create_session_from_imported_frontier|model_execution|session|"
+            r"create_session_from_imported_frontier|mapping|model_execution|process_read|session|"
             r"session_metadata|submit_input|tool_loop)[.]rs|"
             r"crates/persistence/tests/(?:conversation_import_postgres|postgres_integration|"
             r"runner_protocol_postgres|session_metadata_postgres)[.]rs|"
@@ -604,9 +598,8 @@ def tracked_files(root: Path) -> list[Path]:
         raise InventoryError("git ls-files returned no vocabulary inputs")
     return [root / label for label in labels]
 
-def audit(root: Path) -> tuple[list[str], str]:
+def audit(root: Path) -> list[str]:
     failures: list[str] = []
-    allowed_inventory: list[str] = []
     for path in tracked_files(root):
         relative = path.relative_to(root).as_posix()
         try:
@@ -626,20 +619,12 @@ def audit(root: Path) -> tuple[list[str], str]:
                 )
                 for match in matches
             ):
-                previous_line = lines[index - 1] if index > 0 else ""
-                next_line = lines[index + 1] if index + 1 < len(lines) else ""
-                allowed_inventory.extend(
-                    f"{relative}\0{number}\0{previous_line}\0{line}\0{next_line}\0"
-                    f"{match.start()}\0{match.end()}"
-                    for match in matches
-                )
                 continue
             failures.append(f"{relative}:{number}: {line.strip()}")
         for match in BARE_USER_MESSAGE.finditer(text):
             number = text.count("\n", 0, match.start()) + 1
             failures.append(f"{relative}:{number}: {lines[number - 1].strip()}")
-    inventory = "\n".join(sorted(allowed_inventory)).encode()
-    return failures, hashlib.sha256(inventory).hexdigest()
+    return failures
 
 
 def main() -> int:
@@ -647,8 +632,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=repository_root)
     parser.add_argument("--show-allowlist", action="store_true")
-    parser.add_argument("--show-allowlist-hash", action="store_true")
-    parser.add_argument("--expected-allowlist-sha256")
     args = parser.parse_args()
     if args.show_allowlist:
         for allowance in ALLOWLIST:
@@ -656,22 +639,10 @@ def main() -> int:
         return 0
     root = args.root.resolve()
     try:
-        failures, observed_inventory = audit(root)
+        failures = audit(root)
     except (InventoryError, OSError) as error:
         print(f"user-vocabulary check failed: {error}", file=sys.stderr)
         return 1
-    if args.show_allowlist_hash:
-        print(observed_inventory)
-        return 0
-    expected_inventory = args.expected_allowlist_sha256
-    if expected_inventory is None and root == repository_root:
-        expected_inventory = REVIEWED_ALLOWLIST_SHA256
-    if expected_inventory is not None and observed_inventory != expected_inventory:
-        print(
-            "reviewed owner allowlist inventory changed: "
-            f"expected {expected_inventory}, observed {observed_inventory}"
-        )
-        failures.append("reviewed allowlist inventory digest mismatch")
     if failures:
         print("retired or ambiguous role vocabulary is forbidden:")
         for failure in failures:

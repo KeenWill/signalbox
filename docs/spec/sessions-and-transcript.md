@@ -27,9 +27,11 @@ a law is cited as `INV-NNN`, the generated
 [invariant test index](../invariants.md) resolves it; where mechanics owned by
 another contract are summarized, the owning sibling page is linked inline.
 
-The path-scoped session-placement paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with its
-read-introspection and process-surface child pull request.
+The path-scoped session-placement domain and persistence paragraphs were
+verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
+current-head authentication is additionally verified against the parent slice
+(`agent/scoped-visibility`). The read-scope enforcement and process surface are
+verified against this PR (`agent/scoped-visibility-wiring`).
 
 ## Session identity and creation provenance
 
@@ -154,14 +156,22 @@ Path placement is opt-in. `Pathless` is the compatibility value and preserves
 today's cross-session read behavior exactly. A placed session carries one
 validated dotted path whose nonempty ASCII label segments admit letters, digits,
 hyphen, and underscore; each segment is at most 64 bytes and a path is at most
-64 segments. The initial value is pinned by creation. Only the explicit
+64 segments. Process-protocol requests and responses admit that same complete
+structural range, preserving exact replay of placement commands already recorded
+under the migration. The initial value is pinned by creation. Only the explicit
 `UpdateSessionPlacement` durable command changes it, appending a versioned
 `Updated` event that names its predecessor and command identity; creation itself
 appends version-one `Created`, so no update rewrites history. Every
 current-placement load authenticates the contiguous history from version one
 through the selected head against each event's typed receipt and durable-command
-registry claim; a missing, cross-wired, or invalid command fact fails closed as
-typed storage corruption.
+registry claim and rejects a head when immutable history contains a later event.
+Equal native and imported-frontier creation replay likewise rejects a missing or
+lagging current head while reconstituting its immutable creation receipt. A
+placement-update replay authenticates the current head event and rejects either
+a head that selects no authenticated event or a head that lags later history
+before reconstituting applied or stateful-rejection evidence. A missing or
+lagging head, cross-wired history, or invalid command fact fails closed as typed
+storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one
@@ -169,10 +179,16 @@ prefix comparison against the target placement: siblings and descendants are
 allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
 refusal is typed evidence containing that requesting directory and the closed
 reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
-The child pull request enforces this decision where the conversation
-introspection adapter opens a selected native transcript. Conversation-list
-inventory is discovery rather than a selected transcript read, and imported
-conversations are not sessions; neither surface is filtered by this rule.
+The conversation tool renders ordinary refusals with the full reason name. If a
+maximum-width directory would exceed the unchanged durable error-detail bound,
+it uses the closed compact spelling `o<requesting-directory>`; `o` means that
+same outside-requesting-directory-subtree reason and the directory remains
+byte-exact. The conversation-introspection adapter enforces this decision when
+it opens a selected native transcript. It loads requester and target placement
+and applies the prefix decision in the same repeatable-read transaction that
+opens the transcript cursor. Conversation-list inventory is discovery rather
+than a selected transcript read, and imported conversations are not sessions;
+neither surface is filtered by this rule.
 
 A one-segment placement sits in the root directory and therefore has global
 conversation read, including pathless sessions. It is legal only through the
@@ -939,6 +955,12 @@ this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
+The delegated-task turn nevertheless retains its parent's exact requested and
+frozen model configuration as turn-origin provenance. A direct override remains
+an override, and an alias retains both its frozen definition and selected direct
+model; reconstitution does not replace either form with the copied child default
+merely because both resolve to the same effective model.
+
 The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
 referencing the exact spawning request and its parent session and turn. It is
 model/tool-authored delegation work, not accepted input and not `Actor::User`;
@@ -1062,11 +1084,10 @@ placement and this stack implements no placement logic.
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant text, tool-use/result references, completed-turn, steering, and
-  cancelled-turn semantic entries are implemented. The session-delegation stack
-  adds delegation-message and delegation-result entries. Refusal,
-  reconciliation, mismatch, accepted-risk, and approval-event variants remain
-  open.
+- Assistant text, tool-use/result references, completed-turn, steering,
+  cancelled-turn, delegated-task, delegation-message, and delegation-result
+  semantic entries are implemented. Refusal, reconciliation, mismatch,
+  accepted-risk, and approval-event variants remain open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

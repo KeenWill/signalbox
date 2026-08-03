@@ -4,14 +4,144 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
-    GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
-    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    AcceptedInputId, DangerousToolAutoApproval, DelegateApprovalRecommendation, DurableCommandId,
+    GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
+    GoalUserAction, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
     SessionPlacementEventKind, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
     ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
+
+use crate::approval_judge::FailedApprovalJudgeDisposition;
+
+/// Closed approval-judge lifecycle states stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApprovalJudgeStateStorageKind {
+    Prepared,
+    InFlight,
+    Terminal,
+}
+
+pub(crate) const fn approval_judge_state_to_str(
+    value: ApprovalJudgeStateStorageKind,
+) -> &'static str {
+    match value {
+        ApprovalJudgeStateStorageKind::Prepared => "prepared",
+        ApprovalJudgeStateStorageKind::InFlight => "in_flight",
+        ApprovalJudgeStateStorageKind::Terminal => "terminal",
+    }
+}
+
+pub(crate) fn approval_judge_state_from_str(value: &str) -> Option<ApprovalJudgeStateStorageKind> {
+    match value {
+        "prepared" => Some(ApprovalJudgeStateStorageKind::Prepared),
+        "in_flight" => Some(ApprovalJudgeStateStorageKind::InFlight),
+        "terminal" => Some(ApprovalJudgeStateStorageKind::Terminal),
+        _ => None,
+    }
+}
+
+/// Closed approval-judge terminal dispositions stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApprovalJudgeTerminalDispositionStorageKind {
+    Completed,
+    Failed(FailedApprovalJudgeDisposition),
+}
+
+pub(crate) const fn approval_judge_terminal_disposition_to_str(
+    value: ApprovalJudgeTerminalDispositionStorageKind,
+) -> &'static str {
+    match value {
+        ApprovalJudgeTerminalDispositionStorageKind::Completed => "completed",
+        ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::KnownFailed,
+        ) => "known_failed",
+        ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Refused,
+        ) => "refused",
+        ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Cancelled,
+        ) => "cancelled",
+        ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Ambiguous,
+        ) => "ambiguous",
+    }
+}
+
+pub(crate) fn approval_judge_terminal_disposition_from_str(
+    value: &str,
+) -> Option<ApprovalJudgeTerminalDispositionStorageKind> {
+    match value {
+        "completed" => Some(ApprovalJudgeTerminalDispositionStorageKind::Completed),
+        "known_failed" => Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::KnownFailed,
+        )),
+        "refused" => Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Refused,
+        )),
+        "cancelled" => Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Cancelled,
+        )),
+        "ambiguous" => Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+            FailedApprovalJudgeDisposition::Ambiguous,
+        )),
+        _ => None,
+    }
+}
+
+pub(crate) const fn approval_judge_recommendation_to_str(
+    value: DelegateApprovalRecommendation,
+) -> &'static str {
+    match value {
+        DelegateApprovalRecommendation::Approve => "approve",
+        DelegateApprovalRecommendation::Deny => "deny",
+        DelegateApprovalRecommendation::EscalateToHuman => "escalate_to_human",
+    }
+}
+
+pub(crate) fn approval_judge_recommendation_from_str(
+    value: &str,
+) -> Option<DelegateApprovalRecommendation> {
+    match value {
+        "approve" => Some(DelegateApprovalRecommendation::Approve),
+        "deny" => Some(DelegateApprovalRecommendation::Deny),
+        "escalate_to_human" => Some(DelegateApprovalRecommendation::EscalateToHuman),
+        _ => None,
+    }
+}
+
+/// Closed tool-approval decision sources stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolApprovalDecisionSourceStorageKind {
+    UserCommand,
+    PolicyAuto,
+    SessionBlanket,
+    Delegate,
+}
+
+pub(crate) const fn tool_approval_decision_source_to_str(
+    value: ToolApprovalDecisionSourceStorageKind,
+) -> &'static str {
+    match value {
+        ToolApprovalDecisionSourceStorageKind::UserCommand => "owner_command",
+        ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
+        ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
+        ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+    }
+}
+
+pub(crate) fn tool_approval_decision_source_from_str(
+    value: &str,
+) -> Option<ToolApprovalDecisionSourceStorageKind> {
+    match value {
+        "owner_command" => Some(ToolApprovalDecisionSourceStorageKind::UserCommand),
+        "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
+        "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
+        "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        _ => None,
+    }
+}
 
 /// Closed durable-command kinds stored by the user-global registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -543,16 +673,20 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, ToolApprovalPosture,
-        ToolPermissionDefault, TurnId,
+        AcceptedInputId, DelegateApprovalRecommendation, DurableCommandId,
+        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+        SessionPlacementEventKind, ToolApprovalPosture, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
     use super::{
+        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
         PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
         SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
@@ -563,8 +697,111 @@ mod tests {
         tool_approval_posture_to_str, tool_permission_default_from_str,
         tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
     };
+    use crate::approval_judge::FailedApprovalJudgeDisposition;
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+
+    #[test]
+    fn approval_judge_discriminator_mappings_are_closed() {
+        assert_eq!(
+            approval_judge_state_from_str(approval_judge_state_to_str(
+                ApprovalJudgeStateStorageKind::Prepared,
+            )),
+            Some(ApprovalJudgeStateStorageKind::Prepared)
+        );
+        assert_eq!(
+            approval_judge_state_from_str(approval_judge_state_to_str(
+                ApprovalJudgeStateStorageKind::InFlight,
+            )),
+            Some(ApprovalJudgeStateStorageKind::InFlight)
+        );
+        assert_eq!(
+            approval_judge_state_from_str(approval_judge_state_to_str(
+                ApprovalJudgeStateStorageKind::Terminal,
+            )),
+            Some(ApprovalJudgeStateStorageKind::Terminal)
+        );
+        assert_eq!(approval_judge_state_from_str("unknown"), None);
+        assert_eq!(
+            approval_judge_terminal_disposition_from_str(
+                approval_judge_terminal_disposition_to_str(
+                    ApprovalJudgeTerminalDispositionStorageKind::Completed,
+                ),
+            ),
+            Some(ApprovalJudgeTerminalDispositionStorageKind::Completed)
+        );
+        assert_eq!(
+            approval_judge_terminal_disposition_from_str(
+                approval_judge_terminal_disposition_to_str(
+                    ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                        FailedApprovalJudgeDisposition::KnownFailed,
+                    ),
+                ),
+            ),
+            Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                FailedApprovalJudgeDisposition::KnownFailed,
+            ))
+        );
+        assert_eq!(
+            approval_judge_terminal_disposition_from_str(
+                approval_judge_terminal_disposition_to_str(
+                    ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                        FailedApprovalJudgeDisposition::Refused,
+                    ),
+                ),
+            ),
+            Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                FailedApprovalJudgeDisposition::Refused,
+            ))
+        );
+        assert_eq!(
+            approval_judge_terminal_disposition_from_str(
+                approval_judge_terminal_disposition_to_str(
+                    ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                        FailedApprovalJudgeDisposition::Cancelled,
+                    ),
+                ),
+            ),
+            Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                FailedApprovalJudgeDisposition::Cancelled,
+            ))
+        );
+        assert_eq!(
+            approval_judge_terminal_disposition_from_str(
+                approval_judge_terminal_disposition_to_str(
+                    ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                        FailedApprovalJudgeDisposition::Ambiguous,
+                    ),
+                ),
+            ),
+            Some(ApprovalJudgeTerminalDispositionStorageKind::Failed(
+                FailedApprovalJudgeDisposition::Ambiguous,
+            ))
+        );
+        assert_eq!(
+            approval_judge_terminal_disposition_from_str("unknown"),
+            None
+        );
+        assert_eq!(
+            approval_judge_recommendation_from_str(approval_judge_recommendation_to_str(
+                DelegateApprovalRecommendation::Approve,
+            )),
+            Some(DelegateApprovalRecommendation::Approve)
+        );
+        assert_eq!(
+            approval_judge_recommendation_from_str(approval_judge_recommendation_to_str(
+                DelegateApprovalRecommendation::Deny,
+            )),
+            Some(DelegateApprovalRecommendation::Deny)
+        );
+        assert_eq!(
+            approval_judge_recommendation_from_str(approval_judge_recommendation_to_str(
+                DelegateApprovalRecommendation::EscalateToHuman,
+            )),
+            Some(DelegateApprovalRecommendation::EscalateToHuman)
+        );
+        assert_eq!(approval_judge_recommendation_from_str("unknown"), None);
+    }
 
     #[test]
     fn plan_event_kind_mapping_is_closed() {

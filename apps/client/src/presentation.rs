@@ -17,8 +17,9 @@ use signalbox_process_protocol::{
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
-    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
+    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolApprovalEventDecider,
+    ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -952,10 +953,25 @@ impl<'a> Output<'a> {
         session_id: CanonicalUuid,
         defaults_version: u64,
         selection: &str,
+        placement_version: u64,
+        placement: &str,
     ) -> io::Result<()> {
         writeln!(
             self.stdout,
-            "{session_id} defaults_version={defaults_version} {selection}"
+            "{session_id} defaults_version={defaults_version} {selection} \
+             placement_version={placement_version} {placement}"
+        )
+    }
+
+    pub(crate) fn session_placement_updated(
+        &mut self,
+        session_id: CanonicalUuid,
+        placement_version: u64,
+        placement: &str,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "session={session_id} placement_version={placement_version} {placement}"
         )
     }
 
@@ -982,7 +998,7 @@ impl<'a> Output<'a> {
             snapshot.counts.repair_fixed_count.value(),
             snapshot.counts.publication_published_count.value(),
         )?;
-        self.review_text_field("concern_set_version", &snapshot.concern_set_version)?;
+        self.text_field("concern_set_version", &snapshot.concern_set_version)?;
         writeln!(
             self.stdout,
             "template_import_digest={} template_judgment_digest={} template_repair_digest={} \
@@ -1002,7 +1018,7 @@ impl<'a> Output<'a> {
                     .map_or_else(|| String::from("-"), |id| id.to_string()),
                 concern.template_digest.as_str(),
             )?;
-            self.review_text_field("concern_key", &concern.key)?;
+            self.text_field("concern_key", &concern.key)?;
         }
         Ok(())
     }
@@ -1023,13 +1039,13 @@ impl<'a> Output<'a> {
                 .stack_parent_target_id
                 .map_or_else(|| String::from("-"), |id| id.to_string()),
         )?;
-        self.review_text_field("provider", &target.provider)?;
-        self.review_text_field("repository", &target.repository)?;
-        self.review_text_field("head_revision", &target.head_revision)?;
+        self.text_field("provider", &target.provider)?;
+        self.text_field("repository", &target.repository)?;
+        self.text_field("head_revision", &target.head_revision)?;
         match target.base_revision.as_deref() {
             Some(base_revision) => {
                 writeln!(self.stdout, "base_revision_present=true")?;
-                self.review_text_field("base_revision", base_revision)
+                self.text_field("base_revision", base_revision)
             }
             None => writeln!(self.stdout, "base_revision_present=false"),
         }
@@ -1100,20 +1116,20 @@ impl<'a> Output<'a> {
             finding.finding.is_real_confidence.value(),
             finding.finding.severity_label_confidence.value(),
         )?;
-        self.review_text_field("file_path", &finding.finding.file_path)?;
-        self.review_text_field("title", &finding.finding.title)?;
-        self.review_text_field("body", &finding.finding.body)?;
-        self.review_text_field("category", &finding.finding.category)?;
+        self.text_field("file_path", &finding.finding.file_path)?;
+        self.text_field("title", &finding.finding.title)?;
+        self.text_field("body", &finding.finding.body)?;
+        self.text_field("category", &finding.finding.category)?;
         match finding.finding.recommended_fix.as_deref() {
             Some(recommended_fix) => {
                 writeln!(self.stdout, "recommended_fix_present=true")?;
-                self.review_text_field("recommended_fix", recommended_fix)
+                self.text_field("recommended_fix", recommended_fix)
             }
             None => writeln!(self.stdout, "recommended_fix_present=false"),
         }
     }
 
-    fn review_text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
+    fn text_field(&mut self, name: &str, value: &str) -> io::Result<()> {
         write!(self.stdout, "{name}=")?;
         self.stdout.write_all(
             self.render_field(value, TextField::TrailingOnLine)
@@ -1477,6 +1493,43 @@ impl<'a> Output<'a> {
                      tool_attempt={tool_attempt_id}"
                 ),
             },
+            SessionEvent::ToolApprovalDecided {
+                turn_id,
+                tool_request_id,
+                decision,
+                decider,
+                rationale,
+            } => {
+                let (decision, denial_reason) = match decision {
+                    ToolApprovalEventDecision::Approve {} => ("approve", None),
+                    ToolApprovalEventDecision::Deny { reason } => ("deny", reason.as_deref()),
+                };
+                match decider {
+                    ToolApprovalEventDecider::User { command_id } => writeln!(
+                        self.stdout,
+                        "event={cursor} session={session_id} tool_approval_decided \
+                         turn={turn_id} request={tool_request_id} decision={decision} \
+                         decider=user command={command_id}"
+                    )?,
+                    ToolApprovalEventDecider::Delegate {
+                        model_selection_id,
+                        model_call_id,
+                    } => writeln!(
+                        self.stdout,
+                        "event={cursor} session={session_id} tool_approval_decided \
+                         turn={turn_id} request={tool_request_id} decision={decision} \
+                         decider=delegate model_selection={model_selection_id} \
+                         call={model_call_id}"
+                    )?,
+                }
+                if let Some(reason) = denial_reason {
+                    self.text_field("denial_reason", reason)?;
+                }
+                if let Some(rationale) = rationale {
+                    self.text_field("rationale", rationale)?;
+                }
+                Ok(())
+            }
             SessionEvent::ContextCompacted {
                 context_compaction_id,
                 model_call_id,
@@ -1719,6 +1772,16 @@ impl<'a> Output<'a> {
                 )?;
                 self.text(content.as_str())
             }
+            TurnState::QueuedDelegationWake {
+                first_delivery_sequence,
+                through_delivery_sequence,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=queued_delegation_wake \
+                 deliveries={}-{}",
+                first_delivery_sequence.value(),
+                through_delivery_sequence.value()
+            ),
             TurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -1749,6 +1812,16 @@ impl<'a> Output<'a> {
                 self.stdout,
                 "turn={turn_id} position={position} state=active_awaiting_tool_approval \
                  request={tool_request_id}"
+            ),
+            TurnState::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_child \
+                 request={await_request_id} spawning_request={spawning_request_id} \
+                 child={child_session_id}"
             ),
             TurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
@@ -1984,15 +2057,47 @@ impl<'a> Output<'a> {
                 tool_request_id,
                 tool_name,
                 arguments,
-            }) => writeln!(
-                self.stdout,
-                "assistant_tool_use turn={turn_id} call={model_call_id} \
-                 request={tool_request_id} name={} arguments={} source={} entry={}",
-                self.render(tool_name),
-                self.render(arguments),
-                entry.source_session_id,
-                entry.entry_id
-            ),
+                approval,
+            }) => {
+                writeln!(
+                    self.stdout,
+                    "assistant_tool_use turn={turn_id} call={model_call_id} \
+                     request={tool_request_id} name={} arguments={} source={} entry={}",
+                    self.render(tool_name),
+                    self.render(arguments),
+                    entry.source_session_id,
+                    entry.entry_id
+                )?;
+                if let Some(approval) = approval {
+                    let (decision, reason) = match &approval.decision {
+                        ToolApprovalEventDecision::Approve {} => ("approve", None),
+                        ToolApprovalEventDecision::Deny { reason } => ("deny", reason.as_deref()),
+                    };
+                    match &approval.decider {
+                        ToolApprovalEventDecider::User { command_id } => writeln!(
+                            self.stdout,
+                            "tool_approval request={tool_request_id} decision={decision} \
+                             decider=user command={command_id}"
+                        )?,
+                        ToolApprovalEventDecider::Delegate {
+                            model_selection_id,
+                            model_call_id,
+                        } => writeln!(
+                            self.stdout,
+                            "tool_approval request={tool_request_id} decision={decision} \
+                             decider=delegate model_selection={model_selection_id} \
+                             call={model_call_id}"
+                        )?,
+                    }
+                    if let Some(reason) = reason {
+                        self.text_field("denial_reason", reason)?;
+                    }
+                    if let Some(rationale) = &approval.rationale {
+                        self.text_field("rationale", rationale)?;
+                    }
+                }
+                Ok(())
+            }
             SnapshotEntryKind::Marker(TranscriptEntry::ToolExecutionResult {
                 tool_request_id,
                 tool_attempt_id,
@@ -2139,6 +2244,14 @@ impl SnapshotSelection {
                     results.insert(*tool_request_id);
                     trailing_results.insert(*tool_request_id);
                 }
+                SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                    await_request_id,
+                    mode: DelegationWaitMode::Foreground,
+                    ..
+                }) => {
+                    results.insert(*await_request_id);
+                    trailing_results.insert(*await_request_id);
+                }
                 _ if self.includes_terminal_marker(&entry) => {
                     anchor_found = true;
                     terminal_results.clone_from(&trailing_results);
@@ -2240,6 +2353,17 @@ impl SnapshotSelection {
                     },
                 ),
             ) => context.requests.contains(tool_request_id),
+            (
+                Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. },
+                SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                    await_request_id,
+                    mode: DelegationWaitMode::Foreground,
+                    ..
+                }),
+            ) => context.requests.contains(await_request_id),
             (
                 Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(_),
@@ -2671,8 +2795,9 @@ mod tests {
         ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
         ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
         ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
-        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry,
-        TranscriptTextEntry, TurnState, UsageProvenance,
+        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3433,6 +3558,7 @@ mod tests {
                         tool_request_id: selected_request,
                         tool_name: String::from("selected"),
                         arguments: String::from("{}"),
+                        approval: None,
                     },
                 },
                 ServerMessage::TranscriptEntry {
@@ -3454,6 +3580,7 @@ mod tests {
                         tool_request_id: later_request,
                         tool_name: String::from("later"),
                         arguments: String::from("{}"),
+                        approval: None,
                     },
                 },
                 ServerMessage::TranscriptEntry {
@@ -3613,6 +3740,21 @@ mod tests {
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegated spawning_request=00000000-0000-0000-0000-000000000002 parent_session=00000000-0000-0000-0000-000000000003 parent_turn=00000000-0000-0000-0000-000000000004
             delegated task
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn snapshot_renders_queued_delegation_wake_range() {
+        let rendered = render_snapshot_turn(TurnState::QueuedDelegationWake {
+            first_delivery_sequence: CanonicalU64::new(3),
+            through_delivery_sequence: CanonicalU64::new(5),
+        });
+
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegation_wake deliveries=3-5
             usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
@@ -4020,6 +4162,49 @@ mod tests {
 
         expect![[r#"
             event=1 session=00000000-0000-0000-0000-000000000001 model_call_transition turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 state=cancellation_requested
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_delegate_tool_decision_and_rationale() {
+        let rendered = render_event(SessionEvent::ToolApprovalDecided {
+            turn_id: wire_uuid(2),
+            tool_request_id: wire_uuid(3),
+            decision: ToolApprovalEventDecision::Deny { reason: None },
+            decider: ToolApprovalEventDecider::Delegate {
+                model_selection_id: wire_uuid(4),
+                model_call_id: wire_uuid(5),
+            },
+            rationale: Some(String::from(
+                "request exceeds configured authority\nreview manually",
+            )),
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 tool_approval_decided turn=00000000-0000-0000-0000-000000000002 request=00000000-0000-0000-0000-000000000003 decision=deny decider=delegate model_selection=00000000-0000-0000-0000-000000000004 call=00000000-0000-0000-0000-000000000005
+            rationale=request exceeds configured authority\u{a}review manually
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_user_tool_denial_and_reason() {
+        let rendered = render_event(SessionEvent::ToolApprovalDecided {
+            turn_id: wire_uuid(2),
+            tool_request_id: wire_uuid(3),
+            decision: ToolApprovalEventDecision::Deny {
+                reason: Some(String::from("outside requested scope")),
+            },
+            decider: ToolApprovalEventDecider::User {
+                command_id: wire_uuid(4),
+            },
+            rationale: None,
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 tool_approval_decided turn=00000000-0000-0000-0000-000000000002 request=00000000-0000-0000-0000-000000000003 decision=deny decider=user command=00000000-0000-0000-0000-000000000004
+            denial_reason=outside requested scope
         "#]]
         .assert_eq(&rendered);
     }
