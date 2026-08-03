@@ -735,7 +735,7 @@ fn failed_branch_switch_preserves_a_foreign_entry_in_a_restored_quarantine() {
 }
 
 #[test]
-fn branch_switch_excludes_a_foreign_entry_from_source_quarantine_ownership() {
+fn branch_switch_excludes_a_foreign_entry_from_source_quarantine_cleanup_capture() {
     let fixture = Fixture::new();
     let original_content = b"original directory\n";
     let foreign_content = b"foreign quarantine entry\n";
@@ -781,7 +781,7 @@ fn branch_switch_excludes_a_foreign_entry_from_source_quarantine_ownership() {
                 .expect("foreign source quarantine entry writes");
             },
         )
-        .expect_err("foreign source quarantine addition rejects ownership");
+        .expect_err("foreign source quarantine addition rejects cleanup capture");
     let retained_foreign = cleanup_file(fixture.root(), Path::new("foreign.txt"));
 
     assert_eq!(failure, LocalGitFailure::Operation);
