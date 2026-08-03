@@ -232,15 +232,24 @@ impl PostgresApprovalJudgeRepository {
             }
             None => (producing_model.selection, producing_model.target),
         };
-        let credential = resolve_session_credential(
-            &mut transaction,
-            session,
-            target,
-            &self.fallback_credential,
-            self.credential_families.as_ref(),
-        )
-        .await
-        .map_err(map_model_error)?;
+        let credential = if configured_selection.is_none()
+            && self
+                .credential_families
+                .as_ref()
+                .is_some_and(|families| families.family(target).is_none())
+        {
+            producing_model.credential
+        } else {
+            resolve_session_credential(
+                &mut transaction,
+                session,
+                target,
+                &self.fallback_credential,
+                self.credential_families.as_ref(),
+            )
+            .await
+            .map_err(map_model_error)?
+        };
         let input_includes_cache_tokens = self.cache_inclusive_input_targets.contains(&target);
         let inserted = sqlx::query(
             "INSERT INTO tool_approval_judge_model_call
@@ -648,6 +657,7 @@ fn decode_prepared(
 struct ProducingModel {
     selection: DirectModelSelection,
     target: ResolvedProviderTarget,
+    credential: ModelCallCredentialReference,
 }
 
 async fn load_producing_model(
@@ -657,7 +667,7 @@ async fn load_producing_model(
     let row = sqlx::query(
         "SELECT COALESCE(direct_model_selection_id, frozen_alias_selected_direct_id)
                     AS direct_model_selection_id,
-                resolved_provider_model_identity_id
+                resolved_provider_model_identity_id, credential_reference
            FROM model_call WHERE model_call_id = $1",
     )
     .bind(call.into_uuid())
@@ -670,6 +680,10 @@ async fn load_producing_model(
             &row,
             "resolved_provider_model_identity_id",
         )?)),
+        credential: ModelCallCredentialReference::new(required::<String>(
+            &row,
+            "credential_reference",
+        )?),
     })
 }
 

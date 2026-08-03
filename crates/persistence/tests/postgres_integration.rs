@@ -3618,6 +3618,61 @@ async fn approval_judge_repository_defaults_to_durable_producing_model_after_cat
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_default_preserves_producing_credential_after_route_removal()
+-> Result<(), Box<dyn Error>> {
+    const UNRELATED_FAMILY: &str = "unrelated-model-family";
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ec8;
+    let (fixture, _model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let unrelated_target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+        Uuid::from_u128(seed + 0xe1),
+    ));
+    let credential_families = ModelCredentialFamilyCatalog::try_new([(
+        unrelated_target,
+        Arc::<str>::from(UNRELATED_FAMILY),
+        None,
+    )])
+    .expect("the unrelated credential route forms a catalog");
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        ModelTargetCatalog::try_from_definitions([])
+            .expect("an empty replacement target catalog is valid"),
+        model_credential_reference(),
+    )
+    .with_session_credentials(credential_families)
+    .approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+    let producing_credential: String =
+        sqlx::query_scalar("SELECT credential_reference FROM model_call WHERE model_call_id = $1")
+            .bind(fixture.call.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(prepared.credential_reference(), producing_credential);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_repeated_authorization_returns_no_send() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ed0;
