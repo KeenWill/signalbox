@@ -8,16 +8,17 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
-    CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
-    GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-    ModelCallDisposition, ModelCallState, ReviewDiffSide, ReviewFindingSnapshot,
-    ReviewFindingStatus, ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot,
-    ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
-    ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
-    SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    UsageProvenance,
+    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationOutcome, DelegationPolicy,
+    DelegationProvenance, DelegationReason, DescendantTerminationScope, FailedModelCallCause,
+    FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
+    GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+    ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
+    ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
+    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
+    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolBatchState, ToolDecision,
+    TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -1548,6 +1549,103 @@ impl<'a> Output<'a> {
                  turn={turn_id} operation=tool_attempt operation_id={tool_attempt_id} \
                  frontier={terminal_frontier_id}"
             ),
+            SessionEvent::ChildSpawned {
+                spawning_request_id,
+                child_session_id,
+                relationship,
+            } => match relationship {
+                DelegationPolicy::Background {} => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_child_spawned \
+                     spawning_request={spawning_request_id} child={child_session_id} \
+                     policy=background"
+                ),
+                DelegationPolicy::Bound {
+                    on_parent_stopped,
+                    on_parent_cancelled,
+                } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_child_spawned \
+                     spawning_request={spawning_request_id} child={child_session_id} \
+                     policy=bound on_parent_stopped={} on_parent_cancelled={}",
+                    bound_child_action(*on_parent_stopped),
+                    bound_child_action(*on_parent_cancelled)
+                ),
+            },
+            SessionEvent::ChildWaiting {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+                mode,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} delegation_child_waiting \
+                 spawning_request={spawning_request_id} child={child_session_id} \
+                 await_request={await_request_id} mode={}",
+                match mode {
+                    signalbox_process_protocol::DelegationWaitMode::Foreground => "foreground",
+                    signalbox_process_protocol::DelegationWaitMode::Background => "background",
+                }
+            ),
+            SessionEvent::ChildLifecycleDisposition {
+                spawning_request_id,
+                child_session_id,
+                outcome,
+                reason,
+                provenance,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} delegation_child_lifecycle_disposition \
+                 spawning_request={spawning_request_id} child={child_session_id} \
+                 outcome={} reason={} provenance={}",
+                delegation_outcome(*outcome),
+                delegation_reason(*reason),
+                delegation_provenance(provenance)
+            ),
+            SessionEvent::ChildResult {
+                spawning_request_id,
+                child_session_id,
+                outcome,
+                reason,
+                provenance,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_child_result \
+                     spawning_request={spawning_request_id} child={child_session_id} \
+                     outcome={} reason={} provenance={} content_present={}",
+                    delegation_outcome(*outcome),
+                    delegation_reason(*reason),
+                    delegation_provenance(provenance),
+                    content.is_some()
+                )?;
+                if let Some(content) = content {
+                    self.text(content)
+                } else {
+                    Ok(())
+                }
+            }
+            SessionEvent::SessionMessage {
+                spawning_request_id,
+                message_id,
+                sender_session_id,
+                recipient_session_id,
+                ordinal,
+                delivery_sequence,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_session_message \
+                     spawning_request={spawning_request_id} message={message_id} \
+                     sender={sender_session_id} recipient={recipient_session_id} \
+                     ordinal={} delivery_sequence={}",
+                    ordinal.value(),
+                    delivery_sequence.value()
+                )?;
+                self.text(content)
+            }
         }
     }
 
@@ -2242,6 +2340,71 @@ const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     }
 }
 
+const fn bound_child_action(action: BoundChildAction) -> &'static str {
+    match action {
+        BoundChildAction::KeepRunning => "keep_running",
+        BoundChildAction::Stop => "stop",
+        BoundChildAction::Cancel => "cancel",
+    }
+}
+
+const fn delegation_outcome(outcome: DelegationOutcome) -> &'static str {
+    match outcome {
+        DelegationOutcome::Returned => "returned",
+        DelegationOutcome::Failed => "failed",
+        DelegationOutcome::Stopped => "stopped",
+        DelegationOutcome::Cancelled => "cancelled",
+        DelegationOutcome::ContinueRunning => "continue_running",
+        DelegationOutcome::AlreadyTerminal => "already_terminal",
+    }
+}
+
+const fn delegation_reason(reason: DelegationReason) -> &'static str {
+    match reason {
+        DelegationReason::ChildCompleted => "child_completed",
+        DelegationReason::ChildExecutionFailed => "child_execution_failed",
+        DelegationReason::ChildResultUnavailable => "child_result_unavailable",
+        DelegationReason::ChildCancelled => "child_cancelled",
+        DelegationReason::ParentStopped => "parent_stopped",
+        DelegationReason::ParentCancelled => "parent_cancelled",
+    }
+}
+
+fn delegation_provenance(provenance: &DelegationProvenance) -> String {
+    match provenance {
+        DelegationProvenance::ChildTurn {
+            child_session_id,
+            child_turn_id,
+        } => format!("child_turn:{child_session_id}:{child_turn_id}"),
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id,
+            parent_turn_id,
+            command_id,
+            descendant_scope,
+        } => format!(
+            "parent_turn_command:{parent_session_id}:{parent_turn_id}:{command_id}:{}",
+            descendant_scope_label(*descendant_scope)
+        ),
+        DelegationProvenance::ParentGoalCommand {
+            parent_session_id,
+            goal_generation,
+            command_id,
+            descendant_scope,
+        } => format!(
+            "parent_goal_command:{parent_session_id}:{}:{command_id}:{}",
+            goal_generation.value(),
+            descendant_scope_label(*descendant_scope)
+        ),
+    }
+}
+
+const fn descendant_scope_label(scope: DescendantTerminationScope) -> &'static str {
+    match scope {
+        DescendantTerminationScope::ParentAlone => "parent_alone",
+        DescendantTerminationScope::ParentAndDescendants => "parent_and_descendants",
+    }
+}
+
 const fn goal_blocked_reason_label(reason: GoalBlockedReason) -> &'static str {
     match reason {
         GoalBlockedReason::UserInputRequired => "user_input_required",
@@ -2413,15 +2576,16 @@ mod tests {
     use expect_test::expect;
     use rust_decimal::Decimal;
     use signalbox_process_protocol::{
-        BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ContentFragment,
-        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
-        FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, MetadataActor,
-        MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost, ModelCallState,
-        ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject,
-        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
-        UsageProvenance,
+        BillingRateVersion, BoundChildAction, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
+        ContentFragment, CurrentModelCall, CurrentModelCallState, DelegationOutcome,
+        DelegationPolicy, DelegationProvenance, DelegationReason, DescendantTerminationScope,
+        ErrorCode, ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall,
+        ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+        InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost,
+        ModelCallState, ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput,
+        ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot,
+        ReviewTargetSubject, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
+        TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3709,6 +3873,46 @@ mod tests {
 
         expect![[r#"
             event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 operation=model_call operation_id=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_bound_child_policy() {
+        let rendered = render_event(SessionEvent::ChildSpawned {
+            spawning_request_id: wire_uuid(2),
+            child_session_id: wire_uuid(3),
+            relationship: DelegationPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_spawned spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 policy=bound on_parent_stopped=stop on_parent_cancelled=cancel
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_child_result_with_provenance_and_content() {
+        let rendered = render_event(SessionEvent::ChildResult {
+            spawning_request_id: wire_uuid(2),
+            child_session_id: wire_uuid(3),
+            outcome: DelegationOutcome::Stopped,
+            content: Some(String::from("delivered result")),
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentTurnCommand {
+                parent_session_id: wire_uuid(1),
+                parent_turn_id: wire_uuid(4),
+                command_id: wire_uuid(5),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_result spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 outcome=stopped reason=parent_stopped provenance=parent_turn_command:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000004:00000000-0000-0000-0000-000000000005:parent_and_descendants content_present=true
+            delivered result
         "#]]
         .assert_eq(&rendered);
     }

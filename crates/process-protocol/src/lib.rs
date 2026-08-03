@@ -4151,6 +4151,114 @@ pub enum ToolBatchState {
     },
 }
 
+/// Action chosen for one bound child when its parent reaches a terminal state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundChildAction {
+    /// Leave the child running.
+    KeepRunning,
+    /// Stop the child with typed parent-policy provenance.
+    Stop,
+    /// Cancel the child with typed parent-policy provenance.
+    Cancel,
+}
+
+/// Parent-chosen lifecycle policy carried by a child-spawned update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DelegationPolicy {
+    /// The child keeps working independently of parent state.
+    Background {},
+    /// The child follows the two explicit parent-state actions.
+    Bound {
+        /// Action when the parent stops.
+        on_parent_stopped: BoundChildAction,
+        /// Action when the parent is cancelled.
+        on_parent_cancelled: BoundChildAction,
+    },
+}
+
+/// Delivery behavior chosen by one await request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationWaitMode {
+    /// Keep the current parent turn open until delivery.
+    Foreground,
+    /// Return registration and deliver through a later wake.
+    Background,
+}
+
+/// Closed relationship outcome carried by delegation updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationOutcome {
+    /// Child content is available.
+    Returned,
+    /// Child execution failed or returned unusable content.
+    Failed,
+    /// Parent policy stopped the child.
+    Stopped,
+    /// Child or parent policy cancelled the child.
+    Cancelled,
+    /// Relationship policy left the child running.
+    ContinueRunning,
+    /// Parent policy reached an already-terminal child.
+    AlreadyTerminal,
+}
+
+/// Exact reason carried alongside a delegation outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationReason {
+    /// Child completed with delivered content.
+    ChildCompleted,
+    /// Child execution failed.
+    ChildExecutionFailed,
+    /// Completed child content could not form a result.
+    ChildResultUnavailable,
+    /// Child cancelled independently.
+    ChildCancelled,
+    /// A parent stop selected descendants.
+    ParentStopped,
+    /// A parent cancellation selected descendants.
+    ParentCancelled,
+}
+
+/// Proof source retained by one lifecycle or result update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DelegationProvenance {
+    /// Exact terminal child turn.
+    ChildTurn {
+        /// Child session.
+        child_session_id: CanonicalUuid,
+        /// Terminal delegated turn.
+        child_turn_id: CanonicalUuid,
+    },
+    /// Exact parent turn command.
+    ParentTurnCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// Parent turn named by the command.
+        parent_turn_id: CanonicalUuid,
+        /// Durable stop or interrupt command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
+    /// Exact parent goal-generation command.
+    ParentGoalCommand {
+        /// Parent session.
+        parent_session_id: CanonicalUuid,
+        /// One-based goal generation.
+        goal_generation: CanonicalU64,
+        /// Durable goal stop command.
+        command_id: CanonicalUuid,
+        /// Explicit kill-time descendant choice.
+        descendant_scope: DescendantTerminationScope,
+    },
+}
+
 /// Closed durable update event family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -4267,6 +4375,214 @@ pub enum SessionEvent {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
     },
+    /// A parent committed one child relationship and lifecycle policy.
+    ChildSpawned {
+        /// Exact spawning tool request and relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Spawned child session.
+        child_session_id: CanonicalUuid,
+        /// Parent-chosen relationship lifecycle policy.
+        relationship: DelegationPolicy,
+    },
+    /// A parent registered one foreground or background wait.
+    ChildWaiting {
+        /// Exact await tool request.
+        await_request_id: CanonicalUuid,
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Child being awaited.
+        child_session_id: CanonicalUuid,
+        /// Wait delivery mode.
+        mode: DelegationWaitMode,
+    },
+    /// One bidirectional relationship message became durable for its recipient.
+    SessionMessage {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Message identity.
+        message_id: CanonicalUuid,
+        /// Sending session.
+        sender_session_id: CanonicalUuid,
+        /// Receiving session.
+        recipient_session_id: CanonicalUuid,
+        /// Relationship-local message ordinal.
+        ordinal: CanonicalU64,
+        /// Recipient-wide delivery sequence.
+        delivery_sequence: CanonicalU64,
+        /// Exact delivered content.
+        content: String,
+    },
+    /// A terminal child result became durable for its parent.
+    ChildResult {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Terminal child.
+        child_session_id: CanonicalUuid,
+        /// Typed terminal result outcome.
+        outcome: DelegationOutcome,
+        /// Delivered content for a successful result only.
+        content: Option<String>,
+        /// Typed reason for the terminal result.
+        reason: DelegationReason,
+        /// Exact child-turn or parent-command provenance.
+        provenance: DelegationProvenance,
+    },
+    /// Parent termination evaluated one relationship edge.
+    ChildLifecycleDisposition {
+        /// Relationship identity.
+        spawning_request_id: CanonicalUuid,
+        /// Evaluated child.
+        child_session_id: CanonicalUuid,
+        /// Typed relationship outcome.
+        outcome: DelegationOutcome,
+        /// Typed reason for evaluating this relationship edge.
+        reason: DelegationReason,
+        /// Exact parent command provenance.
+        provenance: DelegationProvenance,
+    },
+}
+
+fn validate_delegation_session_event(
+    session_id: CanonicalUuid,
+    event: &SessionEvent,
+) -> Result<(), FrameValidationError> {
+    let valid = match event {
+        SessionEvent::ChildSpawned {
+            child_session_id, ..
+        }
+        | SessionEvent::ChildWaiting {
+            child_session_id, ..
+        } => *child_session_id != session_id,
+        SessionEvent::SessionMessage {
+            sender_session_id,
+            recipient_session_id,
+            ordinal,
+            delivery_sequence,
+            content,
+            ..
+        } => {
+            *recipient_session_id == session_id
+                && sender_session_id != recipient_session_id
+                && ordinal.value() > 0
+                && delivery_sequence.value() > 0
+                && delegation_content_is_valid(content)
+        }
+        SessionEvent::ChildResult {
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+            ..
+        } => {
+            *child_session_id != session_id
+                && child_result_shape_is_valid(
+                    session_id,
+                    *child_session_id,
+                    *outcome,
+                    content,
+                    *reason,
+                    provenance,
+                )
+        }
+        SessionEvent::ChildLifecycleDisposition {
+            child_session_id,
+            outcome,
+            reason,
+            provenance,
+            ..
+        } => {
+            *child_session_id != session_id
+                && matches!(
+                    outcome,
+                    DelegationOutcome::Stopped
+                        | DelegationOutcome::Cancelled
+                        | DelegationOutcome::AlreadyTerminal
+                        | DelegationOutcome::ContinueRunning
+                )
+                && matches!(
+                    reason,
+                    DelegationReason::ParentStopped | DelegationReason::ParentCancelled
+                )
+                && parent_delegation_provenance_is_cascade(session_id, provenance)
+        }
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::DelegationShape)
+    }
+}
+
+fn child_result_shape_is_valid(
+    parent_session_id: CanonicalUuid,
+    child_session_id: CanonicalUuid,
+    outcome: DelegationOutcome,
+    content: &Option<String>,
+    reason: DelegationReason,
+    provenance: &DelegationProvenance,
+) -> bool {
+    match (outcome, reason, provenance, content) {
+        (
+            DelegationOutcome::Returned,
+            DelegationReason::ChildCompleted,
+            DelegationProvenance::ChildTurn {
+                child_session_id: provenance_child,
+                ..
+            },
+            Some(content),
+        ) => *provenance_child == child_session_id && delegation_content_is_valid(content),
+        (
+            DelegationOutcome::Failed,
+            DelegationReason::ChildExecutionFailed | DelegationReason::ChildResultUnavailable,
+            DelegationProvenance::ChildTurn {
+                child_session_id: provenance_child,
+                ..
+            },
+            None,
+        )
+        | (
+            DelegationOutcome::Cancelled,
+            DelegationReason::ChildCancelled,
+            DelegationProvenance::ChildTurn {
+                child_session_id: provenance_child,
+                ..
+            },
+            None,
+        ) => *provenance_child == child_session_id,
+        (
+            DelegationOutcome::Stopped | DelegationOutcome::Cancelled,
+            DelegationReason::ParentStopped | DelegationReason::ParentCancelled,
+            provenance,
+            None,
+        ) => parent_delegation_provenance_is_cascade(parent_session_id, provenance),
+        _ => false,
+    }
+}
+
+fn parent_delegation_provenance_is_cascade(
+    parent_session_id: CanonicalUuid,
+    provenance: &DelegationProvenance,
+) -> bool {
+    match provenance {
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id: provenance_parent,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => *provenance_parent == parent_session_id,
+        DelegationProvenance::ParentGoalCommand {
+            parent_session_id: provenance_parent,
+            goal_generation,
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => *provenance_parent == parent_session_id && goal_generation.value() > 0,
+        _ => false,
+    }
+}
+
+fn delegation_content_is_valid(content: &str) -> bool {
+    !content.is_empty() && content.len() <= MAX_CONTENT_FRAGMENT_BYTES && !content.contains('\0')
 }
 
 /// Closed versioned server message family.
@@ -4898,6 +5214,9 @@ impl ServerMessage {
             {
                 return Err(FrameValidationError::ModelCallUsageShape);
             }
+            Self::SessionEvent {
+                session_id, event, ..
+            } => validate_delegation_session_event(*session_id, event)?,
             _ => {}
         }
         Ok(())
@@ -5162,6 +5481,8 @@ pub enum FrameValidationError {
     ModelCallUsageShape,
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    /// A delegation update carried an invalid correlated shape.
+    DelegationShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -5191,6 +5512,7 @@ impl fmt::Display for FrameValidationError {
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
+            Self::DelegationShape => "session-delegation frame shape is inconsistent",
         })
     }
 }
@@ -5600,7 +5922,8 @@ mod tests {
         ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
         ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, DescendantTerminationScope, ErrorCode, ErrorDetail,
+        CurrentModelCallState, DelegationOutcome, DelegationPolicy, DelegationProvenance,
+        DelegationReason, DelegationWaitMode, DescendantTerminationScope, ErrorCode, ErrorDetail,
         FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
         FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
         GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
@@ -9483,6 +9806,167 @@ mod tests {
             )
         );
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn delegation_session_events_round_trip_their_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(40)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::ChildSpawned {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    relationship: DelegationPolicy::Background {},
+                },
+            },
+            r#"{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_spawned","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","relationship":{"type":"background"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(41)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(1),
+                event: SessionEvent::ChildWaiting {
+                    await_request_id: uuid(4),
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    mode: DelegationWaitMode::Background,
+                },
+            },
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_waiting","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","mode":"background"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(42)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(3),
+                event: SessionEvent::SessionMessage {
+                    spawning_request_id: uuid(2),
+                    message_id: uuid(5),
+                    sender_session_id: uuid(1),
+                    recipient_session_id: uuid(3),
+                    ordinal: CanonicalU64::new(2),
+                    delivery_sequence: CanonicalU64::new(7),
+                    content: String::from("status"),
+                },
+            },
+            r#"{"type":"session_event","cursor":"3","session_id":"00000000-0000-0000-0000-000000000003","event":{"type":"session_message","spawning_request_id":"00000000-0000-0000-0000-000000000002","message_id":"00000000-0000-0000-0000-000000000005","sender_session_id":"00000000-0000-0000-0000-000000000001","recipient_session_id":"00000000-0000-0000-0000-000000000003","ordinal":"2","delivery_sequence":"7","content":"status"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(43)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(4),
+                session_id: uuid(1),
+                event: SessionEvent::ChildResult {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Returned,
+                    content: Some(String::from("done")),
+                    reason: DelegationReason::ChildCompleted,
+                    provenance: DelegationProvenance::ChildTurn {
+                        child_session_id: uuid(3),
+                        child_turn_id: uuid(6),
+                    },
+                },
+            },
+            r#"{"type":"session_event","cursor":"4","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_result","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","outcome":"returned","content":"done","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000003","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(44)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(5),
+                session_id: uuid(1),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+            r#"{"type":"session_event","cursor":"5","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_lifecycle_disposition","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","outcome":"stopped","reason":"parent_stopped","provenance":{"type":"parent_turn_command","parent_session_id":"00000000-0000-0000-0000-000000000001","parent_turn_id":"00000000-0000-0000-0000-000000000007","command_id":"00000000-0000-0000-0000-000000000008","descendant_scope":"parent_and_descendants"}}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn delegation_session_events_reject_contradictory_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let missing_returned_content = ServerFrame::try_new(
+            request(45)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::ChildResult {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Returned,
+                    content: None,
+                    reason: DelegationReason::ChildCompleted,
+                    provenance: DelegationProvenance::ChildTurn {
+                        child_session_id: uuid(3),
+                        child_turn_id: uuid(6),
+                    },
+                },
+            },
+        );
+        let parent_alone_disposition = ServerFrame::try_new(
+            request(46)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(1),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::ContinueRunning,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                },
+            },
+        );
+        let zero_message_sequence = ServerFrame::try_new(
+            request(47)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(1),
+                event: SessionEvent::SessionMessage {
+                    spawning_request_id: uuid(2),
+                    message_id: uuid(5),
+                    sender_session_id: uuid(1),
+                    recipient_session_id: uuid(3),
+                    ordinal: CanonicalU64::new(1),
+                    delivery_sequence: CanonicalU64::new(0),
+                    content: String::from("status"),
+                },
+            },
+        );
+
+        assert_eq!(
+            missing_returned_content,
+            Err(FrameValidationError::DelegationShape)
+        );
+        assert_eq!(
+            parent_alone_disposition,
+            Err(FrameValidationError::DelegationShape)
+        );
+        assert_eq!(
+            zero_message_sequence,
+            Err(FrameValidationError::DelegationShape)
+        );
         Ok(())
     }
 

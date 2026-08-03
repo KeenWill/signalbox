@@ -87,9 +87,12 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
     outbox::{
-        DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
+        DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
+        DispatchedDelegationWaitMode, DispatchedModelCallDisposition, DispatchedModelCallState,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedReconciliationOperation,
+        DispatchedToolBatchState, OutboxDeliveryDecision, OutboxDispatchError,
+        OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition,
@@ -109,11 +112,15 @@ use signalbox_persistence::{
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use signalbox_process_protocol::{
-    BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
-    ConversationCursor as WireConversationCursor, ConversationImportFormat,
-    ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
+    BillingRateVersion, BoundChildAction as WireBoundChildAction, CanonicalDollarAmount,
+    CanonicalU64, CanonicalUuid, ClientRequest, ConversationCursor as WireConversationCursor,
+    ConversationImportFormat, ConversationImportRejectionClass,
+    ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
+    DelegationOutcome as WireDelegationOutcome, DelegationPolicy as WireDelegationPolicy,
+    DelegationProvenance as WireDelegationProvenance, DelegationReason as WireDelegationReason,
+    DelegationWaitMode as WireDelegationWaitMode,
     DescendantTerminationScope as WireDescendantTerminationScope, ErrorCode, ErrorDetail,
     FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
     FrameDecodeErrorKind, FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
@@ -402,9 +409,10 @@ async fn dispatch_updates(
                     event.sequence(),
                     event.kind(),
                 );
-                let update = ProcessUpdate::from(event);
-                let _ = fanouts.durable.send(update.clone());
-                let _ = fanouts.streaming.send(update);
+                if let Some(update) = ProcessUpdate::from_outbox(event) {
+                    let _ = fanouts.durable.send(update.clone());
+                    let _ = fanouts.streaming.send(update);
+                }
                 OutboxDeliveryDecision::Delivered
             })
             .await
@@ -465,7 +473,9 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
-        | DispatchedOutboxEventKind::ContextCompacted { .. } => {}
+        | DispatchedOutboxEventKind::ContextCompacted { .. }
+        | DispatchedOutboxEventKind::DelegationUpdate(_)
+        | DispatchedOutboxEventKind::DelegationWake(_) => {}
     }
 }
 
@@ -10666,13 +10676,13 @@ enum ProcessUpdate {
     ProviderTextDelta(ProviderTextDelta),
 }
 
-impl From<&DispatchedOutboxEvent> for ProcessUpdate {
-    fn from(event: &DispatchedOutboxEvent) -> Self {
-        Self::Durable {
+impl ProcessUpdate {
+    fn from_outbox(event: &DispatchedOutboxEvent) -> Option<Self> {
+        Some(Self::Durable {
             cursor: event.sequence(),
             session: event.session(),
-            event: ProcessUpdateEvent::from(event.kind()),
-        }
+            event: ProcessUpdateEvent::from_outbox(event.kind())?,
+        })
     }
 }
 
@@ -10735,11 +10745,12 @@ enum ProcessUpdateEvent {
         operation: DispatchedReconciliationOperation,
         terminal_frontier: signalbox_domain::ContextFrontierId,
     },
+    DelegationUpdate(DispatchedDelegationUpdate),
 }
 
-impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
-    fn from(event: &DispatchedOutboxEventKind) -> Self {
-        match event {
+impl ProcessUpdateEvent {
+    fn from_outbox(event: &DispatchedOutboxEventKind) -> Option<Self> {
+        Some(match event {
             DispatchedOutboxEventKind::SessionCreated => Self::SessionCreated,
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input,
@@ -10838,11 +10849,13 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
                 operation: *operation,
                 terminal_frontier: *terminal_frontier,
             },
-        }
+            DispatchedOutboxEventKind::DelegationUpdate(update) => {
+                Self::DelegationUpdate(update.clone())
+            }
+            DispatchedOutboxEventKind::DelegationWake(_) => return None,
+        })
     }
-}
 
-impl ProcessUpdateEvent {
     fn wire(&self) -> SessionEvent {
         match self {
             Self::SessionCreated => SessionEvent::SessionCreated {},
@@ -10966,7 +10979,166 @@ impl ProcessUpdateEvent {
                     }
                 }
             },
+            Self::DelegationUpdate(update) => wire_delegation_update(update),
         }
+    }
+}
+
+fn wire_delegation_update(update: &DispatchedDelegationUpdate) -> SessionEvent {
+    match update {
+        DispatchedDelegationUpdate::ChildSpawned {
+            spawning_request,
+            child,
+            policy,
+        } => SessionEvent::ChildSpawned {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            relationship: wire_delegation_policy(*policy),
+        },
+        DispatchedDelegationUpdate::ChildWaiting {
+            spawning_request,
+            child,
+            awaiting_request,
+            mode,
+        } => SessionEvent::ChildWaiting {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            await_request_id: wire_uuid(awaiting_request.into_uuid()),
+            mode: match mode {
+                DispatchedDelegationWaitMode::Foreground => WireDelegationWaitMode::Foreground,
+                DispatchedDelegationWaitMode::Background => WireDelegationWaitMode::Background,
+            },
+        },
+        DispatchedDelegationUpdate::ChildLifecycleDisposition {
+            spawning_request,
+            child,
+            event_ordinal: _,
+            outcome,
+            reason,
+            provenance,
+        } => SessionEvent::ChildLifecycleDisposition {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            outcome: wire_delegation_outcome(*outcome),
+            reason: wire_delegation_reason(*reason),
+            provenance: wire_delegation_provenance(*provenance),
+        },
+        DispatchedDelegationUpdate::ChildResult {
+            spawning_request,
+            child,
+            outcome,
+            reason,
+            provenance,
+            content,
+        } => SessionEvent::ChildResult {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+            outcome: wire_delegation_outcome(*outcome),
+            reason: wire_delegation_reason(*reason),
+            provenance: wire_delegation_provenance(*provenance),
+            content: content.clone(),
+        },
+        DispatchedDelegationUpdate::SessionMessage {
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            message_ordinal,
+            delivery_sequence,
+            content,
+        } => SessionEvent::SessionMessage {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            message_id: wire_uuid(message.into_uuid()),
+            sender_session_id: wire_uuid(sender.into_uuid()),
+            recipient_session_id: wire_uuid(recipient.into_uuid()),
+            ordinal: CanonicalU64::new(*message_ordinal),
+            delivery_sequence: CanonicalU64::new(*delivery_sequence),
+            content: content.clone(),
+        },
+    }
+}
+
+const fn wire_delegation_policy(policy: DispatchedDelegationPolicy) -> WireDelegationPolicy {
+    match policy {
+        DispatchedDelegationPolicy::Background => WireDelegationPolicy::Background {},
+        DispatchedDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => WireDelegationPolicy::Bound {
+            on_parent_stopped: wire_bound_child_action(on_parent_stopped),
+            on_parent_cancelled: wire_bound_child_action(on_parent_cancelled),
+        },
+    }
+}
+
+const fn wire_bound_child_action(action: DispatchedBoundChildAction) -> WireBoundChildAction {
+    match action {
+        DispatchedBoundChildAction::KeepRunning => WireBoundChildAction::KeepRunning,
+        DispatchedBoundChildAction::Stop => WireBoundChildAction::Stop,
+        DispatchedBoundChildAction::Cancel => WireBoundChildAction::Cancel,
+    }
+}
+
+const fn wire_delegation_outcome(outcome: DispatchedDelegationOutcome) -> WireDelegationOutcome {
+    match outcome {
+        DispatchedDelegationOutcome::ResultReturned => WireDelegationOutcome::Returned,
+        DispatchedDelegationOutcome::ChildFailed => WireDelegationOutcome::Failed,
+        DispatchedDelegationOutcome::ChildStopped => WireDelegationOutcome::Stopped,
+        DispatchedDelegationOutcome::ChildCancelled => WireDelegationOutcome::Cancelled,
+        DispatchedDelegationOutcome::ContinueRunning => WireDelegationOutcome::ContinueRunning,
+        DispatchedDelegationOutcome::AlreadyTerminal => WireDelegationOutcome::AlreadyTerminal,
+    }
+}
+
+const fn wire_delegation_reason(reason: DispatchedDelegationReason) -> WireDelegationReason {
+    match reason {
+        DispatchedDelegationReason::ChildCompleted => WireDelegationReason::ChildCompleted,
+        DispatchedDelegationReason::ChildExecutionFailed => {
+            WireDelegationReason::ChildExecutionFailed
+        }
+        DispatchedDelegationReason::ChildResultUnavailable => {
+            WireDelegationReason::ChildResultUnavailable
+        }
+        DispatchedDelegationReason::ChildCancelled => WireDelegationReason::ChildCancelled,
+        DispatchedDelegationReason::ParentStoppedWithDescendants => {
+            WireDelegationReason::ParentStopped
+        }
+        DispatchedDelegationReason::ParentCancelledWithDescendants => {
+            WireDelegationReason::ParentCancelled
+        }
+    }
+}
+
+fn wire_delegation_provenance(
+    provenance: DispatchedDelegationProvenance,
+) -> WireDelegationProvenance {
+    match provenance {
+        DispatchedDelegationProvenance::ChildTurn { session, turn } => {
+            WireDelegationProvenance::ChildTurn {
+                child_session_id: wire_uuid(session.into_uuid()),
+                child_turn_id: wire_uuid(turn.into_uuid()),
+            }
+        }
+        DispatchedDelegationProvenance::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        } => WireDelegationProvenance::ParentTurnCommand {
+            parent_session_id: wire_uuid(session.into_uuid()),
+            parent_turn_id: wire_uuid(turn.into_uuid()),
+            command_id: wire_uuid(command.into_uuid()),
+            descendant_scope: WireDescendantTerminationScope::ParentAndDescendants,
+        },
+        DispatchedDelegationProvenance::ParentGoalCommand {
+            session,
+            goal_generation,
+            command,
+        } => WireDelegationProvenance::ParentGoalCommand {
+            parent_session_id: wire_uuid(session.into_uuid()),
+            goal_generation: CanonicalU64::new(goal_generation),
+            command_id: wire_uuid(command.into_uuid()),
+            descendant_scope: WireDescendantTerminationScope::ParentAndDescendants,
+        },
     }
 }
 
@@ -13495,13 +13667,47 @@ context_window_tokens = 200000
     #[test]
     fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
         let turn = TurnId::from_uuid(Uuid::from_u128(7));
-        let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
+        let update =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::GoalTurnRetired { turn })
+                .expect("a client-visible event projects to one update");
 
         assert_eq!(
             update.wire(),
             SessionEvent::GoalTurnRetired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
             }
+        );
+    }
+
+    #[test]
+    fn delegation_updates_project_but_internal_wakes_do_not_follow() {
+        let spawning_request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(8));
+        let child = SessionId::from_uuid(Uuid::from_u128(9));
+        let update = ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::DelegationUpdate(
+            signalbox_persistence::outbox::DispatchedDelegationUpdate::ChildSpawned {
+                spawning_request,
+                child,
+                policy: signalbox_persistence::outbox::DispatchedDelegationPolicy::Background,
+            },
+        ))
+        .expect("a delegation update is client-visible");
+
+        assert_eq!(
+            update.wire(),
+            SessionEvent::ChildSpawned {
+                spawning_request_id: CanonicalUuid::from_uuid(spawning_request.into_uuid()),
+                child_session_id: CanonicalUuid::from_uuid(child.into_uuid()),
+                relationship: signalbox_process_protocol::DelegationPolicy::Background {},
+            }
+        );
+        assert!(
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::DelegationWake(
+                signalbox_persistence::outbox::DispatchedDelegationWake::Result {
+                    spawning_request,
+                    awaiting_request: None,
+                },
+            ))
+            .is_none()
         );
     }
 
@@ -13538,11 +13744,13 @@ context_window_tokens = 200000
             }
         );
 
-        let cancelled = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnCancelled {
-            turn,
-            cancellation_entry: entry,
-            terminal_frontier: frontier,
-        });
+        let cancelled =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::TurnCancelled {
+                turn,
+                cancellation_entry: entry,
+                terminal_frontier: frontier,
+            })
+            .expect("a client-visible event projects to one update");
         assert_eq!(
             cancelled.wire(),
             SessionEvent::TurnCancelled {
@@ -13551,12 +13759,14 @@ context_window_tokens = 200000
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
             }
         );
-        let reconciliation =
-            ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
+        let reconciliation = ProcessUpdateEvent::from_outbox(
+            &DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
                 operation: DispatchedReconciliationOperation::ModelCall(call),
                 terminal_frontier: frontier,
-            });
+            },
+        )
+        .expect("a client-visible event projects to one update");
         assert_eq!(
             reconciliation.wire(),
             SessionEvent::TurnReconciliationRequired {
@@ -13566,13 +13776,15 @@ context_window_tokens = 200000
             }
         );
         let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(6));
-        let recovery = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::ToolBatchTransition {
-            turn,
-            producing_call: call,
-            state: DispatchedToolBatchState::RecoveryRequired {
-                attempt: tool_attempt,
-            },
-        });
+        let recovery =
+            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::ToolBatchTransition {
+                turn,
+                producing_call: call,
+                state: DispatchedToolBatchState::RecoveryRequired {
+                    attempt: tool_attempt,
+                },
+            })
+            .expect("a client-visible event projects to one update");
         assert_eq!(
             recovery.wire(),
             SessionEvent::ToolBatchTransition {

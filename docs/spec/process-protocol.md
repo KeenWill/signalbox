@@ -16,9 +16,11 @@ Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
-import transport in PR #401 (`agent/import-chunks-protocol`). This page is the
-normative boundary between a local client process and `signalboxd`; domain
-values, PostgreSQL records, and wire messages remain distinct representations.
+import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
+delegation session-follow events against this PR (`agent/delegation`). This page
+is the normative boundary between a local client process and `signalboxd`;
+domain values, PostgreSQL records, and wire messages remain distinct
+representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1483,14 +1485,15 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-This section is the foundation proposal at the bottom of the delegation stack.
-The model-facing tool names and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). The process surface
-admits their exact already-issued work for terminal operation and recovery; it
-does not let a client fabricate model provenance. `spawn_session`,
-`await_session`, and `send_session_message` therefore each carry the invoking
-session, turn, and `tool_request_id`, which must reconstitute one matching
-logical request before any mutation occurs.
+The session-follow event shapes and internal-wake exclusion in this section are
+implemented. The mutation request and receipt shapes remain the foundation
+proposal at the bottom of the delegation stack. The model-facing tool names and
+arguments are owned by [tool-loop](tool-loop.md#session-delegation-tool-family).
+The process surface admits their exact already-issued work for terminal
+operation and recovery; it does not let a client fabricate model provenance.
+`spawn_session`, `await_session`, and `send_session_message` therefore each
+carry the invoking session, turn, and `tool_request_id`, which must reconstitute
+one matching logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable
@@ -1670,23 +1673,23 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
 closed `event` object. The protocol admits these event shapes:
 
-| Event                          | Additional members                                                                                         |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `session_created`              | none                                                                                                       |
-| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                       |
-| `goal_turn_retired`            | `turn_id`                                                                                                  |
-| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                         |
-| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                    |
-| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                              |
-| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                  |
-| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
-| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                             |
-| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
-| `child_spawned`                | `spawning_request_id`, `child_session_id`, and `relationship`                                              |
-| `child_waiting`                | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                  |
-| `child_lifecycle_disposition`  | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                           |
-| `child_result`                 | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                |
-| `session_message`              | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content` |
+| Event                          | Additional members                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `session_created`              | none                                                                                                                            |
+| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                            |
+| `goal_turn_retired`            | `turn_id`                                                                                                                       |
+| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                                              |
+| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                                         |
+| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                   |
+| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                       |
+| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                          |
+| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                  |
+| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                          |
+| `child_spawned`                | `spawning_request_id`, `child_session_id`, and `relationship`                                                                   |
+| `child_waiting`                | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                                       |
+| `child_lifecycle_disposition`  | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                                                |
+| `child_result`                 | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                                     |
+| `session_message`              | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, `delivery_sequence`, and `content` |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A
