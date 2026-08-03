@@ -16,3 +16,13 @@ The packed replacement record was produced by `git update-ref` under
 
 initial: 5b157a42f41234f041d36f0eb1f2540600127609
 replacement: 3c54f8667c0ace9b4d5f3b6fbf2160859e74e138
+
+The SHA-256 pack index was generated with the same Git version in a bare
+`git init --object-format=sha256` repository. A blob containing
+`real Git SHA-256 fixture\n`, its one-entry tree, and a commit authored and
+committed by Signalbox Fixture <fixture@example.test> at
+2000-01-01T00:00:00Z were written with `git hash-object`, `git mktree`, and
+`git commit-tree`; `git update-ref refs/heads/main` and `git repack -ad`
+produced the recorded version-2 index. The `.hex` file is `xxd -p` output;
+the checksum and sorted object IDs are the corresponding `git verify-pack -v`
+results when run with that repository as `--git-dir`.
