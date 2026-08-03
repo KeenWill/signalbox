@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `e91bec38` on 2026-08-03.
+Verified against repository head `631b8a25` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 15 close-now, 16 staged, and 1 report-only.
+variants: 16 close-now, 16 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -59,6 +59,7 @@ variants: 15 close-now, 16 staged, and 1 report-only.
 | C14 | Medium   | Imported summaries whose protocol title state is `underivable` had no source-authored label for the unified list or detail navigation.                                                                                                   | **close-now** — provide a stable, visibly untitled imported-conversation label rather than presenting an empty title.                                                |
 | C15 | Medium   | Nested model-call and tool-request UUIDs were treated as global across source transcripts, allowing imported evidence to overwrite tool cards, usage anchors, plan provenance positions, SwiftUI row identity, or side-read attribution. | **close-now** — keep presentation source-qualified and admit only native-source entries into current-session correlation and side-read evidence.                     |
 | C16 | Medium   | A model-usage row's stable event ID was derived from its current transcript anchor, so compaction and later anchor reuse could give two usage rows one ID and silently replace one.                                                      | **close-now** — allocate stable IDs only by model-call identity and use transcript anchors solely for presentation order.                                            |
+| C17 | Medium   | A `turn_tool_reconciliation_required` side reread rendered only the result carrying the named crash-lost attempt and omitted other results in the same terminal suffix.                                                                  | **close-now** — authenticate the named attempt within the native contiguous terminal-result suffix and render that complete suffix.                                  |
 
 ## Staged gaps
 
