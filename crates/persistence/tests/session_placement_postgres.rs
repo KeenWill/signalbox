@@ -38,10 +38,16 @@ const DATABASE_NAME: &str = "signalbox_placement";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RESULT_SHAPE_CONSTRAINT: &str = "update_session_placement_command_result_shape";
+const ARBITRARY_DEFAULT_MODEL_SELECTION_ID_SEED: u128 = 0x1000;
+const ARBITRARY_ROOT_CREATION_COMMAND_ID_SEED: u128 = 0x101;
+const ARBITRARY_ROOT_CREATION_SESSION_ID_SEED: u128 = 0x201;
+const ARBITRARY_PATHLESS_CREATION_COMMAND_ID_SEED: u128 = 0x102;
+const ARBITRARY_PATHLESS_CREATION_SESSION_ID_SEED: u128 = 0x202;
 const ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED: u128 = 0x230;
 const ARBITRARY_RESERVED_IDENTITY_CREATION_COMMAND_ID_SEED: u128 = 0x130;
 const ARBITRARY_MISSING_HEAD_SESSION_ID_SEED: u128 = 0x204;
 const ARBITRARY_MISSING_HEAD_CREATION_COMMAND_ID_SEED: u128 = 0x105;
+const ARBITRARY_MISSING_HEAD_UPDATE_COMMAND_ID_SEED: u128 = 0x106;
 const ARBITRARY_REJECTION_RECEIPT_SESSION_ID_SEED: u128 = 0x206;
 const ARBITRARY_REJECTION_RECEIPT_CREATION_COMMAND_ID_SEED: u128 = 0x110;
 const ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x111;
@@ -51,6 +57,10 @@ const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
 const ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED: u128 = 0x223;
 const ARBITRARY_APPLIED_REPLAY_CREATION_COMMAND_ID_SEED: u128 = 0x125;
 const ARBITRARY_APPLIED_REPLAY_UPDATE_COMMAND_ID_SEED: u128 = 0x126;
+const ARBITRARY_CROSS_WIRED_APPLIED_SESSION_ID_SEED: u128 = 0x205;
+const ARBITRARY_CROSS_WIRED_APPLIED_CREATION_COMMAND_ID_SEED: u128 = 0x107;
+const ARBITRARY_CROSS_WIRED_APPLIED_FIRST_UPDATE_COMMAND_ID_SEED: u128 = 0x108;
+const ARBITRARY_CROSS_WIRED_APPLIED_SECOND_UPDATE_COMMAND_ID_SEED: u128 = 0x109;
 const ARBITRARY_REJECTED_REPLAY_SESSION_ID_SEED: u128 = 0x226;
 const ARBITRARY_REJECTED_REPLAY_CREATION_COMMAND_ID_SEED: u128 = 0x12a;
 const ARBITRARY_REJECTED_REPLAY_UPDATE_COMMAND_ID_SEED: u128 = 0x12b;
@@ -61,6 +71,30 @@ const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_SESSION_ID_SEED: u128 = 0x209;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_COMMAND_ID_SEED: u128 = 0x115;
 const ARBITRARY_CORRUPT_UPDATE_RECEIPT_SESSION_ID_SEED: u128 = 0x20a;
 const ARBITRARY_CORRUPT_UPDATE_RECEIPT_CREATION_COMMAND_ID_SEED: u128 = 0x116;
+const ARBITRARY_CORRUPT_UPDATE_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x117;
+const ARBITRARY_CORRUPT_UPDATE_RECEIPT_REPLACEMENT_COMMAND_ID_SEED: u128 = 0x118;
+const ARBITRARY_CORRUPT_PREDECESSOR_SESSION_ID_SEED: u128 = 0x231;
+const ARBITRARY_CORRUPT_PREDECESSOR_CREATION_COMMAND_ID_SEED: u128 = 0x131;
+const ARBITRARY_CORRUPT_PREDECESSOR_FIRST_UPDATE_COMMAND_ID_SEED: u128 = 0x132;
+const ARBITRARY_CORRUPT_PREDECESSOR_SUCCESSOR_COMMAND_ID_SEED: u128 = 0x133;
+const ARBITRARY_CORRUPT_PREDECESSOR_FOLLOWUP_COMMAND_ID_SEED: u128 = 0x134;
+const ARBITRARY_REJECTED_CURRENT_AUTH_SESSION_ID_SEED: u128 = 0x224;
+const ARBITRARY_REJECTED_CURRENT_AUTH_CREATION_COMMAND_ID_SEED: u128 = 0x127;
+const ARBITRARY_REJECTED_CURRENT_AUTH_UPDATE_COMMAND_ID_SEED: u128 = 0x128;
+const ARBITRARY_CORRUPT_HEADER_SESSION_ID_SEED: u128 = 0x220;
+const ARBITRARY_CORRUPT_HEADER_CREATION_COMMAND_ID_SEED: u128 = 0x120;
+const ARBITRARY_CORRUPT_HEADER_UPDATE_COMMAND_ID_SEED: u128 = 0x121;
+const ARBITRARY_ANCESTRY_MISMATCH_SESSION_ID_SEED: u128 = 0x221;
+const ARBITRARY_ANCESTRY_MISMATCH_CREATION_COMMAND_ID_SEED: u128 = 0x122;
+const ARBITRARY_ANCESTRY_MISMATCH_CONVERSATION_ID_SEED: u128 = 0x320;
+const ARBITRARY_ANCESTRY_MISMATCH_FRONTIER_ENTRY_ID_SEED: u128 = 0x321;
+const ARBITRARY_PRE_V6_CREATION_COMMAND_ID_SEED: u128 = 0x129;
+const ARBITRARY_PRE_V6_SESSION_ID_SEED: u128 = 0x225;
+const ARBITRARY_LEGACY_CREATION_COMMAND_ID_SEED: u128 = 0x118;
+const ARBITRARY_LEGACY_SESSION_ID_SEED: u128 = 0x20c;
+const ARBITRARY_MALFORMED_RECEIPT_SESSION_ID_SEED: u128 = 0x20b;
+const ARBITRARY_MALFORMED_PREDECESSOR_COMMAND_ID_SEED: u128 = 0x119;
+const ARBITRARY_MISSING_RESULT_VERSION_COMMAND_ID_SEED: u128 = 0x117;
 const ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED: u128 = 0x203;
 const ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED: u128 = 0x103;
 const ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED: u128 = 0x104;
@@ -143,7 +177,9 @@ fn creation(
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-            DirectModelSelection::from_uuid(Uuid::from_u128(0x1000)),
+            DirectModelSelection::from_uuid(Uuid::from_u128(
+                ARBITRARY_DEFAULT_MODEL_SELECTION_ID_SEED,
+            )),
         )),
         placement,
     )
@@ -307,8 +343,8 @@ async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_
 async fn s01_root_creation_record_states_global_read_intent_explicitly()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let command_id = command(0x101);
-    let session_id = session(0x201);
+    let command_id = command(ARBITRARY_ROOT_CREATION_COMMAND_ID_SEED);
+    let session_id = session(ARBITRARY_ROOT_CREATION_SESSION_ID_SEED);
     let root = root("operator");
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(command_id, session_id, root.clone()))
@@ -343,8 +379,8 @@ async fn s01_root_creation_record_states_global_read_intent_explicitly()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_pathless_creation_keeps_the_legacy_unscoped_value() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let command_id = command(0x102);
-    let session_id = session(0x202);
+    let command_id = command(ARBITRARY_PATHLESS_CREATION_COMMAND_ID_SEED);
+    let session_id = session(ARBITRARY_PATHLESS_CREATION_SESSION_ID_SEED);
     let placement = SessionPlacement::pathless();
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(command_id, session_id, placement.clone()))
@@ -484,7 +520,7 @@ async fn s36_public_placement_read_rejects_a_missing_current_head() -> Result<()
 async fn s36_placement_update_rejects_a_missing_current_head() -> Result<(), Box<dyn Error>> {
     let fixture = missing_placement_head_fixture().await?;
     let update = UpdateSessionPlacement::new(
-        command(0x106),
+        command(ARBITRARY_MISSING_HEAD_UPDATE_COMMAND_ID_SEED),
         fixture.session,
         SessionPlacementVersion::INITIAL,
         SessionPlacement::pathless(),
@@ -505,8 +541,8 @@ async fn s36_placement_update_rejects_a_missing_current_head() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_creation_replay_rejects_a_missing_current_placement_head() -> Result<(), Box<dyn Error>>
-{
+async fn s36_inv002_inv012_creation_replay_rejects_a_missing_current_placement_head()
+-> Result<(), Box<dyn Error>> {
     let fixture = missing_placement_head_fixture().await?;
     let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
         .handle(fixture.creation)
@@ -776,22 +812,22 @@ async fn corrupt_creation_placement_provenance_fixture()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x205);
+    let session_id = session(ARBITRARY_CROSS_WIRED_APPLIED_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x107),
+            command(ARBITRARY_CROSS_WIRED_APPLIED_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let first_command = command(0x108);
+    let first_command = command(ARBITRARY_CROSS_WIRED_APPLIED_FIRST_UPDATE_COMMAND_ID_SEED);
     let first = UpdateSessionPlacement::new(
         first_command,
         session_id,
         SessionPlacementVersion::INITIAL,
         scoped("projects.foo.first"),
     );
-    let second_command = command(0x109);
+    let second_command = command(ARBITRARY_CROSS_WIRED_APPLIED_SECOND_UPDATE_COMMAND_ID_SEED);
     let second = UpdateSessionPlacement::new(
         second_command,
         session_id,
@@ -840,10 +876,10 @@ struct CorruptPlacementPredecessorFixture {
 async fn corrupt_placement_predecessor_fixture()
 -> Result<CorruptPlacementPredecessorFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session = session(0x231);
+    let session = session(ARBITRARY_CORRUPT_PREDECESSOR_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x131),
+            command(ARBITRARY_CORRUPT_PREDECESSOR_CREATION_COMMAND_ID_SEED),
             session,
             SessionPlacement::pathless(),
         ))
@@ -851,13 +887,13 @@ async fn corrupt_placement_predecessor_fixture()
     let repository = SessionPlacementRepository::new(pool.clone());
     repository
         .handle(UpdateSessionPlacement::new(
-            command(0x132),
+            command(ARBITRARY_CORRUPT_PREDECESSOR_FIRST_UPDATE_COMMAND_ID_SEED),
             session,
             SessionPlacementVersion::INITIAL,
             scoped("projects.foo.first"),
         ))
         .await?;
-    let successor_command = command(0x133);
+    let successor_command = command(ARBITRARY_CORRUPT_PREDECESSOR_SUCCESSOR_COMMAND_ID_SEED);
     repository
         .handle(UpdateSessionPlacement::new(
             successor_command,
@@ -915,7 +951,7 @@ async fn s36_placement_update_authenticates_every_placement_predecessor()
     let fixture = corrupt_placement_predecessor_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(UpdateSessionPlacement::new(
-            command(0x134),
+            command(ARBITRARY_CORRUPT_PREDECESSOR_FOLLOWUP_COMMAND_ID_SEED),
             fixture.session,
             SessionPlacementVersion::try_from_u64(3).expect("fixture current version is positive"),
             scoped("projects.foo.third"),
@@ -951,7 +987,7 @@ async fn corrupt_placement_update_receipt_fixture()
         .await?;
     SessionPlacementRepository::new(pool.clone())
         .handle(UpdateSessionPlacement::new(
-            command(0x117),
+            command(ARBITRARY_CORRUPT_UPDATE_RECEIPT_UPDATE_COMMAND_ID_SEED),
             session,
             SessionPlacementVersion::INITIAL,
             scoped("projects.foo.recorded"),
@@ -1004,7 +1040,7 @@ async fn s36_placement_update_authenticates_the_current_placement_receipt()
     let fixture = corrupt_placement_update_receipt_fixture().await?;
     let error = SessionPlacementRepository::new(fixture.pool.clone())
         .handle(UpdateSessionPlacement::new(
-            command(0x118),
+            command(ARBITRARY_CORRUPT_UPDATE_RECEIPT_REPLACEMENT_COMMAND_ID_SEED),
             fixture.session,
             SessionPlacementVersion::try_from_u64(2).expect("fixture current version is positive"),
             scoped("projects.foo.replacement"),
@@ -1026,15 +1062,15 @@ async fn s36_placement_update_authenticates_the_current_placement_receipt()
 async fn s36_inv012_rejected_update_replay_authenticates_the_reported_current_version()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session = session(0x224);
+    let session = session(ARBITRARY_REJECTED_CURRENT_AUTH_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x127),
+            command(ARBITRARY_REJECTED_CURRENT_AUTH_CREATION_COMMAND_ID_SEED),
             session,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let command_id = command(0x128);
+    let command_id = command(ARBITRARY_REJECTED_CURRENT_AUTH_UPDATE_COMMAND_ID_SEED);
     let update = UpdateSessionPlacement::new(
         command_id,
         session,
@@ -1284,17 +1320,17 @@ async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reac
 async fn s36_current_read_rejects_a_corrupt_placement_update_typed_header()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x220);
+    let session_id = session(ARBITRARY_CORRUPT_HEADER_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x120),
+            command(ARBITRARY_CORRUPT_HEADER_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
         .await?;
     SessionPlacementRepository::new(pool.clone())
         .handle(UpdateSessionPlacement::new(
-            command(0x121),
+            command(ARBITRARY_CORRUPT_HEADER_UPDATE_COMMAND_ID_SEED),
             session_id,
             SessionPlacementVersion::INITIAL,
             scoped("projects.foo.header"),
@@ -1337,12 +1373,14 @@ async fn s36_current_read_rejects_a_corrupt_placement_update_typed_header()
 async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x221);
-    let imported_conversation_id = Uuid::from_u128(0x320);
-    let imported_frontier_entry_id = Uuid::from_u128(0x321);
+    let session_id = session(ARBITRARY_ANCESTRY_MISMATCH_SESSION_ID_SEED);
+    let imported_conversation_id =
+        Uuid::from_u128(ARBITRARY_ANCESTRY_MISMATCH_CONVERSATION_ID_SEED);
+    let imported_frontier_entry_id =
+        Uuid::from_u128(ARBITRARY_ANCESTRY_MISMATCH_FRONTIER_ENTRY_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x122),
+            command(ARBITRARY_ANCESTRY_MISMATCH_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
@@ -1384,8 +1422,8 @@ async fn s36_creation_receipt_must_match_the_session_ancestry_family() -> Result
 async fn s36_current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let command = command(0x129);
-    let session = session(0x225);
+    let command = command(ARBITRARY_PRE_V6_CREATION_COMMAND_ID_SEED);
+    let session = session(ARBITRARY_PRE_V6_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
             command,
@@ -1435,8 +1473,8 @@ async fn s36_current_placement_read_rejects_a_pre_v6_scoped_creation_receipt()
 async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let command_id = command(0x118);
-    let session_id = session(0x20c);
+    let command_id = command(ARBITRARY_LEGACY_CREATION_COMMAND_ID_SEED);
+    let session_id = session(ARBITRARY_LEGACY_SESSION_ID_SEED);
     let legacy_placement = SessionPlacement::pathless();
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(command_id, session_id, legacy_placement.clone()))
@@ -1516,7 +1554,7 @@ async fn s36_post_migration_legacy_creation_materializes_pathless_placement()
 async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
-    let command_id = command(0x119);
+    let command_id = command(ARBITRARY_MALFORMED_PREDECESSOR_COMMAND_ID_SEED);
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
@@ -1537,7 +1575,7 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
                  7, NULL, FALSE, 'applied', NULL, 2, NULL)",
     )
     .bind(*command_id.as_uuid())
-    .bind(*session(0x20b).as_uuid())
+    .bind(*session(ARBITRARY_MALFORMED_RECEIPT_SESSION_ID_SEED).as_uuid())
     .execute(&mut *transaction)
     .await
     .expect_err("an applied update receipt must advance its expected predecessor");
@@ -1557,7 +1595,7 @@ async fn s36_applied_update_receipt_requires_the_expected_predecessor() -> Resul
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_applied_update_receipt_requires_a_result_version() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let command_id = command(0x117);
+    let command_id = command(ARBITRARY_MISSING_RESULT_VERSION_COMMAND_ID_SEED);
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
@@ -1578,7 +1616,7 @@ async fn s36_applied_update_receipt_requires_a_result_version() -> Result<(), Bo
                  1, NULL, FALSE, 'applied', NULL, NULL, NULL)",
     )
     .bind(*command_id.as_uuid())
-    .bind(*session(0x20b).as_uuid())
+    .bind(*session(ARBITRARY_MALFORMED_RECEIPT_SESSION_ID_SEED).as_uuid())
     .execute(&mut *transaction)
     .await
     .expect_err("an applied update receipt must name its resulting version");
