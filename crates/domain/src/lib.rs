@@ -20,6 +20,7 @@ mod imported_conversation;
 mod imported_session;
 mod model_call;
 mod model_execution;
+mod model_settings;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
@@ -133,6 +134,14 @@ pub use model_execution::{
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
     ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+};
+pub use model_settings::{
+    AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings, EffectiveModelSettings,
+    FastMode, FastModeSupport, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityCatalogError, ModelCapabilityDefinition, ModelChangeAdjustment,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+    ReasoningLevel, ResolvedModelSettings, ServiceTier, SessionModelSettingsChanged,
+    SettingOverlay, TurnModelSettingsResolved, UnsupportedModelSetting, ValidatedModelSettings,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,

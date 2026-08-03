@@ -2,10 +2,10 @@
 //!
 //! The normative specification is
 //! `docs/spec/configuration-and-credentials.md`. The first implementable
-//! effective configuration is deliberately model-selection-only: one frozen
-//! direct or alias model selection, provider-default parameters, and
-//! disabled known-provider-failure retry and model fallback. Custom
-//! parameters, instructions, tool enablement, placement constraints,
+//! effective configuration includes one frozen direct or alias model
+//! selection, validated model/session settings, provider-default legacy
+//! parameters, and disabled known-provider-failure retry and model fallback.
+//! Custom instructions, tool enablement, placement constraints,
 //! per-turn resources, and interpreting-policy selections are unavailable
 //! baseline capabilities, not latent optional fields. The `Scope` section
 //! on [`EffectiveConfiguration`] lists what these pure values deliberately
@@ -16,7 +16,7 @@
 
 use core::fmt;
 
-use crate::DangerousToolAutoApproval;
+use crate::{DangerousToolAutoApproval, ValidatedModelSettings};
 
 crate::define_identity!(
     /// Names exactly one configured provider/model selection as a canonical
@@ -142,6 +142,7 @@ pub struct EffectiveConfiguration {
     known_provider_failure_retry: KnownProviderFailureRetry,
     model_fallback: ModelFallback,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    model_settings: ValidatedModelSettings,
 }
 
 impl EffectiveConfiguration {
@@ -153,6 +154,7 @@ impl EffectiveConfiguration {
             known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
             model_fallback: ModelFallback::Disabled,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
     }
 
@@ -167,6 +169,24 @@ impl EffectiveConfiguration {
             known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
             model_fallback: ModelFallback::Disabled,
             dangerous_tool_auto_approval,
+            model_settings: ValidatedModelSettings::provider_defaults(),
+        }
+    }
+
+    /// Constructs the complete value with model settings validated for its
+    /// frozen direct selection.
+    pub const fn with_model_settings(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
+    ) -> Self {
+        Self {
+            model,
+            parameters: ModelParameters::ProviderDefaults,
+            known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
+            model_fallback: ModelFallback::Disabled,
+            dangerous_tool_auto_approval,
+            model_settings,
         }
     }
 
@@ -193,6 +213,11 @@ impl EffectiveConfiguration {
     /// Returns the dangerous blanket-auto posture frozen for this turn.
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
+    }
+
+    /// Returns the complete validated model settings frozen for this turn.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
     }
 }
 
@@ -366,6 +391,7 @@ pub struct SessionConfigurationDefaults {
     model: ModelSelectionRequest,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
     system_prompt: Option<SessionSystemPrompt>,
+    model_settings: ValidatedModelSettings,
 }
 
 impl SessionConfigurationDefaults {
@@ -375,6 +401,7 @@ impl SessionConfigurationDefaults {
             model,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
             system_prompt: None,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
     }
 
@@ -387,6 +414,7 @@ impl SessionConfigurationDefaults {
             model,
             dangerous_tool_auto_approval,
             system_prompt: None,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
     }
 
@@ -400,6 +428,22 @@ impl SessionConfigurationDefaults {
             model,
             dangerous_tool_auto_approval,
             system_prompt,
+            model_settings: ValidatedModelSettings::provider_defaults(),
+        }
+    }
+
+    /// Creates complete defaults including validated model settings.
+    pub const fn complete_with_model_settings(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+        model_settings: ValidatedModelSettings,
+    ) -> Self {
+        Self {
+            model,
+            dangerous_tool_auto_approval,
+            system_prompt,
+            model_settings,
         }
     }
 
@@ -416,6 +460,11 @@ impl SessionConfigurationDefaults {
     /// Borrows the optional session system prompt.
     pub const fn system_prompt(&self) -> Option<&SessionSystemPrompt> {
         self.system_prompt.as_ref()
+    }
+
+    /// Returns the complete settings snapshot installed in this defaults epoch.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
     }
 }
 
@@ -499,6 +548,7 @@ impl VersionedSessionConfigurationDefaults {
             request: ConfigurationRequest {
                 model,
                 dangerous_tool_auto_approval: self.defaults.dangerous_tool_auto_approval(),
+                model_settings: self.defaults.model_settings(),
             },
             session_defaults_version: self.version,
         })
@@ -523,6 +573,7 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest {
     model: ModelSelectionRequest,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    model_settings: ValidatedModelSettings,
 }
 
 impl ConfigurationRequest {
@@ -534,6 +585,11 @@ impl ConfigurationRequest {
     /// Returns the dangerous blanket-auto posture derived with this request.
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
+    }
+
+    /// Returns the complete model settings derived with this request.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
     }
 }
 
@@ -621,9 +677,10 @@ impl OriginConfiguration {
         Ok(Self {
             requested,
             session_defaults_version,
-            effective: EffectiveConfiguration::with_dangerous_tool_auto_approval(
+            effective: EffectiveConfiguration::with_model_settings(
                 model,
                 requested.dangerous_tool_auto_approval(),
+                requested.model_settings(),
             ),
         })
     }
@@ -741,7 +798,7 @@ mod tests {
         VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
     };
     use crate::test_support::{alias, direct, turn_id};
-    use crate::{DangerousToolAutoApproval, SteeringBinding};
+    use crate::{DangerousToolAutoApproval, SteeringBinding, ValidatedModelSettings};
     use uuid::Uuid;
 
     /// S34 / INV-046: the session system prompt admits exactly the
@@ -1254,6 +1311,7 @@ mod tests {
         let request = ConfigurationRequest {
             model,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         };
 
         assert_eq!(request.model(), model);

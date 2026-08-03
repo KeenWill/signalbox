@@ -1520,8 +1520,13 @@ impl EffectiveConfiguration {
         model: FrozenModelSelection,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
+    pub const fn with_model_settings(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
+    ) -> Self;
     // accessors: model(), parameters(), known_provider_failure_retry(), model_fallback(),
-    // dangerous_tool_auto_approval()
+    // dangerous_tool_auto_approval(), model_settings()
 }
 
 pub struct SessionConfigurationDefaultsVersion(/* private u64 */);
@@ -1562,7 +1567,13 @@ impl SessionConfigurationDefaults {
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
     ) -> Self;
-    // accessors: model(), dangerous_tool_auto_approval(), system_prompt()
+    pub const fn complete_with_model_settings(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+        model_settings: ValidatedModelSettings,
+    ) -> Self;
+    // accessors: model(), dangerous_tool_auto_approval(), system_prompt(), model_settings()
 }
 
 pub struct VersionedSessionConfigurationDefaults { /* private */ }
@@ -1588,7 +1599,7 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest { /* private */ }
 // sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
 impl ConfigurationRequest {
-    // accessors: model(), dangerous_tool_auto_approval()
+    // accessors: model(), dangerous_tool_auto_approval(), model_settings()
 }
 
 pub struct VersionCheckedConfigurationRequest { /* private */ }
@@ -1632,6 +1643,201 @@ impl UnknownModelAlias {
 pub enum TurnConfigurationProvenance {
     ExplicitOrigin(OriginConfiguration),
     InheritedForReclassifiedSteering(SteeringBinding),
+}
+```
+
+## domain: model_settings
+
+```rust
+pub enum ReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+pub enum FastMode { Disabled, Enabled }
+
+pub enum AnthropicServiceTier { Auto, StandardOnly }
+
+pub enum OpenAiServiceTier { Auto, Default, Flex, Scale, Priority, Fast }
+
+pub enum CodexCliServiceTier { Default, Priority, Flex }
+
+pub enum ServiceTier {
+    Anthropic(AnthropicServiceTier),
+    OpenAi(OpenAiServiceTier),
+    CodexCli(CodexCliServiceTier),
+}
+
+pub enum SettingOverlay<T> {
+    Inherit,
+    ProviderDefault,
+    Value(T),
+}
+
+pub struct ModelSettingsOverlay { /* private */ }
+impl ModelSettingsOverlay {
+    pub const fn inherit_all() -> Self;
+    pub const fn new(
+        reasoning_level: SettingOverlay<ReasoningLevel>,
+        fast_mode: SettingOverlay<FastMode>,
+        service_tier: SettingOverlay<ServiceTier>,
+    ) -> Self;
+    pub const fn from_effective(settings: EffectiveModelSettings) -> Self;
+    // accessors: reasoning_level(), fast_mode(), service_tier()
+}
+
+pub struct EffectiveModelSettings { /* private */ }
+impl EffectiveModelSettings {
+    pub const fn provider_defaults() -> Self;
+    pub const fn new(
+        reasoning_level: Option<ReasoningLevel>,
+        fast_mode: FastMode,
+        service_tier: Option<ServiceTier>,
+    ) -> Self;
+    // accessors: reasoning_level(), fast_mode(), service_tier()
+}
+
+pub enum ModelSettingSource { PerCall, Session, Profile, GlobalDefault }
+
+pub struct ResolvedModelSettings { /* private */ }
+// sealed: ModelSettingsPrecedence::resolve
+impl ResolvedModelSettings {
+    // accessors: effective(), reasoning_source(), fast_mode_source(), service_tier_source()
+}
+
+pub struct ValidatedModelSettings { /* private */ }
+// sealed: provider_defaults or ModelCapabilities::validate_resolved
+impl ValidatedModelSettings {
+    pub const fn provider_defaults() -> Self;
+    // accessors: effective(), validated_for()
+}
+
+pub struct ModelSettingsPrecedence { /* private */ }
+impl ModelSettingsPrecedence {
+    pub const fn new(
+        per_call: ModelSettingsOverlay,
+        session: ModelSettingsOverlay,
+        profile: ModelSettingsOverlay,
+        global_default: ModelSettingsOverlay,
+    ) -> Self;
+    pub fn resolve(self) -> ResolvedModelSettings;
+}
+
+pub enum FastModeSupport {
+    Unsupported,
+    RequestControl,
+    AlternateTarget(ResolvedProviderTarget),
+}
+
+pub struct ModelCapabilities { /* private */ }
+impl ModelCapabilities {
+    pub const fn new(
+        reasoning_levels: BTreeSet<ReasoningLevel>,
+        fast_mode: FastModeSupport,
+        service_tiers: BTreeSet<ServiceTier>,
+    ) -> Self;
+    pub fn validate_explicit(
+        &self,
+        selection: DirectModelSelection,
+        overlay: ModelSettingsOverlay,
+    ) -> Result<(), UnsupportedModelSetting>;
+    pub fn validate_resolved(
+        &self,
+        selection: DirectModelSelection,
+        resolved: ResolvedModelSettings,
+    ) -> Result<ValidatedModelSettings, UnsupportedModelSetting>;
+    pub fn adjust_for_model_change(
+        &self,
+        inherited: EffectiveModelSettings,
+    ) -> CompatibleModelSettings;
+    pub const fn serving_target(
+        &self,
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> Option<ResolvedProviderTarget>;
+    // accessors: reasoning_levels(), fast_mode(), service_tiers()
+}
+
+pub enum UnsupportedModelSetting {
+    ReasoningLevel { selection: DirectModelSelection, requested: ReasoningLevel },
+    FastMode { selection: DirectModelSelection },
+    ServiceTier { selection: DirectModelSelection, requested: ServiceTier },
+}
+
+pub enum ModelChangeAdjustment {
+    ReasoningLevelClamped { from: ReasoningLevel, to: ReasoningLevel },
+    ReasoningLevelCleared { from: ReasoningLevel },
+    FastModeDisabled,
+    ServiceTierCleared { from: ServiceTier },
+}
+
+pub struct CompatibleModelSettings { /* private */ }
+// sealed: ModelCapabilities::adjust_for_model_change
+impl CompatibleModelSettings {
+    pub fn into_parts(self) -> (EffectiveModelSettings, Box<[ModelChangeAdjustment]>);
+    // accessors: effective(), adjustments()
+}
+
+pub struct SessionModelSettingsChanged { /* private */ }
+impl SessionModelSettingsChanged {
+    pub fn try_new(
+        session: SessionId,
+        command_id: DurableCommandId,
+        prior_defaults_version: SessionConfigurationDefaultsVersion,
+        installed_defaults_version: SessionConfigurationDefaultsVersion,
+        prior_model: ModelSelectionRequest,
+        installed_model: ModelSelectionRequest,
+        prior_settings: ValidatedModelSettings,
+        installed_settings: ValidatedModelSettings,
+        caller_override: ModelSettingsOverlay,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
+    // accessors: session(), command_id(), prior_defaults_version(),
+    // installed_defaults_version(), prior_model(), installed_model(), prior_settings(),
+    // installed_settings(), caller_override(), adjustments()
+}
+
+pub struct TurnModelSettingsResolved { /* private */ }
+impl TurnModelSettingsResolved {
+    pub fn try_new(
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selection: FrozenModelSelection,
+        per_call_override: ModelSettingsOverlay,
+        settings: ValidatedModelSettings,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
+    // accessors: accepted_input(), turn(), defaults_version(), selection(),
+    // per_call_override(), settings(), adjustments()
+}
+
+pub struct ModelCapabilityDefinition { /* private */ }
+impl ModelCapabilityDefinition {
+    pub const fn new(
+        selection: DirectModelSelection,
+        capabilities: ModelCapabilities,
+    ) -> Self;
+    // accessors: selection(), capabilities()
+}
+
+pub struct ModelCapabilityCatalog { /* private */ }
+impl ModelCapabilityCatalog {
+    pub fn try_from_definitions(
+        definitions: impl IntoIterator<Item = ModelCapabilityDefinition>,
+    ) -> Result<Self, ModelCapabilityCatalogError>;
+    pub fn resolve(&self, selection: DirectModelSelection) -> Option<&ModelCapabilities>;
+    pub fn iter(&self) -> impl Iterator<Item = (DirectModelSelection, &ModelCapabilities)>;
+}
+
+pub enum ModelCapabilityCatalogError {
+    DuplicateSelection { selection: DirectModelSelection },
 }
 ```
 
@@ -1686,7 +1892,12 @@ impl PerInputConfigurationChoices {
         expected_session_defaults_version: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
     ) -> Self;
-    // accessors: expected_session_defaults_version(), model()
+    pub const fn with_model_settings(
+        expected_session_defaults_version: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        model_settings: ModelSettingsOverlay,
+    ) -> Self;
+    // accessors: expected_session_defaults_version(), model(), model_settings()
 }
 
 pub enum DeliveryRequest {
@@ -8722,6 +8933,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
+| domain: model_settings                             | 23                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
@@ -8748,7 +8960,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **710 (+7 free fn)** |
+| **signalbox-domain total**                         | **733 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
