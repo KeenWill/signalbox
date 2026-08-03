@@ -4619,12 +4619,20 @@ where
             .await;
         }
     };
-    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
         model_selection,
         DangerousToolAutoApproval::Disabled,
         None,
         model_settings,
-    );
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let through_position = wire_request.through_position;
     let repository =
         ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
@@ -6347,15 +6355,22 @@ where
             .await;
         }
     };
-    let request = CreateSessionRequest::try_new(
-        DurableCommandId::from_uuid(command_uuid),
-        SessionConfigurationDefaults::complete_with_model_settings(
-            model_selection,
-            DangerousToolAutoApproval::Disabled,
-            system_prompt,
-            model_settings,
-        ),
-    );
+    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
+        model_selection,
+        DangerousToolAutoApproval::Disabled,
+        system_prompt,
+        model_settings,
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request =
+        CreateSessionRequest::try_new(DurableCommandId::from_uuid(command_uuid), defaults);
     let Ok(request) = request.map(|request| request.with_placement(placement)) else {
         return write_error(
             writer,
@@ -7816,7 +7831,7 @@ where
             .await;
         }
     };
-    let replacement = SessionConfigurationDefaults::complete_with_model_settings(
+    let Some(replacement) = SessionConfigurationDefaults::complete_with_model_settings(
         replacement_model,
         if dangerous_tool_auto_approval {
             DangerousToolAutoApproval::ApproveAll
@@ -7825,7 +7840,15 @@ where
         },
         system_prompt,
         model_settings,
-    );
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let durable_command_id = DurableCommandId::from_uuid(command_id);
     // A member the frame could not state must not silently clear a prompt
     // the current epoch carries; the transaction refuses that atomically
