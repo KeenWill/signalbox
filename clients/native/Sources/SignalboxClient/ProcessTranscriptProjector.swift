@@ -201,6 +201,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let modelCallAnchors = modelCallAnchors(in: snapshot.records)
     let turnEntryAnchors = turnEntryAnchors(in: snapshot.records)
     let sessionTurnAcceptancePositions = sessionTurnAcceptancePositions(in: snapshot.records)
+    let sessionToolRequestPositions = sessionToolRequestPositions(in: snapshot.records)
     let trailingModelCallUsageIDs = trailingModelCallUsageIDs(in: snapshot.records)
     var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
     var unanchoredUsage: [SignalboxStoredEvent] = []
@@ -299,6 +300,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           message,
           awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
           sessionTurnAcceptancePositions: sessionTurnAcceptancePositions,
+          sessionToolRequestPositions: sessionToolRequestPositions,
           selection: selection
         )
         if let projected {
@@ -455,6 +457,22 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
   }
 
+  private func sessionToolRequestPositions(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition] {
+    records.reduce(into: [:]) { positions, record in
+      guard case .entry(let message) = record,
+        case .assistantToolUse(let turnID, _, let requestID, _, _) = message.entry
+      else {
+        return
+      }
+      positions[requestID] = SignalboxProcessToolRequestPosition(
+        turnID: turnID,
+        entryIndex: message.entryIndex
+      )
+    }
+  }
+
   private func transcriptMarkerTerminalModelCallID(
     for state: SignalboxTranscriptTurnState
   ) -> SignalboxCanonicalUUID? {
@@ -543,6 +561,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     awaitingToolDecisionRequestID: String?,
     sessionTurnAcceptancePositions: [SignalboxCanonicalUUID: SignalboxCanonicalUInt64],
+    sessionToolRequestPositions:
+      [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition],
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
     guard entryIsSelected(message, selection: selection) else {
@@ -572,6 +592,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         toolRequestID: SignalboxToolInvocationID(rawValue: request),
         turnID: turnID,
         sessionTurnAcceptancePositions: sessionTurnAcceptancePositions,
+        sessionToolRequestPositions: sessionToolRequestPositions,
         toolName: toolName,
         arguments: arguments,
         output: nil,
@@ -680,6 +701,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       toolRequestID: prior.toolRequestID,
       turnID: prior.turnID,
       sessionTurnAcceptancePositions: prior.sessionTurnAcceptancePositions,
+      sessionToolRequestPositions: prior.sessionToolRequestPositions,
       toolAttemptID: toolAttemptID,
       toolName: prior.toolName,
       arguments: prior.arguments,
@@ -703,6 +725,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       toolRequestID: event.toolRequestID,
       turnID: event.turnID,
       sessionTurnAcceptancePositions: event.sessionTurnAcceptancePositions,
+      sessionToolRequestPositions: event.sessionToolRequestPositions,
       toolAttemptID: event.toolAttemptID,
       toolName: event.toolName,
       arguments: event.arguments,

@@ -761,9 +761,7 @@ public enum SignalboxEventNormalizer {
                     validPlanReadResponse(arguments: arguments, output: output)
                         && validPlanHistoryCorrelation(
                             output.history,
-                            owningTurnID: tool.turnID,
-                            sessionTurnAcceptancePositions:
-                                tool.sessionTurnAcceptancePositions
+                            tool: tool
                         )
                         ? formattedPlanReadOutput(output)
                         : nil
@@ -1060,15 +1058,13 @@ public enum SignalboxEventNormalizer {
 
     private static func validPlanHistoryCorrelation(
         _ history: [PlanEvent]?,
-        owningTurnID: SignalboxCanonicalUUID?,
-        sessionTurnAcceptancePositions:
-            [SignalboxCanonicalUUID: SignalboxCanonicalUInt64]?
+        tool: SignalboxProcessToolEvent
     ) -> Bool {
         guard let history, !history.isEmpty else {
             return true
         }
-        guard let owningTurnID,
-            let sessionTurnAcceptancePositions,
+        guard let owningTurnID = tool.turnID,
+            let sessionTurnAcceptancePositions = tool.sessionTurnAcceptancePositions,
             let owningPosition = sessionTurnAcceptancePositions[owningTurnID]
         else {
             return false
@@ -1081,7 +1077,23 @@ public enum SignalboxEventNormalizer {
             else {
                 return false
             }
-            return eventPosition <= owningPosition
+            guard event.provenance.turnID == owningTurnID else {
+                return eventPosition < owningPosition
+            }
+            guard let sessionToolRequestPositions = tool.sessionToolRequestPositions,
+                let owningRequestID = try? SignalboxCanonicalUUID(
+                    validating: tool.toolRequestID.rawValue
+                ),
+                let owningRequestPosition = sessionToolRequestPositions[owningRequestID],
+                owningRequestPosition.turnID == owningTurnID,
+                let eventRequestPosition = sessionToolRequestPositions[
+                    event.provenance.requestID
+                ],
+                eventRequestPosition.turnID == owningTurnID
+            else {
+                return false
+            }
+            return eventRequestPosition.entryIndex < owningRequestPosition.entryIndex
         }
     }
 

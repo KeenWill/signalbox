@@ -739,12 +739,27 @@ public enum SignalboxProcessToolStatus: String, Codable, Equatable, Sendable {
   case recoveryRequired = "recovery_required"
 }
 
+public struct SignalboxProcessToolRequestPosition: Codable, Equatable, Sendable {
+  public let turnID: SignalboxCanonicalUUID
+  public let entryIndex: SignalboxCanonicalUInt64
+
+  public init(
+    turnID: SignalboxCanonicalUUID,
+    entryIndex: SignalboxCanonicalUInt64
+  ) {
+    self.turnID = turnID
+    self.entryIndex = entryIndex
+  }
+}
+
 public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
   public let kind: String
   public let toolRequestID: SignalboxToolInvocationID
   public let turnID: SignalboxCanonicalUUID?
   public let sessionTurnAcceptancePositions:
     [SignalboxCanonicalUUID: SignalboxCanonicalUInt64]?
+  public let sessionToolRequestPositions:
+    [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition]?
   public let toolAttemptID: SignalboxCanonicalUUID?
   public let toolName: String
   public let arguments: String?
@@ -756,6 +771,8 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     turnID: SignalboxCanonicalUUID? = nil,
     sessionTurnAcceptancePositions:
       [SignalboxCanonicalUUID: SignalboxCanonicalUInt64]? = nil,
+    sessionToolRequestPositions:
+      [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition]? = nil,
     toolAttemptID: SignalboxCanonicalUUID? = nil,
     toolName: String,
     arguments: String?,
@@ -766,6 +783,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     self.toolRequestID = toolRequestID
     self.turnID = turnID
     self.sessionTurnAcceptancePositions = sessionTurnAcceptancePositions
+    self.sessionToolRequestPositions = sessionToolRequestPositions
     self.toolAttemptID = toolAttemptID
     self.toolName = toolName
     self.arguments = arguments
@@ -778,7 +796,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     try payload.rejectUnadmittedFields(
       [
         "kind", "toolRequestID", "turnID", "sessionTurnAcceptancePositions", "toolAttemptID",
-        "toolName", "arguments", "output", "status",
+        "sessionToolRequestPositions", "toolName", "arguments", "output", "status",
       ],
       decoder: decoder
     )
