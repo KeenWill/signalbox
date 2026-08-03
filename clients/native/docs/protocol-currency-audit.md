@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `79350a46` on 2026-08-03.
+Verified against repository head `39de7e6f` on 2026-08-03.
 
 ## Scope and method
 
