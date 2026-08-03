@@ -159,6 +159,10 @@ Adjustment variants are closed: `reasoning_level_clamped { from, to }`,
 types but preserve every field. Equal durable-command replay returns the first
 recorded result and events; conflicting override provenance is conflicting reuse
 (INV-012).
+Automatic adjustments are server-derived evidence, not caller payload: they do
+not participate in command comparison. A first application stores them with the
+event, while an equal replay returns that recorded evidence instead of deriving
+it again from the current capability catalog.
 
 ## Adapter translation
 
