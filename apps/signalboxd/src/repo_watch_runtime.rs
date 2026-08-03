@@ -57,9 +57,9 @@ const MAX_AGGREGATE_WIRE_BYTES: usize = 64 * 1024 * 1024;
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
-  $owner: String!, $name: String!, $number: Int!, $after: String
+  $namespace: String!, $name: String!, $number: Int!, $after: String
 ) {
-  repository(owner: $owner, name: $name) {
+  repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
         nodes { id isResolved }
@@ -607,12 +607,12 @@ impl GitHubRepositoryPoller {
         &mut self,
         number: u64,
     ) -> Result<Vec<RepoWatchThreadObservation>, RepositoryWatchAttemptError> {
-        let (owner, name) = self
+        let (namespace, name) = self
             .repository
             .as_str()
             .split_once('/')
             .ok_or(RepositoryWatchAttemptError::Normalization)?;
-        let owner = owner.to_owned();
+        let namespace = namespace.to_owned();
         let name = name.to_owned();
         let number =
             i64::try_from(number).map_err(|_| RepositoryWatchAttemptError::Normalization)?;
@@ -623,7 +623,7 @@ impl GitHubRepositoryPoller {
             let body = serde_json::to_vec(&GraphQlRequest {
                 query: REVIEW_THREADS_QUERY,
                 variables: ThreadVariables {
-                    owner: &owner,
+                    namespace: &namespace,
                     name: &name,
                     number,
                     after: after.as_deref(),
@@ -904,12 +904,12 @@ impl GitHubRepositoryPoller {
                 .map_err(|_| RepositoryWatchAttemptError::Request)?;
             segments.pop_if_empty();
             segments.push("repos");
-            let (owner, name) = self
+            let (namespace, name) = self
                 .repository
                 .as_str()
                 .split_once('/')
                 .ok_or(RepositoryWatchAttemptError::Normalization)?;
-            segments.push(owner);
+            segments.push(namespace);
             segments.push(name);
             segments.extend(suffix.iter().copied());
         }
@@ -1441,7 +1441,7 @@ struct GraphQlRequest<T> {
 
 #[derive(Serialize)]
 struct ThreadVariables<'a> {
-    owner: &'a str,
+    namespace: &'a str,
     name: &'a str,
     number: i64,
     after: Option<&'a str>,
@@ -1517,34 +1517,33 @@ mod tests {
     use signalbox_domain::ReactionSubject;
     use signalbox_model_runtime::CredentialReference;
 
-    const WATCHED_REPOSITORY: &str = "owner/repository";
-    const CREDENTIAL_REFERENCE: &str = "repository-watch:owner/repository";
+    const WATCHED_REPOSITORY: &str = "namespace/project";
+    const CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
     const CREDENTIAL_FILE_NAME: &str = "watch-token";
     const CREDENTIAL_VALUE: &str = "fixture-token";
     const ENTITY_TAG: &str = "\"fixture-etag\"";
-    const PULLS_TARGET: &str = "/repos/owner/repository/pulls?state=open&per_page=100&page=1";
-    const BRANCHES_TARGET: &str = "/repos/owner/repository/branches?per_page=100&page=1";
-    const WORKFLOWS_TARGET: &str = "/repos/owner/repository/actions/workflows?per_page=100&page=1";
+    const PULLS_TARGET: &str = "/repos/namespace/project/pulls?state=open&per_page=100&page=1";
+    const BRANCHES_TARGET: &str = "/repos/namespace/project/branches?per_page=100&page=1";
+    const WORKFLOWS_TARGET: &str = "/repos/namespace/project/actions/workflows?per_page=100&page=1";
     const SECOND_WORKFLOWS_PAGE_TARGET: &str =
-        "/repos/owner/repository/actions/workflows?per_page=100&page=2";
-    const PULL_DETAIL_TARGET: &str = "/repos/owner/repository/pulls/7";
-    const CHECK_SUITES_TARGET: &str = "/repos/owner/repository/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-suites?per_page=100&page=1";
-    const CHECK_RUNS_TARGET: &str = "/repos/owner/repository/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100&page=1";
-    const REVIEWS_TARGET: &str = "/repos/owner/repository/pulls/7/reviews?per_page=100&page=1";
+        "/repos/namespace/project/actions/workflows?per_page=100&page=2";
+    const PULL_DETAIL_TARGET: &str = "/repos/namespace/project/pulls/7";
+    const CHECK_SUITES_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-suites?per_page=100&page=1";
+    const CHECK_RUNS_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100&page=1";
+    const REVIEWS_TARGET: &str = "/repos/namespace/project/pulls/7/reviews?per_page=100&page=1";
     const THREADS_TARGET: &str = "/graphql";
     const PULL_REACTIONS_TARGET: &str =
-        "/repos/owner/repository/issues/7/reactions?per_page=100&page=1";
+        "/repos/namespace/project/issues/7/reactions?per_page=100&page=1";
     const ISSUE_COMMENTS_TARGET: &str =
-        "/repos/owner/repository/issues/7/comments?per_page=100&page=1";
+        "/repos/namespace/project/issues/7/comments?per_page=100&page=1";
     const ISSUE_COMMENT_REACTIONS_TARGET: &str =
-        "/repos/owner/repository/issues/comments/41/reactions?per_page=100&page=1";
+        "/repos/namespace/project/issues/comments/41/reactions?per_page=100&page=1";
     const REVIEW_COMMENTS_TARGET: &str =
-        "/repos/owner/repository/pulls/7/comments?per_page=100&page=1";
+        "/repos/namespace/project/pulls/7/comments?per_page=100&page=1";
     const REVIEW_COMMENT_REACTIONS_TARGET: &str =
-        "/repos/owner/repository/pulls/comments/51/reactions?per_page=100&page=1";
-    const MAIN_WORKFLOW_TARGET: &str =
-        "/repos/owner/repository/actions/workflows/61/runs?branch=main&status=completed&per_page=1";
-    const FEATURE_WORKFLOW_TARGET: &str = "/repos/owner/repository/actions/workflows/61/runs?branch=feature%2Fwatch&status=completed&per_page=1";
+        "/repos/namespace/project/pulls/comments/51/reactions?per_page=100&page=1";
+    const MAIN_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=1";
+    const FEATURE_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=feature%2Fwatch&status=completed&per_page=1";
     const EMPTY_LIST: &str = "[]";
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
@@ -1552,7 +1551,7 @@ mod tests {
     const CACHE_KEY_KIND: &str = "fixture-page";
     const CACHE_KEY_QUERY_VALUE: &str = "provider-controlled-branch";
     const CACHE_KEY_URL: &str =
-        "https://api.github.com/repos/owner/repository/runs?branch=provider-controlled-branch";
+        "https://api.github.com/repos/namespace/project/runs?branch=provider-controlled-branch";
     const EXPECTED_LIFECYCLE: RepoWatchPullRequestLifecycle = RepoWatchPullRequestLifecycle::Open;
     const EXPECTED_MERGEABLE_STATE: MergeableState = MergeableState::Conflicting;
     const EXPECTED_CHECKS_OUTCOME: ChecksOutcome = ChecksOutcome::Success;
@@ -1596,7 +1595,7 @@ mod tests {
     const WORKFLOW_ID: u64 = 61;
     const WORKFLOW_RUN_IDS: [u64; 2] = [71, 72];
     const PROVIDER_HEAD_REPOSITORY: &str = "Fork/Repository";
-    const PROVIDER_BASE_REPOSITORY: &str = "Owner/Repository";
+    const PROVIDER_BASE_REPOSITORY: &str = "Namespace/Project";
     const PROVIDER_PULL_AUTHOR: &str = "Pull-Author";
     const PROVIDER_REVIEWER: &str = "Signal-Reviewer";
     const SCRIPTED_SERVER_TIMEOUT: Duration = Duration::from_secs(5);

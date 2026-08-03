@@ -74,9 +74,9 @@ allowed_origins = [
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
 #
 # [[repository_watch.repositories]]
-# repository = "owner/repository"
+# repository = "namespace/project"
 # poll_interval_seconds = 60
-# credential_file = "/run/credentials/repository-watch-owner-repository"
+# credential_file = "/run/credentials/repository-watch-namespace-project"
 
 # Tool dependencies use the same closed mapping-table pattern as model
 # adapters. The two GitHub-backed families share one non-secret profile; the

@@ -19,7 +19,7 @@ OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
 REVIEWED_ALLOWLIST_SHA256 = (
-    "c7a9a97996337774a13fdfc2007a2a0c7397c9cda30ec0392af21767da370bef"
+    "ffbf1970df87951b69867c95e44ce9267b7e2d93ebe6db7d9c9871ab561123da"
 )
 
 
@@ -164,13 +164,14 @@ ALLOWLIST = (
     Allowance(
         "GitHub repository GraphQL owner variables",
         re.compile(
-            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"^(?:apps/signalboxd/src/repo_watch_runtime[.]rs|"
+            r"crates/tools-github/src/lib[.]rs|"
             r"crates/tools-code-host/src/code_host/github[.]rs)$"
         ),
         re.compile(
             r"^query (?:PullRequestReviewThreads|ReviewThreads|Convergence|"
             r"ThreadInventory)\(\$owner: String!,|"
-            r"^\s*repository\(owner: \$owner, name: \$name\) \{\s*$"
+            r"^\s*repository\(owner: \$(?:namespace|owner), name: \$name\) \{\s*$"
         ),
     ),
     Allowance(

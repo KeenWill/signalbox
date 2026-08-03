@@ -1643,20 +1643,20 @@ mod tests {
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
-    const WATCH_REPOSITORY: &str = "owner/repository";
-    const SECOND_WATCH_REPOSITORY: &str = "owner/second";
+    const WATCH_REPOSITORY: &str = "namespace/project";
+    const SECOND_WATCH_REPOSITORY: &str = "namespace/second";
     const WATCH_CREDENTIAL_FILE: &str = "/run/credentials/repository-watch-token";
     const SECOND_WATCH_CREDENTIAL_FILE: &str = "/run/credentials/second-watch-token";
-    const WATCH_CREDENTIAL_REFERENCE: &str = "repository-watch:owner/repository";
+    const WATCH_CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
     const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
-    const PROVIDER_WATCH_REPOSITORY: &str = "Owner/Repository";
-    const PROVIDER_SECOND_WATCH_REPOSITORY: &str = "Owner/Second";
+    const PROVIDER_WATCH_REPOSITORY: &str = "Namespace/Project";
+    const PROVIDER_SECOND_WATCH_REPOSITORY: &str = "Namespace/Second";
     const PROVIDER_SIGNAL_REVIEWER: &str = "Signal-Reviewer";
     const PROVIDER_SECOND_SIGNAL_REVIEWER: &str = "Review-Bot[bot]";
-    const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "OWNER/REPOSITORY";
+    const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "NAMESPACE/PROJECT";
     const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
     const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
     const CONFIGURATION: &str = r#"
