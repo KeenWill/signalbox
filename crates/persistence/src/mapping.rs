@@ -996,8 +996,9 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         AcceptedInputId, DirectModelSelection, DurableCommandId, FastMode, FastModeSupport,
-        ModelCapabilities, ModelSettingsOverlay, ModelSettingsPrecedence, ReasoningLevel,
-        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+        ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay, ModelSettingsPrecedence,
+        OpenAiServiceTier, ReasoningLevel, ServiceTier, SessionConfigurationDefaultsVersion,
+        SessionId, SessionInputPosition,
         SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolPermissionDefault,
         TurnId,
     };
@@ -1009,8 +1010,10 @@ mod tests {
         SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
-        input_position_from_numeric, input_position_to_numeric, model_settings_from_json,
-        model_settings_to_json, plan_event_kind_from_str, plan_event_kind_to_str,
+        input_position_from_numeric, input_position_to_numeric,
+        model_change_adjustments_from_json, model_change_adjustments_to_json,
+        model_settings_from_json, model_settings_to_json, plan_event_kind_from_str,
+        plan_event_kind_to_str,
         session_id_from_uuid, session_id_to_uuid, session_placement_event_kind_from_str,
         session_placement_event_kind_to_str, session_placement_rejection_from_str,
         session_placement_result_kind_from_str, session_placement_result_kind_to_str,
@@ -1063,6 +1066,39 @@ mod tests {
             .insert(String::from("unknown_member"), serde_json::Value::Null);
 
         let result = model_settings_from_json(encoded);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn model_change_adjustment_json_round_trips_every_variant() {
+        let adjustments = vec![
+            ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            },
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::Medium,
+            },
+            ModelChangeAdjustment::FastModeDisabled,
+            ModelChangeAdjustment::ServiceTierCleared {
+                from: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
+            },
+        ];
+
+        let decoded = model_change_adjustments_from_json(
+            model_change_adjustments_to_json(&adjustments),
+        )
+        .expect("the closed adjustment document decodes");
+
+        assert_eq!(decoded, adjustments);
+    }
+
+    #[test]
+    fn model_change_adjustment_json_rejects_unknown_variants() {
+        let encoded = serde_json::json!([{"kind": "unknown"}]);
+
+        let result = model_change_adjustments_from_json(encoded);
 
         assert!(result.is_err());
     }

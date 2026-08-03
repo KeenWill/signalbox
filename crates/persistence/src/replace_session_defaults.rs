@@ -675,6 +675,14 @@ async fn insert_model_settings_event(
     ))
     .execute(&mut *connection)
     .await?;
+    crate::outbox::append(
+        connection,
+        crate::outbox::OutboxEvent::SessionModelSettingsChanged {
+            session: event.session(),
+            installed_defaults_version: event.installed_defaults_version(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
