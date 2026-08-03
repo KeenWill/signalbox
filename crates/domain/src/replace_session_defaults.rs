@@ -956,6 +956,10 @@ mod tests {
             high,
         )
         .expect("the high settings match the direct replacement");
+        assert_ne!(
+            low_replacement.model_settings(),
+            high_replacement.model_settings(),
+        );
         let caller = ModelSettingsOverlay::inherit_all();
         let recorded = ReplaceSessionDefaults::with_model_settings(
             command_id(1),

@@ -428,6 +428,7 @@ private actor MockProcessProtocolState {
               "kind": "direct",
               "selection_id": MockProcessProtocolFixtures.selectionID,
             ],
+            "model_settings": MockProcessProtocolFixtures.providerDefaultModelSettings(),
             "dangerous_tool_auto_approval": false,
             "system_prompt": NSNull(),
           ]
