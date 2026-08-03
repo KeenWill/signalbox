@@ -212,16 +212,57 @@ pub enum ModelCapabilityError {
 
 impl std::fmt::Display for ModelCapabilityError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::UnknownTarget { .. } => "the exact runtime target has no model-capability record",
-            Self::UnsupportedReasoningLevel { .. } => {
-                "the explicit reasoning level is unsupported by the exact runtime target"
+        match self {
+            Self::UnknownTarget { target } => write!(
+                formatter,
+                "exact runtime target {:?} has no model-capability record",
+                target.as_str()
+            ),
+            Self::UnsupportedReasoningLevel { reasoning_level } => write!(
+                formatter,
+                "explicit reasoning level {} is unsupported by the exact runtime target",
+                reasoning_level_label(*reasoning_level)
+            ),
+            Self::UnsupportedFastMode => {
+                formatter.write_str("fast mode is unsupported by the exact runtime target")
             }
-            Self::UnsupportedFastMode => "fast mode is unsupported by the exact runtime target",
-            Self::UnsupportedServiceTier { .. } => {
-                "the explicit service tier is unsupported by the exact runtime target"
-            }
-        })
+            Self::UnsupportedServiceTier { service_tier } => write!(
+                formatter,
+                "explicit service tier {} is unsupported by the exact runtime target",
+                service_tier_label(*service_tier)
+            ),
+        }
+    }
+}
+
+fn reasoning_level_label(level: ReasoningLevel) -> &'static str {
+    match level {
+        ReasoningLevel::None => "none",
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh => "xhigh",
+        ReasoningLevel::Max => "max",
+        ReasoningLevel::Ultra => "ultra",
+    }
+}
+
+fn service_tier_label(tier: ServiceTier) -> &'static str {
+    match tier {
+        ServiceTier::Anthropic(crate::AnthropicServiceTier::Auto) => "anthropic:auto",
+        ServiceTier::Anthropic(crate::AnthropicServiceTier::StandardOnly) => {
+            "anthropic:standard_only"
+        }
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Auto) => "openai:auto",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Default) => "openai:default",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Flex) => "openai:flex",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Scale) => "openai:scale",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Priority) => "openai:priority",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Fast) => "openai:fast",
+        ServiceTier::CodexCli(crate::CodexCliServiceTier::Default) => "codex_cli:default",
+        ServiceTier::CodexCli(crate::CodexCliServiceTier::Priority) => "codex_cli:priority",
+        ServiceTier::CodexCli(crate::CodexCliServiceTier::Flex) => "codex_cli:flex",
     }
 }
 
@@ -253,7 +294,9 @@ mod tests {
         FastModeTarget, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
         ModelCapabilityError,
     };
-    use crate::{FastMode, ModelSettings, ReasoningLevel, ResolvedTarget};
+    use crate::{
+        FastMode, ModelSettings, OpenAiServiceTier, ReasoningLevel, ResolvedTarget, ServiceTier,
+    };
 
     fn catalog() -> ModelCapabilityCatalog {
         ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
@@ -305,6 +348,32 @@ mod tests {
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Disabled),
             Ok(&selected)
+        );
+    }
+
+    #[test]
+    fn capability_errors_name_the_safe_offending_value() {
+        let unknown = ModelCapabilityError::UnknownTarget {
+            target: ResolvedTarget::new("fixture-unknown"),
+        };
+        let reasoning = ModelCapabilityError::UnsupportedReasoningLevel {
+            reasoning_level: ReasoningLevel::Ultra,
+        };
+        let tier = ModelCapabilityError::UnsupportedServiceTier {
+            service_tier: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
+        };
+
+        assert_eq!(
+            unknown.to_string(),
+            "exact runtime target \"fixture-unknown\" has no model-capability record"
+        );
+        assert_eq!(
+            reasoning.to_string(),
+            "explicit reasoning level ultra is unsupported by the exact runtime target"
+        );
+        assert_eq!(
+            tier.to_string(),
+            "explicit service tier openai:priority is unsupported by the exact runtime target"
         );
     }
 }

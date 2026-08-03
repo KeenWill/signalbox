@@ -122,12 +122,17 @@ fn anthropic_service_tier<C>(
         | (FastMode::Enabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
             Ok(Some("standard_only"))
         }
-        (_, Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto))) => Ok(Some("auto")),
-        (_, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
+        (FastMode::Disabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto))) => {
+            Ok(Some("auto"))
+        }
+        (FastMode::Disabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
             Ok(Some("standard_only"))
         }
-        (_, None) => Ok(None),
-        (_, Some(_)) => Err(PreparationFailure::UnsupportedOperation {
+        (FastMode::Disabled, None) => Ok(None),
+        (
+            FastMode::Disabled | FastMode::Enabled,
+            Some(ServiceTier::OpenAi(_) | ServiceTier::CodexCli(_)),
+        ) => Err(PreparationFailure::UnsupportedOperation {
             detail: "Anthropic cannot enforce another provider's service tier".to_string(),
         }),
     }
