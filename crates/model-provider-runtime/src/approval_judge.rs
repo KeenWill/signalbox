@@ -299,9 +299,7 @@ fn require_preparation_correlation<P>(
     };
     (*correlation == expected)
         .then_some(())
-        .ok_or(ApprovalJudgeModelError::CorrelationMismatch(
-            TokenUsage::default(),
-        ))
+        .ok_or(ApprovalJudgeModelError::PreparationCorrelationMismatch)
 }
 
 fn output_contract() -> Result<StructuredOutputContract, ApprovalJudgeModelError> {
@@ -413,6 +411,8 @@ pub enum ApprovalJudgeModelError {
     PreparationFailed,
     /// Adapter request construction was defective.
     PreparationDefect,
+    /// Runtime preparation returned another operation's correlation before send.
+    PreparationCorrelationMismatch,
     /// Runtime correlation differed from the durable call.
     CorrelationMismatch(TokenUsage),
     /// The provider returned an explicit refusal.
@@ -449,6 +449,7 @@ impl ApprovalJudgeModelError {
             | Self::CancelledBeforeSend
             | Self::PreparationFailed
             | Self::PreparationDefect
+            | Self::PreparationCorrelationMismatch
             | Self::CancellationConfirmed
             | Self::ProvenUnsent => TokenUsage {
                 input_tokens: None,
@@ -462,7 +463,59 @@ impl ApprovalJudgeModelError {
 
 impl fmt::Display for ApprovalJudgeModelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("approval judge model execution failed")
+        match self {
+            Self::UnconfiguredTarget => {
+                formatter.write_str("approval judge model target is not configured")
+            }
+            Self::InvalidContract => {
+                formatter.write_str("approval judge structured-output contract is invalid")
+            }
+            Self::CancelledBeforeSend => {
+                formatter.write_str("approval judge model call was cancelled before send")
+            }
+            Self::PreparationFailed => {
+                formatter.write_str("approval judge model call preparation failed")
+            }
+            Self::PreparationDefect => {
+                formatter.write_str("approval judge model call preparation was defective")
+            }
+            Self::PreparationCorrelationMismatch => formatter
+                .write_str("approval judge model call preparation returned another correlation"),
+            Self::CorrelationMismatch(usage) => write!(
+                formatter,
+                "approval judge model call returned another correlation; usage={usage:?}"
+            ),
+            Self::Refused(usage) => write!(
+                formatter,
+                "approval judge model call was refused; usage={usage:?}"
+            ),
+            Self::ProviderError(usage) => write!(
+                formatter,
+                "approval judge model call returned a provider error; usage={usage:?}"
+            ),
+            Self::CancellationConfirmed => {
+                formatter.write_str("approval judge model call cancellation was confirmed")
+            }
+            Self::ProvenUnsent => {
+                formatter.write_str("approval judge model call was proven unsent")
+            }
+            Self::BoundaryLoss(usage) => write!(
+                formatter,
+                "approval judge model call lost its provider boundary; usage={usage:?}"
+            ),
+            Self::ProviderTargetSubstituted(usage) => write!(
+                formatter,
+                "approval judge model call reported another model lineage; usage={usage:?}"
+            ),
+            Self::IncompleteDecision(usage) => write!(
+                formatter,
+                "approval judge model call returned an incomplete decision; usage={usage:?}"
+            ),
+            Self::InvalidDecision(usage) => write!(
+                formatter,
+                "approval judge model call returned an invalid decision; usage={usage:?}"
+            ),
+        }
     }
 }
 
@@ -673,7 +726,22 @@ mod tests {
 
         assert_eq!(
             error,
-            ApprovalJudgeModelError::CorrelationMismatch(TokenUsage::default())
+            ApprovalJudgeModelError::PreparationCorrelationMismatch
+        );
+    }
+
+    #[test]
+    fn approval_judge_errors_display_distinct_failure_evidence() {
+        assert_eq!(
+            ApprovalJudgeModelError::PreparationCorrelationMismatch.to_string(),
+            "approval judge model call preparation returned another correlation"
+        );
+        assert_eq!(
+            ApprovalJudgeModelError::InvalidDecision(reported_usage()).to_string(),
+            format!(
+                "approval judge model call returned an invalid decision; usage={:?}",
+                reported_usage()
+            )
         );
     }
 }
