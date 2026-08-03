@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, os::unix::ffi::OsStrExt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Component, Path, PathBuf},
+};
 
 use git2::{Index, Repository};
 
@@ -63,6 +67,7 @@ pub(super) fn tree_files(
         for entry in &tree {
             let mut path = prefix.clone();
             path.push(std::ffi::OsStr::from_bytes(entry.name_bytes()));
+            validate_repository_data_path(&path)?;
             match entry.kind() {
                 Some(git2::ObjectType::Tree) => pending.push((entry.id(), path)),
                 Some(git2::ObjectType::Blob) => {
@@ -118,6 +123,7 @@ pub(super) fn validate_tree_discovery_with_symlinks(
             inspected = inspected.saturating_add(1);
             let mut path = prefix.clone();
             path.push(std::ffi::OsStr::from_bytes(entry.name_bytes()));
+            validate_repository_data_path(&path)?;
             inspected_path_bytes =
                 inspected_path_bytes.saturating_add(path.as_os_str().as_bytes().len());
             if inspected > MAX_WORKTREE_INSPECTIONS
@@ -166,7 +172,13 @@ pub(super) fn validate_index_objects(
     validate_index_entry_count(index)?;
     let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
     let mut blob_bytes = 0_usize;
-    for entry in index.iter().filter(|entry| entry.flags & 0x3000 == 0) {
+    for entry in index.iter() {
+        validate_repository_data_path(&PathBuf::from(std::ffi::OsString::from_vec(
+            entry.path.clone(),
+        )))?;
+        if entry.flags & 0x3000 != 0 {
+            continue;
+        }
         if entry.mode == GITLINK_MODE {
             continue;
         }
@@ -179,6 +191,22 @@ pub(super) fn validate_index_objects(
             || blob_bytes > MAX_TREE_BLOB_BYTES
         {
             return Err(LocalGitFailure::Operation);
+        }
+    }
+    Ok(())
+}
+
+fn validate_repository_data_path(path: &Path) -> Result<(), LocalGitFailure> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(LocalGitFailure::Operation);
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if !name.as_bytes().eq_ignore_ascii_case(b".git") => {}
+            Component::Normal(_) | Component::CurDir | Component::ParentDir => {
+                return Err(LocalGitFailure::Operation);
+            }
+            Component::RootDir | Component::Prefix(_) => return Err(LocalGitFailure::Operation),
         }
     }
     Ok(())

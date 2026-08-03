@@ -24,13 +24,13 @@ pub struct GitStatusArguments {}
 pub enum GitDiffArguments {
     /// Includes both staged and unstaged worktree changes against HEAD.
     Worktree,
-    /// Compares the trees named by two revisions.
+    /// Compares trees named by exact revision identifiers.
     Revisions {
-        /// Older revision expression.
+        /// Older `HEAD`, full `refs/...` name, or full object ID.
         #[serde(deserialize_with = "deserialize_revision")]
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         base: String,
-        /// Newer revision expression.
+        /// Newer `HEAD`, full `refs/...` name, or full object ID.
         #[serde(deserialize_with = "deserialize_revision")]
         #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
         head: String,
@@ -49,7 +49,7 @@ pub(super) fn default_log_entries() -> usize {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GitLogArguments {
-    /// Revision expression at which traversal starts.
+    /// Starting `HEAD`, full `refs/...` name, or full object ID.
     #[serde(
         default = "default_log_revision",
         deserialize_with = "deserialize_revision"
@@ -129,7 +129,7 @@ pub struct GitBranchCreateArguments {
     #[serde(deserialize_with = "deserialize_branch_name")]
     #[schemars(length(min = 1, max = MAX_BRANCH_BYTES))]
     pub(super) name: String,
-    /// Revision resolving to the branch's initial commit.
+    /// Initial `HEAD`, full `refs/...` name, or full object ID.
     #[serde(deserialize_with = "deserialize_revision")]
     #[schemars(length(min = 1, max = MAX_REVISION_BYTES))]
     pub(super) start: String,

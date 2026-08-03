@@ -20,7 +20,11 @@ pub(super) const INITIAL_MESSAGE: &str = "initial";
 
 pub(super) const FIX_BRANCH: &str = "agent/fix";
 
+pub(super) const DEFAULT_BRANCH: &str = "main";
+
 pub(super) const TRACKED_PATH: &str = "tracked.txt";
+
+pub(super) const ADMINISTRATION_INDEX_PATH: &str = ".git/config";
 
 pub(super) const INITIAL_CONTENT: &str = "before\n";
 

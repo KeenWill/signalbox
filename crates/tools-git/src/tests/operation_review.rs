@@ -13,6 +13,7 @@ use git2::{
     BranchType, IndexEntry, IndexTime, ObjectFormat, Odb, Repository, RepositoryInitOptions,
     Signature,
 };
+use sha1::{Digest, Sha1};
 
 use crate::LocalGitExecutor;
 use crate::arguments::{
@@ -37,9 +38,10 @@ use crate::rollback::{
 };
 use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
-    CHANGED_CONTENT, FIX_BRANCH, Fixture, INITIAL_CONTENT, MODEL_MESSAGE, Sha256Fixture,
-    TRACKED_PATH, commit_all, execute, identity, install_deleted_conflict,
-    real_git_sha256_pack_checksum, real_git_sha256_pack_index, real_git_sha256_pack_object_ids,
+    ADMINISTRATION_INDEX_PATH, CHANGED_CONTENT, DEFAULT_BRANCH, FIX_BRANCH, Fixture,
+    INITIAL_CONTENT, MODEL_MESSAGE, Sha256Fixture, TRACKED_PATH, commit_all, execute, identity,
+    install_deleted_conflict, real_git_sha256_pack_checksum, real_git_sha256_pack_index,
+    real_git_sha256_pack_object_ids,
 };
 
 #[test]
@@ -145,6 +147,74 @@ fn stage_rejects_a_nested_repository_administration_path() {
         .expect_err("nested administration path rejects");
 
     assert_eq!(failure, LocalGitFailure::Path);
+}
+
+#[test]
+fn status_rejects_an_administration_path_decoded_from_the_index() {
+    let fixture = Fixture::new();
+    plant_administration_index_path(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Status)
+        .expect_err("administration index path rejects status");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn worktree_diff_rejects_an_administration_path_decoded_from_the_index() {
+    let fixture = Fixture::new();
+    plant_administration_index_path(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree))
+        .expect_err("administration index path rejects worktree diff");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn branch_switch_rejects_an_administration_path_decoded_from_the_index() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    plant_administration_index_path(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }))
+        .expect_err("administration index path rejects branch switch");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok(DEFAULT_BRANCH)
+    );
+}
+
+fn plant_administration_index_path(fixture: &Fixture) {
+    let index_path = fixture.root().join(".git/index");
+    let mut bytes = fs::read(&index_path).expect("fixture index reads");
+    let entry_path = bytes
+        .windows(TRACKED_PATH.len())
+        .position(|window| window == TRACKED_PATH.as_bytes())
+        .expect("tracked fixture entry exists");
+    bytes[entry_path..entry_path + TRACKED_PATH.len()]
+        .copy_from_slice(ADMINISTRATION_INDEX_PATH.as_bytes());
+    let checksum_offset = bytes.len() - 20;
+    let checksum = Sha1::digest(&bytes[..checksum_offset]);
+    bytes[checksum_offset..].copy_from_slice(&checksum);
+    fs::write(index_path, bytes).expect("crafted checksum-valid index writes");
 }
 
 #[test]
