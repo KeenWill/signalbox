@@ -31,14 +31,14 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
     MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
     ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingsOverlay, ProtocolVersion,
-    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
-    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
-    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
-    SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
-    encode_client_line, encode_server_line,
+    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
+    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+    TurnState, decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -194,6 +194,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionPlacementUpdated { .. }
         | ServerMessage::InputSubmitted { .. }
         | ServerMessage::SteeringSubmitted { .. }
         | ServerMessage::GoalTransitionApplied { .. }
@@ -385,6 +386,7 @@ async fn execute(
             ..
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::Create { .. }
+        | Command::Place { .. }
         | Command::Continue { .. }
         | Command::Compact { .. }
         | Command::Goal(_)
@@ -415,6 +417,7 @@ async fn execute(
             ..
         } => Some(read_system_prompt_file(path).await?),
         Command::Create { .. }
+        | Command::Place { .. }
         | Command::Compact { .. }
         | Command::Goal(_)
         | Command::List
@@ -446,6 +449,7 @@ async fn execute(
             template,
             command_id,
             system_prompt_file: _,
+            placement,
         } => match (selection, template) {
             (Some(selection), None) => {
                 create(
@@ -454,16 +458,34 @@ async fn execute(
                     selection,
                     command_id,
                     system_prompt_text,
+                    placement,
                 )
                 .await
             }
             (None, Some(template)) => {
-                create_from_template(&mut client, &mut output, template, command_id).await
+                create_from_template(&mut client, &mut output, template, command_id, placement)
+                    .await
             }
             _ => Err(ClientError::Protocol(
                 "create source was internally invalid",
             )),
         },
+        Command::Place {
+            session_id,
+            expected_placement_version,
+            replacement,
+            command_id,
+        } => {
+            update_session_placement(
+                &mut client,
+                &mut output,
+                session_id,
+                expected_placement_version,
+                replacement,
+                command_id,
+            )
+            .await
+        }
         Command::Continue {
             imported_conversation_id,
             through_position,
@@ -835,6 +857,7 @@ async fn create(
     selection: ModelSelection,
     command_id: Option<CommandId>,
     system_prompt: Option<SystemPromptText>,
+    placement: SessionPlacement,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -849,6 +872,7 @@ async fn create(
             initial_model_selection: selection,
             model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(system_prompt),
+            placement,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -870,6 +894,7 @@ async fn create_from_template(
     output: &mut Output<'_>,
     template_name: String,
     command_id: Option<CommandId>,
+    placement: SessionPlacement,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
     if generated {
@@ -882,6 +907,7 @@ async fn create_from_template(
         .mutation_request(ClientRequest::CreateSessionFromTemplate {
             command_id,
             template_name,
+            placement,
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
@@ -897,6 +923,109 @@ async fn create_from_template(
         _ => Err(
             ClientError::Protocol("template creation returned an unexpected response").mutation(),
         ),
+    }
+}
+
+async fn update_session_placement(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+    expected_placement_version: CanonicalU64,
+    replacement: SessionPlacement,
+    command_id: Option<CommandId>,
+) -> Result<(), ClientError> {
+    let (command_id, generated) = command_identity(command_id)?;
+    let requested_session = session_id;
+    let requested_replacement = replacement.clone();
+    if generated {
+        output.recovery_value(
+            "command_id",
+            &command_id.into_uuid().hyphenated().to_string(),
+        )?;
+    }
+    let mut connection = client
+        .mutation_request(ClientRequest::UpdateSessionPlacement {
+            command_id,
+            session_id,
+            expected_placement_version,
+            replacement,
+        })
+        .await?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::SessionPlacementUpdated {
+            session_id,
+            placement_version,
+            placement,
+        } => {
+            if !placement_update_receipt_matches(
+                session_id,
+                placement_version,
+                &placement,
+                requested_session,
+                expected_placement_version,
+                &requested_replacement,
+            ) {
+                return Err(
+                    ClientError::Protocol("place returned an incoherent receipt").mutation(),
+                );
+            }
+            output.session_placement_updated(
+                session_id,
+                placement_version.value(),
+                &placement_display(&placement),
+            )?;
+            Ok(())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => {
+            if code == ErrorCode::Rejected
+                && !placement_update_rejection_matches(
+                    detail.value(),
+                    requested_session,
+                    expected_placement_version,
+                )
+            {
+                return Err(ClientError::Protocol("place returned incoherent rejection").mutation());
+            }
+            Err(ClientError::remote(code, message, detail).mutation())
+        }
+        _ => Err(ClientError::Protocol("place returned an unexpected response").mutation()),
+    }
+}
+
+fn placement_update_receipt_matches(
+    actual_session: CanonicalUuid,
+    actual_version: CanonicalU64,
+    actual_placement: &SessionPlacement,
+    requested_session: CanonicalUuid,
+    expected_version: CanonicalU64,
+    requested_placement: &SessionPlacement,
+) -> bool {
+    actual_session == requested_session
+        && expected_version.value().checked_add(1) == Some(actual_version.value())
+        && actual_placement == requested_placement
+}
+
+fn placement_update_rejection_matches(
+    detail: Option<RejectionDetail>,
+    requested_session: CanonicalUuid,
+    expected_version: CanonicalU64,
+) -> bool {
+    match detail {
+        Some(RejectionDetail::SessionNotFound { session_id }) => session_id == requested_session,
+        Some(RejectionDetail::SessionPlacementCurrentVersionMismatch {
+            session_id,
+            expected_placement_version,
+            ..
+        }) => session_id == requested_session && expected_placement_version == expected_version,
+        Some(RejectionDetail::SessionPlacementVersionExhausted {
+            session_id,
+            current_placement_version,
+        }) => session_id == requested_session && current_placement_version == expected_version,
+        _ => false,
     }
 }
 
@@ -2147,10 +2276,14 @@ async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(),
                 session_id,
                 defaults_version,
                 model_selection,
+                placement_version,
+                placement,
             } => output.session_summary(
                 *session_id,
                 defaults_version.value(),
                 &selection_display(*model_selection),
+                placement_version.value(),
+                &placement_display(placement),
             )?,
             _ => {
                 return Err(ClientError::Protocol(
@@ -3379,6 +3512,16 @@ async fn read_session_summaries(
     }
 }
 
+fn placement_display(placement: &SessionPlacement) -> String {
+    match placement {
+        SessionPlacement::Pathless {} => String::from("placement=pathless"),
+        SessionPlacement::Scoped { path } => format!("placement={path}"),
+        SessionPlacement::RootGlobalRead { path, .. } => {
+            format!("placement={path} root_global_read=acknowledged")
+        }
+    }
+}
+
 async fn review(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -4382,18 +4525,18 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-        ConversationSummary, EffectiveModelSettings, FastMode, FrameEncodeError, GoalHistoryEvent,
-        GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
-        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion,
-        RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
-        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
-        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
-        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
-        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
-        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
-        encode_server_line,
+        ConversationSummary, EffectiveModelSettings, FastMode, FrameEncodeError,
+        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+        ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
+        MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
+        ModelSelection, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
+        ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
+        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
+        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
+        ServerMessage, SessionEvent, SessionPlacement, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -4431,7 +4574,8 @@ mod tests {
         await_turn_terminal, collect_import_paths, continue_imported,
         conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, import_conversation_file, imported,
-        model_call_recovery_transition, open_scanned_import_source, read_goal_text_file,
+        model_call_recovery_transition, open_scanned_import_source,
+        placement_update_receipt_matches, placement_update_rejection_matches, read_goal_text_file,
         read_import_file, read_input, read_review_json_file, read_system_prompt_file,
         reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
@@ -4522,6 +4666,112 @@ mod tests {
             .expect_err("foreign session receipt is rejected");
 
         assert!(error.is_ambiguous_mutation());
+    }
+
+    #[test]
+    fn placement_update_receipt_requires_the_exact_successor_and_echoed_request() {
+        let requested_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let expected_version = CanonicalU64::new(7);
+        let successor_version = CanonicalU64::new(8);
+        let requested_placement = SessionPlacement::Pathless {};
+        let foreign_placement =
+            SessionPlacement::try_scoped(String::from("projects.other.session"))
+                .expect("fixture placement is admitted");
+
+        assert!(placement_update_receipt_matches(
+            requested_session,
+            successor_version,
+            &requested_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+        assert!(!placement_update_receipt_matches(
+            foreign_session,
+            successor_version,
+            &requested_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+        assert!(!placement_update_receipt_matches(
+            requested_session,
+            expected_version,
+            &requested_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+        assert!(!placement_update_receipt_matches(
+            requested_session,
+            successor_version,
+            &foreign_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+    }
+
+    #[test]
+    fn placement_update_rejection_requires_the_exact_request_evidence() {
+        let requested_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let expected_version = CanonicalU64::new(u64::MAX);
+
+        assert!(placement_update_rejection_matches(
+            Some(RejectionDetail::SessionNotFound {
+                session_id: requested_session,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            Some(RejectionDetail::SessionNotFound {
+                session_id: foreign_session,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(placement_update_rejection_matches(
+            Some(RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                session_id: requested_session,
+                expected_placement_version: expected_version,
+                current_placement_version: CanonicalU64::new(3),
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            Some(RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                session_id: requested_session,
+                expected_placement_version: CanonicalU64::new(3),
+                current_placement_version: CanonicalU64::new(4),
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(placement_update_rejection_matches(
+            Some(RejectionDetail::SessionPlacementVersionExhausted {
+                session_id: requested_session,
+                current_placement_version: expected_version,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            Some(RejectionDetail::GoalCommandRejected {
+                session_id: requested_session,
+                reason: GoalCommandRejection::SessionNotFound,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            None,
+            requested_session,
+            expected_version,
+        ));
     }
 
     #[tokio::test]
@@ -6487,6 +6737,7 @@ mod tests {
             },
             Some(CommandId::try_from_uuid(Uuid::from_u128(2))?),
             None,
+            super::SessionPlacement::Pathless {},
         )
         .await;
 

@@ -779,6 +779,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn pinned_root_identity_survives_later_path_replacement() {
+        use std::{fs, os::unix::fs::MetadataExt};
+
+        let parent = tempfile::tempdir().expect("parent fixture constructs");
+        let workspace_path = parent.path().join("workspace");
+        let moved_path = parent.path().join("moved-workspace");
+        fs::create_dir(&workspace_path).expect("workspace fixture constructs");
+        let root = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, &workspace_path)
+            .expect("fixture root is valid");
+        let identity_before = root.identity();
+        fs::rename(&workspace_path, &moved_path).expect("workspace fixture moves");
+        fs::create_dir(&workspace_path).expect("replacement workspace constructs");
+        let moved_metadata = fs::metadata(&moved_path).expect("moved workspace metadata reads");
+        let replacement = WorkspaceRoot::try_new(&LocalWorkspaceFileSystem, &workspace_path)
+            .expect("replacement root is valid");
+
+        let identity_after = root.identity();
+        let replacement_identity = replacement.identity();
+
+        assert_eq!(identity_after, identity_before);
+        assert_ne!(identity_after, replacement_identity);
+        assert_eq!(identity_after.device, moved_metadata.dev());
+        assert_eq!(identity_after.inode, moved_metadata.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn fifo_read_is_rejected_without_blocking() {
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
         let fifo = workspace.path().join("pipe");
