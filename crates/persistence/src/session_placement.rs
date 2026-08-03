@@ -341,9 +341,10 @@ pub(crate) async fn load_current(
             "session placement event missing",
         ));
     }
-    let later_event_exists: bool = row.try_get("later_event_exists")?;
+    let history_head_state =
+        PlacementHistoryHeadState::from_later_event_exists(row.try_get("later_event_exists")?);
     let current = decode_authenticated_placement(row)?;
-    authenticate_loaded_current(connection, session, current, later_event_exists)
+    authenticate_loaded_current(connection, session, current, history_head_state)
         .await
         .map(Some)
 }
@@ -449,11 +450,27 @@ pub(crate) async fn load_authenticated_version(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementHistoryHeadState {
+    MatchesLatestEvent,
+    BehindLaterEvent,
+}
+
+impl PlacementHistoryHeadState {
+    fn from_later_event_exists(later_event_exists: bool) -> Self {
+        if later_event_exists {
+            Self::BehindLaterEvent
+        } else {
+            Self::MatchesLatestEvent
+        }
+    }
+}
+
 async fn authenticate_loaded_current(
     connection: &mut PgConnection,
     session: SessionId,
     current: VersionedSessionPlacement,
-    later_event_exists: bool,
+    history_head_state: PlacementHistoryHeadState,
 ) -> Result<VersionedSessionPlacement, SessionPlacementRepositoryError> {
     let authenticated = load_authenticated_version(connection, session, current.version())
         .await?
@@ -465,12 +482,14 @@ async fn authenticate_loaded_current(
             "session placement predecessor chain",
         ));
     }
-    if later_event_exists {
-        return Err(SessionPlacementRepositoryError::Corruption(
-            "session placement head behind event history",
-        ));
+    match history_head_state {
+        PlacementHistoryHeadState::MatchesLatestEvent => Ok(authenticated),
+        PlacementHistoryHeadState::BehindLaterEvent => {
+            Err(SessionPlacementRepositoryError::Corruption(
+                "session placement head behind event history",
+            ))
+        }
     }
-    Ok(authenticated)
 }
 
 async fn load_current_for_update(
@@ -483,20 +502,21 @@ async fn load_current_for_update(
         .await?;
     if let Some(row) = row {
         let current = decode_authenticated_placement(row)?;
-        let later_event_exists = later_event_exists(connection, session, current.version()).await?;
-        return authenticate_loaded_current(connection, session, current, later_event_exists)
+        let history_head_state =
+            load_history_head_state(connection, session, current.version()).await?;
+        return authenticate_loaded_current(connection, session, current, history_head_state)
             .await
             .map(Some);
     }
     missing_head_result(connection, session).await
 }
 
-async fn later_event_exists(
+async fn load_history_head_state(
     connection: &mut PgConnection,
     session: SessionId,
     version: SessionPlacementVersion,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+) -> Result<PlacementHistoryHeadState, sqlx::Error> {
+    let later_event_exists = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1
               FROM session_placement_event
@@ -506,7 +526,10 @@ async fn later_event_exists(
     .bind(session_id_to_uuid(session))
     .bind(version_to_numeric(version))
     .fetch_one(&mut *connection)
-    .await
+    .await?;
+    Ok(PlacementHistoryHeadState::from_later_event_exists(
+        later_event_exists,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -609,9 +632,9 @@ async fn missing_head_result(
     match row {
         Some(row) => {
             let current = decode_authenticated_placement(row)?;
-            let later_event_exists =
-                later_event_exists(connection, session, current.version()).await?;
-            authenticate_loaded_current(connection, session, current, later_event_exists)
+            let history_head_state =
+                load_history_head_state(connection, session, current.version()).await?;
+            authenticate_loaded_current(connection, session, current, history_head_state)
                 .await
                 .map(Some)
         }

@@ -48,6 +48,10 @@ const ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x111;
 const ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED: u128 = 0x227;
 const ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED: u128 = 0x12d;
 const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
+const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_SESSION_ID_SEED: u128 = 0x208;
+const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_COMMAND_ID_SEED: u128 = 0x114;
+const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_SESSION_ID_SEED: u128 = 0x209;
+const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_COMMAND_ID_SEED: u128 = 0x115;
 const ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED: u128 = 0x203;
 const ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED: u128 = 0x103;
 const ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED: u128 = 0x104;
@@ -751,16 +755,16 @@ struct CorruptCreationPlacementProvenanceFixture {
 async fn corrupt_creation_placement_provenance_fixture()
 -> Result<CorruptCreationPlacementProvenanceFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let first_command = command(0x114);
-    let first_session = session(0x208);
+    let first_command = command(ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_COMMAND_ID_SEED);
+    let first_session = session(ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_SESSION_ID_SEED);
     let first = creation(first_command, first_session, SessionPlacement::pathless());
     let repository = CreateSessionRepository::new(pool.clone(), credential_pin());
     repository.handle(first.clone()).await?;
-    let second_command = command(0x115);
+    let second_command = command(ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_COMMAND_ID_SEED);
     repository
         .handle(creation(
             second_command,
-            session(0x209),
+            session(ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_SESSION_ID_SEED),
             SessionPlacement::pathless(),
         ))
         .await?;
