@@ -18,6 +18,7 @@ CREATE TABLE tool_approval_decided_outbox_event (
     session_id uuid NOT NULL,
     turn_id uuid NOT NULL,
     request_id uuid NOT NULL UNIQUE,
+    recording_transaction_id xid8 NOT NULL DEFAULT pg_current_xact_id(),
 
     CONSTRAINT tool_approval_decided_outbox_kind_closed
         CHECK (event_kind = 'tool_approval_decided'),
@@ -46,6 +47,11 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF NEW.recording_transaction_id <> pg_current_xact_id() THEN
+        RAISE EXCEPTION 'tool approval decided event transaction is not current'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'tool_approval_decided_transaction_current';
+    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM tool_approval_decision
          WHERE request_id = NEW.request_id
@@ -95,6 +101,23 @@ BEGIN
      WHERE dispatched.request_id = NEW.request_id
        AND lifecycle.active_tool_round_call_id =
            request.producing_model_call_id
+       AND (
+            SELECT count(*)
+              FROM tool_approval_decided_outbox_event AS transaction_event
+              JOIN tool_approval_decision AS transaction_decision
+                ON transaction_decision.request_id =
+                   transaction_event.request_id
+              JOIN tool_request AS transaction_request
+                ON transaction_request.request_id =
+                   transaction_decision.request_id
+             WHERE transaction_request.producing_model_call_id =
+                   request.producing_model_call_id
+               AND transaction_decision.decision_source NOT IN (
+                    'policy_auto', 'session_blanket'
+               )
+               AND transaction_event.recording_transaction_id =
+                   dispatched.recording_transaction_id
+       ) = 1
        AND NOT EXISTS (
             SELECT 1
               FROM tool_request AS earlier
