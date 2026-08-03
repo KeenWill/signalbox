@@ -15,9 +15,10 @@ from the watcher.
 
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
-validation shapes were verified against PR #430 (`agent/repo-watch-spec`).
-Persistence, polling, and rule dispatch become implemented only in the child
-pull requests named by their verification references.
+validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
+persistence and differ behavior below is verified against this PR
+(`agent/repo-watch-persistence`). Polling and rule dispatch become implemented
+only in the later child pull requests named by their verification references.
 
 ## Configuration and credential boundary
 
@@ -52,28 +53,41 @@ dispatch record, session parameter, error, or log.
 
 **Foundation contract.** Version one uses conditional-request polling with one
 independent task per configured repository and the repository's configured
-interval. The durable cursor retains the last accepted ETag for every fetched
-resource and page plus the complete normalized repository state needed for
-comparison. Each resource request sends `If-None-Match` when its own ETag
-exists. A resource-level `304 Not Modified` reuses only that resource's accepted
-state and does not skip the remaining fetches; GitHub does not count a
-conditional `304` against the primary rate limit. A complete successful poll is
-normalized and committed with all new validators and derived events atomically.
-A failed, rejected, partial, or unparseable poll changes neither cursor nor
-event history. A poll in which every resource is unchanged advances no state and
-emits no event. The next poll occurs after the per-repository interval; version
-one has no webhook fallback and no speculative second polling transport.
+interval. Each resource request sends `If-None-Match` when its own ETag exists.
+A resource-level `304 Not Modified` reuses only that resource's accepted state
+and does not skip the remaining fetches; GitHub does not count a conditional
+`304` against the primary rate limit. A failed, rejected, partial, or
+unparseable poll submits no persistence candidate. The next poll occurs after
+the per-repository interval; version one has no webhook fallback and no
+speculative second polling transport. No present runtime performs these polls;
+Slice 3 implements this constraint.
 
-**Foundation contract.** Polling fetches repository state, not rule inputs. A
-pure differ compares consecutive normalized per-pull-request state and the
-branch-workflow state, producing only the closed version-one event vocabulary
-below. The branch-workflow projection retains the latest completed conclusion
-for every workflow on every extant branch in the watched repository; the
-transport follows every result page needed to build that finite projection and
-retains its per-page validator. Rules never inspect GitHub API objects or
-normalized snapshots and never rerun the differ. Why: transport independence
-requires both polling and a later authenticated webhook receiver to feed the
-same durable facts.
+**Implemented behavior.** The versioned durable cursor retains a bounded ETag
+for every canonical resource/page key plus the complete normalized repository
+state and exact signal-reviewer set needed for comparison. Resource keys admit
+only bounded non-secret path-like identifiers, not query strings. A
+per-repository atomic commit accepts an expected generation, one complete cursor
+candidate, and its ordered event batch. It serializes competing commits, appends
+the cursor and every event together, rolls back the whole batch on failure,
+reports a stale generation as conflict, and recognizes only an exact
+candidate-and-event replay. An unchanged candidate with no events does not
+advance the cursor; an unchanged candidate carrying events is rejected.
+
+**Implemented behavior.** A pure differ compares consecutive canonical
+per-pull-request state, branch heads, and completed branch-workflow identities,
+producing only the closed version-one event vocabulary below in deterministic
+order. The cursor retains provider identities for completed check suites, check
+runs, reviews, threads, and branch-workflow runs, so a provider fact retained in
+the consecutive comparison baseline is not re-emitted. Rules receive only
+events: they cannot inspect normalized snapshots or rerun the differ. Why:
+transport independence requires both polling and a later authenticated webhook
+receiver to feed the same durable facts.
+
+**Foundation contract.** Polling fetches repository state, not rule inputs. The
+branch-workflow projection retains the latest completed run identity and
+conclusion for every workflow on every extant branch in the watched repository;
+the transport follows every result page needed to build that finite projection
+and retains its per-page validator. Slice 3 implements this transport behavior.
 
 ## Durable event vocabulary
 
@@ -91,9 +105,13 @@ transition contradicts that event's complete current pull-request context. A
 Label names admit up to 50 Unicode scalar values, including their full UTF-8
 representation.
 
-**Foundation contract.** Accepted events append in observation order as durable
-facts and are never updated or deleted. No present persistence surface stores a
-repository-watch event; Slice 2 implements this constraint.
+**Implemented behavior.** Accepted events append in observation order as durable
+facts and are never updated, deleted, or truncated. The relational storage row
+fixes the event version to one, closes both target and payload discriminators,
+retains complete PR context, and rejects incoherent payload columns. Reads
+decode every field into the closed domain event and fail closed when a durable
+cursor or event row is malformed or noncanonical. Bounded keyset pages expose
+repository event history in cursor-generation and event-ordinal order.
 
 **Implemented behavior.** The closed version-one event payloads are:
 
@@ -121,7 +139,7 @@ repository-watch event; Slice 2 implements this constraint.
 `changes_requested`, and `commented`; no dismissal payload or separate event
 kind is constructible.
 
-**Foundation contract.** The differ emits `ReviewSubmitted` only for a newly
+**Implemented behavior.** The differ emits `ReviewSubmitted` only for a newly
 submitted review. A later GitHub dismissal is not a version-one fact and emits
 no event.
 
@@ -131,14 +149,14 @@ excluded while normalizing state, so they cannot create durable
 `ReactionChanged` events. Why: reviewer signals are actionable facts; the full
 ambient emoji stream is neither a rule input nor retained noise.
 
-**Foundation contract.** The cursor binds its filtered reaction projection to
+**Implemented behavior.** The cursor binds its filtered reaction projection to
 the exact canonical signal-reviewer login set. When that set changes, the next
 complete poll replaces only the reaction comparison baseline without emitting
 `ReactionChanged`; every other state transition remains eligible for its normal
 event. Why: comparing projections formed under different filters would
 manufacture additions or removals from historical reactions.
 
-**Foundation contract.** A first observation emits `PullRequestOpened` and the
+**Implemented behavior.** A first observation emits `PullRequestOpened` and the
 current `MergeableStateChanged` fact for each open pull request, then
 establishes its comparison baseline. This lets an already-conflicting pull
 request reach the first live rule without waiting for a later round trip through

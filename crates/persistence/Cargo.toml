@@ -13,6 +13,7 @@ postgres-integration = ["dep:testcontainers-modules"]
 
 [dependencies]
 rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
+serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 signalbox-application = { path = "../application" }
 signalbox-domain = { path = "../domain" }
@@ -82,6 +83,11 @@ required-features = ["postgres-integration"]
 [[test]]
 name = "review_workflow_postgres"
 path = "tests/review_workflow_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "repo_watch_postgres"
+path = "tests/repo_watch_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]

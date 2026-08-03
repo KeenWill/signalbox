@@ -11,6 +11,7 @@ mod load_session;
 mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
+mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
@@ -63,6 +64,15 @@ pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, ReplaceSessionDefaultsTransaction,
+};
+pub use repo_watch::{
+    RepoWatchBranchHead, RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation,
+    RepoWatchDifferError, RepoWatchEventIdGenerator, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchEventIdGenerator,
+    derive_repo_watch_events,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,

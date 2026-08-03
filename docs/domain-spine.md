@@ -5642,6 +5642,149 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: repo_watch
+
+```rust
+pub trait RepoWatchEventIdGenerator {
+    fn next_event_id(&mut self) -> RepoWatchEventId;
+}
+
+pub struct UuidV7RepoWatchEventIdGenerator;
+
+pub enum RepoWatchPullRequestLifecycle {
+    Open,
+    Closed,
+    Merged,
+}
+
+pub struct RepoWatchCheckSuiteObservation { /* private */ }
+impl RepoWatchCheckSuiteObservation {
+    pub const fn new(id: GitHubObjectId, outcome: ChecksOutcome) -> Self;
+    // accessors: id(), outcome()
+}
+
+pub struct RepoWatchCheckRunObservation { /* private */ }
+impl RepoWatchCheckRunObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        name: CheckRunName,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), name(), conclusion()
+}
+
+pub struct RepoWatchReviewObservation { /* private */ }
+impl RepoWatchReviewObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        reviewer: RepoWatchAuthorLogin,
+        state: Option<ReviewState>,
+        commit: CommitSha,
+    ) -> Self;
+    // accessors: id(), reviewer(), state(), commit()
+}
+
+pub enum RepoWatchThreadState {
+    Open,
+    Resolved,
+}
+
+pub struct RepoWatchThreadObservation { /* private */ }
+impl RepoWatchThreadObservation {
+    pub const fn new(thread: ReviewThreadId, state: RepoWatchThreadState) -> Self;
+    // accessors: thread(), state()
+}
+
+pub struct RepoWatchReactionObservation { /* private */ }
+impl RepoWatchReactionObservation {
+    pub const fn new(
+        subject: ReactionSubject,
+        reactor: RepoWatchAuthorLogin,
+        content: ReactionContent,
+    ) -> Self;
+    // accessors: subject(), reactor(), content()
+}
+
+pub struct RepoWatchPullRequestStateInput {
+    pub context: PullRequestEventContext,
+    pub lifecycle: RepoWatchPullRequestLifecycle,
+    pub mergeable_state: MergeableState,
+    pub completed_check_suites: Vec<RepoWatchCheckSuiteObservation>,
+    pub completed_check_runs: Vec<RepoWatchCheckRunObservation>,
+    pub reviews: Vec<RepoWatchReviewObservation>,
+    pub threads: Vec<RepoWatchThreadObservation>,
+    pub reactions: Vec<RepoWatchReactionObservation>,
+}
+
+pub struct RepoWatchPullRequestState { /* private */ }
+impl RepoWatchPullRequestState {
+    pub fn try_new(
+        input: RepoWatchPullRequestStateInput,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    // accessors: context(), lifecycle(), mergeable_state(), completed_check_suites(),
+    // completed_check_runs(), reviews(), threads(), reactions()
+}
+
+pub struct RepoWatchWorkflowRunObservation { /* private */ }
+impl RepoWatchWorkflowRunObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        branch: BranchName,
+        workflow: WorkflowName,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), branch(), workflow(), conclusion()
+}
+
+pub struct RepoWatchBranchHead { /* private */ }
+impl RepoWatchBranchHead {
+    pub const fn new(branch: BranchName, head: CommitSha) -> Self;
+    // accessors: branch(), head()
+}
+
+pub struct RepoWatchRepositoryStateInput {
+    pub pull_requests: Vec<RepoWatchPullRequestState>,
+    pub workflow_runs: Vec<RepoWatchWorkflowRunObservation>,
+    pub branch_heads: Vec<RepoWatchBranchHead>,
+}
+
+pub struct RepoWatchRepositoryState { /* private */ }
+impl RepoWatchRepositoryState {
+    pub fn try_new(
+        input: RepoWatchRepositoryStateInput,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    // accessors: pull_requests(), workflow_runs(), branch_heads()
+}
+
+pub struct RepoWatchObservation { /* private */ }
+impl RepoWatchObservation {
+    pub fn new(
+        signal_reviewers: Vec<RepoWatchAuthorLogin>,
+        state: RepoWatchRepositoryState,
+    ) -> Self;
+    // accessors: signal_reviewers(), state()
+}
+
+pub enum RepoWatchRepositoryStateError {
+    DuplicatePullRequest(PullRequestNumber),
+    DuplicateCheckSuite(GitHubObjectId),
+    DuplicateCheckRun(GitHubObjectId),
+    DuplicateReview(GitHubObjectId),
+    DuplicateThread(ReviewThreadId),
+    DuplicateWorkflow { branch: BranchName, workflow: WorkflowName },
+    DuplicateBranchHead(BranchName),
+}
+
+pub struct RepoWatchDifferError(/* private */);
+
+pub fn derive_repo_watch_events(
+    repository: &RepositorySlug,
+    previous: Option<&RepoWatchObservation>,
+    current: &RepoWatchObservation,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> Result<Vec<RepoWatchEvent>, RepoWatchDifferError>;
+```
+
 ## application: review_orchestration
 
 ```rust
@@ -8716,6 +8859,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
+| application: repo_watch                            | 19 (incl. 1 trait)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
 | application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
@@ -8725,4 +8869,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **200**              |
+| **signalbox-application total**                    | **219**              |

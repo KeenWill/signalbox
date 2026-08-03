@@ -21,6 +21,7 @@ pub mod outbox;
 pub mod plan;
 pub mod process_read;
 pub mod replace_session_defaults;
+pub mod repo_watch;
 pub mod review_orchestration;
 pub mod review_workflow;
 mod review_workflow_command;

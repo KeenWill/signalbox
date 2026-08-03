@@ -3,10 +3,12 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
 use signalbox_domain::{
-    AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
-    GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
-    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    AcceptedInputId, CheckConclusion, ChecksOutcome, DangerousToolAutoApproval, DurableCommandId,
+    GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
+    GoalUserAction, MergeableState, ReactionChange, ReactionSubject, RepoWatchEventKindNameV1,
+    ReviewState, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
     SessionPlacementEventKind, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
     ToolRequestId, TurnId,
 };
@@ -215,6 +217,251 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
         "requires_pursuing_or_blocked" => Some(GoalCommandRejection::RequiresPursuingOrBlocked),
         "generation_exhausted" => Some(GoalCommandRejection::GenerationExhausted),
         "event_ordinal_exhausted" => Some(GoalCommandRejection::EventOrdinalExhausted),
+        _ => None,
+    }
+}
+
+/// Stored target shape for one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventTargetStorageKind {
+    PullRequest,
+    Branch,
+}
+
+pub(crate) const fn repo_watch_event_target_to_str(
+    value: RepoWatchEventTargetStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
+        RepoWatchEventTargetStorageKind::Branch => "branch",
+    }
+}
+
+pub(crate) fn repo_watch_event_target_from_str(
+    value: &str,
+) -> Option<RepoWatchEventTargetStorageKind> {
+    match value {
+        "pull_request" => Some(RepoWatchEventTargetStorageKind::PullRequest),
+        "branch" => Some(RepoWatchEventTargetStorageKind::Branch),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_event_kind_to_str(value: RepoWatchEventKindNameV1) -> &'static str {
+    match value {
+        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
+        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
+        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
+        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
+        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
+        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
+        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
+        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
+        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
+        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
+        RepoWatchEventKindNameV1::Labeled => "labeled",
+        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
+        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
+        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
+}
+
+pub(crate) fn repo_watch_event_kind_from_str(value: &str) -> Option<RepoWatchEventKindNameV1> {
+    match value {
+        "pull_request_opened" => Some(RepoWatchEventKindNameV1::PullRequestOpened),
+        "pull_request_closed" => Some(RepoWatchEventKindNameV1::PullRequestClosed),
+        "pull_request_merged" => Some(RepoWatchEventKindNameV1::PullRequestMerged),
+        "head_changed" => Some(RepoWatchEventKindNameV1::HeadChanged),
+        "mergeable_state_changed" => Some(RepoWatchEventKindNameV1::MergeableStateChanged),
+        "checks_completed" => Some(RepoWatchEventKindNameV1::ChecksCompleted),
+        "check_run_completed" => Some(RepoWatchEventKindNameV1::CheckRunCompleted),
+        "branch_workflow_run_completed" => {
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        }
+        "review_submitted" => Some(RepoWatchEventKindNameV1::ReviewSubmitted),
+        "thread_opened" => Some(RepoWatchEventKindNameV1::ThreadOpened),
+        "thread_resolved" => Some(RepoWatchEventKindNameV1::ThreadResolved),
+        "labeled" => Some(RepoWatchEventKindNameV1::Labeled),
+        "unlabeled" => Some(RepoWatchEventKindNameV1::Unlabeled),
+        "base_advanced" => Some(RepoWatchEventKindNameV1::BaseAdvanced),
+        "reaction_changed" => Some(RepoWatchEventKindNameV1::ReactionChanged),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_pull_request_lifecycle_to_str(
+    value: RepoWatchPullRequestLifecycle,
+) -> &'static str {
+    match value {
+        RepoWatchPullRequestLifecycle::Open => "open",
+        RepoWatchPullRequestLifecycle::Closed => "closed",
+        RepoWatchPullRequestLifecycle::Merged => "merged",
+    }
+}
+
+pub(crate) fn repo_watch_pull_request_lifecycle_from_str(
+    value: &str,
+) -> Option<RepoWatchPullRequestLifecycle> {
+    match value {
+        "open" => Some(RepoWatchPullRequestLifecycle::Open),
+        "closed" => Some(RepoWatchPullRequestLifecycle::Closed),
+        "merged" => Some(RepoWatchPullRequestLifecycle::Merged),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_mergeable_state_to_str(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+pub(crate) fn repo_watch_mergeable_state_from_str(value: &str) -> Option<MergeableState> {
+    match value {
+        "mergeable" => Some(MergeableState::Mergeable),
+        "conflicting" => Some(MergeableState::Conflicting),
+        "unknown" => Some(MergeableState::Unknown),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_checks_outcome_to_str(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+pub(crate) fn repo_watch_checks_outcome_from_str(value: &str) -> Option<ChecksOutcome> {
+    match value {
+        "success" => Some(ChecksOutcome::Success),
+        "failure" => Some(ChecksOutcome::Failure),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_check_conclusion_to_str(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+pub(crate) fn repo_watch_check_conclusion_from_str(value: &str) -> Option<CheckConclusion> {
+    match value {
+        "success" => Some(CheckConclusion::Success),
+        "failure" => Some(CheckConclusion::Failure),
+        "neutral" => Some(CheckConclusion::Neutral),
+        "cancelled" => Some(CheckConclusion::Cancelled),
+        "skipped" => Some(CheckConclusion::Skipped),
+        "timed_out" => Some(CheckConclusion::TimedOut),
+        "action_required" => Some(CheckConclusion::ActionRequired),
+        "stale" => Some(CheckConclusion::Stale),
+        "startup_failure" => Some(CheckConclusion::StartupFailure),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_review_state_to_str(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+pub(crate) fn repo_watch_review_state_from_str(value: &str) -> Option<ReviewState> {
+    match value {
+        "approved" => Some(ReviewState::Approved),
+        "changes_requested" => Some(ReviewState::ChangesRequested),
+        "commented" => Some(ReviewState::Commented),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_thread_state_to_str(value: RepoWatchThreadState) -> &'static str {
+    match value {
+        RepoWatchThreadState::Open => "open",
+        RepoWatchThreadState::Resolved => "resolved",
+    }
+}
+
+pub(crate) fn repo_watch_thread_state_from_str(value: &str) -> Option<RepoWatchThreadState> {
+    match value {
+        "open" => Some(RepoWatchThreadState::Open),
+        "resolved" => Some(RepoWatchThreadState::Resolved),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_reaction_change_to_str(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
+}
+
+pub(crate) fn repo_watch_reaction_change_from_str(value: &str) -> Option<ReactionChange> {
+    match value {
+        "added" => Some(ReactionChange::Added),
+        "removed" => Some(ReactionChange::Removed),
+        _ => None,
+    }
+}
+
+/// Stored subject shape for one reaction observation or event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchReactionSubjectStorageKind {
+    PullRequestBody,
+    IssueComment,
+    ReviewComment,
+}
+
+pub(crate) const fn repo_watch_reaction_subject_to_storage(
+    value: ReactionSubject,
+) -> (RepoWatchReactionSubjectStorageKind, Option<u64>) {
+    match value {
+        ReactionSubject::PullRequestBody => {
+            (RepoWatchReactionSubjectStorageKind::PullRequestBody, None)
+        }
+        ReactionSubject::IssueComment { id } => (
+            RepoWatchReactionSubjectStorageKind::IssueComment,
+            Some(id.get()),
+        ),
+        ReactionSubject::ReviewComment { id } => (
+            RepoWatchReactionSubjectStorageKind::ReviewComment,
+            Some(id.get()),
+        ),
+    }
+}
+
+pub(crate) const fn repo_watch_reaction_subject_kind_to_str(
+    value: RepoWatchReactionSubjectStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchReactionSubjectStorageKind::PullRequestBody => "pull_request_body",
+        RepoWatchReactionSubjectStorageKind::IssueComment => "issue_comment",
+        RepoWatchReactionSubjectStorageKind::ReviewComment => "review_comment",
+    }
+}
+
+pub(crate) fn repo_watch_reaction_subject_kind_from_str(
+    value: &str,
+) -> Option<RepoWatchReactionSubjectStorageKind> {
+    match value {
+        "pull_request_body" => Some(RepoWatchReactionSubjectStorageKind::PullRequestBody),
+        "issue_comment" => Some(RepoWatchReactionSubjectStorageKind::IssueComment),
+        "review_comment" => Some(RepoWatchReactionSubjectStorageKind::ReviewComment),
         _ => None,
     }
 }
@@ -485,9 +732,11 @@ mod tests {
     use std::str::FromStr;
 
     use rust_decimal::Decimal;
+    use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
     use signalbox_domain::{
-        AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, ToolApprovalPosture,
+        AcceptedInputId, CheckConclusion, ChecksOutcome, DurableCommandId, MergeableState,
+        ReactionChange, RepoWatchEventKindNameV1, ReviewState, SessionConfigurationDefaultsVersion,
+        SessionId, SessionInputPosition, SessionPlacementEventKind, ToolApprovalPosture,
         ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
@@ -498,7 +747,15 @@ mod tests {
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
         input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
-        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
+        plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
+        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
+        repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
+        repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_thread_state_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         tool_approval_posture_from_str, tool_approval_posture_to_str,
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
@@ -506,6 +763,176 @@ mod tests {
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+    const UNKNOWN_DISCRIMINATOR: &str = "outside-closed-set";
+
+    #[test]
+    fn repository_watch_event_kind_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::PullRequestOpened
+            )),
+            Some(RepoWatchEventKindNameV1::PullRequestOpened)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::PullRequestClosed
+            )),
+            Some(RepoWatchEventKindNameV1::PullRequestClosed)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::PullRequestMerged
+            )),
+            Some(RepoWatchEventKindNameV1::PullRequestMerged)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::HeadChanged
+            )),
+            Some(RepoWatchEventKindNameV1::HeadChanged)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::MergeableStateChanged
+            )),
+            Some(RepoWatchEventKindNameV1::MergeableStateChanged)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ChecksCompleted
+            )),
+            Some(RepoWatchEventKindNameV1::ChecksCompleted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::CheckRunCompleted
+            )),
+            Some(RepoWatchEventKindNameV1::CheckRunCompleted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::BranchWorkflowRunCompleted
+            )),
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ReviewSubmitted
+            )),
+            Some(RepoWatchEventKindNameV1::ReviewSubmitted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ThreadOpened
+            )),
+            Some(RepoWatchEventKindNameV1::ThreadOpened)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ThreadResolved
+            )),
+            Some(RepoWatchEventKindNameV1::ThreadResolved)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::Labeled
+            )),
+            Some(RepoWatchEventKindNameV1::Labeled)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::Unlabeled
+            )),
+            Some(RepoWatchEventKindNameV1::Unlabeled)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::BaseAdvanced
+            )),
+            Some(RepoWatchEventKindNameV1::BaseAdvanced)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ReactionChanged
+            )),
+            Some(RepoWatchEventKindNameV1::ReactionChanged)
+        );
+        assert_eq!(repo_watch_event_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    #[test]
+    fn repository_watch_payload_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_pull_request_lifecycle_from_str(repo_watch_pull_request_lifecycle_to_str(
+                RepoWatchPullRequestLifecycle::Merged
+            )),
+            Some(RepoWatchPullRequestLifecycle::Merged)
+        );
+        assert_eq!(
+            repo_watch_mergeable_state_from_str(repo_watch_mergeable_state_to_str(
+                MergeableState::Conflicting
+            )),
+            Some(MergeableState::Conflicting)
+        );
+        assert_eq!(
+            repo_watch_checks_outcome_from_str(repo_watch_checks_outcome_to_str(
+                ChecksOutcome::Failure
+            )),
+            Some(ChecksOutcome::Failure)
+        );
+        assert_eq!(
+            repo_watch_check_conclusion_from_str(repo_watch_check_conclusion_to_str(
+                CheckConclusion::StartupFailure
+            )),
+            Some(CheckConclusion::StartupFailure)
+        );
+        assert_eq!(
+            repo_watch_review_state_from_str(repo_watch_review_state_to_str(
+                ReviewState::ChangesRequested
+            )),
+            Some(ReviewState::ChangesRequested)
+        );
+        assert_eq!(
+            repo_watch_thread_state_from_str(repo_watch_thread_state_to_str(
+                RepoWatchThreadState::Resolved
+            )),
+            Some(RepoWatchThreadState::Resolved)
+        );
+        assert_eq!(
+            repo_watch_reaction_change_from_str(repo_watch_reaction_change_to_str(
+                ReactionChange::Removed
+            )),
+            Some(ReactionChange::Removed)
+        );
+        assert_eq!(
+            repo_watch_pull_request_lifecycle_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_mergeable_state_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_checks_outcome_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_check_conclusion_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_review_state_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_thread_state_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_reaction_change_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
 
     #[test]
     fn plan_event_kind_mapping_is_closed() {
