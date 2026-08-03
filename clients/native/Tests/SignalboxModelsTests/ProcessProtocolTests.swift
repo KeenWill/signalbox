@@ -384,6 +384,39 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(ProcessProtocolFixture.userDenialReason(in: frame.message), reason)
   }
 
+  func testUserDenialReasonAllowsUnicodeFormatScalar() throws {
+    let formatScalar = "\u{200D}"
+    let reason = "kept\(formatScalar)verbatim"
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"44444444-4444-4444-8444-444444444444",
+            "decision":{"type":"deny","reason":"\(reason)"},
+            "decider":{
+              "type":"user",
+              "command_id":"55555555-5555-4555-8555-555555555555"
+            },
+            "rationale":null
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(ProcessProtocolFixture.userDenialReason(in: frame.message), reason)
+  }
+
   func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
     let contextCompactionID = "33333333-3333-4333-8333-333333333333"
     let modelCallID = "44444444-4444-4444-8444-444444444444"

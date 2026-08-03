@@ -2515,7 +2515,7 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   private static func validDenialReason(_ reason: String) -> Bool {
     !reason.isEmpty
       && reason.utf8.count <= 1_024
-      && reason.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+      && reason.unicodeScalars.allSatisfy { $0.properties.generalCategory != .control }
       && reason.unicodeScalars.first.map { !isPOSIXWhitespace($0) } == true
       && reason.unicodeScalars.last.map { !isPOSIXWhitespace($0) } == true
   }
