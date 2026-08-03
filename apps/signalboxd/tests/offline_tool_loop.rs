@@ -56,7 +56,8 @@ use signalbox_process_protocol::{
     encode_client_line,
 };
 use signalbox_tools_web::{
-    WebSearchRequest, WebSearchTransport, WebSearchTransportFailure, WebSearchTransportOutcome,
+    WEB_FETCH_NAME, WEB_SEARCH_NAME, WebSearchRequest, WebSearchTransport,
+    WebSearchTransportFailure, WebSearchTransportOutcome,
 };
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -605,13 +606,15 @@ fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
         .iter()
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 37);
+    assert_eq!(names.len(), 38);
     assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
     assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
     assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
     assert!(names.contains(&READ_FILE_NAME));
     assert!(names.contains(&WRITE_FILE_NAME));
     assert!(names.contains(&signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME));
+    assert!(names.contains(&WEB_FETCH_NAME));
+    assert!(names.contains(&WEB_SEARCH_NAME));
 }
 
 fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
@@ -1950,7 +1953,7 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
     let arguments = serde_json::json!({"url": expected_url}).to_string();
     let (execution, runtime) = fixture.execution(
         [
-            tool_use_script(&[("web_fetch", arguments.as_str())]),
+            tool_use_script(&[(WEB_FETCH_NAME, arguments.as_str())]),
             completion_script("fetch observed"),
         ],
         tool_catalog,
@@ -1961,6 +1964,10 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
+    fixture
+        .decide(request, ToolApprovalDecision::Approve)
+        .await?;
+    execution.resume_active(fixture.session).await?;
     let fetched = web.requests();
     let [physical_request] = fetched.as_slice() else {
         panic!("one physical fetch crosses the injected transport")
@@ -1979,7 +1986,7 @@ async fn tier_zero_web_fetch_completes_offline_tool_loop() -> Result<(), Box<dyn
     assert_eq!(
         continuation_tool_exchange(&runtime)?,
         vec![
-            expected_tool_call(request, "web_fetch", &arguments),
+            expected_tool_call(request, WEB_FETCH_NAME, &arguments),
             expected_successful_tool_result(request, expected_result),
         ]
     );
