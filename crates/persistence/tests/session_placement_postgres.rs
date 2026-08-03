@@ -40,6 +40,8 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RESULT_SHAPE_CONSTRAINT: &str = "update_session_placement_command_result_shape";
 const ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED: u128 = 0x230;
 const ARBITRARY_RESERVED_IDENTITY_CREATION_COMMAND_ID_SEED: u128 = 0x130;
+const ARBITRARY_MISSING_HEAD_SESSION_ID_SEED: u128 = 0x204;
+const ARBITRARY_MISSING_HEAD_CREATION_COMMAND_ID_SEED: u128 = 0x105;
 const ARBITRARY_REJECTION_RECEIPT_SESSION_ID_SEED: u128 = 0x206;
 const ARBITRARY_REJECTION_RECEIPT_CREATION_COMMAND_ID_SEED: u128 = 0x110;
 const ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x111;
@@ -450,8 +452,12 @@ struct MissingPlacementHeadFixture {
 
 async fn missing_placement_head_fixture() -> Result<MissingPlacementHeadFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session = session(0x204);
-    let creation = creation(command(0x105), session, SessionPlacement::pathless());
+    let session = session(ARBITRARY_MISSING_HEAD_SESSION_ID_SEED);
+    let creation = creation(
+        command(ARBITRARY_MISSING_HEAD_CREATION_COMMAND_ID_SEED),
+        session,
+        SessionPlacement::pathless(),
+    );
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation.clone())
         .await?;

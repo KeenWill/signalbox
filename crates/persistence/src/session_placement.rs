@@ -264,7 +264,13 @@ pub(crate) async fn load_current(
                 event.placement_path, event.root_global_read_intent,
                 native_registry.command_id AS native_creation_command_id,
                 imported_registry.command_id AS imported_creation_command_id,
-                placement_update_registry.command_id AS placement_update_command_id
+                placement_update_registry.command_id AS placement_update_command_id,
+                EXISTS (
+                    SELECT 1
+                      FROM session_placement_event AS later_event
+                     WHERE later_event.session_id = head.session_id
+                       AND later_event.version > head.current_version
+                ) AS later_event_exists
            FROM session
            LEFT JOIN session_current_placement AS head
              ON head.session_id = session.session_id
@@ -335,8 +341,9 @@ pub(crate) async fn load_current(
             "session placement event missing",
         ));
     }
+    let later_event_exists: bool = row.try_get("later_event_exists")?;
     let current = decode_authenticated_placement(row)?;
-    authenticate_loaded_current(connection, session, current)
+    authenticate_loaded_current(connection, session, current, later_event_exists)
         .await
         .map(Some)
 }
@@ -446,6 +453,7 @@ async fn authenticate_loaded_current(
     connection: &mut PgConnection,
     session: SessionId,
     current: VersionedSessionPlacement,
+    later_event_exists: bool,
 ) -> Result<VersionedSessionPlacement, SessionPlacementRepositoryError> {
     let authenticated = load_authenticated_version(connection, session, current.version())
         .await?
@@ -457,17 +465,6 @@ async fn authenticate_loaded_current(
             "session placement predecessor chain",
         ));
     }
-    let later_event_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM session_placement_event
-             WHERE session_id = $1 AND version > $2
-        )",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(version_to_numeric(current.version()))
-    .fetch_one(&mut *connection)
-    .await?;
     if later_event_exists {
         return Err(SessionPlacementRepositoryError::Corruption(
             "session placement head behind event history",
@@ -486,11 +483,30 @@ async fn load_current_for_update(
         .await?;
     if let Some(row) = row {
         let current = decode_authenticated_placement(row)?;
-        return authenticate_loaded_current(connection, session, current)
+        let later_event_exists = later_event_exists(connection, session, current.version()).await?;
+        return authenticate_loaded_current(connection, session, current, later_event_exists)
             .await
             .map(Some);
     }
     missing_head_result(connection, session).await
+}
+
+async fn later_event_exists(
+    connection: &mut PgConnection,
+    session: SessionId,
+    version: SessionPlacementVersion,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM session_placement_event
+             WHERE session_id = $1 AND version > $2
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(version_to_numeric(version))
+    .fetch_one(&mut *connection)
+    .await
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -593,7 +609,9 @@ async fn missing_head_result(
     match row {
         Some(row) => {
             let current = decode_authenticated_placement(row)?;
-            authenticate_loaded_current(connection, session, current)
+            let later_event_exists =
+                later_event_exists(connection, session, current.version()).await?;
+            authenticate_loaded_current(connection, session, current, later_event_exists)
                 .await
                 .map(Some)
         }
