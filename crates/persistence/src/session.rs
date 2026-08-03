@@ -17,14 +17,12 @@ use crate::create_session_from_imported_frontier::{
     self, ImportedSessionCorruption, ImportedSessionRepositoryError,
 };
 use crate::mapping::{
-    PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
-    defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
+    PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+    dangerous_tool_auto_approval_from_str, defaults_version_from_numeric,
+    session_creation_cause_from_str, session_id_from_uuid, session_id_to_uuid,
     session_placement_event_kind_from_str, tool_request_id_from_uuid,
 };
 
-// Applied migrations freeze this legacy storage spelling.
-const USER_INITIATED: &str = "owner_initiated";
-const DELEGATED: &str = "delegated";
 const NO_ANCESTRY: &str = "none";
 
 /// A durable shape that cannot reconstruct one complete current session.
@@ -139,9 +137,10 @@ impl SessionRepository {
     /// by that pointer. Imported ancestry additionally joins its one-to-one
     /// seed record and seed-frontier header as a constant-size proof. Native
     /// template provenance additionally correlates the creation command's
-    /// storage version. It intentionally loads no imported aggregate, frontier
-    /// membership, semantic entry, creation receipt, turn, command history, or
-    /// unselected defaults version.
+    /// storage version. The selected placement is then checked against its
+    /// complete authenticated event-and-receipt chain on the same connection.
+    /// It intentionally loads no imported aggregate, frontier membership,
+    /// semantic entry, turn history, or unselected defaults version.
     pub async fn load_session(
         &self,
         requested_session: SessionId,
@@ -242,7 +241,9 @@ pub(crate) async fn load_session_from_connection(
            ON placement_update.command_id = placement.provenance_command_id
           AND placement_update.session_id = placement.session_id
           AND placement_update.result_kind = 'applied'
+          AND placement_update.rejection_kind IS NULL
           AND placement_update.result_version = placement.version
+          AND placement_update.result_current_version IS NULL
           AND placement_update.expected_version = placement.prior_version
           AND placement_update.replacement_path
                 IS NOT DISTINCT FROM placement.placement_path
@@ -264,7 +265,21 @@ pub(crate) async fn load_session_from_connection(
         );
     }
 
-    decode_complete(row, requested_session).map(Some)
+    let session = decode_complete(row, requested_session)?;
+    let authenticated_placement = crate::session_placement::load_authenticated_version(
+        connection,
+        requested_session,
+        session.current_placement().version(),
+    )
+    .await
+    .map_err(map_placement_error)?
+    .ok_or(SessionCorruption::Inconsistent(
+        "current placement authentication",
+    ))?;
+    if session.current_placement() != &authenticated_placement {
+        return Err(SessionCorruption::Inconsistent("current placement authentication").into());
+    }
+    Ok(Some(session))
 }
 
 fn decode_complete(
@@ -486,6 +501,25 @@ fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositor
     }
 }
 
+fn map_placement_error(
+    error: crate::session_placement::SessionPlacementRepositoryError,
+) -> SessionRepositoryError {
+    use crate::session_placement::SessionPlacementRepositoryError;
+
+    match error {
+        SessionPlacementRepositoryError::Database(error)
+        | SessionPlacementRepositoryError::CommitAmbiguous(error) => {
+            SessionRepositoryError::Database(error)
+        }
+        SessionPlacementRepositoryError::InvalidCommandId => {
+            SessionCorruption::Inconsistent("current placement command identity").into()
+        }
+        SessionPlacementRepositoryError::Corruption(reason) => {
+            SessionCorruption::Inconsistent(reason).into()
+        }
+    }
+}
+
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, SessionRepositoryError>
 where
     for<'r> T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
@@ -515,22 +549,28 @@ fn decode_provenance(
         }
         .into());
     }
-    match (cause.as_str(), spawning_request) {
-        (USER_INITIATED, None) => Ok(SessionCreationProvenance::new(
-            SessionCreationCause::UserInitiated,
-            TranscriptAncestry::None,
-        )),
-        (DELEGATED, Some(request)) => Ok(SessionCreationProvenance::delegated(
-            tool_request_id_from_uuid(request),
-        )),
-        (USER_INITIATED | DELEGATED, _) => {
-            Err(SessionCorruption::Inconsistent("creation cause provenance").into())
-        }
-        _ => Err(SessionCorruption::Unsupported {
+    let Some(cause_kind) = session_creation_cause_from_str(&cause) else {
+        return Err(SessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,
         }
-        .into()),
+        .into());
+    };
+    match (cause_kind, spawning_request) {
+        (SessionCreationCauseStorageKind::UserInitiated, None) => {
+            Ok(SessionCreationProvenance::new(
+                SessionCreationCause::UserInitiated,
+                TranscriptAncestry::None,
+            ))
+        }
+        (SessionCreationCauseStorageKind::Delegated, Some(request)) => Ok(
+            SessionCreationProvenance::delegated(tool_request_id_from_uuid(request)),
+        ),
+        (
+            SessionCreationCauseStorageKind::UserInitiated
+            | SessionCreationCauseStorageKind::Delegated,
+            _,
+        ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
     }
 }
 
@@ -582,7 +622,10 @@ mod tests {
     use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
     use sqlx::types::Uuid;
 
-    use super::{SessionCorruption, SessionRepositoryError, decode_provenance};
+    use super::{NO_ANCESTRY, SessionCorruption, SessionRepositoryError, decode_provenance};
+    use crate::mapping::session_creation_cause_to_str;
+
+    const NON_NONE_ANCESTRY: &str = "single_source";
 
     fn spawning_request() -> Uuid {
         Uuid::from_u128(1)
@@ -600,8 +643,12 @@ mod tests {
     fn s18_inv003_delegated_provenance_decodes_exactly() {
         let request = spawning_request();
         let provenance = decode_provenance(
-            String::from("delegated"),
-            String::from("none"),
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::Delegated {
+                    spawning_request: signalbox_domain::ToolRequestId::from_uuid(request),
+                },
+            )),
+            String::from(NO_ANCESTRY),
             Some(request),
         )
         .expect("the complete delegated storage shape decodes");
@@ -618,8 +665,15 @@ mod tests {
     /// S18 / INV-003: delegated storage cannot omit its spawning request.
     #[test]
     fn s18_inv003_delegated_provenance_requires_spawning_request() {
-        let error = decode_provenance(String::from("delegated"), String::from("none"), None)
-            .expect_err("delegated provenance without its request is corrupt");
+        let delegated = SessionCreationCause::Delegated {
+            spawning_request: signalbox_domain::ToolRequestId::from_uuid(spawning_request()),
+        };
+        let error = decode_provenance(
+            String::from(session_creation_cause_to_str(&delegated)),
+            String::from(NO_ANCESTRY),
+            None,
+        )
+        .expect_err("delegated provenance without its request is corrupt");
 
         assert_eq!(
             corruption(error),
@@ -631,8 +685,10 @@ mod tests {
     #[test]
     fn s01_inv003_user_initiated_provenance_rejects_spawning_request() {
         let error = decode_provenance(
-            String::from("owner_initiated"),
-            String::from("none"),
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            String::from(NO_ANCESTRY),
             Some(spawning_request()),
         )
         .expect_err("user-initiated provenance cannot carry delegated authority");
@@ -646,18 +702,25 @@ mod tests {
     /// S18 / INV-003: delegated creation cannot acquire transcript ancestry.
     #[test]
     fn s18_inv003_delegated_provenance_rejects_non_none_ancestry() {
-        let error = decode_provenance(
-            String::from("delegated"),
-            String::from("single_source"),
-            Some(spawning_request()),
-        )
-        .expect_err("delegated provenance cannot inherit transcript ancestry");
+        let error =
+            decode_provenance(
+                String::from(session_creation_cause_to_str(
+                    &SessionCreationCause::Delegated {
+                        spawning_request: signalbox_domain::ToolRequestId::from_uuid(
+                            spawning_request(),
+                        ),
+                    },
+                )),
+                String::from(NON_NONE_ANCESTRY),
+                Some(spawning_request()),
+            )
+            .expect_err("delegated provenance cannot inherit transcript ancestry");
 
         assert_eq!(
             corruption(error),
             SessionCorruption::Unsupported {
                 field: "ancestry kind",
-                value: String::from("single_source"),
+                value: String::from(NON_NONE_ANCESTRY),
             }
         );
     }
