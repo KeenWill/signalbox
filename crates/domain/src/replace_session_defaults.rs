@@ -11,8 +11,9 @@
 //! acknowledgement.
 
 use crate::{
-    DurableCommandId, ModelSettingsOverlay, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, VersionedSessionConfigurationDefaults,
+    DurableCommandId, ModelChangeAdjustment, ModelSettingsOverlay, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    VersionedSessionConfigurationDefaults,
 };
 
 /// The canonical caller payload for replacing one session's defaults.
@@ -34,11 +35,12 @@ pub struct ReplaceSessionDefaults {
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
     caller_model_settings: ModelSettingsOverlay,
+    model_settings_adjustments: Box<[ModelChangeAdjustment]>,
 }
 
 impl ReplaceSessionDefaults {
     /// Constructs the complete canonical caller payload.
-    pub const fn new(
+    pub fn new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
@@ -56,12 +58,32 @@ impl ReplaceSessionDefaults {
 
     /// Constructs the payload while retaining the caller's exact settings
     /// overlay separately from any automatic installed adjustment.
-    pub const fn with_model_settings(
+    pub fn with_model_settings(
         command_id: DurableCommandId,
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
         caller_model_settings: ModelSettingsOverlay,
+    ) -> Self {
+        Self::with_model_settings_adjustments(
+            command_id,
+            session,
+            expected_current_version,
+            replacement,
+            caller_model_settings,
+            Vec::new(),
+        )
+    }
+
+    /// Constructs the payload with server-derived automatic adjustment
+    /// evidence. Adjustments are excluded from caller-payload equality.
+    pub fn with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
     ) -> Self {
         Self {
             command_id,
@@ -69,6 +91,7 @@ impl ReplaceSessionDefaults {
             expected_current_version,
             replacement,
             caller_model_settings,
+            model_settings_adjustments: model_settings_adjustments.into_boxed_slice(),
         }
     }
 
@@ -95,6 +118,11 @@ impl ReplaceSessionDefaults {
     /// Returns the caller's provenance-preserving session contribution.
     pub const fn caller_model_settings(&self) -> ModelSettingsOverlay {
         self.caller_model_settings
+    }
+
+    /// Borrows ordered automatic adjustments derived for the installed epoch.
+    pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment] {
+        &self.model_settings_adjustments
     }
 
     /// Prepares the authoritative rejection for a target proven absent by the
@@ -716,9 +744,9 @@ mod tests {
 
     use crate::test_support::{command_id, direct, session_id};
     use crate::{
-        ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
-        TranscriptAncestry,
+        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay, ReasoningLevel,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+        SessionCreationProvenance, SessionReconstitutionInput, TranscriptAncestry,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -831,6 +859,35 @@ mod tests {
         assert_ne!(baseline, different_target);
         assert_ne!(baseline, different_expected_version);
         assert_ne!(baseline, different_replacement);
+    }
+
+    /// S37 / INV-012 / INV-053: server-derived adjustment evidence travels
+    /// with a new command but does not alter caller-payload replay equality.
+    #[test]
+    fn s37_inv012_inv053_adjustment_evidence_is_not_caller_payload() {
+        let target = session_id(1);
+        let adjustment = ModelChangeAdjustment::ReasoningLevelClamped {
+            from: ReasoningLevel::High,
+            to: ReasoningLevel::Low,
+        };
+        let with_adjustment = ReplaceSessionDefaults::with_model_settings_adjustments(
+            command_id(1),
+            target,
+            version(1),
+            defaults(2),
+            ModelSettingsOverlay::inherit_all(),
+            vec![adjustment],
+        );
+        let replay = ReplaceSessionDefaults::with_model_settings(
+            command_id(1),
+            target,
+            version(1),
+            defaults(2),
+            ModelSettingsOverlay::inherit_all(),
+        );
+
+        assert_eq!(with_adjustment, replay);
+        assert_eq!(with_adjustment.model_settings_adjustments(), [adjustment]);
     }
 
     /// S01 / INV-008: matching current state installs one complete immutable
