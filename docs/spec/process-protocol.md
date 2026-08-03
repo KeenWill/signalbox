@@ -17,10 +17,10 @@ the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
 import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
-delegation session-follow events against this PR (`agent/delegation`). This page
-is the normative boundary between a local client process and `signalboxd`;
-domain values, PostgreSQL records, and wire messages remain distinct
-representations.
+delegation session-follow events, recipient routing, and wake exclusion against
+this PR (`agent/delegation-persistence-schema`). This page is the normative
+boundary between a local client process and `signalboxd`; domain values,
+PostgreSQL records, and wire messages remain distinct representations.
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field

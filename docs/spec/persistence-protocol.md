@@ -32,13 +32,14 @@ PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 and the session-placement event, current head, and creation transaction were
 verified through PR #415 (`agent/scoped-visibility-creation`); and the exact
-stop-command descendant scopes and typed delegation wake origins were verified
-through this PR (`agent/delegation`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
+stop-command descendant scopes were verified through PR #416
+(`agent/delegation`); and the exact delegation update and wake obligations were
+verified through this PR (`agent/delegation-persistence-schema`). This page
+covers the Postgres representation in `crates/persistence` (source and
+migrations), migration discipline, durable command storage and replay equality,
+the fail-closed reconstitution boundary, the lock protocol, pending-steering
+durable state, the corruption taxonomy, commit-ambiguity handling, and the
+transactional outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in

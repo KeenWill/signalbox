@@ -869,8 +869,8 @@ fn constraint_name(error: &sqlx::Error) -> Option<&str> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_outbox_closes_update_subjects_and_separates_wakes() -> Result<(), Box<dyn Error>>
-{
+async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
+-> Result<(), Box<dyn Error>> {
     let spawn_arguments = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
@@ -1013,25 +1013,44 @@ async fn delegation_outbox_closes_update_subjects_and_separates_wakes() -> Resul
     Ok(())
 }
 
+async fn prepared_recipient_delivery_fixture(
+    seed: u128,
+) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = prepare_canonical_raw_delegation(&pool, seed).await?;
+    let mut base = pool.begin().await?;
+    insert_raw_delegation_with_update(&mut base, fixture).await?;
+    base.commit().await?;
+    Ok((container, pool, fixture))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result<(), Box<dyn Error>>
-{
+async fn inv032_delegation_relation_requires_spawn_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let unannounced = prepare_canonical_raw_delegation(&pool, 0xd700).await?;
+    let fixture = prepare_canonical_raw_delegation(&pool, 0xd700).await?;
     let mut relation_only = pool.begin().await?;
-    insert_raw_delegation(&mut relation_only, unannounced).await?;
-    let spawn_update_error = relation_only
+    insert_raw_delegation(&mut relation_only, fixture).await?;
+    let error = relation_only
         .commit()
         .await
         .expect_err("a delegation relation cannot commit without its spawn update");
 
-    let fixture = prepare_canonical_raw_delegation(&pool, 0xd710).await?;
-    let mut base = pool.begin().await?;
-    insert_raw_delegation_with_update(&mut base, fixture).await?;
-    base.commit().await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_child_spawned_update_required")
+    );
 
-    let mut wait_only = pool.begin().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_wait_requires_parent_update() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd710).await?;
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO session_delegation_wait
             (awaiting_tool_request_id, spawning_tool_request_id,
@@ -1043,88 +1062,146 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
     .bind(fixture.parent.into_uuid())
     .bind(fixture.parent_turn.into_uuid())
     .bind(fixture.child.into_uuid())
-    .execute(&mut *wait_only)
+    .execute(&mut *transaction)
     .await?;
-    let wait_update_error = wait_only
+    let error = transaction
         .commit()
         .await
         .expect_err("a wait cannot commit without its parent-stream update");
 
-    let mut outcome_only = pool.begin().await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_child_waiting_update_required")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_parent_lifecycle_requires_update() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd720).await?;
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
          DISABLE TRIGGER session_delegation_event_requires_payload",
     )
-    .execute(&mut *outcome_only)
+    .execute(&mut *transaction)
     .await?;
-    insert_raw_parent_lifecycle_without_update(&mut outcome_only, fixture, Uuid::from_u128(0xdd10))
+    insert_raw_parent_lifecycle_without_update(&mut transaction, fixture, Uuid::from_u128(0xdd10))
         .await?;
-    let lifecycle_update_error = outcome_only
+    let error = transaction
         .commit()
         .await
         .expect_err("an outcome cannot commit without its parent-stream lifecycle update");
 
-    let mut message_without_update = pool.begin().await?;
-    insert_raw_message(
-        &mut message_without_update,
-        fixture,
-        "parent_to_child",
-        fixture.child,
-    )
-    .await?;
-    append_raw_message_wake(&mut message_without_update, fixture, fixture.child).await?;
-    let message_update_error = message_without_update
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_lifecycle_update_required")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_message_requires_recipient_update() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd730).await?;
+    let mut transaction = pool.begin().await?;
+    insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
+    append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
+    let error = transaction
         .commit()
         .await
         .expect_err("a message cannot commit without its recipient-stream update");
 
-    let mut result_without_update = pool.begin().await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_session_message_update_required")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_result_requires_parent_update() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd740).await?;
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
          DISABLE TRIGGER session_delegation_event_requires_payload",
     )
-    .execute(&mut *result_without_update)
+    .execute(&mut *transaction)
     .await?;
-    insert_raw_wait_and_message_with_delivery(&mut result_without_update, fixture).await?;
-    insert_raw_failed_outcome(&mut result_without_update, fixture, fixture.initial_turn).await?;
-    append_raw_result_wake(&mut result_without_update, fixture).await?;
-    let result_update_error = result_without_update
+    insert_raw_wait_and_message_with_delivery(&mut transaction, fixture).await?;
+    insert_raw_failed_outcome(&mut transaction, fixture, fixture.initial_turn).await?;
+    append_raw_result_wake(&mut transaction, fixture).await?;
+    let error = transaction
         .commit()
         .await
         .expect_err("a result cannot commit without its parent-stream result update");
 
-    let mut message_without_wake = pool.begin().await?;
-    insert_raw_message(
-        &mut message_without_wake,
-        fixture,
-        "parent_to_child",
-        fixture.child,
-    )
-    .await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_child_result_update_required")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_message_requires_recipient_wake() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd750).await?;
+    let mut transaction = pool.begin().await?;
+    insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
     append_raw_message_update(
-        &mut message_without_wake,
+        &mut transaction,
         fixture,
         fixture.child,
         fixture.parent,
         fixture.child,
     )
     .await?;
-    let message_wake_error = message_without_wake
+    let error = transaction
         .commit()
         .await
         .expect_err("every message requires its distinct recipient wake");
 
-    let mut result_without_wake = pool.begin().await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_message_wake_required")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_result_requires_parent_wake() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd760).await?;
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
          DISABLE TRIGGER session_delegation_event_requires_payload",
     )
-    .execute(&mut *result_without_wake)
+    .execute(&mut *transaction)
     .await?;
-    insert_raw_wait_and_message_with_delivery(&mut result_without_wake, fixture).await?;
-    insert_raw_failed_outcome(&mut result_without_wake, fixture, fixture.initial_turn).await?;
+    insert_raw_wait_and_message_with_delivery(&mut transaction, fixture).await?;
+    insert_raw_failed_outcome(&mut transaction, fixture, fixture.initial_turn).await?;
     append_raw_delegation_update(
-        &mut result_without_wake,
+        &mut transaction,
         fixture,
         RawDelegationUpdate {
             session: fixture.parent,
@@ -1137,83 +1214,99 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
         },
     )
     .await?;
-    let result_wake_error = result_without_wake
+    let error = transaction
         .commit()
         .await
         .expect_err("every result requires its distinct parent wake");
 
-    let mut wrong_parent_to_child = pool.begin().await?;
-    insert_raw_message(
-        &mut wrong_parent_to_child,
-        fixture,
-        "parent_to_child",
-        fixture.child,
-    )
-    .await?;
-    append_raw_message_update(
-        &mut wrong_parent_to_child,
-        fixture,
-        fixture.parent,
-        fixture.parent,
-        fixture.child,
-    )
-    .await?;
-    append_raw_message_wake(&mut wrong_parent_to_child, fixture, fixture.child).await?;
-    let parent_to_child_endpoint_error =
-        sqlx::query("SET CONSTRAINTS delegation_update_subject IMMEDIATE")
-            .execute(&mut *wrong_parent_to_child)
-            .await
-            .expect_err("a parent-to-child update belongs only to the child stream");
-    wrong_parent_to_child.rollback().await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_result_wake_required")
+    );
 
-    let mut wrong_child_to_parent = pool.begin().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_parent_to_child_update_requires_child_stream() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd770).await?;
+    let mut transaction = pool.begin().await?;
+    insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
+    append_raw_message_update(
+        &mut transaction,
+        fixture,
+        fixture.parent,
+        fixture.parent,
+        fixture.child,
+    )
+    .await?;
+    append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
+    let error = sqlx::query("SET CONSTRAINTS delegation_update_subject IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .expect_err("a parent-to-child update belongs only to the child stream");
+    transaction.rollback().await?;
+
+    assert_eq!(constraint_name(&error), Some("delegation_update_subject"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_child_to_parent_update_requires_parent_stream() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd780).await?;
+    let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
          DISABLE TRIGGER session_delegation_event_requires_payload",
     )
-    .execute(&mut *wrong_child_to_parent)
+    .execute(&mut *transaction)
     .await?;
-    insert_raw_message(
-        &mut wrong_child_to_parent,
-        fixture,
-        "child_to_parent",
-        fixture.parent,
-    )
-    .await?;
+    insert_raw_message(&mut transaction, fixture, "child_to_parent", fixture.parent).await?;
     append_raw_message_update(
-        &mut wrong_child_to_parent,
+        &mut transaction,
         fixture,
         fixture.child,
         fixture.child,
         fixture.parent,
     )
     .await?;
-    append_raw_message_wake(&mut wrong_child_to_parent, fixture, fixture.parent).await?;
-    let child_to_parent_endpoint_error =
-        sqlx::query("SET CONSTRAINTS delegation_update_subject IMMEDIATE")
-            .execute(&mut *wrong_child_to_parent)
-            .await
-            .expect_err("a child-to-parent update belongs only to the parent stream");
-    wrong_child_to_parent.rollback().await?;
+    append_raw_message_wake(&mut transaction, fixture, fixture.parent).await?;
+    let error = sqlx::query("SET CONSTRAINTS delegation_update_subject IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .expect_err("a child-to-parent update belongs only to the parent stream");
+    transaction.rollback().await?;
 
-    let mut cross_endpoint_duplicate = pool.begin().await?;
-    insert_raw_message(
-        &mut cross_endpoint_duplicate,
-        fixture,
-        "parent_to_child",
-        fixture.child,
-    )
-    .await?;
+    assert_eq!(constraint_name(&error), Some("delegation_update_subject"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_message_update_rejects_cross_endpoint_duplicate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd790).await?;
+    let mut transaction = pool.begin().await?;
+    insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
     append_raw_message_update(
-        &mut cross_endpoint_duplicate,
+        &mut transaction,
         fixture,
         fixture.child,
         fixture.parent,
         fixture.child,
     )
     .await?;
-    let duplicate_error = append_raw_message_update(
-        &mut cross_endpoint_duplicate,
+    let error = append_raw_message_update(
+        &mut transaction,
         fixture,
         fixture.parent,
         fixture.parent,
@@ -1221,67 +1314,34 @@ async fn delegation_state_requires_exact_recipient_updates_and_wakes() -> Result
     )
     .await
     .expect_err("one message cannot be duplicated onto another endpoint");
-    cross_endpoint_duplicate.rollback().await?;
+    transaction.rollback().await?;
 
-    let mut reverse_order = pool.begin().await?;
+    assert_eq!(
+        constraint_name(&error),
+        Some("delegation_session_message_update_once")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_message_delivery_admits_reverse_insert_order() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd7a0).await?;
+    let mut transaction = pool.begin().await?;
     append_raw_message_update(
-        &mut reverse_order,
+        &mut transaction,
         fixture,
         fixture.child,
         fixture.parent,
         fixture.child,
     )
     .await?;
-    append_raw_message_wake(&mut reverse_order, fixture, fixture.child).await?;
-    insert_raw_message(
-        &mut reverse_order,
-        fixture,
-        "parent_to_child",
-        fixture.child,
-    )
-    .await?;
-    reverse_order.commit().await?;
-
-    assert_eq!(
-        constraint_name(&spawn_update_error),
-        Some("delegation_child_spawned_update_required")
-    );
-    assert_eq!(
-        constraint_name(&wait_update_error),
-        Some("delegation_child_waiting_update_required")
-    );
-    assert_eq!(
-        constraint_name(&lifecycle_update_error),
-        Some("delegation_lifecycle_update_required")
-    );
-    assert_eq!(
-        constraint_name(&message_update_error),
-        Some("delegation_session_message_update_required")
-    );
-    assert_eq!(
-        constraint_name(&result_update_error),
-        Some("delegation_child_result_update_required")
-    );
-    assert_eq!(
-        constraint_name(&message_wake_error),
-        Some("delegation_message_wake_required")
-    );
-    assert_eq!(
-        constraint_name(&result_wake_error),
-        Some("delegation_result_wake_required")
-    );
-    assert_eq!(
-        constraint_name(&parent_to_child_endpoint_error),
-        Some("delegation_update_subject")
-    );
-    assert_eq!(
-        constraint_name(&child_to_parent_endpoint_error),
-        Some("delegation_update_subject")
-    );
-    assert_eq!(
-        constraint_name(&duplicate_error),
-        Some("delegation_session_message_update_once")
-    );
+    append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
+    insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
+    transaction.commit().await?;
 
     pool.close().await;
     drop(container);
