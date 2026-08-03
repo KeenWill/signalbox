@@ -52,8 +52,8 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    InputDelivery, ProtocolVersion, RequestId, ServerMessage, ToolDecision, decode_server_line,
-    encode_client_line,
+    InputDelivery, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -3700,6 +3700,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
             session_id: CanonicalUuid::from_uuid(fixture.session.into_uuid()),
             content: steering_content,
             expected_defaults_version: None,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: Some(InputDelivery::Steer {
                 expected_active_turn_id: CanonicalUuid::from_uuid(fixture.turn.into_uuid()),
             }),

@@ -1417,12 +1417,20 @@ pub enum SettingOverlay<ValueT> {
     Value(ValueT),
 }
 
+/// One fast-mode contribution at a precedence layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum FastModeOverlay {
+    Inherit,
+    Value(FastMode),
+}
+
 /// Three provenance-preserving setting contributions at one layer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSettingsOverlay {
     pub reasoning_level: SettingOverlay<ReasoningLevel>,
-    pub fast_mode: SettingOverlay<FastMode>,
+    pub fast_mode: FastModeOverlay,
     pub service_tier: SettingOverlay<ServiceTier>,
 }
 
@@ -1431,7 +1439,7 @@ impl ModelSettingsOverlay {
     pub const fn inherit_all() -> Self {
         Self {
             reasoning_level: SettingOverlay::Inherit,
-            fast_mode: SettingOverlay::Inherit,
+            fast_mode: FastModeOverlay::Inherit,
             service_tier: SettingOverlay::Inherit,
         }
     }
@@ -1531,13 +1539,12 @@ fn resolve_wire_nullable<ValueT: Copy>(
 }
 
 fn resolve_wire_fast(
-    layers: impl IntoIterator<Item = (ModelSettingSource, SettingOverlay<FastMode>)>,
+    layers: impl IntoIterator<Item = (ModelSettingSource, FastModeOverlay)>,
 ) -> (FastMode, Option<ModelSettingSource>) {
     for (source, setting) in layers {
         match setting {
-            SettingOverlay::Inherit => {}
-            SettingOverlay::ProviderDefault => return (FastMode::Disabled, Some(source)),
-            SettingOverlay::Value(value) => return (value, Some(source)),
+            FastModeOverlay::Inherit => {}
+            FastModeOverlay::Value(value) => return (value, Some(source)),
         }
     }
     (FastMode::Disabled, None)
@@ -5969,22 +5976,22 @@ mod tests {
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
         CurrentModelCallState, EffectiveModelSettings, ErrorCode, ErrorDetail,
         FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
-        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
-        GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
-        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
-        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
-        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
-        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
-        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
-        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, ProtocolVersion,
-        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
-        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
-        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
+        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+        ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
+        PROTOCOL_VERSION, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -6012,7 +6019,7 @@ mod tests {
     fn settings_snapshot_fixture() -> ModelSettingsSnapshot {
         let per_call = ModelSettingsOverlay {
             reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
-            fast_mode: SettingOverlay::Inherit,
+            fast_mode: FastModeOverlay::Inherit,
             service_tier: SettingOverlay::ProviderDefault,
         };
         let inherited = ModelSettingsOverlay::inherit_all();
@@ -10757,6 +10764,13 @@ mod tests {
         .expect_err("effective settings must resolve from retained provenance");
 
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    #[test]
+    fn fast_mode_overlay_rejects_provider_default_on_the_wire() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"provider_default"},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
+        );
     }
 
     /// INV-033: steering inherits its source turn and cannot carry an

@@ -933,7 +933,7 @@ impl SubmitInputTurnOriginAppliedResult {
             self.accepted_input,
             self.turn,
             self.origin_configuration.session_defaults_version(),
-            self.origin_configuration.effective().model().clone(),
+            *self.origin_configuration.effective().model(),
             self.origin_configuration
                 .requested()
                 .per_call_model_settings(),
@@ -2317,13 +2317,16 @@ impl SubmitInputReconstitutionInput {
 
                 let origin_configuration = reconstruct_origin_configuration(
                     &self.command,
-                    defaults_session,
-                    defaults_version,
-                    defaults,
-                    stored_requested_model,
-                    stored_frozen_model,
-                    stored_model_settings,
-                    stored_model_settings_adjustments.into_vec(),
+                    StoredOriginConfigurationReconstitutionFacts {
+                        defaults_session,
+                        defaults_version,
+                        defaults,
+                        stored_requested_model,
+                        stored_frozen_model,
+                        stored_model_settings,
+                        stored_model_settings_adjustments: stored_model_settings_adjustments
+                            .into_vec(),
+                    },
                 )
                 .map_err(&fail)?;
                 let applied_interrupt = match interrupt_predecessor {
@@ -2811,8 +2814,7 @@ fn validate_existing_interrupt(
     Ok(())
 }
 
-fn reconstruct_origin_configuration(
-    command: &SubmitInput,
+struct StoredOriginConfigurationReconstitutionFacts {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
@@ -2820,7 +2822,21 @@ fn reconstruct_origin_configuration(
     stored_frozen_model: FrozenModelSelection,
     stored_model_settings: Option<ValidatedModelSettings>,
     stored_model_settings_adjustments: Vec<ModelChangeAdjustment>,
+}
+
+fn reconstruct_origin_configuration(
+    command: &SubmitInput,
+    facts: StoredOriginConfigurationReconstitutionFacts,
 ) -> Result<OriginConfiguration, SubmitInputReconstitutionFailure> {
+    let StoredOriginConfigurationReconstitutionFacts {
+        defaults_session,
+        defaults_version,
+        defaults,
+        stored_requested_model,
+        stored_frozen_model,
+        stored_model_settings,
+        stored_model_settings_adjustments,
+    } = facts;
     let Some(configuration) = explicit_origin_configuration(command.delivery) else {
         return Err(SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin);
     };
@@ -3331,22 +3347,23 @@ mod tests {
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FastModeSupport,
-        FrozenAliasDefinition, FrozenModelSelection, InitialSemanticTranscriptEntryPayload,
-        IssuedOperationRef, ModelCallDisposition, ModelCallReconstitutionInput,
-        ModelCallReconstitutionState, ModelCapabilities, ModelCapabilityCatalog,
-        ModelCapabilityDefinition, ModelSelectionOverride, ModelSelectionRequest,
-        ModelSettingsOverlay, NonEmptyIssuedOperationRefs, NormalizedToolArguments,
-        OriginConfiguration, PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
-        ReasoningLevel, ReconciliationReason, ResolvedContextFrontierReconstitutionInput,
-        ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
-        SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
-        SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
-        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-        SessionCreationProvenance, SessionInputPosition, SessionReconstitutionInput,
-        SettingOverlay, SteeringBinding, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        TranscriptAncestry, TurnDisposition, UserContent,
+        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FastModeOverlay,
+        FastModeSupport, FrozenAliasDefinition, FrozenModelSelection,
+        InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelCallDisposition,
+        ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCapabilities,
+        ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
+        ModelSelectionRequest, ModelSettingsOverlay, NonEmptyIssuedOperationRefs,
+        NormalizedToolArguments, OriginConfiguration, PerInputConfigurationChoices,
+        PinnedProviderTargetReconstitutionInput, ReasoningLevel, ReconciliationReason,
+        ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+        ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
+        SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
+        SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionInputPosition, SessionReconstitutionInput, SettingOverlay, SteeringBinding,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
+        UserContent,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -4103,7 +4120,7 @@ mod tests {
         let selection = direct(2);
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
         let command = start_command_with_settings(1, "settings input", 1, per_call);

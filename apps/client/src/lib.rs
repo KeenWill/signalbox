@@ -30,11 +30,11 @@ use signalbox_process_protocol::{
     ConversationOriginFilter, ConversationSummary, ErrorCode, ErrorDetail, FrameEncodeError,
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
     MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-    ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingsOverlay, ProtocolVersion,
+    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SystemPromptMember,
     SystemPromptText, ToolBatchState, ToolDecision, TurnState, decode_server_line,
@@ -216,6 +216,9 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ModelAliasesStart {}
         | ServerMessage::ModelAliasSummary { .. }
         | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::ModelCapabilitiesStart {}
+        | ServerMessage::ModelCapabilityItem { .. }
+        | ServerMessage::ModelCapabilitiesEnd { .. }
         | ServerMessage::SessionMetadata { .. }
         | ServerMessage::SessionMetadataReplaced { .. }
         | ServerMessage::SessionDefaultsReplaced { .. }
@@ -844,11 +847,12 @@ async fn create(
         .mutation_request(ClientRequest::CreateSession {
             command_id,
             initial_model_selection: selection,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(system_prompt),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::SessionCreated { session_id } => {
+        ServerMessage::SessionCreated { session_id, .. } => {
             output.session_created(session_id)?;
             Ok(())
         }
@@ -881,7 +885,7 @@ async fn create_from_template(
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::SessionCreated { session_id } => {
+        ServerMessage::SessionCreated { session_id, .. } => {
             output.session_created(session_id)?;
             Ok(())
         }
@@ -933,10 +937,11 @@ async fn continue_imported(
             through_position,
             relationship,
             initial_model_selection: selection,
+            model_settings: ModelSettingsOverlay::inherit_all(),
         })
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::SessionCreated { session_id } => {
+        ServerMessage::SessionCreated { session_id, .. } => {
             output.session_created(session_id)?;
             Ok(())
         }
@@ -1083,6 +1088,7 @@ async fn replace_session_model(
             session_id,
             expected_defaults_version: observed.version,
             model_selection: selection,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
             system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
         })
@@ -1094,6 +1100,7 @@ async fn replace_session_model(
             model_selection,
             dangerous_tool_auto_approval,
             system_prompt: receipt_system_prompt,
+            ..
         } if replaced_session == session_id
             && model_selection == selection
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
@@ -1140,6 +1147,7 @@ async fn read_session_defaults(
             model_selection: _,
             dangerous_tool_auto_approval,
             system_prompt,
+            ..
         } if read_session == session_id
             && defaults_version.is_none_or(|named| named == read_version) =>
         {
@@ -2782,6 +2790,7 @@ async fn submit_input(
             session_id,
             content,
             expected_defaults_version,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery,
         })
         .await?;
@@ -3098,6 +3107,8 @@ fn terminal_event_state(
             Some(TurnTerminal::ReconciliationRequired)
         }
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
@@ -3250,6 +3261,8 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         }),
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
@@ -4369,15 +4382,17 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-        ConversationSummary, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState,
-        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
-        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
-        ModelCallState, ModelSelection, ProtocolVersion, RequestId, ReviewConcernTerminalOutcome,
-        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
-        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
-        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
+        ConversationSummary, EffectiveModelSettings, FastMode, FrameEncodeError, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
+        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion,
+        RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind, ReviewFindingEvent,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
+        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
         encode_server_line,
     };
     use tokio::{
@@ -4386,6 +4401,26 @@ mod tests {
         time::timeout,
     };
     use uuid::Uuid;
+
+    fn provider_default_model_settings() -> ModelSettingsSnapshot {
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: ModelSettingsOverlay::inherit_all(),
+                session: ModelSettingsOverlay::inherit_all(),
+                profile: ModelSettingsOverlay::inherit_all(),
+                global_default: ModelSettingsOverlay::inherit_all(),
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: None,
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: None,
+            fast_mode_source: None,
+            service_tier_source: None,
+            validated_for_selection_id: None,
+        }
+    }
 
     use super::{
         ConversationImportOutcome, ConversationsPageRequest, GoalHistoryReplay,
@@ -5896,12 +5931,16 @@ mod tests {
                     through_position: CanonicalU64::new(2),
                     relationship: ImportedSessionRelationship::Resume,
                     initial_model_selection: ModelSelection::Direct { selection_id },
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                 }
             );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
-                ServerMessage::SessionCreated { session_id },
+                ServerMessage::SessionCreated {
+                    session_id,
+                    model_settings: provider_default_model_settings(),
+                },
             )
             .map_err(io::Error::other)?;
             writer
@@ -6498,6 +6537,7 @@ mod tests {
                     session_id,
                     content: expected_content,
                     expected_defaults_version: Some(CanonicalU64::new(1)),
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: None,
                 }
             );
@@ -6509,6 +6549,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                     acceptance_position: CanonicalU64::new(1),
                     turn_id,
+                    model_settings: provider_default_model_settings(),
                 },
             )
             .map_err(io::Error::other)?;
@@ -6564,6 +6605,7 @@ mod tests {
                     session_id,
                     content: InputContent::new(String::from("steering content")),
                     expected_defaults_version: None,
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: Some(InputDelivery::Steer {
                         expected_active_turn_id: source_turn_id,
                     }),
@@ -6621,20 +6663,25 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let parked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("continue after reconciliation"));
+        let expected_content = content.clone();
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::ReconcileTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == parked_turn_id
-            ));
+                &ClientRequest::ReconcileTurn {
+                    command_id,
+                    session_id,
+                    expected_active_turn_id: parked_turn_id,
+                    content: expected_content,
+                    expected_defaults_version: CanonicalU64::new(1),
+                }
+            );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6643,6 +6690,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                     acceptance_position: CanonicalU64::new(2),
                     turn_id: successor_turn_id,
+                    model_settings: provider_default_model_settings(),
                 },
             )
             .map_err(io::Error::other)?;
@@ -6655,10 +6703,10 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = reconcile_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             parked_turn_id,
-            InputContent::new(String::from("continue after reconciliation")),
+            content,
             CanonicalU64::new(1),
         )
         .await?;
@@ -6678,20 +6726,25 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("continue after the stop"));
+        let expected_content = content.clone();
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::StopTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == active_turn_id
-            ));
+                &ClientRequest::StopTurn {
+                    command_id,
+                    session_id,
+                    expected_active_turn_id: active_turn_id,
+                    content: expected_content,
+                    expected_defaults_version: CanonicalU64::new(1),
+                }
+            );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6700,6 +6753,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                     acceptance_position: CanonicalU64::new(2),
                     turn_id: successor_turn_id,
+                    model_settings: provider_default_model_settings(),
                 },
             )
             .map_err(io::Error::other)?;
@@ -6712,10 +6766,10 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = stop_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             active_turn_id,
-            InputContent::new(String::from("continue after the stop")),
+            content,
             CanonicalU64::new(1),
         )
         .await?;

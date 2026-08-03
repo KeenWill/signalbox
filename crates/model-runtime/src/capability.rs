@@ -55,13 +55,13 @@ impl ModelCapabilities {
         &'a self,
         selected: &'a ResolvedTarget,
         fast_mode: FastMode,
-    ) -> Option<&'a ResolvedTarget> {
+    ) -> Result<&'a ResolvedTarget, ModelCapabilityError> {
         match (fast_mode, &self.fast_mode) {
             (FastMode::Disabled, _) | (FastMode::Enabled, Some(FastModeTarget::SameTarget)) => {
-                Some(selected)
+                Ok(selected)
             }
-            (FastMode::Enabled, Some(FastModeTarget::Mapped(target))) => Some(target),
-            (FastMode::Enabled, None) => None,
+            (FastMode::Enabled, Some(FastModeTarget::Mapped(target))) => Ok(target),
+            (FastMode::Enabled, None) => Err(ModelCapabilityError::UnsupportedFastMode),
         }
     }
 }
@@ -300,11 +300,11 @@ mod tests {
 
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Enabled),
-            Some(&mapped)
+            Ok(&mapped)
         );
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Disabled),
-            Some(&selected)
+            Ok(&selected)
         );
     }
 }

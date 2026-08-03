@@ -114,16 +114,20 @@ use signalbox_process_protocol::{
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
-    ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
-    GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
-    GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
+    FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
+    FrameDecodeErrorKind, FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
+    GoalBlockedReason as WireGoalBlockedReason, GoalCommandRejection as WireGoalCommandRejection,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
     ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelSelection as WireModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
+    ModelSettingsOverlay as WireModelSettingsOverlay,
+    ModelSettingsPrecedence as WireModelSettingsPrecedence,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot, ProtocolVersion, RejectionDetail,
+    RequestId, ReviewDiffSide as WireReviewDiffSide,
     ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
@@ -173,6 +177,26 @@ const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
+
+fn provider_default_wire_model_settings() -> WireModelSettingsSnapshot {
+    WireModelSettingsSnapshot {
+        precedence: WireModelSettingsPrecedence {
+            per_call: WireModelSettingsOverlay::inherit_all(),
+            session: WireModelSettingsOverlay::inherit_all(),
+            profile: WireModelSettingsOverlay::inherit_all(),
+            global_default: WireModelSettingsOverlay::inherit_all(),
+        },
+        effective: WireEffectiveModelSettings {
+            reasoning_level: None,
+            fast_mode: FastMode::Disabled,
+            service_tier: None,
+        },
+        reasoning_source: None,
+        fast_mode_source: None,
+        service_tier_source: None,
+        validated_for_selection_id: None,
+    }
+}
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -808,6 +832,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::ListSessionMetadata { .. }
         | ClientRequest::ListConversations { .. }
         | ClientRequest::ListModelAliases {}
+        | ClientRequest::ListModelCapabilities {}
         | ClientRequest::ReadSessionMetadata { .. }
         | ClientRequest::ReplaceSessionMetadata { .. }
         | ClientRequest::ReplaceSessionDefaults { .. }
@@ -1069,8 +1094,18 @@ where
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,
+            model_settings,
             system_prompt,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_create_session(
                 writer,
                 version,
@@ -1102,7 +1137,17 @@ where
             through_position,
             relationship,
             initial_model_selection,
+            model_settings,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_create_session_from_imported_frontier(
                 writer,
                 version,
@@ -1290,8 +1335,18 @@ where
             session_id,
             content,
             expected_defaults_version,
+            model_settings,
             delivery,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_submit_input(
                 writer,
                 version,
@@ -1444,6 +1499,9 @@ where
             )
             .await
         }
+        ClientRequest::ListModelCapabilities {} => {
+            handle_empty_model_capability_catalog(writer, version, request_id).await
+        }
         ClientRequest::ReadSessionMetadata { session_id } => {
             handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
                 .await
@@ -1469,9 +1527,19 @@ where
             session_id,
             expected_defaults_version,
             model_selection,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_replace_session_defaults(
                 writer,
                 version,
@@ -4553,6 +4621,7 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: provider_default_wire_model_settings(),
                     },
                 )
                 .await;
@@ -4712,6 +4781,7 @@ where
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
+                    model_settings: provider_default_wire_model_settings(),
                 },
             )
             .await
@@ -6277,6 +6347,7 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: provider_default_wire_model_settings(),
                     },
                 )
                 .await;
@@ -6431,6 +6502,7 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: provider_default_wire_model_settings(),
                     },
                 )
                 .await;
@@ -6507,6 +6579,7 @@ where
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
+                    model_settings: provider_default_wire_model_settings(),
                 },
             )
             .await
@@ -6625,6 +6698,32 @@ where
                 u64::try_from(aliases.len())
                     .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
             ),
+        },
+    )
+    .await
+}
+
+async fn handle_empty_model_capability_catalog<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ModelCapabilitiesStart {},
+    )
+    .await?;
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ModelCapabilitiesEnd {
+            capability_count: CanonicalU64::new(0),
         },
     )
     .await
@@ -7212,6 +7311,7 @@ where
                     session_id,
                     defaults_version: CanonicalU64::new(read.version().as_u64()),
                     model_selection: wire_domain_model_selection(read.defaults().model()),
+                    model_settings: provider_default_wire_model_settings(),
                     dangerous_tool_auto_approval: matches!(
                         read.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
@@ -7497,6 +7597,7 @@ where
                     session_id,
                     defaults_version: CanonicalU64::new(installed.version().as_u64()),
                     model_selection: wire_domain_model_selection(installed.defaults().model()),
+                    model_settings: provider_default_wire_model_settings(),
                     dangerous_tool_auto_approval: matches!(
                         installed.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
@@ -8049,6 +8150,7 @@ where
                     accepted_input_id: wire_uuid(result.accepted_input().into_uuid()),
                     acceptance_position: CanonicalU64::new(result.acceptance_position().as_u64()),
                     turn_id: wire_uuid(result.turn().into_uuid()),
+                    model_settings: provider_default_wire_model_settings(),
                 },
             )
             .await
