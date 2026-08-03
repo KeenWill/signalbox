@@ -3129,7 +3129,12 @@ fn terminal_event_state(
         | SessionEvent::TurnRefused { .. }
         | SessionEvent::TurnCancelled { .. }
         | SessionEvent::TurnReconciliationRequired { .. }
-        | SessionEvent::TurnToolReconciliationRequired { .. } => None,
+        | SessionEvent::TurnToolReconciliationRequired { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
+        | SessionEvent::ChildLifecycleDisposition { .. } => None,
     }
 }
 
@@ -3274,7 +3279,12 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
-        | SessionEvent::ModelCallTransition { .. } => None,
+        | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
+        | SessionEvent::ChildLifecycleDisposition { .. } => None,
     }
 }
 

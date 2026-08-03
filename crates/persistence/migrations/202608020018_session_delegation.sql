@@ -2178,6 +2178,57 @@ BEGIN
 END;
 $$;
 
+-- A delegated child turn cannot terminalize without atomically materializing
+-- its typed relationship outcome. The event-side validator above proves the
+-- forward correlation; this reverse deferred check prevents a terminal child
+-- transition from omitting the event, immutable result, deliveries, and wakes.
+CREATE FUNCTION require_terminal_delegated_turn_result()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    checked_turn uuid;
+    checked_session uuid;
+    spawning_request uuid;
+BEGIN
+    checked_turn := COALESCE(NEW.turn_id, OLD.turn_id);
+    IF TG_TABLE_NAME = 'turn_lifecycle' THEN
+        checked_session := COALESCE(NEW.session_id, OLD.session_id);
+    ELSE
+        checked_session := COALESCE(
+            NEW.child_session_id,
+            OLD.child_session_id
+        );
+    END IF;
+    SELECT task.spawning_tool_request_id
+      INTO spawning_request
+      FROM session_delegation_initial_task AS task
+     WHERE task.turn_id = checked_turn
+       AND task.child_session_id = checked_session;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM turn_lifecycle AS lifecycle
+         WHERE lifecycle.turn_id = checked_turn
+           AND lifecycle.session_id = checked_session
+           AND lifecycle.state_kind = 'terminal'
+    ) AND (SELECT count(*) FROM session_child_result AS result
+            WHERE result.spawning_tool_request_id = spawning_request) <> 1 THEN
+        RAISE EXCEPTION 'terminal delegated child turn requires exactly one typed result'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'terminal_delegated_turn_result_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER turn_lifecycle_zz_requires_delegated_result
+AFTER INSERT OR UPDATE OR DELETE ON turn_lifecycle
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_terminal_delegated_turn_result();
+CREATE CONSTRAINT TRIGGER delegation_initial_task_zz_requires_terminal_result
+AFTER INSERT OR UPDATE OR DELETE ON session_delegation_initial_task
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_terminal_delegated_turn_result();
+
 CREATE FUNCTION require_delegation_wait_purpose()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -2714,6 +2765,170 @@ AS $$
        AND pending.delivery_sequence = checked_sequence
 $$;
 
+CREATE FUNCTION model_call_suffix_entry_is_valid(
+    checked_session uuid,
+    checked_turn uuid,
+    checked_model_call uuid,
+    checked_source_session uuid,
+    checked_entry uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT checked_source_session = checked_session AND (
+        EXISTS (
+            SELECT 1
+              FROM semantic_transcript_entry AS entry
+              JOIN accepted_input AS accepted
+                ON accepted.accepted_input_id = entry.origin_accepted_input_id
+               AND accepted.session_id = entry.source_session_id
+             WHERE entry.source_session_id = checked_source_session
+               AND entry.semantic_entry_id = checked_entry
+               AND entry.payload_kind = 'steering_accepted_input'
+               AND entry.steering_source_turn_id = checked_turn
+               AND accepted.disposition_kind = 'consumed_as_steering'
+               AND accepted.expected_active_turn_id = checked_turn
+               AND accepted.consuming_model_call_id = checked_model_call
+        ) OR EXISTS (
+            SELECT 1
+              FROM session_pending_delivery AS pending
+             WHERE pending.recipient_session_id = checked_session
+               AND delegation_delivery_semantic_entry(
+                    pending.recipient_session_id,
+                    pending.delivery_sequence
+               ) = checked_entry
+        )
+    )
+$$;
+
+CREATE FUNCTION model_call_delivery_suffix_is_ordered(
+    checked_session uuid,
+    checked_frontier uuid,
+    suffix_start numeric(20, 0)
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT NOT EXISTS (
+        SELECT 1
+          FROM (
+                SELECT
+                    pending.delivery_sequence,
+                    row_number() OVER (
+                        ORDER BY pending.delivery_sequence
+                    ) AS delivery_order,
+                    row_number() OVER (
+                        ORDER BY member.member_position
+                    ) AS member_order
+                  FROM context_frontier_member AS member
+                  JOIN session_pending_delivery AS pending
+                    ON pending.recipient_session_id = checked_session
+                   AND delegation_delivery_semantic_entry(
+                        pending.recipient_session_id,
+                        pending.delivery_sequence
+                   ) = member.semantic_entry_id
+                 WHERE member.owning_session_id = checked_session
+                   AND member.context_frontier_id = checked_frontier
+                   AND member.member_position > suffix_start
+                   AND member.source_session_id = checked_session
+          ) AS ordered
+         WHERE ordered.delivery_order <> ordered.member_order
+    )
+$$;
+
+-- Continuation calls consume the recipient's entire as-of-commit delegation
+-- inbox alongside pending steering. The existing validator still owns the
+-- safe-point boundary; these substitutions extend only its suffix vocabulary,
+-- completeness count, and recipient-wide delivery ordering.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_model_call_steering_final_state(uuid)'::regprocedure
+    ) INTO definition;
+
+    updated_definition := regexp_replace(
+        definition,
+        'AND consuming_model_call_id = checked_model_call_id;[[:space:]]+SELECT count\(\*\)[[:space:]]+INTO malformed_count',
+        $replacement$AND consuming_model_call_id = checked_model_call_id;
+
+    SELECT consumed_count + count(*)
+      INTO consumed_count
+      FROM session_pending_delivery AS pending
+     WHERE pending.recipient_session_id = checked_session
+       AND NOT EXISTS (
+            SELECT 1
+              FROM context_frontier_member AS prior_member
+             WHERE prior_member.owning_session_id = checked_session
+               AND prior_member.context_frontier_id = checked_frontier
+               AND prior_member.member_position <= suffix_start_count
+               AND prior_member.source_session_id = checked_session
+               AND prior_member.semantic_entry_id =
+                    delegation_delivery_semantic_entry(
+                        pending.recipient_session_id,
+                        pending.delivery_sequence
+                    )
+       );
+
+    SELECT count(*)
+      INTO malformed_count$replacement$
+    );
+    IF updated_definition = definition THEN
+        RAISE EXCEPTION
+            'delegation delivery extension could not augment suffix completeness';
+    END IF;
+    definition := updated_definition;
+
+    updated_definition := replace(
+        definition,
+        $search$AND (
+            entry.payload_kind IS DISTINCT FROM 'steering_accepted_input'
+            OR entry.source_session_id IS DISTINCT FROM checked_session
+            OR entry.steering_source_turn_id IS DISTINCT FROM checked_turn
+            OR accepted.disposition_kind IS DISTINCT FROM
+               'consumed_as_steering'
+            OR accepted.expected_active_turn_id IS DISTINCT FROM checked_turn
+            OR accepted.consuming_model_call_id IS DISTINCT FROM
+               checked_model_call_id
+       )$search$,
+        $replacement$AND NOT model_call_suffix_entry_is_valid(
+            checked_session,
+            checked_turn,
+            checked_model_call_id,
+            entry.source_session_id,
+            entry.semantic_entry_id
+       )$replacement$
+    );
+    IF updated_definition = definition THEN
+        RAISE EXCEPTION
+            'delegation delivery extension could not widen suffix vocabulary';
+    END IF;
+    definition := updated_definition;
+
+    updated_definition := replace(
+        definition,
+        $search$OR malformed_count <> 0
+       OR EXISTS ($search$,
+        $replacement$OR malformed_count <> 0
+       OR NOT model_call_delivery_suffix_is_ordered(
+            checked_session,
+            checked_frontier,
+            suffix_start_count
+       )
+       OR EXISTS ($replacement$
+    );
+    IF updated_definition = definition THEN
+        RAISE EXCEPTION
+            'delegation delivery extension could not add FIFO ordering';
+    END IF;
+    EXECUTE updated_definition;
+END;
+$migration$;
+
 CREATE OR REPLACE FUNCTION require_delegation_initial_task_origin()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -3147,6 +3362,25 @@ BEGIN
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_wake_turn_origin';
     END IF;
+    SELECT count(*) INTO skipped_earlier_count
+      FROM session_pending_delivery AS pending
+     WHERE pending.recipient_session_id = stored.recipient_session_id
+       AND pending.delivery_sequence < stored.first_delivery_sequence
+       AND NOT EXISTS (
+            SELECT 1 FROM context_frontier_member AS member
+             WHERE member.owning_session_id = stored.recipient_session_id
+               AND member.context_frontier_id = predecessor_frontier
+               AND member.source_session_id = stored.recipient_session_id
+               AND member.semantic_entry_id = delegation_delivery_semantic_entry(
+                    stored.recipient_session_id,
+                    pending.delivery_sequence
+               )
+       );
+    IF skipped_earlier_count <> 0 THEN
+        RAISE EXCEPTION 'delegation wake starting frontier skips earlier delivery content'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'session_delegation_wake_turn_origin';
+    END IF;
     IF lifecycle.state_kind = 'queued' THEN
         RETURN NULL;
     END IF;
@@ -3183,21 +3417,7 @@ BEGIN
             sequence.value
        )
      WHERE member.semantic_entry_id IS NULL;
-    SELECT count(*) INTO skipped_earlier_count
-      FROM session_pending_delivery AS pending
-     WHERE pending.recipient_session_id = stored.recipient_session_id
-       AND pending.delivery_sequence < stored.first_delivery_sequence
-       AND NOT EXISTS (
-            SELECT 1 FROM context_frontier_member AS member
-             WHERE member.owning_session_id = stored.recipient_session_id
-               AND member.context_frontier_id = predecessor_frontier
-               AND member.source_session_id = stored.recipient_session_id
-               AND member.semantic_entry_id = delegation_delivery_semantic_entry(
-                    stored.recipient_session_id,
-                    pending.delivery_sequence
-               )
-       );
-    IF incorrect_member_count <> 0 OR skipped_earlier_count <> 0 THEN
+    IF incorrect_member_count <> 0 THEN
         RAISE EXCEPTION 'delegation wake starting frontier skips or reorders delivery content'
             USING ERRCODE = '23514',
                 CONSTRAINT = 'session_delegation_wake_turn_origin';
