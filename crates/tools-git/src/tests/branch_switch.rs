@@ -41,6 +41,14 @@ fn cleanup_directories(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn cleanup_file(root: &Path, relative: &Path) -> PathBuf {
+    cleanup_directories(root)
+        .into_iter()
+        .map(|path| path.join(relative))
+        .find(|path| path.is_file())
+        .expect("cleanup file exists")
+}
+
 #[test]
 fn branch_switch_changes_real_head() {
     let fixture = Fixture::new();
@@ -430,25 +438,14 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
                 name: FIX_BRANCH.to_owned(),
             },
             || {
-                let target_quarantine = cleanup_directories(fixture.root())
-                    .into_iter()
-                    .find(|path| path.join("src").is_file())
-                    .expect("prepared target quarantine exists");
-                fs::rename(
-                    target_quarantine.join("src"),
-                    target_quarantine.join("retired"),
-                )
-                .expect("prepared target retires");
-                fs::write(target_quarantine.join("src"), foreign_content)
-                    .expect("foreign target writes");
+                let prepared_target = cleanup_file(fixture.root(), Path::new("src"));
+                fs::rename(&prepared_target, prepared_target.with_file_name("retired"))
+                    .expect("prepared target retires");
+                fs::write(prepared_target, foreign_content).expect("foreign target writes");
             },
         )
         .expect_err("prepared target replacement rejects publication");
-    let retained_foreign = cleanup_directories(fixture.root())
-        .into_iter()
-        .map(|path| path.join("src"))
-        .find(|path| path.is_file())
-        .expect("foreign prepared target remains quarantined");
+    let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
