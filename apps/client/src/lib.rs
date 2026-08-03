@@ -931,6 +931,8 @@ async fn update_session_placement(
     command_id: Option<CommandId>,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
+    let requested_session = session_id;
+    let requested_replacement = replacement.clone();
     if generated {
         output.recovery_value(
             "command_id",
@@ -951,6 +953,18 @@ async fn update_session_placement(
             placement_version,
             placement,
         } => {
+            if !placement_update_receipt_matches(
+                session_id,
+                placement_version,
+                &placement,
+                requested_session,
+                expected_placement_version,
+                &requested_replacement,
+            ) {
+                return Err(
+                    ClientError::Protocol("place returned an incoherent receipt").mutation(),
+                );
+            }
             output.session_placement_updated(
                 session_id,
                 placement_version.value(),
@@ -965,6 +979,19 @@ async fn update_session_placement(
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("place returned an unexpected response").mutation()),
     }
+}
+
+fn placement_update_receipt_matches(
+    actual_session: CanonicalUuid,
+    actual_version: CanonicalU64,
+    actual_placement: &SessionPlacement,
+    requested_session: CanonicalUuid,
+    expected_version: CanonicalU64,
+    requested_placement: &SessionPlacement,
+) -> bool {
+    actual_session == requested_session
+        && expected_version.value().checked_add(1) == Some(actual_version.value())
+        && actual_placement == requested_placement
 }
 
 async fn continue_imported(
@@ -4462,8 +4489,8 @@ mod tests {
         ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
         ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
         ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
-        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TurnState, decode_client_line,
-        encode_server_line,
+        ServerMessage, SessionEvent, SessionPlacement, ToolBatchState, ToolDecision, TurnState,
+        decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -4481,9 +4508,10 @@ mod tests {
         await_turn_terminal, collect_import_paths, continue_imported,
         conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, import_conversation_file, imported,
-        model_call_recovery_transition, open_scanned_import_source, read_goal_text_file,
-        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
+        model_call_recovery_transition, open_scanned_import_source,
+        placement_update_receipt_matches, read_goal_text_file, read_import_file, read_input,
+        read_review_json_file, read_system_prompt_file, reconcile_turn, review,
+        review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
         review_pass_completion_is_coherent, review_publication_state_is_coherent,
         review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
@@ -4572,6 +4600,51 @@ mod tests {
             .expect_err("foreign session receipt is rejected");
 
         assert!(error.is_ambiguous_mutation());
+    }
+
+    #[test]
+    fn placement_update_receipt_requires_the_exact_successor_and_echoed_request() {
+        let requested_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let expected_version = CanonicalU64::new(7);
+        let successor_version = CanonicalU64::new(8);
+        let requested_placement = SessionPlacement::Pathless {};
+        let foreign_placement =
+            SessionPlacement::try_scoped(String::from("projects.other.session"))
+                .expect("fixture placement is admitted");
+
+        assert!(placement_update_receipt_matches(
+            requested_session,
+            successor_version,
+            &requested_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+        assert!(!placement_update_receipt_matches(
+            foreign_session,
+            successor_version,
+            &requested_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+        assert!(!placement_update_receipt_matches(
+            requested_session,
+            expected_version,
+            &requested_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
+        assert!(!placement_update_receipt_matches(
+            requested_session,
+            successor_version,
+            &foreign_placement,
+            requested_session,
+            expected_version,
+            &requested_placement,
+        ));
     }
 
     #[tokio::test]

@@ -7,6 +7,8 @@ use signalbox_domain::{
     UpdateSessionPlacement as DomainUpdateSessionPlacement, UpdateSessionPlacementResult,
 };
 
+use crate::InvalidDurableCommandId;
+
 /// Complete admitted placement update request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpdateSessionPlacementRequest {
@@ -17,18 +19,62 @@ pub struct UpdateSessionPlacementRequest {
 }
 
 impl UpdateSessionPlacementRequest {
-    pub const fn new(
+    /// Rejects reserved command identities before canonical construction.
+    pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_version: SessionPlacementVersion,
         replacement: SessionPlacement,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, InvalidDurableCommandId> {
+        if command_id.as_uuid().is_nil() {
+            return Err(InvalidDurableCommandId::Nil);
+        }
+        if command_id.as_uuid().is_max() {
+            return Err(InvalidDurableCommandId::Max);
+        }
+        Ok(Self {
             command_id,
             session,
             expected_version,
             replacement,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_domain::{
+        DurableCommandId, SessionId, SessionPlacement, SessionPlacementVersion,
+    };
+    use uuid::Uuid;
+
+    use super::UpdateSessionPlacementRequest;
+    use crate::InvalidDurableCommandId;
+
+    /// S36 / INV-001 / INV-012: reserved command identities fail before a
+    /// placement-update transaction can observe a canonical request.
+    #[test]
+    fn s36_inv001_inv012_request_rejects_reserved_command_identifiers() {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+
+        assert_eq!(
+            UpdateSessionPlacementRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::nil()),
+                session,
+                SessionPlacementVersion::INITIAL,
+                SessionPlacement::pathless(),
+            ),
+            Err(InvalidDurableCommandId::Nil)
+        );
+        assert_eq!(
+            UpdateSessionPlacementRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::max()),
+                session,
+                SessionPlacementVersion::INITIAL,
+                SessionPlacement::pathless(),
+            ),
+            Err(InvalidDurableCommandId::Max)
+        );
     }
 }
 

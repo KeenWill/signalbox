@@ -703,7 +703,9 @@ transport request — `create_session`, `create_session_from_template`,
 
 - `session_created` with `session_id`;
 - `session_placement_updated` with `session_id`, the positive successor
-  `placement_version`, and the complete recorded `placement` object;
+  `placement_version`, and the complete recorded `placement` object; the client
+  accepts it only when the session and placement echo its request and the
+  version is exactly one greater than its stated expected version;
 - `input_submitted` with `session_id`, `accepted_input_id`,
   `acceptance_position`, and `turn_id`; a queued submit names the ordinary
   origin turn held behind its expected active turn, and a `stop_turn` acceptance
@@ -1145,8 +1147,11 @@ An `update_session_placement` rejection is one of
 `session_placement_current_version_mismatch { session_id, expected_placement_version, current_placement_version }`,
 or
 `session_placement_version_exhausted { session_id, current_placement_version }`.
-Each is the durable typed result of handling the exact update command; equal
-replay returns the same result and conflicting command reuse remains distinct.
+Placement versions in these details are positive. A current-version mismatch
+additionally requires distinct expected and current versions; equality is a
+contradictory frame rather than durable mismatch evidence. Each is the durable
+typed result of handling the exact update command; equal replay returns the same
+result and conflicting command reuse remains distinct.
 
 The proposed `replace_lost_runner` rejection admits
 `session_not_found { session_id }`, `runner_placement_not_found { session_id }`,

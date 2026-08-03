@@ -984,9 +984,9 @@ where
                 });
             }
             ConversationTranscriptRead::Refused(refusal) => {
-                let reason = match refusal.reason() {
+                let (reason, compact_reason) = match refusal.reason() {
                     SessionReadRefusalReason::OutsideRequestingDirectorySubtree => {
-                        "outside_requesting_directory_subtree"
+                        ("outside_requesting_directory_subtree", "o")
                     }
                 };
                 let value = format!(
@@ -994,6 +994,12 @@ where
                     refusal.requesting_directory().as_str()
                 );
                 let detail = ToolExecutionErrorDetail::try_new(value)
+                    .or_else(|_| {
+                        ToolExecutionErrorDetail::try_new(format!(
+                            "{compact_reason}:{}",
+                            refusal.requesting_directory().as_str()
+                        ))
+                    })
                     .map_err(|_| ConversationExecutorError::ResultEncoding)?;
                 return Ok(ToolExecutorEvidence::KnownFailed {
                     detail: Some(detail),

@@ -583,7 +583,6 @@ pub struct SessionPlacementPath { /* private */ }
 impl SessionPlacementPath {
     pub const MAX_DEPTH: usize;
     pub const MAX_SEGMENT_BYTES: usize;
-    pub const MAX_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, SessionPlacementPathError>;
     // accessors: as_str(), depth()
 }
@@ -592,7 +591,6 @@ pub enum SessionPlacementPathError {
     EmptySegment,
     MalformedSegment,
     SegmentTooLong,
-    PathTooLong,
     TooDeep,
 }
 // impl Display + std::error::Error
@@ -4833,12 +4831,12 @@ impl<Generator: SessionIdGenerator, Transaction: CreateSessionTransaction>
 ```rust
 pub struct UpdateSessionPlacementRequest { /* private */ }
 impl UpdateSessionPlacementRequest {
-    pub const fn new(
+    pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_version: SessionPlacementVersion,
         replacement: SessionPlacement,
-    ) -> Self;
+    ) -> Result<Self, InvalidDurableCommandId>;
 }
 
 pub trait UpdateSessionPlacementTransaction {

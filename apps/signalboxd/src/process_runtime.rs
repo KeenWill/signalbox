@@ -6471,12 +6471,20 @@ where
         .await;
     };
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let request = UpdateSessionPlacementRequest::new(
+    let Ok(request) = UpdateSessionPlacementRequest::try_new(
         DurableCommandId::from_uuid(command_id.into_uuid()),
         session,
         expected_version,
         replacement,
-    );
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let mut service =
         UpdateSessionPlacementService::new(SessionPlacementRepository::new(pool.clone()));
     match service.execute(request).await {

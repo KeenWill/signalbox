@@ -156,20 +156,22 @@ Path placement is opt-in. `Pathless` is the compatibility value and preserves
 today's cross-session read behavior exactly. A placed session carries one
 validated dotted path whose nonempty ASCII label segments admit letters, digits,
 hyphen, and underscore; each segment is at most 64 bytes and a path is at most
-64 segments and 4,000 bytes. The initial value is pinned by creation. Only the
-explicit `UpdateSessionPlacement` durable command changes it, appending a
-versioned `Updated` event that names its predecessor and command identity;
-creation itself appends version-one `Created`, so no update rewrites history.
-Every current-placement load authenticates the contiguous history from version
-one through the selected head against each event's typed receipt and
-durable-command registry claim and rejects a head when immutable history
-contains a later event. Equal native and imported-frontier creation replay
-likewise rejects a missing or lagging current head while reconstituting its
-immutable creation receipt. A placement-update replay authenticates the current
-head event and rejects either a head that selects no authenticated event or a
-head that lags later history before reconstituting applied or stateful-rejection
-evidence. A missing or lagging head, cross-wired history, or invalid command
-fact fails closed as typed storage corruption.
+64 segments. Process-protocol admission additionally caps a newly submitted path
+at 4,000 bytes, while domain reconstitution retains the migration's full
+structurally valid range so a previously admitted path remains readable. The
+initial value is pinned by creation. Only the explicit `UpdateSessionPlacement`
+durable command changes it, appending a versioned `Updated` event that names its
+predecessor and command identity; creation itself appends version-one `Created`,
+so no update rewrites history. Every current-placement load authenticates the
+contiguous history from version one through the selected head against each
+event's typed receipt and durable-command registry claim and rejects a head when
+immutable history contains a later event. Equal native and imported-frontier
+creation replay likewise rejects a missing or lagging current head while
+reconstituting its immutable creation receipt. A placement-update replay
+authenticates the current head event and rejects either a head that selects no
+authenticated event or a head that lags later history before reconstituting
+applied or stateful-rejection evidence. A missing or lagging head, cross-wired
+history, or invalid command fact fails closed as typed storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one
@@ -177,12 +179,16 @@ prefix comparison against the target placement: siblings and descendants are
 allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
 refusal is typed evidence containing that requesting directory and the closed
 reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
-The conversation-introspection adapter enforces this decision when it opens a
-selected native transcript. It loads requester and target placement and applies
-the prefix decision in the same repeatable-read transaction that opens the
-transcript cursor. Conversation-list inventory is discovery rather than a
-selected transcript read, and imported conversations are not sessions; neither
-surface is filtered by this rule.
+The conversation tool renders ordinary refusals with the full reason name. If a
+legacy maximum-width directory would exceed the unchanged durable error-detail
+bound, it uses the closed compact spelling `o:<requesting-directory>`; `o` means
+that same outside-requesting-directory-subtree reason and the directory remains
+byte-exact. The conversation-introspection adapter enforces this decision when
+it opens a selected native transcript. It loads requester and target placement
+and applies the prefix decision in the same repeatable-read transaction that
+opens the transcript cursor. Conversation-list inventory is discovery rather
+than a selected transcript read, and imported conversations are not sessions;
+neither surface is filtered by this rule.
 
 A one-segment placement sits in the root directory and therefore has global
 conversation read, including pathless sessions. It is legal only through the

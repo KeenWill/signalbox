@@ -5141,6 +5141,8 @@ impl ServerFrame {
                         validate_conversation_import_detail(detail)?;
                     } else if *code != ErrorCode::Rejected {
                         return Err(FrameValidationError::ErrorDetailShape);
+                    } else {
+                        validate_rejection_detail(detail)?;
                     }
                 } else if *code == ErrorCode::Rejected {
                     return Err(FrameValidationError::ErrorDetailShape);
@@ -5176,6 +5178,53 @@ impl<'de> Deserialize<'de> for ServerFrame {
         };
         frame.validate().map_err(serde::de::Error::custom)?;
         Ok(frame)
+    }
+}
+
+fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidationError> {
+    let valid = match detail {
+        RejectionDetail::SessionPlacementCurrentVersionMismatch {
+            expected_placement_version,
+            current_placement_version,
+            ..
+        } => {
+            expected_placement_version.value() > 0
+                && current_placement_version.value() > 0
+                && expected_placement_version != current_placement_version
+        }
+        RejectionDetail::SessionPlacementVersionExhausted {
+            current_placement_version,
+            ..
+        } => current_placement_version.value() > 0,
+        RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::ActiveTurnMismatch { .. }
+        | RejectionDetail::NoActiveTurn { .. }
+        | RejectionDetail::TurnNotAwaitingReconciliation { .. }
+        | RejectionDetail::InterruptAlreadyApplied { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::SafePointUnavailableWhileStopping { .. }
+        | RejectionDetail::ToolRequestNotFound { .. }
+        | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
+        | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::UnknownModelAlias { .. }
+        | RejectionDetail::AcceptancePositionExhausted { .. }
+        | RejectionDetail::DefaultsVersionExhausted { .. }
+        | RejectionDetail::ImportedConversationNotFound { .. }
+        | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => true,
+        RejectionDetail::ConversationImportAlreadyInProgress {}
+        | RejectionDetail::ConversationImportNotInProgress {}
+        | RejectionDetail::ConversationImportSourceTooLarge { .. }
+        | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
+        | RejectionDetail::ConversationImportConversionFailed { .. } => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::ErrorDetailShape)
     }
 }
 
@@ -5863,6 +5912,26 @@ mod tests {
     fn assert_server_malformed(json: &str) {
         let error = decode_server_line(&line(json)).expect_err("server frame must be malformed");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[track_caller]
+    fn assert_placement_version_mismatch_rejected(expected: u64, current: u64) {
+        let error = ServerFrame::try_new(
+            request(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("placement version mismatch"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                        session_id: uuid(2),
+                        expected_placement_version: CanonicalU64::new(expected),
+                        current_placement_version: CanonicalU64::new(current),
+                    },
+                ),
+            },
+        )
+        .expect_err("incoherent placement mismatch evidence is rejected");
+        assert_eq!(error, FrameValidationError::ErrorDetailShape);
     }
 
     #[track_caller]
@@ -8887,6 +8956,29 @@ mod tests {
         );
 
         assert_client_malformed(&frame);
+    }
+
+    #[test]
+    fn inv033_session_placement_mismatch_requires_positive_distinct_versions() {
+        assert_placement_version_mismatch_rejected(0, 2);
+        assert_placement_version_mismatch_rejected(1, 0);
+        assert_placement_version_mismatch_rejected(2, 2);
+
+        let valid = ServerFrame::try_new(
+            request(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("placement version mismatch"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                        session_id: uuid(2),
+                        expected_placement_version: CanonicalU64::new(1),
+                        current_placement_version: CanonicalU64::new(2),
+                    },
+                ),
+            },
+        );
+        assert!(valid.is_ok());
     }
 
     /// INV-033: invalid template names or versions cannot enter admitted frames.
