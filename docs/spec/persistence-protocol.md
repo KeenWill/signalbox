@@ -31,14 +31,14 @@ transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 the approval-judge lifecycle transactions were verified through this PR
-(`agent/approval-judge-execution-support`);
-and the session-placement event, current head, and creation transaction were
-verified through PR #415 (`agent/scoped-visibility-creation`). This page covers
-the Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
+(`agent/approval-judge-execution-support`); and the session-placement event,
+current head, and creation transaction were verified through PR #415
+(`agent/scoped-visibility-creation`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -614,10 +614,10 @@ Locks per transaction, in acquisition order:
   `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
   `FOR UPDATE`, before checking for an existing decision and validating the
   prepared call. Completion's decision insert takes the request row after the
-  scheduler lock and before its guarded lifecycle transition. Authorization
-  and failure need no additional explicit lock. The shared scheduler-first
-  prefix prevents approval-judge, tool-loop, and lifecycle-transition
-  transactions from holding these rows in reverse order.
+  scheduler lock and before its guarded lifecycle transition. Authorization and
+  failure need no additional explicit lock. The shared scheduler-first prefix
+  prevents approval-judge, tool-loop, and lifecycle-transition transactions from
+  holding these rows in reverse order.
 
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
