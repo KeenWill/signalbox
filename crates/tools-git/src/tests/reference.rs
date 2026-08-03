@@ -384,6 +384,40 @@ fn quarantine_creation_failure_removes_its_persisted_directory() {
 }
 
 #[test]
+fn quarantine_drop_preserves_a_replacement_of_its_directory_path() {
+    let parent = tempfile::tempdir().expect("quarantine parent constructs");
+    let parent_descriptor = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("quarantine parent opens");
+    let quarantine = QuarantineDirectory::create(&parent_descriptor).expect("quarantine creates");
+    let quarantine_path = parent.path().join(quarantine.name());
+    let retired_path = parent.path().join("retired");
+    let foreign_bytes = b"foreign";
+    fs::write(quarantine_path.join("owned"), b"owned").expect("owned entry writes");
+    fs::rename(&quarantine_path, &retired_path).expect("quarantine retires");
+    fs::create_dir(&quarantine_path).expect("foreign directory creates");
+    fs::write(quarantine_path.join("foreign"), foreign_bytes).expect("foreign entry writes");
+
+    drop(quarantine);
+
+    assert_eq!(
+        fs::read(quarantine_path.join("foreign")).expect("foreign entry reads"),
+        foreign_bytes
+    );
+    assert!(retired_path.is_dir());
+    assert!(
+        fs::read_dir(retired_path)
+            .expect("retired quarantine reads")
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn foreign_cleanup_entry_is_rejected_before_quarantine_creation() {
     let parent = tempfile::tempdir().expect("cleanup parent constructs");
     let directory = openat(

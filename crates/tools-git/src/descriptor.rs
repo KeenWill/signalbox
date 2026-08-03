@@ -10,7 +10,7 @@ use std::{
 };
 
 use rustix::{
-    fs::{AtFlags, Mode, OFlags, openat, statat, unlinkat},
+    fs::{AtFlags, FileType, Mode, OFlags, openat, statat, unlinkat},
     io::dup,
 };
 
@@ -130,6 +130,42 @@ impl QuarantineDirectory {
     pub(super) fn descriptor(&self) -> &OwnedFd {
         &self.directory
     }
+
+    pub(super) fn name(&self) -> &OsStr {
+        &self.name
+    }
+}
+
+fn clear_pinned_directory(directory: &OwnedFd) -> Result<(), LocalGitFailure> {
+    let entries =
+        fs::read_dir(descriptor_path_from_fd(directory)).map_err(|_| LocalGitFailure::Operation)?;
+    for entry in entries {
+        let name = entry.map_err(|_| LocalGitFailure::Operation)?.file_name();
+        let status = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        let identity = stat_file_identity(&status);
+        let removal_flags = if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
+            let child = openat(
+                directory,
+                &name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitFailure::Operation)?;
+            clear_pinned_directory(&child)?;
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        let current = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map(|status| stat_file_identity(&status))
+            .map_err(|_| LocalGitFailure::Operation)?;
+        if current != identity {
+            return Err(LocalGitFailure::Operation);
+        }
+        unlinkat(directory, &name, removal_flags).map_err(|_| LocalGitFailure::Operation)?;
+    }
+    Ok(())
 }
 
 fn remove_quarantine_directory_if_identity(
@@ -186,6 +222,7 @@ fn restore_or_remove_quarantined_entry(
 
 impl Drop for QuarantineDirectory {
     fn drop(&mut self) {
+        let _ = clear_pinned_directory(&self.directory);
         let current = openat(
             &self.parent,
             &self.name,

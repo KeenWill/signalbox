@@ -221,7 +221,7 @@ pub(super) fn commit<ValidateRoot>(
 where
     ValidateRoot: FnOnce() -> Result<(), LocalGitFailure>,
 {
-    let (_index_lock, mut index) = IndexLock::acquire_for_repository(authority)?;
+    let (index_lock, mut index) = IndexLock::acquire_for_repository(authority)?;
     validate_index_objects(repository, &index)?;
     let state = RepositoryOperationState::capture(authority)?;
     let merge_parent_ids = state.merge_parent_ids(authority.object_format)?;
@@ -308,6 +308,7 @@ where
     });
     state.validate(authority)?;
     validate_root_before_publish()?;
+    index_lock.validate_source()?;
     validate_live_commit_target(authority, oid)?;
     publish_commit_reference(
         authority,

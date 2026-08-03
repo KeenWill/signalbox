@@ -381,6 +381,14 @@ impl IndexLock {
         Ok(bytes)
     }
 
+    pub(super) fn validate_source(&self) -> Result<(), LocalGitFailure> {
+        if index_snapshot_identity_at(&self.parent, &self.index_name)? == self.expected_index {
+            Ok(())
+        } else {
+            Err(LocalGitFailure::Operation)
+        }
+    }
+
     pub(super) fn write_raw(&mut self, bytes: &[u8]) -> Result<(), LocalGitFailure> {
         self.write_raw_with_hook(bytes, || {})
     }

@@ -47,9 +47,9 @@ use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain_from;
 use crate::result::{BranchResult, LocalGitResult, StageResult, encode_result};
 use crate::rollback::{
-    CheckoutRollbackContext, capture_rollback_identities, capture_worktree_rollback_state,
-    checkout_tree_with_rollback, restore_index, rollback_checkout_atomically,
-    validate_checkout_path,
+    CheckoutRollbackContext, WorktreeRollbackIdentities, capture_rollback_identities,
+    capture_rollback_identity, capture_worktree_rollback_state, checkout_tree_with_rollback,
+    restore_index, rollback_checkout_atomically, validate_checkout_path,
 };
 use crate::status::{status, tracked_directories};
 
@@ -90,6 +90,33 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         &self,
         operation: LocalOperation,
     ) -> Result<String, LocalGitFailure> {
+        self.execute_operation_with_hooks(operation, || {}, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn execute_read_with_return_hook<Hook: FnOnce()>(
+        &self,
+        operation: LocalOperation,
+        before_read_return: Hook,
+    ) -> Result<String, LocalGitFailure> {
+        self.execute_operation_with_hooks(operation, before_read_return, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn execute_commit_with_publish_hook<Hook: FnOnce()>(
+        &self,
+        operation: LocalOperation,
+        before_commit_publish: Hook,
+    ) -> Result<String, LocalGitFailure> {
+        self.execute_operation_with_hooks(operation, || {}, before_commit_publish)
+    }
+
+    fn execute_operation_with_hooks<ReadHook: FnOnce(), CommitHook: FnOnce()>(
+        &self,
+        operation: LocalOperation,
+        before_read_return: ReadHook,
+        before_commit_publish: CommitHook,
+    ) -> Result<String, LocalGitFailure> {
         self.validate_current_repository()?;
         let mut repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
@@ -105,6 +132,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository
             .set_odb(&object_database)
             .map_err(|_| LocalGitFailure::Operation)?;
+        let revalidate_captured_objects = matches!(
+            &operation,
+            LocalOperation::Status | LocalOperation::Diff(_) | LocalOperation::Log(_)
+        );
         let result = match operation {
             LocalOperation::Status => {
                 let index_snapshot = self.bind_index_snapshot(&repository)?;
@@ -169,6 +200,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &persistent_object_database,
                     &object_database,
                     || {
+                        before_commit_publish();
                         pinned_objects.validate_live(&self.repository_authority)?;
                         self.validate_current_repository_identity()
                     },
@@ -197,6 +229,10 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 return encode_result(&result);
             }
         };
+        if revalidate_captured_objects {
+            before_read_return();
+            pinned_objects.validate_live(&self.repository_authority)?;
+        }
         self.validate_current_repository()?;
         encode_result(&result)
     }
@@ -603,13 +639,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
     #[cfg(test)]
     pub(super) fn branch_switch_with_hook<Hook: FnOnce()>(
         &self,
-        repository: &Repository,
         arguments: GitBranchSwitchArguments,
         post_checkout: Hook,
     ) -> Result<BranchResult, LocalGitFailure> {
+        self.validate_current_repository()?;
+        let repository = self.repository_authority.repository()?;
         let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
         self.branch_switch_with_hooks(
-            repository,
+            &repository,
             &pinned_objects,
             arguments,
             (|| {}, post_checkout, || {}, || {}),
@@ -847,6 +890,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         let original_index_bytes = index_lock.original_bytes()?;
         index_lock.write(&mut next_index)?;
         let updated_paths = RefCell::new(BTreeSet::new());
+        let updated_identities = RefCell::new(WorktreeRollbackIdentities::new());
         let mut checkout = CheckoutBuilder::new();
         checkout
             .safe()
@@ -857,19 +901,26 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         checkout
             .notify_on(CheckoutNotificationType::UPDATED)
             .notify(|_, path, _, _, _| {
-                let mut updated_paths = updated_paths.borrow_mut();
-                if let Some(path) = path {
-                    updated_paths.insert(path.to_owned());
+                let paths = if let Some(path) = path {
+                    BTreeSet::from([path.to_owned()])
                 } else {
-                    updated_paths.extend(checkout_paths.iter().cloned());
-                }
-                true
+                    checkout_paths.clone()
+                };
+                paths.into_iter().all(|path| {
+                    updated_paths.borrow_mut().insert(path.clone());
+                    capture_rollback_identity(&self.repository_authority.root, &path)
+                        .map(|identity| {
+                            updated_identities.borrow_mut().insert(path, identity);
+                        })
+                        .is_ok()
+                })
             });
         checkout_tree_with_rollback(
             repository,
             current_tree.as_ref(),
             &target_tree,
             &updated_paths,
+            &updated_identities,
             CheckoutRollbackContext {
                 filesystem: &self.filesystem,
                 root: &self.root,
@@ -890,14 +941,88 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .map_err(|_| LocalGitFailure::Operation)
             },
         )?;
+        let before_checkout_capture = checkout_paths
+            .iter()
+            .map(|path| {
+                capture_rollback_identity(&self.repository_authority.root, path)
+                    .map(|identity| (path.clone(), identity))
+            })
+            .collect::<Result<WorktreeRollbackIdentities, _>>();
+        let before_checkout_capture = match before_checkout_capture {
+            Ok(identities) => identities,
+            Err(failure) => {
+                rollback_checkout_atomically(
+                    repository,
+                    current_tree.as_ref(),
+                    &target_tree,
+                    &checkout_paths,
+                    CheckoutRollbackContext {
+                        filesystem: &self.filesystem,
+                        root: &self.root,
+                        authority: &self.repository_authority,
+                    },
+                    Some(&updated_identities.borrow()),
+                )?;
+                return Err(failure);
+            }
+        };
+        post_checkout();
         let checkout_state =
-            capture_worktree_rollback_state(&self.filesystem, &self.root, &checkout_paths)?;
-        let checkout_identities = capture_rollback_identities(
+            match capture_worktree_rollback_state(&self.filesystem, &self.root, &checkout_paths) {
+                Ok(state) => state,
+                Err(failure) => {
+                    rollback_checkout_atomically(
+                        repository,
+                        current_tree.as_ref(),
+                        &target_tree,
+                        &checkout_paths,
+                        CheckoutRollbackContext {
+                            filesystem: &self.filesystem,
+                            root: &self.root,
+                            authority: &self.repository_authority,
+                        },
+                        Some(&before_checkout_capture),
+                    )?;
+                    return Err(failure);
+                }
+            };
+        let checkout_identities = match capture_rollback_identities(
             &self.repository_authority.root,
             Path::new(""),
             &checkout_state,
-        )?;
-        post_checkout();
+        ) {
+            Ok(identities) => identities,
+            Err(failure) => {
+                rollback_checkout_atomically(
+                    repository,
+                    current_tree.as_ref(),
+                    &target_tree,
+                    &checkout_paths,
+                    CheckoutRollbackContext {
+                        filesystem: &self.filesystem,
+                        root: &self.root,
+                        authority: &self.repository_authority,
+                    },
+                    Some(&before_checkout_capture),
+                )?;
+                return Err(failure);
+            }
+        };
+        if checkout_identities != before_checkout_capture {
+            rollback_checkout_atomically(
+                repository,
+                current_tree.as_ref(),
+                &target_tree,
+                &checkout_paths,
+                CheckoutRollbackContext {
+                    filesystem: &self.filesystem,
+                    root: &self.root,
+                    authority: &self.repository_authority,
+                },
+                Some(&before_checkout_capture),
+            )?;
+            return Err(LocalGitFailure::Operation);
+        }
         let published_index = match index_lock.commit() {
             Ok(published_index) => published_index,
             Err(_) => {

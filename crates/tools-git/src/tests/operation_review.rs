@@ -1,6 +1,7 @@
 //! Review regressions for operation authority and Git-format parity.
 
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     fs,
     io::Write,
@@ -20,6 +21,7 @@ use crate::arguments::{
 };
 use crate::bounded::RevisionSnapshot;
 use crate::branch::branch_create;
+use crate::descriptor::file_identity;
 use crate::failure::LocalGitFailure;
 use crate::limits::{
     GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
@@ -28,7 +30,9 @@ use crate::limits::{
 use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
 use crate::reflog::ReferenceLogLock;
 use crate::rollback::{
-    atomic_restore_checkout_path, capture_rollback_identities, capture_worktree_rollback_state,
+    CheckoutRollbackContext, WorktreeRollbackIdentities, atomic_restore_checkout_path,
+    capture_rollback_identities, capture_rollback_identity, capture_worktree_rollback_state,
+    checkout_tree_with_rollback,
 };
 use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
@@ -448,6 +452,198 @@ fn checkout_rollback_preserves_a_same_content_foreign_replacement() {
         fs::read(fixture.root().join(original_prefix).join(tracked_path))
             .expect("rollback original reads"),
         INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_same_content_replacement_during_checkout_capture() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let replacement = fixture.root().join("foreign-replacement");
+                fs::write(&replacement, INITIAL_CONTENT).expect("foreign content writes");
+                fs::rename(&replacement, fixture.root().join(TRACKED_PATH))
+                    .expect("foreign content publishes");
+            },
+        )
+        .expect_err("checkout identity transition rejects");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("foreign content reads"),
+        INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_rolls_back_owned_paths_when_checkout_capture_rejects_a_symlink() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::remove_file(fixture.root().join(TRACKED_PATH))
+                    .expect("checked-out file removes");
+                symlink("foreign-target", fixture.root().join(TRACKED_PATH))
+                    .expect("foreign symlink publishes");
+            },
+        )
+        .expect_err("symlinked checkout capture rejects");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Path);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read_link(fixture.root().join(TRACKED_PATH)).expect("foreign symlink remains"),
+        Path::new("foreign-target")
+    );
+}
+
+#[test]
+fn failed_checkout_preserves_a_same_content_replacement_after_notification() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("target worktree content writes");
+    let target = commit_all(&repository, MODEL_MESSAGE);
+    let current_commit = repository
+        .find_commit(fixture.initial)
+        .expect("current fixture commit opens");
+    let current_tree = current_commit.tree().expect("current fixture tree opens");
+    let target_commit = repository
+        .find_commit(target)
+        .expect("target fixture commit opens");
+    let target_tree = target_commit.tree().expect("target fixture tree opens");
+    let executor = fixture.executor();
+    let tracked_path = Path::new(TRACKED_PATH).to_path_buf();
+    let updated_paths = RefCell::new(BTreeSet::from([tracked_path.clone()]));
+    let checked_out_identity =
+        capture_rollback_identity(&executor.repository_authority.root, Path::new(TRACKED_PATH))
+            .expect("checked-out identity captures");
+    let updated_identities = RefCell::new(WorktreeRollbackIdentities::from([(
+        tracked_path,
+        checked_out_identity,
+    )]));
+    let replacement = fixture.root().join("foreign-replacement");
+    fs::write(&replacement, CHANGED_CONTENT).expect("foreign content writes");
+
+    let failure = checkout_tree_with_rollback(
+        &repository,
+        Some(&current_tree),
+        &target_tree,
+        &updated_paths,
+        &updated_identities,
+        CheckoutRollbackContext {
+            filesystem: &executor.filesystem,
+            root: &executor.root,
+            authority: &executor.repository_authority,
+        },
+        || {
+            fs::rename(&replacement, fixture.root().join(TRACKED_PATH))
+                .expect("foreign content publishes");
+            Err(LocalGitFailure::Operation)
+        },
+    )
+    .expect_err("failed checkout reports failure");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("foreign content remains"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn read_operation_rejects_the_live_object_directory_changed_before_return() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let objects = fixture.root().join(".git/objects");
+    let retired_objects = fixture.root().join(".git/objects-retired");
+
+    let failure = executor
+        .execute_read_with_return_hook(LocalOperation::Status, || {
+            fs::rename(&objects, &retired_objects).expect("captured objects retire");
+            fs::create_dir(&objects).expect("foreign objects directory creates");
+        })
+        .expect_err("changed live objects reject read return");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(objects.is_dir());
+    assert!(retired_objects.is_dir());
+}
+
+#[test]
+fn commit_rejects_an_index_replaced_before_reference_publication() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+    let index = fixture.root().join(".git/index");
+    let replacement = fixture.root().join(".git/actor-index");
+    fs::copy(&index, &replacement).expect("actor index copies");
+    let replacement_identity =
+        file_identity(&fs::metadata(&replacement).expect("actor index metadata reads"));
+
+    let failure = executor
+        .execute_commit_with_publish_hook(
+            LocalOperation::Commit(GitCommitArguments {
+                message: MODEL_MESSAGE.to_owned(),
+            }),
+            || fs::rename(&replacement, &index).expect("actor index publishes"),
+        )
+        .expect_err("replaced index rejects commit publication");
+    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
+    let live_identity = file_identity(&fs::metadata(&index).expect("live index metadata reads"));
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(live_identity, replacement_identity);
+    assert_eq!(
+        repository.head().expect("original HEAD remains").target(),
+        Some(fixture.initial)
     );
 }
 
