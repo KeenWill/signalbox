@@ -1840,6 +1840,11 @@ extension SignalboxTranscriptEntry {
       .toolDenied(_, let content),
       .toolClosed(_, let content):
       return UInt(content.utf8.count)
+    case .delegatedTask(_, _, _, let content),
+      .delegationMessage(_, _, _, _, _, _, let content):
+      return UInt(content.utf8.count)
+    case .delegationResult(_, _, _, _, _, _, let content, _, _):
+      return UInt(content?.utf8.count ?? 0)
     case .imported(_, _, let sourceSpeaker, let contentKind):
       return sourceSpeaker.retainedUTF8Bytes.saturatedAdding(contentKind.retainedUTF8Bytes)
     case .unknown(let kind, let payload, let diagnostic):

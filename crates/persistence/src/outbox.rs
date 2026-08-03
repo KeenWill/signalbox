@@ -1836,7 +1836,9 @@ fn decode_bound_action(value: &str) -> Result<DispatchedBoundChildAction, Outbox
     }
 }
 
-fn decode_wait_mode(value: &str) -> Result<DispatchedDelegationWaitMode, OutboxCorruption> {
+pub(crate) fn decode_wait_mode(
+    value: &str,
+) -> Result<DispatchedDelegationWaitMode, OutboxCorruption> {
     match value {
         "foreground" => Ok(DispatchedDelegationWaitMode::Foreground),
         "background" => Ok(DispatchedDelegationWaitMode::Background),
@@ -1844,7 +1846,9 @@ fn decode_wait_mode(value: &str) -> Result<DispatchedDelegationWaitMode, OutboxC
     }
 }
 
-fn decode_delegation_outcome(value: &str) -> Result<DispatchedDelegationOutcome, OutboxCorruption> {
+pub(crate) fn decode_delegation_outcome(
+    value: &str,
+) -> Result<DispatchedDelegationOutcome, OutboxCorruption> {
     match value {
         "result_returned" => Ok(DispatchedDelegationOutcome::ResultReturned),
         "child_failed" => Ok(DispatchedDelegationOutcome::ChildFailed),
@@ -1856,7 +1860,9 @@ fn decode_delegation_outcome(value: &str) -> Result<DispatchedDelegationOutcome,
     }
 }
 
-fn decode_delegation_reason(value: &str) -> Result<DispatchedDelegationReason, OutboxCorruption> {
+pub(crate) fn decode_delegation_reason(
+    value: &str,
+) -> Result<DispatchedDelegationReason, OutboxCorruption> {
     match value {
         "child_completed" => Ok(DispatchedDelegationReason::ChildCompleted),
         "child_execution_failed" => Ok(DispatchedDelegationReason::ChildExecutionFailed),
@@ -1872,7 +1878,7 @@ fn decode_delegation_reason(value: &str) -> Result<DispatchedDelegationReason, O
     }
 }
 
-fn decode_delegation_provenance(
+pub(crate) fn decode_delegation_provenance(
     row: &sqlx::postgres::PgRow,
 ) -> Result<DispatchedDelegationProvenance, OutboxCorruption> {
     let kind: Option<String> = row

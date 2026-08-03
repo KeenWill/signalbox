@@ -1890,7 +1890,100 @@ public struct SignalboxTranscriptEntryMessage: Decodable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxDelegationWaitMode: String, Decodable, Equatable, Sendable {
+  case foreground
+  case background
+}
+
+public enum SignalboxDelegationOutcome: String, Decodable, Equatable, Sendable {
+  case returned
+  case failed
+  case stopped
+  case cancelled
+  case continueRunning = "continue_running"
+  case alreadyTerminal = "already_terminal"
+}
+
+public enum SignalboxDelegationReason: String, Decodable, Equatable, Sendable {
+  case childCompleted = "child_completed"
+  case childExecutionFailed = "child_execution_failed"
+  case childResultUnavailable = "child_result_unavailable"
+  case childCancelled = "child_cancelled"
+  case parentStopped = "parent_stopped"
+  case parentCancelled = "parent_cancelled"
+}
+
+public enum SignalboxDelegationProvenance: Decodable, Equatable, Sendable {
+  case childTurn(childSessionID: SignalboxCanonicalUUID, childTurnID: SignalboxCanonicalUUID)
+  case parentTurnCommand(
+    parentSessionID: SignalboxCanonicalUUID,
+    parentTurnID: SignalboxCanonicalUUID,
+    commandID: SignalboxCanonicalUUID,
+    descendantScope: SignalboxDescendantTerminationScope)
+  case parentGoalCommand(
+    parentSessionID: SignalboxCanonicalUUID,
+    goalGeneration: SignalboxCanonicalUInt64,
+    commandID: SignalboxCanonicalUUID,
+    descendantScope: SignalboxDescendantTerminationScope)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "child_turn":
+      try tagged.rejectUnadmittedFields(
+        ["type", "child_session_id", "child_turn_id"], decoder: decoder)
+      self = .childTurn(
+        childSessionID: try decoder.decode("child_session_id"),
+        childTurnID: try decoder.decode("child_turn_id"))
+    case "parent_turn_command":
+      try tagged.rejectUnadmittedFields(
+        ["type", "parent_session_id", "parent_turn_id", "command_id", "descendant_scope"],
+        decoder: decoder)
+      self = .parentTurnCommand(
+        parentSessionID: try decoder.decode("parent_session_id"),
+        parentTurnID: try decoder.decode("parent_turn_id"),
+        commandID: try decoder.decode("command_id"),
+        descendantScope: try decoder.decode("descendant_scope"))
+    case "parent_goal_command":
+      try tagged.rejectUnadmittedFields(
+        ["type", "parent_session_id", "goal_generation", "command_id", "descendant_scope"],
+        decoder: decoder)
+      self = .parentGoalCommand(
+        parentSessionID: try decoder.decode("parent_session_id"),
+        goalGeneration: try decoder.decode("goal_generation"),
+        commandID: try decoder.decode("command_id"),
+        descendantScope: try decoder.decode("descendant_scope"))
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(codingPath: decoder.codingPath, debugDescription: "Unknown delegation provenance."))
+    }
+  }
+}
+
 public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
+  case delegatedTask(
+    spawningRequestID: SignalboxCanonicalUUID,
+    parentSessionID: SignalboxCanonicalUUID,
+    parentTurnID: SignalboxCanonicalUUID,
+    content: String)
+  case delegationMessage(
+    spawningRequestID: SignalboxCanonicalUUID,
+    messageID: SignalboxCanonicalUUID,
+    senderSessionID: SignalboxCanonicalUUID,
+    recipientSessionID: SignalboxCanonicalUUID,
+    ordinal: SignalboxCanonicalUInt64,
+    deliverySequence: SignalboxCanonicalUInt64,
+    content: String)
+  case delegationResult(
+    awaitRequestID: SignalboxCanonicalUUID,
+    spawningRequestID: SignalboxCanonicalUUID,
+    childSessionID: SignalboxCanonicalUUID,
+    mode: SignalboxDelegationWaitMode,
+    deliverySequence: SignalboxCanonicalUInt64?,
+    outcome: SignalboxDelegationOutcome,
+    content: String?,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance)
   case modelIdentityChanged(
     turnID: SignalboxCanonicalUUID,
     defaultsVersion: SignalboxCanonicalUInt64,
@@ -1920,6 +2013,64 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     let tagged = try SignalboxTaggedPayload(from: decoder)
     do {
       switch tagged.kind {
+      case "delegated_task":
+        try tagged.rejectUnadmittedFields(
+          ["type", "spawning_request_id", "parent_session_id", "parent_turn_id", "content"],
+          decoder: decoder)
+        self = .delegatedTask(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          parentSessionID: try decoder.decode("parent_session_id"),
+          parentTurnID: try decoder.decode("parent_turn_id"),
+          content: try decoder.decode("content"))
+      case "delegation_message":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "spawning_request_id", "message_id", "sender_session_id",
+            "recipient_session_id", "ordinal", "delivery_sequence", "content",
+          ], decoder: decoder)
+        self = .delegationMessage(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          messageID: try decoder.decode("message_id"),
+          senderSessionID: try decoder.decode("sender_session_id"),
+          recipientSessionID: try decoder.decode("recipient_session_id"),
+          ordinal: try decoder.decode("ordinal"),
+          deliverySequence: try decoder.decode("delivery_sequence"),
+          content: try decoder.decode("content"))
+      case "delegation_result":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "await_request_id", "spawning_request_id", "child_session_id", "mode",
+            "delivery_sequence", "outcome", "content", "reason", "provenance",
+          ], decoder: decoder)
+        try tagged.requireFields(["delivery_sequence", "content"], decoder: decoder)
+        let mode: SignalboxDelegationWaitMode = try decoder.decode("mode")
+        let deliverySequence: SignalboxCanonicalUInt64? = try decoder.decodeIfPresent(
+          "delivery_sequence")
+        let outcome: SignalboxDelegationOutcome = try decoder.decode("outcome")
+        let content: String? = try decoder.decodeIfPresent("content")
+        guard
+          (mode == .foreground && deliverySequence == nil)
+            || (mode == .background && (deliverySequence?.rawValue ?? 0) > 0),
+          (outcome == .returned && content != nil)
+            || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil)
+        else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath,
+              debugDescription: "Delegation-result delivery or content shape is inconsistent."
+            )
+          )
+        }
+        self = .delegationResult(
+          awaitRequestID: try decoder.decode("await_request_id"),
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id"),
+          mode: mode,
+          deliverySequence: deliverySequence,
+          outcome: outcome,
+          content: content,
+          reason: try decoder.decode("reason"),
+          provenance: try decoder.decode("provenance"))
       case "model_identity_changed":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "defaults_version", "selected_model_id"],

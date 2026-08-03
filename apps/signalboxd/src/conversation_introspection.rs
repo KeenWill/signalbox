@@ -250,6 +250,25 @@ fn visible_process_entry(
     entry: ProcessTranscriptEntry,
 ) -> Result<VisibleEntry, ConversationIntrospectionError> {
     let (entry_index, kind, content) = match entry {
+        ProcessTranscriptEntry::DelegatedTask {
+            entry_index,
+            content,
+            ..
+        }
+        | ProcessTranscriptEntry::DelegationMessage {
+            entry_index,
+            content,
+            ..
+        } => (entry_index, TranscriptEntryKind::System, content),
+        ProcessTranscriptEntry::DelegationResult {
+            entry_index,
+            content,
+            ..
+        } => (
+            entry_index,
+            TranscriptEntryKind::ToolResult,
+            content.unwrap_or_else(|| String::from("delegated child returned no content")),
+        ),
         ProcessTranscriptEntry::ModelIdentityChanged { entry_index, .. } => (
             entry_index,
             TranscriptEntryKind::System,

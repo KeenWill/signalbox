@@ -41,26 +41,27 @@ use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices,
+    DecideToolRequestResult, DelegationMessageId, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
     PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
-    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
-    ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
-    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal, ToolDispatchAuthority,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -77,10 +78,12 @@ use signalbox_persistence::{
         PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     outbox::{
-        DispatchedDelegationPolicy, DispatchedDelegationUpdate, DispatchedDelegationWake,
-        DispatchedModelCallState, DispatchedOutboxEvent, DispatchedOutboxEventKind,
-        DispatchedReconciliationOperation, DispatchedToolBatchState, OutboxCorruption,
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
+        DispatchedDelegationReason, DispatchedDelegationUpdate, DispatchedDelegationWaitMode,
+        DispatchedDelegationWake, DispatchedModelCallState, DispatchedOutboxEvent,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, DispatchedToolBatchState,
+        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
+        OutboxDispatcher,
     },
     plan::{SessionPlanCorruption, SessionPlanRepository, SessionPlanRepositoryError},
     process_read::{
@@ -153,6 +156,33 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
 
 const RAW_DELEGATED_TASK: &str = "inspect delegated work";
 const RAW_DELEGATED_MESSAGE: &str = "delegated status";
+const DELEGATION_OUTBOX_FIXTURE_SEED: u128 = 0xd600;
+const DELEGATION_HISTORY_FIXTURE_SEED: u128 = 0xd610;
+const DELEGATION_SPAWN_PURPOSE_FIXTURE_SEED: u128 = 0xd620;
+const DELEGATION_MESSAGE_PURPOSE_FIXTURE_SEED: u128 = 0xd630;
+const DELEGATION_CASCADE_SOURCE_FIXTURE_SEED: u128 = 0xd640;
+const DELEGATION_CASCADE_TARGET_FIXTURE_SEED: u128 = 0xd650;
+const DELEGATION_RELATION_FIXTURE_SEED: u128 = 0xd700;
+const DELEGATION_WAIT_FIXTURE_SEED: u128 = 0xd710;
+const DELEGATION_LIFECYCLE_FIXTURE_SEED: u128 = 0xd720;
+const DELEGATION_MESSAGE_UPDATE_FIXTURE_SEED: u128 = 0xd730;
+const DELEGATION_RESULT_UPDATE_FIXTURE_SEED: u128 = 0xd740;
+const DELEGATION_MESSAGE_WAKE_FIXTURE_SEED: u128 = 0xd750;
+const DELEGATION_RESULT_WAKE_FIXTURE_SEED: u128 = 0xd760;
+const DELEGATION_CHILD_STREAM_FIXTURE_SEED: u128 = 0xd770;
+const DELEGATION_PARENT_STREAM_FIXTURE_SEED: u128 = 0xd780;
+const DELEGATION_DUPLICATE_MESSAGE_FIXTURE_SEED: u128 = 0xd790;
+const DELEGATION_REVERSE_INSERT_FIXTURE_SEED: u128 = 0xd7a0;
+const DELEGATION_OUTBOX_COMMAND_ID: u128 = 0xdc00;
+const DELEGATION_LIFECYCLE_COMMAND_ID: u128 = 0xdd10;
+const DELEGATION_CASCADE_ROOT_COMMAND_ID: u128 = 0xe640;
+const DELEGATION_WAIT_ONLY_OUTCOME_ORDINAL: i16 = 2;
+const DELEGATION_AFTER_MESSAGE_OUTCOME_ORDINAL: i16 = 3;
+
+struct RawDelegationPurposes<'a> {
+    spawn_arguments: &'a str,
+    message_arguments: &'a str,
+}
 
 #[derive(Clone, Copy)]
 struct RawDelegationFixture {
@@ -168,11 +198,17 @@ struct RawDelegationFixture {
     message_id: Uuid,
 }
 
+#[derive(Clone, Copy)]
+struct RawMessageRoute {
+    stream: SessionId,
+    sender: SessionId,
+    recipient: SessionId,
+}
+
 async fn prepare_raw_delegation(
     pool: &PgPool,
     seed: u128,
-    spawn_arguments: &str,
-    message_arguments: &str,
+    purposes: RawDelegationPurposes<'_>,
 ) -> Result<RawDelegationFixture, Box<dyn Error>> {
     let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
     let await_arguments = serde_json::json!({
@@ -184,9 +220,9 @@ async fn prepare_raw_delegation(
         pool,
         seed,
         &[
-            ("spawn_session", spawn_arguments),
+            ("spawn_session", purposes.spawn_arguments),
             ("await_session", await_arguments.as_str()),
-            ("send_session_message", message_arguments),
+            ("send_session_message", purposes.message_arguments),
         ],
     )
     .await?;
@@ -287,7 +323,15 @@ async fn prepare_canonical_raw_delegation(
         "peer_session_id": child.as_uuid().to_string(),
     })
     .to_string();
-    prepare_raw_delegation(pool, seed, &spawn_arguments, &message_arguments).await
+    prepare_raw_delegation(
+        pool,
+        seed,
+        RawDelegationPurposes {
+            spawn_arguments: &spawn_arguments,
+            message_arguments: &message_arguments,
+        },
+    )
+    .await
 }
 
 async fn insert_raw_delegation(
@@ -414,7 +458,7 @@ async fn insert_raw_delegation(
     Ok(())
 }
 
-async fn insert_raw_wait_and_message(
+async fn insert_raw_wait(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
 ) -> Result<(), sqlx::Error> {
@@ -431,6 +475,14 @@ async fn insert_raw_wait_and_message(
     .bind(fixture.child.into_uuid())
     .execute(&mut *connection)
     .await?;
+    Ok(())
+}
+
+async fn insert_raw_wait_and_message(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+) -> Result<(), sqlx::Error> {
+    insert_raw_wait(connection, fixture).await?;
     insert_raw_message(connection, fixture, "parent_to_child", fixture.child).await?;
     Ok(())
 }
@@ -439,27 +491,30 @@ async fn insert_raw_failed_outcome(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
     turn: TurnId,
+    event_ordinal: i16,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO session_delegation_event
             (spawning_tool_request_id, event_ordinal, event_kind,
              outcome_kind, reason_kind, provenance_kind,
              provenance_session_id, provenance_turn_id)
-         VALUES ($1, 3, 'outcome_recorded', 'child_failed',
+         VALUES ($1, $4, 'outcome_recorded', 'child_failed',
                  'child_execution_failed', 'child_turn', $2, $3)",
     )
     .bind(fixture.spawning_request.into_uuid())
     .bind(fixture.child.into_uuid())
     .bind(turn.into_uuid())
+    .bind(event_ordinal)
     .execute(&mut *connection)
     .await?;
     sqlx::query(
         "INSERT INTO session_child_result
             (spawning_tool_request_id, event_ordinal, event_kind,
              outcome_kind, content_text)
-         VALUES ($1, 3, 'outcome_recorded', 'child_failed', NULL)",
+         VALUES ($1, $2, 'outcome_recorded', 'child_failed', NULL)",
     )
     .bind(fixture.spawning_request.into_uuid())
+    .bind(event_ordinal)
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -747,21 +802,8 @@ async fn insert_raw_wait_and_message_with_delivery(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
 ) -> Result<(), sqlx::Error> {
-    insert_raw_wait_and_message(connection, fixture).await?;
-    append_raw_delegation_update(
-        connection,
-        fixture,
-        RawDelegationUpdate {
-            session: fixture.parent,
-            kind: "child_waiting",
-            awaiting_request: Some(fixture.awaiting_request.into_uuid()),
-            event_ordinal: None,
-            event_kind: None,
-            result_request: None,
-            message_id: None,
-        },
-    )
-    .await?;
+    insert_raw_wait_with_update(connection, fixture).await?;
+    insert_raw_message(connection, fixture, "parent_to_child", fixture.child).await?;
     append_raw_delegation_update(
         connection,
         fixture,
@@ -777,6 +819,27 @@ async fn insert_raw_wait_and_message_with_delivery(
     )
     .await?;
     append_raw_message_wake(connection, fixture, fixture.child).await
+}
+
+async fn insert_raw_wait_with_update(
+    connection: &mut PgConnection,
+    fixture: RawDelegationFixture,
+) -> Result<(), sqlx::Error> {
+    insert_raw_wait(connection, fixture).await?;
+    append_raw_delegation_update(
+        connection,
+        fixture,
+        RawDelegationUpdate {
+            session: fixture.parent,
+            kind: "child_waiting",
+            awaiting_request: Some(fixture.awaiting_request.into_uuid()),
+            event_ordinal: None,
+            event_kind: None,
+            result_request: None,
+            message_id: None,
+        },
+    )
+    .await
 }
 
 async fn insert_raw_message(
@@ -831,9 +894,7 @@ async fn insert_raw_message(
 async fn append_raw_message_update(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
-    stream: SessionId,
-    sender: SessionId,
-    recipient: SessionId,
+    route: RawMessageRoute,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH header AS (
@@ -850,11 +911,11 @@ async fn append_raw_message_update(
                 'session_message', $2, $3, $4, $5, 2, $6
            FROM header",
     )
-    .bind(stream.into_uuid())
+    .bind(route.stream.into_uuid())
     .bind(fixture.spawning_request.into_uuid())
     .bind(fixture.message_id)
-    .bind(sender.into_uuid())
-    .bind(recipient.into_uuid())
+    .bind(route.sender.into_uuid())
+    .bind(route.recipient.into_uuid())
     .bind(RAW_DELEGATED_MESSAGE)
     .execute(connection)
     .await?;
@@ -867,24 +928,30 @@ fn constraint_name(error: &sqlx::Error) -> Option<&str> {
         .and_then(|error| error.constraint())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
--> Result<(), Box<dyn Error>> {
+async fn prepared_complete_delegation_outbox(
+    seed: u128,
+) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
     let spawn_arguments = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
     })
     .to_string();
-    let child = SessionId::from_uuid(Uuid::from_u128(0xd600 + 0x200));
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
     let message_arguments = serde_json::json!({
         "content": RAW_DELEGATED_MESSAGE,
         "peer_session_id": child.as_uuid().to_string(),
     })
     .to_string();
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture =
-        prepare_raw_delegation(&pool, 0xd600, &spawn_arguments, &message_arguments).await?;
+    let fixture = prepare_raw_delegation(
+        &pool,
+        seed,
+        RawDelegationPurposes {
+            spawn_arguments: &spawn_arguments,
+            message_arguments: &message_arguments,
+        },
+    )
+    .await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
@@ -894,7 +961,13 @@ async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
     .await?;
     insert_raw_delegation(&mut transaction, fixture).await?;
     insert_raw_wait_and_message(&mut transaction, fixture).await?;
-    insert_raw_failed_outcome(&mut transaction, fixture, fixture.initial_turn).await?;
+    insert_raw_failed_outcome(
+        &mut transaction,
+        fixture,
+        fixture.initial_turn,
+        DELEGATION_AFTER_MESSAGE_OUTCOME_ORDINAL,
+    )
+    .await?;
     append_raw_delegation_update(
         &mut transaction,
         fixture,
@@ -923,7 +996,12 @@ async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
         },
     )
     .await?;
-    append_raw_parent_lifecycle_update(&mut transaction, fixture, Uuid::from_u128(0xdc00)).await?;
+    append_raw_parent_lifecycle_update(
+        &mut transaction,
+        fixture,
+        Uuid::from_u128(DELEGATION_OUTBOX_COMMAND_ID),
+    )
+    .await?;
     append_raw_delegation_update(
         &mut transaction,
         fixture,
@@ -955,6 +1033,15 @@ async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
     append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
     append_raw_result_wake(&mut transaction, fixture).await?;
     transaction.commit().await?;
+    Ok((container, pool, fixture))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_outbox_records_exact_update_and_wake_inventory()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _fixture) =
+        prepared_complete_delegation_outbox(DELEGATION_OUTBOX_FIXTURE_SEED).await?;
     let update_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM delegation_update_outbox_event")
             .fetch_one(&pool)
@@ -962,6 +1049,20 @@ async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
     let wake_count: i64 = sqlx::query_scalar("SELECT count(*) FROM delegation_wake_outbox_event")
         .fetch_one(&pool)
         .await?;
+
+    assert_eq!(update_count, 5);
+    assert_eq!(wake_count, 2);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_result_update_requires_its_subject() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) =
+        prepared_complete_delegation_outbox(DELEGATION_OUTBOX_FIXTURE_SEED).await?;
     let mut forged = pool.begin().await?;
     let shape_error = append_raw_delegation_update(
         &mut forged,
@@ -979,6 +1080,22 @@ async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
     .await
     .expect_err("a child-result update requires its correlated result");
     forged.rollback().await?;
+
+    assert_eq!(
+        constraint_name(&shape_error),
+        Some("delegation_update_subject_shape")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_result_update_rejects_a_duplicate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) =
+        prepared_complete_delegation_outbox(DELEGATION_OUTBOX_FIXTURE_SEED).await?;
     let mut duplicate = pool.begin().await?;
     let duplicate_error = append_raw_delegation_update(
         &mut duplicate,
@@ -997,12 +1114,6 @@ async fn inv032_delegation_outbox_closes_update_subjects_and_separates_wakes()
     .expect_err("one stream cannot receive a result update twice");
     duplicate.rollback().await?;
 
-    assert_eq!(update_count, 5);
-    assert_eq!(wake_count, 2);
-    assert_eq!(
-        constraint_name(&shape_error),
-        Some("delegation_update_subject_shape")
-    );
     assert_eq!(
         constraint_name(&duplicate_error),
         Some("delegation_child_result_update_once")
@@ -1028,7 +1139,7 @@ async fn prepared_recipient_delivery_fixture(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_relation_requires_spawn_update() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture = prepare_canonical_raw_delegation(&pool, 0xd700).await?;
+    let fixture = prepare_canonical_raw_delegation(&pool, DELEGATION_RELATION_FIXTURE_SEED).await?;
     let mut relation_only = pool.begin().await?;
     insert_raw_delegation(&mut relation_only, fixture).await?;
     let error = relation_only
@@ -1049,7 +1160,8 @@ async fn inv032_delegation_relation_requires_spawn_update() -> Result<(), Box<dy
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_wait_requires_parent_update() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd710).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_WAIT_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO session_delegation_wait
@@ -1082,7 +1194,8 @@ async fn inv032_delegation_wait_requires_parent_update() -> Result<(), Box<dyn E
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_parent_lifecycle_requires_update() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd720).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_LIFECYCLE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
@@ -1090,8 +1203,12 @@ async fn inv032_delegation_parent_lifecycle_requires_update() -> Result<(), Box<
     )
     .execute(&mut *transaction)
     .await?;
-    insert_raw_parent_lifecycle_without_update(&mut transaction, fixture, Uuid::from_u128(0xdd10))
-        .await?;
+    insert_raw_parent_lifecycle_without_update(
+        &mut transaction,
+        fixture,
+        Uuid::from_u128(DELEGATION_LIFECYCLE_COMMAND_ID),
+    )
+    .await?;
     let error = transaction
         .commit()
         .await
@@ -1110,7 +1227,8 @@ async fn inv032_delegation_parent_lifecycle_requires_update() -> Result<(), Box<
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_message_requires_recipient_update() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd730).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_MESSAGE_UPDATE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
     append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
@@ -1132,7 +1250,8 @@ async fn inv032_delegation_message_requires_recipient_update() -> Result<(), Box
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_result_requires_parent_update() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd740).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_RESULT_UPDATE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
@@ -1140,8 +1259,14 @@ async fn inv032_delegation_result_requires_parent_update() -> Result<(), Box<dyn
     )
     .execute(&mut *transaction)
     .await?;
-    insert_raw_wait_and_message_with_delivery(&mut transaction, fixture).await?;
-    insert_raw_failed_outcome(&mut transaction, fixture, fixture.initial_turn).await?;
+    insert_raw_wait_with_update(&mut transaction, fixture).await?;
+    insert_raw_failed_outcome(
+        &mut transaction,
+        fixture,
+        fixture.initial_turn,
+        DELEGATION_WAIT_ONLY_OUTCOME_ORDINAL,
+    )
+    .await?;
     append_raw_result_wake(&mut transaction, fixture).await?;
     let error = transaction
         .commit()
@@ -1161,15 +1286,18 @@ async fn inv032_delegation_result_requires_parent_update() -> Result<(), Box<dyn
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_message_requires_recipient_wake() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd750).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_MESSAGE_WAKE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
     append_raw_message_update(
         &mut transaction,
         fixture,
-        fixture.child,
-        fixture.parent,
-        fixture.child,
+        RawMessageRoute {
+            stream: fixture.child,
+            sender: fixture.parent,
+            recipient: fixture.child,
+        },
     )
     .await?;
     let error = transaction
@@ -1190,7 +1318,8 @@ async fn inv032_delegation_message_requires_recipient_wake() -> Result<(), Box<d
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_result_requires_parent_wake() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd760).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_RESULT_WAKE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
@@ -1198,8 +1327,14 @@ async fn inv032_delegation_result_requires_parent_wake() -> Result<(), Box<dyn E
     )
     .execute(&mut *transaction)
     .await?;
-    insert_raw_wait_and_message_with_delivery(&mut transaction, fixture).await?;
-    insert_raw_failed_outcome(&mut transaction, fixture, fixture.initial_turn).await?;
+    insert_raw_wait_with_update(&mut transaction, fixture).await?;
+    insert_raw_failed_outcome(
+        &mut transaction,
+        fixture,
+        fixture.initial_turn,
+        DELEGATION_WAIT_ONLY_OUTCOME_ORDINAL,
+    )
+    .await?;
     append_raw_delegation_update(
         &mut transaction,
         fixture,
@@ -1232,15 +1367,18 @@ async fn inv032_delegation_result_requires_parent_wake() -> Result<(), Box<dyn E
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_parent_to_child_update_requires_child_stream() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd770).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_CHILD_STREAM_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
     append_raw_message_update(
         &mut transaction,
         fixture,
-        fixture.parent,
-        fixture.parent,
-        fixture.child,
+        RawMessageRoute {
+            stream: fixture.parent,
+            sender: fixture.parent,
+            recipient: fixture.child,
+        },
     )
     .await?;
     append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
@@ -1260,7 +1398,8 @@ async fn inv032_parent_to_child_update_requires_child_stream() -> Result<(), Box
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_child_to_parent_update_requires_parent_stream() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd780).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_PARENT_STREAM_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_event
@@ -1272,9 +1411,11 @@ async fn inv032_child_to_parent_update_requires_parent_stream() -> Result<(), Bo
     append_raw_message_update(
         &mut transaction,
         fixture,
-        fixture.child,
-        fixture.child,
-        fixture.parent,
+        RawMessageRoute {
+            stream: fixture.child,
+            sender: fixture.child,
+            recipient: fixture.parent,
+        },
     )
     .await?;
     append_raw_message_wake(&mut transaction, fixture, fixture.parent).await?;
@@ -1294,23 +1435,28 @@ async fn inv032_child_to_parent_update_requires_parent_stream() -> Result<(), Bo
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_message_update_rejects_cross_endpoint_duplicate() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd790).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_DUPLICATE_MESSAGE_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     insert_raw_message(&mut transaction, fixture, "parent_to_child", fixture.child).await?;
     append_raw_message_update(
         &mut transaction,
         fixture,
-        fixture.child,
-        fixture.parent,
-        fixture.child,
+        RawMessageRoute {
+            stream: fixture.child,
+            sender: fixture.parent,
+            recipient: fixture.child,
+        },
     )
     .await?;
     let error = append_raw_message_update(
         &mut transaction,
         fixture,
-        fixture.parent,
-        fixture.parent,
-        fixture.child,
+        RawMessageRoute {
+            stream: fixture.parent,
+            sender: fixture.parent,
+            recipient: fixture.child,
+        },
     )
     .await
     .expect_err("one message cannot be duplicated onto another endpoint");
@@ -1329,14 +1475,17 @@ async fn inv032_message_update_rejects_cross_endpoint_duplicate() -> Result<(), 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_message_delivery_admits_reverse_insert_order() -> Result<(), Box<dyn Error>> {
-    let (container, pool, fixture) = prepared_recipient_delivery_fixture(0xd7a0).await?;
+    let (container, pool, fixture) =
+        prepared_recipient_delivery_fixture(DELEGATION_REVERSE_INSERT_FIXTURE_SEED).await?;
     let mut transaction = pool.begin().await?;
     append_raw_message_update(
         &mut transaction,
         fixture,
-        fixture.child,
-        fixture.parent,
-        fixture.child,
+        RawMessageRoute {
+            stream: fixture.child,
+            sender: fixture.parent,
+            recipient: fixture.child,
+        },
     )
     .await?;
     append_raw_message_wake(&mut transaction, fixture, fixture.child).await?;
@@ -1348,27 +1497,23 @@ async fn inv032_message_delivery_admits_reverse_insert_order() -> Result<(), Box
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<(), Box<dyn Error>> {
-    let spawn_arguments = serde_json::json!({
-        "relationship": { "kind": "background" },
-        "task": RAW_DELEGATED_TASK,
-    })
-    .to_string();
-    let child = SessionId::from_uuid(Uuid::from_u128(0xd610 + 0x200));
-    let message_arguments = serde_json::json!({
-        "content": RAW_DELEGATED_MESSAGE,
-        "peer_session_id": child.as_uuid().to_string(),
-    })
-    .to_string();
+async fn prepared_delegation_with_wait_and_message(
+    seed: u128,
+) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture =
-        prepare_raw_delegation(&pool, 0xd610, &spawn_arguments, &message_arguments).await?;
+    let fixture = prepare_canonical_raw_delegation(&pool, seed).await?;
     let mut setup = pool.begin().await?;
     insert_raw_delegation_with_update(&mut setup, fixture).await?;
     insert_raw_wait_and_message_with_delivery(&mut setup, fixture).await?;
     setup.commit().await?;
+    Ok((container, pool, fixture))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_history_rejects_initial_task_deletion() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) =
+        prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let mut history = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_initial_task
@@ -1387,7 +1532,23 @@ async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<()
         .commit()
         .await
         .expect_err("a relation cannot outlive its initial task");
-    let later_turn = TurnId::from_uuid(Uuid::from_u128(0xd610 + 0x500));
+
+    assert_eq!(
+        constraint_name(&history_error),
+        Some("semantic_transcript_entry_delegated_task_fk")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_outcome_rejects_a_later_child_turn() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) =
+        prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
+    let later_turn = TurnId::from_uuid(Uuid::from_u128(DELEGATION_HISTORY_FIXTURE_SEED + 0x500));
     let mut outcome = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE turn_lifecycle
@@ -1408,11 +1569,33 @@ async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<()
     .bind(fixture.child.into_uuid())
     .execute(&mut *outcome)
     .await?;
-    insert_raw_failed_outcome(&mut outcome, fixture, later_turn).await?;
+    insert_raw_failed_outcome(
+        &mut outcome,
+        fixture,
+        later_turn,
+        DELEGATION_AFTER_MESSAGE_OUTCOME_ORDINAL,
+    )
+    .await?;
     let turn_error = outcome
         .commit()
         .await
         .expect_err("a later child turn cannot terminate the delegation");
+
+    assert_eq!(
+        constraint_name(&turn_error),
+        Some("session_delegation_event_semantics")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_delegation_result_wake_requires_its_subject_shape() -> Result<(), Box<dyn Error>> {
+    let (container, pool, fixture) =
+        prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let wake_error = sqlx::query(
         "WITH header AS (
             INSERT INTO outbox_event(event_kind, storage_version, session_id)
@@ -1433,14 +1616,6 @@ async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<()
     .expect_err("a result wake requires its correlated result pointer");
 
     assert_eq!(
-        constraint_name(&history_error),
-        Some("semantic_transcript_entry_delegated_task_fk")
-    );
-    assert_eq!(
-        constraint_name(&turn_error),
-        Some("session_delegation_event_semantics")
-    );
-    assert_eq!(
         constraint_name(&wake_error),
         Some("delegation_wake_subject_shape")
     );
@@ -1452,42 +1627,75 @@ async fn delegation_history_exact_turn_and_wake_shape_fail_closed() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_tool_purposes_require_exact_json() -> Result<(), Box<dyn Error>> {
+async fn delegation_spawn_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
     let extra_spawn = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
         "unexpected": true,
     })
     .to_string();
-    let child = SessionId::from_uuid(Uuid::from_u128(0xd620 + 0x200));
+    let child = SessionId::from_uuid(Uuid::from_u128(
+        DELEGATION_SPAWN_PURPOSE_FIXTURE_SEED + 0x200,
+    ));
     let canonical_message = serde_json::json!({
         "content": RAW_DELEGATED_MESSAGE,
         "peer_session_id": child.as_uuid().to_string(),
     })
     .to_string();
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let spawn_fixture =
-        prepare_raw_delegation(&pool, 0xd620, &extra_spawn, &canonical_message).await?;
+    let spawn_fixture = prepare_raw_delegation(
+        &pool,
+        DELEGATION_SPAWN_PURPOSE_FIXTURE_SEED,
+        RawDelegationPurposes {
+            spawn_arguments: &extra_spawn,
+            message_arguments: &canonical_message,
+        },
+    )
+    .await?;
     let mut spawn = pool.begin().await?;
     insert_raw_delegation_with_update(&mut spawn, spawn_fixture).await?;
     let spawn_error = spawn
         .commit()
         .await
         .expect_err("extra spawn fields are not canonical purpose");
+
+    assert_eq!(
+        constraint_name(&spawn_error),
+        Some("session_delegation_initial_task_purpose")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
     let canonical_spawn = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
     })
     .to_string();
-    let message_child = SessionId::from_uuid(Uuid::from_u128(0xd630 + 0x200));
+    let message_child = SessionId::from_uuid(Uuid::from_u128(
+        DELEGATION_MESSAGE_PURPOSE_FIXTURE_SEED + 0x200,
+    ));
     let extra_message = serde_json::json!({
         "content": RAW_DELEGATED_MESSAGE,
         "peer_session_id": message_child.as_uuid().to_string(),
         "unexpected": true,
     })
     .to_string();
-    let message_fixture =
-        prepare_raw_delegation(&pool, 0xd630, &canonical_spawn, &extra_message).await?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let message_fixture = prepare_raw_delegation(
+        &pool,
+        DELEGATION_MESSAGE_PURPOSE_FIXTURE_SEED,
+        RawDelegationPurposes {
+            spawn_arguments: &canonical_spawn,
+            message_arguments: &extra_message,
+        },
+    )
+    .await?;
     let mut message = pool.begin().await?;
     insert_raw_delegation_with_update(&mut message, message_fixture).await?;
     insert_raw_wait_and_message_with_delivery(&mut message, message_fixture).await?;
@@ -1496,10 +1704,6 @@ async fn delegation_tool_purposes_require_exact_json() -> Result<(), Box<dyn Err
         .await
         .expect_err("extra message fields are not canonical purpose");
 
-    assert_eq!(
-        constraint_name(&spawn_error),
-        Some("session_delegation_initial_task_purpose")
-    );
     assert_eq!(
         constraint_name(&message_error),
         Some("session_delegation_event_semantics")
@@ -1512,32 +1716,54 @@ async fn delegation_tool_purposes_require_exact_json() -> Result<(), Box<dyn Err
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_cascade_rejects_unrelated_disposition_source() -> Result<(), Box<dyn Error>> {
+async fn s19_delegation_cascade_rejects_unrelated_disposition_source() -> Result<(), Box<dyn Error>>
+{
     let spawn_arguments = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
     })
     .to_string();
-    let first_child = SessionId::from_uuid(Uuid::from_u128(0xd640 + 0x200));
+    let first_child = SessionId::from_uuid(Uuid::from_u128(
+        DELEGATION_CASCADE_SOURCE_FIXTURE_SEED + 0x200,
+    ));
     let first_message = serde_json::json!({
         "content": RAW_DELEGATED_MESSAGE,
         "peer_session_id": first_child.as_uuid().to_string(),
     })
     .to_string();
-    let second_child = SessionId::from_uuid(Uuid::from_u128(0xd650 + 0x200));
+    let second_child = SessionId::from_uuid(Uuid::from_u128(
+        DELEGATION_CASCADE_TARGET_FIXTURE_SEED + 0x200,
+    ));
     let second_message = serde_json::json!({
         "content": RAW_DELEGATED_MESSAGE,
         "peer_session_id": second_child.as_uuid().to_string(),
     })
     .to_string();
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let source = prepare_raw_delegation(&pool, 0xd640, &spawn_arguments, &first_message).await?;
-    let target = prepare_raw_delegation(&pool, 0xd650, &spawn_arguments, &second_message).await?;
+    let source = prepare_raw_delegation(
+        &pool,
+        DELEGATION_CASCADE_SOURCE_FIXTURE_SEED,
+        RawDelegationPurposes {
+            spawn_arguments: &spawn_arguments,
+            message_arguments: &first_message,
+        },
+    )
+    .await?;
+    let target = prepare_raw_delegation(
+        &pool,
+        DELEGATION_CASCADE_TARGET_FIXTURE_SEED,
+        RawDelegationPurposes {
+            spawn_arguments: &spawn_arguments,
+            message_arguments: &second_message,
+        },
+    )
+    .await?;
     let mut setup = pool.begin().await?;
     insert_raw_delegation_with_update(&mut setup, source).await?;
     insert_raw_delegation_with_update(&mut setup, target).await?;
     setup.commit().await?;
-    let root_command = DurableCommandId::from_uuid(Uuid::from_u128(0xe640));
+    let root_command =
+        DurableCommandId::from_uuid(Uuid::from_u128(DELEGATION_CASCADE_ROOT_COMMAND_ID));
     let mut cascade = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE durable_command
@@ -2914,7 +3140,12 @@ async fn drain_cancellation_dispatches(
     Ok(cancellations)
 }
 
-type ReconciliationDispatch = (SessionId, TurnId, ModelCallId, ContextFrontierId);
+type ReconciliationDispatch = (
+    SessionId,
+    TurnId,
+    DispatchedReconciliationOperation,
+    ContextFrontierId,
+);
 
 async fn drain_reconciliation_dispatches(
     pool: &PgPool,
@@ -2923,13 +3154,13 @@ async fn drain_reconciliation_dispatches(
     drain_outbox(pool, |event| {
         let DispatchedOutboxEventKind::TurnReconciliationRequired {
             turn,
-            operation: DispatchedReconciliationOperation::ModelCall(call),
+            operation,
             terminal_frontier,
         } = event.kind()
         else {
             return;
         };
-        reconciliations.push((event.session(), *turn, *call, *terminal_frontier));
+        reconciliations.push((event.session(), *turn, *operation, *terminal_frontier));
     })
     .await?;
     Ok(reconciliations)
@@ -8596,6 +8827,295 @@ async fn foreground_delegation_result_decodes_in_tool_batch_outbox() -> Result<(
     Ok(())
 }
 
+/// Delegation semantic entries resolve through their immutable relationship,
+/// delivery, wait, result, and lifecycle records instead of degrading to
+/// generic transcript markers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_semantic_entries_decode_exact_delivered_content() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parent_uuid = Uuid::from_u128(0xd360);
+    let child_uuid = Uuid::from_u128(0xd361);
+    let parent_turn_uuid = Uuid::from_u128(0xd362);
+    let child_turn_uuid = Uuid::from_u128(0xd363);
+    let spawning_request_uuid = Uuid::from_u128(0xd364);
+    let awaiting_request_uuid = Uuid::from_u128(0xd365);
+    let task_entry_uuid = Uuid::from_u128(0xd366);
+    let message_entry_uuid = Uuid::from_u128(0xd367);
+    let result_entry_uuid = Uuid::from_u128(0xd368);
+    let message_uuid = Uuid::from_u128(0xd369);
+    let model_selection_uuid = Uuid::from_u128(0xd36a);
+    let background_awaiting_request_uuid = Uuid::from_u128(0xd36b);
+    let background_result_entry_uuid = Uuid::from_u128(0xd36c);
+    let delegated_task_content = "inspect the durable result";
+    let delegation_message_content = "continue with the checked input";
+    let delegation_result_content = "checked result";
+
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_message DISABLE TRIGGER ALL;
+         ALTER TABLE session_message_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE semantic_transcript_entry DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(parent_turn_uuid)
+    .bind(child_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, $5, $6)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(child_uuid)
+    .bind(child_turn_uuid)
+    .bind(task_entry_uuid)
+    .bind(model_selection_uuid)
+    .bind(delegated_task_content)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 2, 'message_delivered', 'tool_request', $2, $3, $4)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(parent_turn_uuid)
+    .bind(awaiting_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_message
+            (message_id, spawning_tool_request_id, event_ordinal,
+             event_kind, direction, content_text)
+         VALUES ($1, $2, 2, 'message_delivered', 'parent_to_child', $3)",
+    )
+    .bind(message_uuid)
+    .bind(spawning_request_uuid)
+    .bind(delegation_message_content)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_message_delivery
+            (message_id, spawning_tool_request_id, recipient_session_id,
+             delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, 1, 'message')",
+    )
+    .bind(message_uuid)
+    .bind(spawning_request_uuid)
+    .bind(child_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, 3, 'outcome_recorded', 'result_returned',
+                 'child_completed', 'child_turn', $2, $3)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(child_uuid)
+    .bind(child_turn_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 3, 'outcome_recorded', 'result_returned', $2)",
+    )
+    .bind(spawning_request_uuid)
+    .bind(delegation_result_content)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground'),
+                ($6, $2, $3, $4, $5, 'background')",
+    )
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(parent_turn_uuid)
+    .bind(child_uuid)
+    .bind(background_awaiting_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id, parent_session_id,
+             delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, NULL, NULL),
+                ($4, $2, $3, 2, 'background_result')",
+    )
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .bind(parent_uuid)
+    .bind(background_awaiting_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(child_uuid)
+    .bind(task_entry_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegation_result_awaiting_tool_request_id,
+             delegation_result_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegation_result', $3, $4)",
+    )
+    .bind(parent_uuid)
+    .bind(background_result_entry_uuid)
+    .bind(background_awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegation_message_id)
+         VALUES ($1, $2, 'delegation_message', $3)",
+    )
+    .bind(child_uuid)
+    .bind(message_entry_uuid)
+    .bind(message_uuid)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id,
+             delegation_result_awaiting_tool_request_id,
+             delegation_result_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegation_result', $3, $3, $4)",
+    )
+    .bind(parent_uuid)
+    .bind(result_entry_uuid)
+    .bind(awaiting_request_uuid)
+    .bind(spawning_request_uuid)
+    .execute(&pool)
+    .await?;
+
+    let parent = SessionId::from_uuid(parent_uuid);
+    let child = SessionId::from_uuid(child_uuid);
+    let spawning_request = ToolRequestId::from_uuid(spawning_request_uuid);
+    let awaiting_request = ToolRequestId::from_uuid(awaiting_request_uuid);
+    let background_awaiting_request = ToolRequestId::from_uuid(background_awaiting_request_uuid);
+    let task_entry = SemanticTranscriptEntryId::from_uuid(task_entry_uuid);
+    let message_entry = SemanticTranscriptEntryId::from_uuid(message_entry_uuid);
+    let result_entry = SemanticTranscriptEntryId::from_uuid(result_entry_uuid);
+    let background_result_entry =
+        SemanticTranscriptEntryId::from_uuid(background_result_entry_uuid);
+    let entries = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(
+            &[1, 2, 3, 4],
+            &[
+                SemanticTranscriptEntryRef::from_source(child, task_entry),
+                SemanticTranscriptEntryRef::from_source(child, message_entry),
+                SemanticTranscriptEntryRef::from_source(parent, result_entry),
+                SemanticTranscriptEntryRef::from_source(parent, background_result_entry),
+            ],
+        )
+        .await?;
+
+    assert_eq!(
+        entries.as_ref(),
+        &[
+            ProcessTranscriptEntry::DelegatedTask {
+                entry_index: 0,
+                source_session: child,
+                entry: task_entry,
+                spawning_request,
+                parent_session: parent,
+                parent_turn: TurnId::from_uuid(parent_turn_uuid),
+                content: String::from(delegated_task_content),
+            },
+            ProcessTranscriptEntry::DelegationMessage {
+                entry_index: 1,
+                source_session: child,
+                entry: message_entry,
+                spawning_request,
+                message: DelegationMessageId::from_uuid(message_uuid),
+                sender: parent,
+                recipient: child,
+                ordinal: 2,
+                delivery_sequence: 1,
+                content: String::from(delegation_message_content),
+            },
+            ProcessTranscriptEntry::DelegationResult {
+                entry_index: 2,
+                source_session: parent,
+                entry: result_entry,
+                awaiting_request,
+                spawning_request,
+                child,
+                mode: DispatchedDelegationWaitMode::Foreground,
+                delivery_sequence: None,
+                outcome: DispatchedDelegationOutcome::ResultReturned,
+                content: Some(String::from(delegation_result_content)),
+                reason: DispatchedDelegationReason::ChildCompleted,
+                provenance: DispatchedDelegationProvenance::ChildTurn {
+                    session: child,
+                    turn: TurnId::from_uuid(child_turn_uuid),
+                },
+            },
+            ProcessTranscriptEntry::DelegationResult {
+                entry_index: 3,
+                source_session: parent,
+                entry: background_result_entry,
+                awaiting_request: background_awaiting_request,
+                spawning_request,
+                child,
+                mode: DispatchedDelegationWaitMode::Background,
+                delivery_sequence: Some(2),
+                outcome: DispatchedDelegationOutcome::ResultReturned,
+                content: Some(String::from(delegation_result_content)),
+                reason: DispatchedDelegationReason::ChildCompleted,
+                provenance: DispatchedDelegationProvenance::ChildTurn {
+                    session: child,
+                    turn: TurnId::from_uuid(child_turn_uuid),
+                },
+            },
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// A message update recovers its recipient-wide delivery sequence, and its
 /// paired internal wake remains a typed dispatcher event.
 #[tokio::test(flavor = "multi_thread")]
@@ -9926,7 +10446,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
         vec![(
             fixture.session,
             fixture.turn,
-            fixture.call,
+            DispatchedReconciliationOperation::ModelCall(fixture.call),
             ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
         )]
     );
