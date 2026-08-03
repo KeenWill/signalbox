@@ -648,6 +648,44 @@ fn commit_rejects_an_index_replaced_before_reference_publication() {
 }
 
 #[test]
+fn commit_rejects_merge_state_created_before_reference_publication() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+    let merge_head = fixture.root().join(".git/MERGE_HEAD");
+
+    let failure = executor
+        .execute_commit_with_publish_hook(
+            LocalOperation::Commit(GitCommitArguments {
+                message: MODEL_MESSAGE.to_owned(),
+            }),
+            || {
+                fs::write(&merge_head, format!("{}\n", fixture.initial))
+                    .expect("racing merge state writes");
+            },
+        )
+        .expect_err("changed merge state rejects commit publication");
+    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        repository.head().expect("original HEAD remains").target(),
+        Some(fixture.initial)
+    );
+    assert_eq!(
+        fs::read_to_string(merge_head).expect("foreign merge state remains"),
+        format!("{}\n", fixture.initial)
+    );
+}
+
+#[test]
 fn reflog_publication_rejects_a_live_leaf_changed_after_snapshot() {
     let fixture = Fixture::new();
     let executor = fixture.executor();

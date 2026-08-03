@@ -306,10 +306,6 @@ where
         ObjectFormat::Sha1 => git2::Oid::ZERO_SHA1,
         ObjectFormat::Sha256 => git2::Oid::ZERO_SHA256,
     });
-    state.validate(authority)?;
-    validate_root_before_publish()?;
-    index_lock.validate_source()?;
-    validate_live_commit_target(authority, oid)?;
     publish_commit_reference(
         authority,
         update_lock,
@@ -317,6 +313,12 @@ where
         old,
         oid,
         &signature,
+        || {
+            validate_root_before_publish()?;
+            state.validate(authority)?;
+            index_lock.validate_source()?;
+            validate_live_commit_target(authority, oid)
+        },
     )?;
     let state_cleaned = state.cleanup(authority).is_ok();
     Ok(CommitResult {
@@ -343,34 +345,19 @@ fn validate_live_commit_target(
     pinned_objects.validate_live(authority)
 }
 
-pub(super) fn publish_commit_reference(
+pub(super) fn publish_commit_reference<ValidatePublication>(
     authority: &PinnedRepository,
     update_lock: ReferenceLock,
     update_reference: &str,
     old: git2::Oid,
     new: git2::Oid,
     signature: &Signature<'_>,
-) -> Result<(), LocalGitFailure> {
-    publish_commit_reference_with_hook(
-        authority,
-        update_lock,
-        update_reference,
-        old,
-        new,
-        signature,
-        || {},
-    )
-}
-
-pub(super) fn publish_commit_reference_with_hook<Hook: FnOnce()>(
-    authority: &PinnedRepository,
-    mut update_lock: ReferenceLock,
-    update_reference: &str,
-    old: git2::Oid,
-    new: git2::Oid,
-    signature: &Signature<'_>,
-    before_reference_publish: Hook,
-) -> Result<(), LocalGitFailure> {
+    validate_publication: ValidatePublication,
+) -> Result<(), LocalGitFailure>
+where
+    ValidatePublication: FnOnce() -> Result<(), LocalGitFailure>,
+{
+    let mut update_lock = update_lock;
     let expected = update_lock.read(authority)?;
     update_lock.prepare(authority, new)?;
     let mut logs = vec![ReferenceLogLock::acquire(authority, "HEAD")?];
@@ -388,7 +375,10 @@ pub(super) fn publish_commit_reference_with_hook<Hook: FnOnce()>(
         }
         published += 1;
     }
-    before_reference_publish();
+    if let Err(failure) = validate_publication() {
+        rollback_published_logs(&mut logs);
+        return Err(failure);
+    }
     if update_lock.publish(authority, &expected).is_err() {
         rollback_published_logs(&mut logs);
         return Err(LocalGitFailure::Operation);
