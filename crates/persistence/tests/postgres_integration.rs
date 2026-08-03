@@ -21,17 +21,17 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
+    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
     CommitModelCallObservationTransaction, CreateSessionError, CreateSessionOutcome,
     CreateSessionRequest, CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome,
     EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelConversationMessage, PromptMemberStatement, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
-    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
+    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputRequestError, SubmitInputService, ToolAttemptAuthorizationStatus,
 };
@@ -767,6 +767,26 @@ struct ApprovalJudgeDurableState {
 struct ApprovalJudgeDecisionDurableState {
     prepared_judge_exists: bool,
     decision_exists: bool,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct AppliedApprovalJudgeProjection {
+    judge_state: String,
+    recommendation: String,
+    decision_source: String,
+    delegate_model_selection_id: Uuid,
+    delegate_model_call_id: Uuid,
+    rationale: String,
+    active_phase: String,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct EscalatedApprovalJudgeProjection {
+    judge_state: String,
+    recommendation: String,
+    decision_exists: bool,
+    active_phase: String,
+    approval_tool_request_id: Uuid,
 }
 
 #[track_caller]
@@ -3596,6 +3616,16 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     assert_eq!(prepared.request().id(), request);
     repository.authorize(&prepared).await?;
     let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let collision = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported().with_input_tokens(Some(13)),
+            fixture.attempt,
+        )
+        .await
+        .expect_err("a taken continuation identity is retriable");
     let outcome = repository
         .complete(
             &prepared,
@@ -3605,11 +3635,13 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
             TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
         )
         .await?;
-    let stored: (String, String, String, Uuid, Uuid, String, String) = sqlx::query_as(
-        "SELECT judge.state_kind, judge.recommendation_kind,
-                decision.decision_source, decision.delegate_model_selection_id,
+    let stored: AppliedApprovalJudgeProjection = sqlx::query_as(
+        "SELECT judge.state_kind AS judge_state,
+                judge.recommendation_kind AS recommendation,
+                decision.decision_source,
+                decision.delegate_model_selection_id,
                 decision.delegate_model_call_id, decision.rationale,
-                lifecycle.active_phase_kind
+                lifecycle.active_phase_kind AS active_phase
            FROM tool_approval_judge_model_call AS judge
            JOIN tool_approval_decision AS decision
              ON decision.request_id = judge.request_id
@@ -3622,14 +3654,21 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     .fetch_one(&pool)
     .await?;
 
+    assert_eq!(
+        collision.operator_failure_class(),
+        OperatorFailureClass::IdentityCollision
+    );
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::Decided);
-    assert_eq!(stored.0, "terminal");
-    assert_eq!(stored.1, APPROVAL_RECOMMENDATION);
-    assert_eq!(stored.2, APPROVAL_DELEGATE_SOURCE);
-    assert_eq!(stored.3, prepared.selection().into_uuid());
-    assert_eq!(stored.4, prepared.call().into_uuid());
-    assert_eq!(stored.5, APPROVAL_JUDGE_RATIONALE);
-    assert_eq!(stored.6, "running");
+    assert_eq!(stored.judge_state, "terminal");
+    assert_eq!(stored.recommendation, APPROVAL_RECOMMENDATION);
+    assert_eq!(stored.decision_source, APPROVAL_DELEGATE_SOURCE);
+    assert_eq!(
+        stored.delegate_model_selection_id,
+        prepared.selection().into_uuid()
+    );
+    assert_eq!(stored.delegate_model_call_id, prepared.call().into_uuid());
+    assert_eq!(stored.rationale, APPROVAL_JUDGE_RATIONALE);
+    assert_eq!(stored.active_phase, "running");
 
     pool.close().await;
     drop(container);
@@ -3672,13 +3711,15 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
             TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
         )
         .await?;
-    let parked: (String, String, bool, String, Uuid) = sqlx::query_as(
-        "SELECT judge.state_kind, judge.recommendation_kind,
+    let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
+        "SELECT judge.state_kind AS judge_state,
+                judge.recommendation_kind AS recommendation,
                 EXISTS (
                     SELECT 1 FROM tool_approval_decision
                      WHERE request_id = judge.request_id
-                ),
-                lifecycle.active_phase_kind, lifecycle.approval_tool_request_id
+                ) AS decision_exists,
+                lifecycle.active_phase_kind AS active_phase,
+                lifecycle.approval_tool_request_id
            FROM tool_approval_judge_model_call AS judge
            JOIN turn_lifecycle AS lifecycle
              ON lifecycle.turn_id = judge.turn_id
@@ -3701,11 +3742,11 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
         .await?;
 
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
-    assert_eq!(parked.0, "terminal");
-    assert_eq!(parked.1, "escalate_to_human");
-    assert!(!parked.2);
-    assert_eq!(parked.3, "awaiting_tool_approval");
-    assert_eq!(parked.4, request.into_uuid());
+    assert_eq!(parked.judge_state, "terminal");
+    assert_eq!(parked.recommendation, "escalate_to_human");
+    assert!(!parked.decision_exists);
+    assert_eq!(parked.active_phase, "awaiting_tool_approval");
+    assert_eq!(parked.approval_tool_request_id, request.into_uuid());
     assert_eq!(
         applied_tool_decision(&user_decision).resolution().request(),
         request

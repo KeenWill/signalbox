@@ -30,6 +30,8 @@ extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
+the approval-judge lifecycle transactions were verified through this PR
+(`agent/approval-judge-execution-support`);
 and the session-placement event, current head, and creation transaction were
 verified through PR #415 (`agent/scoped-visibility-creation`). This page covers
 the Postgres representation in `crates/persistence` (source and migrations),
@@ -606,12 +608,16 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 
-- **Approval-judge preparation**: the schema guard first attempts to lock the
-  `tool_request` row `FOR UPDATE`, then locks the exact active `turn_lifecycle`
-  row `FOR UPDATE`, and only then checks for an existing decision and validates
-  the prepared call. This matches the decision insert's implicit request lock
-  before its lifecycle update, so opposing approval transactions cannot hold
-  those rows in reverse order.
+- **Approval-judge transactions** (prepare, authorize, complete, and fail): the
+  `session_scheduler` row `FOR UPDATE` is always the first Rust-issued explicit
+  lock. Preparation then inserts the call; its schema guard takes the exact
+  `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
+  `FOR UPDATE`, before checking for an existing decision and validating the
+  prepared call. Completion's decision insert takes the request row after the
+  scheduler lock and before its guarded lifecycle transition. Authorization
+  and failure need no additional explicit lock. The shared scheduler-first
+  prefix prevents approval-judge, tool-loop, and lifecycle-transition
+  transactions from holding these rows in reverse order.
 
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
