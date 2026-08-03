@@ -11,7 +11,7 @@
 mod support;
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
     error::Error,
     sync::{
         Arc, Mutex,
@@ -42,17 +42,19 @@ use signalbox_domain::{
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
     DecideToolRequestResult, DelegateApprovalRecommendation, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    NormalizedToolArguments, PerInputConfigurationChoices,
-    PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
-    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
+    DurableCommandId, FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport,
+    InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelCapabilities,
+    ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
+    PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
+    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionInputPosition, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
@@ -21650,6 +21652,67 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
             OutboxCorruption::MissingTypedRecord
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S37 / INV-003 / INV-053: the process defaults projection decodes the exact
+/// self-contained settings document stored with the selected epoch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s37_inv003_inv053_process_defaults_read_retains_model_settings_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x3751));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3752));
+    let precedence = ModelSettingsPrecedence::new(
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::Low),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        ),
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::inherit_all(),
+    );
+    let settings = ModelCapabilities::new(
+        BTreeSet::from([ReasoningLevel::Low]),
+        FastModeSupport::Unsupported,
+        BTreeSet::new(),
+    )
+    .validate_precedence(selection, precedence)
+    .expect("the fixture capability admits the session reasoning level");
+    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        ModelSelectionRequest::Direct(selection),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        None,
+        settings,
+    )
+    .expect("the fixture settings belong to the direct default");
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x3753)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        defaults.clone(),
+    )
+    .prepare(session)
+    .expect("user-initiated creation without ancestry is preparable");
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(creation)
+        .await?;
+
+    let ProcessSessionDefaultsRead::Read(read) = ProcessReadRepository::new(pool.clone())
+        .read_session_defaults(session, None)
+        .await?
+    else {
+        panic!("the installed settings epoch must read");
+    };
+
+    assert_eq!(read.defaults(), &defaults);
 
     pool.close().await;
     drop(container);
