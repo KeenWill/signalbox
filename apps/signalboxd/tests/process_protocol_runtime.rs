@@ -3552,6 +3552,8 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
     runtime.stop().await
 }
 
+/// S37 / INV-053: reconciliation records the explicit per-call contribution
+/// with the successor origin instead of dropping it at the daemon boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
@@ -4464,6 +4466,8 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
     runtime.stop().await
 }
 
+/// S37 / INV-053: stopping a turn records the explicit per-call contribution
+/// with the successor origin instead of dropping it at the daemon boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
