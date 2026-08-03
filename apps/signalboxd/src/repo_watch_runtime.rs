@@ -818,7 +818,11 @@ impl GitHubRepositoryPoller {
                 .await?;
             let has_next = response.len() == PAGE_SIZE;
             for reaction in response {
-                if let Some(reactor) = self.signal_reviewer(&reaction.user.login) {
+                if let Some(reactor) = reaction
+                    .user
+                    .as_ref()
+                    .and_then(|user| self.signal_reviewer(&user.login))
+                {
                     observations.push(RepoWatchReactionObservation::new(
                         subject,
                         reactor,
@@ -1196,18 +1200,32 @@ impl PollCache {
         wire_bytes: usize,
         accepted: T,
     ) -> Result<(), RepositoryWatchAttemptError> {
-        if !self.resources.contains_key(&key) && self.resources.len() >= MAX_CACHED_RESOURCES {
+        self.insert_with_resource_limit(key, entity_tag, wire_bytes, accepted, MAX_CACHED_RESOURCES)
+    }
+
+    fn insert_with_resource_limit<T: Any + Send + Sync>(
+        &mut self,
+        key: ResourceKey,
+        entity_tag: EntityTag,
+        wire_bytes: usize,
+        accepted: T,
+        resource_limit: usize,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        while !self.resources.contains_key(&key) && self.resources.len() >= resource_limit {
+            if !self.evict_one_untouched() {
+                break;
+            }
+        }
+        if !self.resources.contains_key(&key) && self.resources.len() >= resource_limit {
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
-        let replaced_bytes = self
-            .resources
-            .get(&key)
-            .map_or(0, |resource| resource.wire_bytes);
-        let projected_bytes = self
-            .cached_wire_bytes
-            .checked_sub(replaced_bytes)
-            .and_then(|retained| retained.checked_add(wire_bytes))
-            .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
+        let mut projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
+        while projected_bytes > MAX_AGGREGATE_WIRE_BYTES {
+            if !self.evict_one_untouched() {
+                break;
+            }
+            projected_bytes = self.projected_cached_bytes(&key, wire_bytes)?;
+        }
         if projected_bytes > MAX_AGGREGATE_WIRE_BYTES {
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
@@ -1221,6 +1239,35 @@ impl PollCache {
         );
         self.cached_wire_bytes = projected_bytes;
         Ok(())
+    }
+
+    fn projected_cached_bytes(
+        &self,
+        key: &ResourceKey,
+        wire_bytes: usize,
+    ) -> Result<usize, RepositoryWatchAttemptError> {
+        let replaced_bytes = self
+            .resources
+            .get(key)
+            .map_or(0, |resource| resource.wire_bytes);
+        self.cached_wire_bytes
+            .checked_sub(replaced_bytes)
+            .and_then(|retained| retained.checked_add(wire_bytes))
+            .ok_or(RepositoryWatchAttemptError::ResourceLimit)
+    }
+
+    fn evict_one_untouched(&mut self) -> bool {
+        let stale = self
+            .resources
+            .keys()
+            .find(|cached| !self.touched.contains(*cached))
+            .cloned();
+        if let Some(stale) = stale {
+            self.remove(&stale);
+            true
+        } else {
+            false
+        }
     }
 
     fn replace_entity_tag(
@@ -1476,7 +1523,7 @@ struct CommentResponse {
 
 #[derive(Clone, Deserialize)]
 struct ReactionResponse {
-    user: UserResponse,
+    user: Option<UserResponse>,
     content: String,
 }
 
@@ -1633,6 +1680,11 @@ mod tests {
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
     const CACHE_RESOURCE_KEY: &str = "fixture/resource";
+    const CACHE_RETAINED_KEY: &str = "fixture/retained";
+    const CACHE_STALE_KEY: &str = "fixture/stale";
+    const CACHE_REPLACEMENT_KEY: &str = "fixture/replacement";
+    const TEST_CACHE_RESOURCE_LIMIT: usize = 2;
+    const CACHE_WIRE_BYTES: usize = 1;
     const CACHE_KEY_KIND: &str = "fixture-page";
     const CACHE_KEY_QUERY_VALUE: &str = "provider-controlled-branch";
     const CACHE_KEY_URL: &str =
@@ -1820,6 +1872,14 @@ mod tests {
                 "content": AMBIENT_REACTION_CONTENT
             }
         ])
+        .to_string()
+    }
+
+    fn identity_less_reaction() -> String {
+        serde_json::json!([{
+            "user": null,
+            "content": SIGNAL_REACTION_CONTENTS[0]
+        }])
         .to_string()
     }
 
@@ -2526,6 +2586,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reaction_without_an_actor_identity_is_omitted() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
+            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+        ])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let reactions = fixture
+            .poller
+            .fetch_reactions(PULL_NUMBER)
+            .await
+            .expect("identity-less reaction is safely omitted");
+        server.finish().await;
+
+        assert!(reactions.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_complete_poll_normalizes_reaction_subjects() {
         let observation = complete_typed_observation().await;
         let reactions = observation.state().pull_requests()[0].reactions();
@@ -2588,6 +2668,54 @@ mod tests {
         );
 
         assert_eq!(result, Err(RepositoryWatchAttemptError::ResourceLimit));
+    }
+
+    #[test]
+    fn process_local_cache_replaces_an_untouched_stale_entry_at_capacity() {
+        let mut cache = PollCache::default();
+        let retained = ResourceKey(CACHE_RETAINED_KEY.to_owned());
+        let stale = ResourceKey(CACHE_STALE_KEY.to_owned());
+        let replacement = ResourceKey(CACHE_REPLACEMENT_KEY.to_owned());
+        cache
+            .insert_with_resource_limit(
+                retained.clone(),
+                EntityTag(ENTITY_TAG.to_owned()),
+                CACHE_WIRE_BYTES,
+                Vec::<u8>::new(),
+                TEST_CACHE_RESOURCE_LIMIT,
+            )
+            .expect("retained cache fixture is admitted");
+        cache
+            .insert_with_resource_limit(
+                stale.clone(),
+                EntityTag(ENTITY_TAG.to_owned()),
+                CACHE_WIRE_BYTES,
+                Vec::<u8>::new(),
+                TEST_CACHE_RESOURCE_LIMIT,
+            )
+            .expect("stale cache fixture is admitted");
+        cache.begin_poll();
+        cache
+            .touch(retained.clone())
+            .expect("retained cache fixture is touched");
+        cache
+            .touch(replacement.clone())
+            .expect("replacement cache fixture is touched");
+
+        cache
+            .insert_with_resource_limit(
+                replacement.clone(),
+                EntityTag(ENTITY_TAG.to_owned()),
+                CACHE_WIRE_BYTES,
+                Vec::<u8>::new(),
+                TEST_CACHE_RESOURCE_LIMIT,
+            )
+            .expect("replacement evicts the untouched stale fixture");
+
+        assert_eq!(cache.resources.len(), TEST_CACHE_RESOURCE_LIMIT);
+        assert!(cache.resources.contains_key(&retained));
+        assert!(cache.resources.contains_key(&replacement));
+        assert!(!cache.resources.contains_key(&stale));
     }
 
     #[test]

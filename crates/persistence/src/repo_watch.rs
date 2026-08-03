@@ -694,7 +694,11 @@ struct ReactionRecord {
 #[serde(deny_unknown_fields)]
 struct WorkflowRunRecord {
     id: u64,
-    #[serde(default, deserialize_with = "deserialize_optional_workflow_id")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_workflow_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     workflow_id: Option<u64>,
     branch: String,
     workflow: String,
@@ -719,6 +723,27 @@ fn encode_cursor_candidate(
     candidate: &RepoWatchCursorCandidate,
 ) -> Result<Value, RepoWatchStoreError> {
     serde_json::to_value(cursor_record(candidate)).map_err(RepoWatchStoreError::CursorEncoding)
+}
+
+fn encode_legacy_cursor_candidate(
+    candidate: &RepoWatchCursorCandidate,
+) -> Result<Value, RepoWatchStoreError> {
+    let mut record = cursor_record(candidate);
+    for run in &mut record.state.workflow_runs {
+        run.workflow_id = None;
+    }
+    record.state.workflow_runs.sort_by(|left, right| {
+        (&left.branch, &left.workflow).cmp(&(&right.branch, &right.workflow))
+    });
+    if record
+        .state
+        .workflow_runs
+        .windows(2)
+        .any(|runs| runs[0].branch == runs[1].branch && runs[0].workflow == runs[1].workflow)
+    {
+        return Err(RepoWatchPersistenceCorruption::NonCanonicalCursor.into());
+    }
+    serde_json::to_value(record).map_err(RepoWatchStoreError::CursorEncoding)
 }
 
 fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
@@ -837,19 +862,30 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
 }
 
 fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, RepoWatchStoreError> {
-    let mut record: CursorRecord = serde_json::from_value(value).map_err(|_| {
+    let mut record: CursorRecord = serde_json::from_value(value.clone()).map_err(|_| {
         RepoWatchStoreError::Corruption(RepoWatchPersistenceCorruption::MalformedCursorDocument)
     })?;
     if record.storage_version != CURSOR_STORAGE_VERSION {
         return Err(RepoWatchPersistenceCorruption::UnsupportedCursorVersion.into());
+    }
+    let legacy_workflow_shape = record
+        .state
+        .workflow_runs
+        .iter()
+        .all(|run| run.workflow_id.is_none());
+    let current_workflow_shape = record
+        .state
+        .workflow_runs
+        .iter()
+        .all(|run| run.workflow_id.is_some());
+    if !legacy_workflow_shape && !current_workflow_shape {
+        return Err(RepoWatchPersistenceCorruption::NonCanonicalCursor.into());
     }
     for run in &mut record.state.workflow_runs {
         if run.workflow_id.is_none() {
             run.workflow_id = Some(run.id);
         }
     }
-    let canonical_input =
-        serde_json::to_value(&record).map_err(RepoWatchStoreError::CursorEncoding)?;
     let signal_reviewers = record
         .signal_reviewers
         .into_iter()
@@ -858,7 +894,12 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
     let state = decode_repository_state(record.state)?;
     let candidate =
         RepoWatchCursorCandidate::new(RepoWatchObservation::new(signal_reviewers, state));
-    if encode_cursor_candidate(&candidate)? != canonical_input {
+    let canonical = if legacy_workflow_shape {
+        encode_legacy_cursor_candidate(&candidate)?
+    } else {
+        encode_cursor_candidate(&candidate)?
+    };
+    if canonical != value {
         return Err(RepoWatchPersistenceCorruption::NonCanonicalCursor.into());
     }
     Ok(candidate)
@@ -1697,6 +1738,9 @@ mod tests {
     const WORKFLOW_ID: u64 = 42;
     const BRANCH: &str = "main";
     const WORKFLOW: &str = "continuous-integration";
+    const LEGACY_WORKFLOW_RUN_IDS: [u64; 2] = [82, 40];
+    const LEGACY_WORKFLOW_IDS: [u64; 2] = [43, 44];
+    const LEGACY_WORKFLOW_NAMES: [&str; 2] = ["alpha", "zulu"];
 
     fn github_object_id(value: u64) -> GitHubObjectId {
         GitHubObjectId::new(NonZeroU64::new(value).expect("fixture object identity is positive"))
@@ -1719,6 +1763,52 @@ mod tests {
             Vec::new(),
             state,
         )))
+    }
+
+    fn multi_workflow_candidate() -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+        let alpha = RepoWatchWorkflowRunObservation::new(
+            github_object_id(LEGACY_WORKFLOW_RUN_IDS[0]),
+            github_object_id(LEGACY_WORKFLOW_IDS[0]),
+            BranchName::try_new(String::from(BRANCH))?,
+            WorkflowName::try_new(String::from(LEGACY_WORKFLOW_NAMES[0]))?,
+            CheckConclusion::Success,
+        );
+        let zulu = RepoWatchWorkflowRunObservation::new(
+            github_object_id(LEGACY_WORKFLOW_RUN_IDS[1]),
+            github_object_id(LEGACY_WORKFLOW_IDS[1]),
+            BranchName::try_new(String::from(BRANCH))?,
+            WorkflowName::try_new(String::from(LEGACY_WORKFLOW_NAMES[1]))?,
+            CheckConclusion::Failure,
+        );
+        let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![zulu, alpha],
+            branch_heads: Vec::new(),
+        })?;
+        Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+            Vec::new(),
+            state,
+        )))
+    }
+
+    fn legacy_cursor_value(candidate: &RepoWatchCursorCandidate) -> Result<Value, Box<dyn Error>> {
+        let mut encoded = encode_cursor_candidate(candidate)?;
+        let workflow_runs = encoded
+            .get_mut("state")
+            .and_then(|state| state.get_mut("workflow_runs"))
+            .and_then(Value::as_array_mut)
+            .ok_or("fixture workflow cursor shape is present")?;
+        for run in workflow_runs.iter_mut() {
+            run.as_object_mut()
+                .ok_or("fixture workflow run is an object")?
+                .remove("workflow_id");
+        }
+        workflow_runs.sort_by(|left, right| {
+            left.get("workflow")
+                .and_then(Value::as_str)
+                .cmp(&right.get("workflow").and_then(Value::as_str))
+        });
+        Ok(encoded)
     }
 
     #[test]
@@ -1769,6 +1859,27 @@ mod tests {
         assert_eq!(
             decoded.observation().state().workflow_runs()[0].workflow_id(),
             github_object_id(WORKFLOW_RUN_ID)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_cursor_preserves_name_order_while_translating_workflow_identity()
+    -> Result<(), Box<dyn Error>> {
+        let candidate = multi_workflow_candidate()?;
+        let encoded = legacy_cursor_value(&candidate)?;
+
+        let decoded = decode_cursor_candidate(encoded)?;
+        let workflows = decoded.observation().state().workflow_runs();
+
+        assert_eq!(workflows.len(), LEGACY_WORKFLOW_NAMES.len());
+        assert_eq!(
+            workflows[0].id(),
+            github_object_id(LEGACY_WORKFLOW_RUN_IDS[1])
+        );
+        assert_eq!(
+            workflows[1].id(),
+            github_object_id(LEGACY_WORKFLOW_RUN_IDS[0])
         );
         Ok(())
     }

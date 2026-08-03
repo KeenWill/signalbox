@@ -72,10 +72,12 @@ accepted state and does not skip the remaining fetches; GitHub does not count a
 conditional `304` against the primary rate limit. Cache keys are bounded,
 non-secret resource/page identifiers rather than query strings. The cache starts
 empty on every daemon start, so the first poll and the first poll after restart
-perform one complete unconditional fetch. A failed, rejected, partial, or
-unparseable poll submits no persistence candidate. The next poll occurs after
-the per-repository interval; version one has no webhook fallback and no
-speculative second polling transport.
+perform one complete unconditional fetch. When a current poll replaces a
+resource at the cache's entry bound, admission evicts an untouched stale entry
+before enforcing that bound; replacement within the bound cannot wedge later
+polls. A failed, rejected, partial, or unparseable poll submits no persistence
+candidate. The next poll occurs after the per-repository interval; version one
+has no webhook fallback and no speculative second polling transport.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Every completed provider identity
@@ -192,7 +194,8 @@ provider review identity; a new identity-less review is omitted.
 
 **Implemented behavior.** Reaction ingestion includes only reactions by a login
 in the configured signal-reviewer list. Reactions from every other actor are
-excluded while normalizing state, so they cannot create durable
+excluded while normalizing state, and a reaction whose deleted actor has no
+current login identity is omitted, so neither can create durable
 `ReactionChanged` events. Why: reviewer signals are actionable facts; the full
 ambient emoji stream is neither a rule input nor retained noise.
 
