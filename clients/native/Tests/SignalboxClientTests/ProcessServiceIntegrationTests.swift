@@ -893,7 +893,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testCompletionSideProjectionIncludesModelIdentityMarker() throws {
+  func testCompletionSideProjectionExcludesEarlierModelIdentityMarker() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
     let trigger = try ProcessProjectionFixture.completedTrigger()
     var projector = SignalboxProcessTranscriptProjector()
@@ -904,9 +904,25 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(
       ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
-      ProcessProjectionFixture.modelIdentityNoticeTitles
+      ProcessProjectionFixture.noNoticeTitles
     )
     XCTAssertEqual(message.text, ProcessProjectionFixture.completedAssistantText)
+  }
+
+  func testProposedToolSideProjectionExcludesEarlierModelIdentityMarker() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
+    let trigger = try ProcessProjectionFixture.proposedToolTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+    let tool = try ProcessProjectionFixture.onlyTool(in: projection)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.noNoticeTitles
+    )
+    XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
   }
 
   func testRefusedSideProjectionExcludesModelIdentityMarker() throws {
@@ -5400,6 +5416,7 @@ private enum ProcessProjectionFixture {
   static let proposedAssistantText = "I will inspect the fixture before using the tool."
   static let proposedToolName = "inspect_fixture"
   static let proposedAssistantEntry = "99999999-9999-4999-8999-999999999999"
+  static let modelIdentityEntry = "99999999-1111-4111-8111-111111111111"
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
   static let proposedToolRequest = "bbbbbbbb-1111-4111-8111-111111111111"
   static let crossTurn = "cccccccc-3333-4333-8333-333333333333"
@@ -5450,7 +5467,7 @@ private enum ProcessProjectionFixture {
     SignalboxProcessMessageSourceAttribution.importedSpeakerAbsent
   static let importedAttestedAbsentLabel = importedAttestedAbsentAttribution.presentationLabel
   static let modelNoticeTitles = ["Model changed", "Model usage"]
-  static let modelIdentityNoticeTitles = ["Model changed"]
+  static let noNoticeTitles: [String] = []
   static let modelPresentationEventKinds = [
     "process_model_identity", "process_message", "process_message",
     "process_model_call_usage",
@@ -6438,7 +6455,7 @@ private enum ProcessProjectionFixture {
           "type":"transcript_entry",
           "entry_index":"1",
           "source_session_id":"\(ProcessDriverFixture.session)",
-          "entry_id":"\(proposedToolEntry)",
+          "entry_id":"\(modelIdentityEntry)",
           "entry":{
             "type":"model_identity_changed",
             "turn_id":"\(ProcessDriverFixture.turn)",
@@ -6496,6 +6513,22 @@ private enum ProcessProjectionFixture {
           "type":"transcript_entry",
           "entry_index":"4",
           "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"5",
+          "source_session_id":"\(ProcessDriverFixture.session)",
           "entry_id":"\(ProcessDriverFixture.completionEntry)",
           "entry":{
             "type":"turn_completed",
@@ -6509,7 +6542,7 @@ private enum ProcessProjectionFixture {
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"2",
-          "entry_count":"5"
+          "entry_count":"6"
         }
         """,
       ]

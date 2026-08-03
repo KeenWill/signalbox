@@ -860,23 +860,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
-    if case .modelIdentityChanged(let entryTurnID, _, _) = message.entry {
-      switch trigger {
-      case .toolBatchTransition(let turnID, _, let state):
-        switch state {
-        case .proposed, .resultsProjected:
-          return turnID == entryTurnID
-        case .recoveryRequired, .unknown:
-          return false
-        }
-      case .turnCompleted(let turnID, _, _, _), .turnFailed(let turnID, _, _),
-        .turnCancelled(let turnID, _, _),
-        .turnToolReconciliationRequired(let turnID, _, _):
-        return turnID == entryTurnID
-      case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-        .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
-        return false
-      }
+    if case .modelIdentityChanged = message.entry {
+      return false
     }
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
