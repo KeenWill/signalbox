@@ -89,20 +89,29 @@ pub(super) fn validate_tree_discovery(
     repository: &Repository,
     root: &git2::Tree<'_>,
 ) -> Result<(), LocalGitFailure> {
-    validate_tree_discovery_with_symlinks(repository, root, true)
+    validate_tree_discovery_options(repository, root, true, true)
 }
 
 pub(super) fn validate_checkout_tree_discovery(
     repository: &Repository,
     root: &git2::Tree<'_>,
 ) -> Result<(), LocalGitFailure> {
-    validate_tree_discovery_with_symlinks(repository, root, false)
+    validate_tree_discovery_options(repository, root, false, false)
 }
 
 pub(super) fn validate_tree_discovery_with_symlinks(
     repository: &Repository,
     root: &git2::Tree<'_>,
     allow_symlinks: bool,
+) -> Result<(), LocalGitFailure> {
+    validate_tree_discovery_options(repository, root, allow_symlinks, true)
+}
+
+fn validate_tree_discovery_options(
+    repository: &Repository,
+    root: &git2::Tree<'_>,
+    allow_symlinks: bool,
+    allow_gitlinks: bool,
 ) -> Result<(), LocalGitFailure> {
     let object_database = repository.odb().map_err(|_| LocalGitFailure::Operation)?;
     let mut pending = vec![(root.id(), PathBuf::new())];
@@ -150,7 +159,8 @@ pub(super) fn validate_tree_discovery_with_symlinks(
                         return Err(LocalGitFailure::Operation);
                     }
                 }
-                Some(git2::ObjectType::Commit) if entry.filemode() == GITLINK_MODE as i32 => {}
+                Some(git2::ObjectType::Commit)
+                    if allow_gitlinks && entry.filemode() == GITLINK_MODE as i32 => {}
                 _ => return Err(LocalGitFailure::Operation),
             }
         }

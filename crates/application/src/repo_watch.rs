@@ -313,6 +313,7 @@ const fn reaction_subject_sort_key(subject: ReactionSubject) -> (u8, u64) {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWorkflowRunObservation {
     id: GitHubObjectId,
+    workflow_id: GitHubObjectId,
     attempt: RepoWatchWorkflowRunAttempt,
     branch: BranchName,
     workflow: WorkflowName,
@@ -322,6 +323,7 @@ pub struct RepoWatchWorkflowRunObservation {
 impl RepoWatchWorkflowRunObservation {
     pub const fn new(
         id: GitHubObjectId,
+        workflow_id: GitHubObjectId,
         attempt: RepoWatchWorkflowRunAttempt,
         branch: BranchName,
         workflow: WorkflowName,
@@ -329,6 +331,7 @@ impl RepoWatchWorkflowRunObservation {
     ) -> Self {
         Self {
             id,
+            workflow_id,
             attempt,
             branch,
             workflow,
@@ -338,6 +341,10 @@ impl RepoWatchWorkflowRunObservation {
 
     pub const fn id(&self) -> GitHubObjectId {
         self.id
+    }
+
+    pub const fn workflow_id(&self) -> GitHubObjectId {
+        self.workflow_id
     }
 
     pub const fn attempt(&self) -> RepoWatchWorkflowRunAttempt {
@@ -402,9 +409,9 @@ impl RepoWatchRepositoryState {
             .pull_requests
             .sort_by_key(|pull_request| pull_request.context().number());
         reject_duplicate_pull_requests(&input.pull_requests)?;
-        input.workflow_runs.sort_by(|left, right| {
-            (left.branch(), left.workflow()).cmp(&(right.branch(), right.workflow()))
-        });
+        input
+            .workflow_runs
+            .sort_by_key(|run| (run.branch().clone(), run.workflow_id()));
         reject_duplicate_workflows(&input.workflow_runs)?;
         input
             .branch_heads
@@ -469,7 +476,7 @@ pub enum RepoWatchRepositoryStateError {
     DuplicateThread(ReviewThreadId),
     DuplicateWorkflow {
         branch: BranchName,
-        workflow: WorkflowName,
+        workflow_id: GitHubObjectId,
     },
     DuplicateBranchHead(BranchName),
 }
@@ -488,11 +495,14 @@ impl fmt::Display for RepoWatchRepositoryStateError {
             Self::DuplicateThread(thread) => {
                 write!(formatter, "duplicate review thread {}", thread.as_str())
             }
-            Self::DuplicateWorkflow { branch, workflow } => write!(
+            Self::DuplicateWorkflow {
+                branch,
+                workflow_id,
+            } => write!(
                 formatter,
                 "duplicate branch workflow {}/{}",
                 branch.as_str(),
-                workflow.as_str()
+                workflow_id.get()
             ),
             Self::DuplicateBranchHead(branch) => {
                 write!(formatter, "duplicate branch head {}", branch.as_str())
@@ -950,7 +960,6 @@ fn derive_workflow_events(
     for run in current.workflow_runs() {
         let already_observed = previous.workflow_runs().iter().any(|prior| {
             prior.branch() == run.branch()
-                && prior.workflow() == run.workflow()
                 && prior.id() == run.id()
                 && prior.attempt() == run.attempt()
         });
@@ -1048,11 +1057,11 @@ fn reject_duplicate_workflows(
 ) -> Result<(), RepoWatchRepositoryStateError> {
     for adjacent in workflows.windows(2) {
         if adjacent[0].branch() == adjacent[1].branch()
-            && adjacent[0].workflow() == adjacent[1].workflow()
+            && adjacent[0].workflow_id() == adjacent[1].workflow_id()
         {
             return Err(RepoWatchRepositoryStateError::DuplicateWorkflow {
                 branch: adjacent[0].branch().clone(),
-                workflow: adjacent[0].workflow().clone(),
+                workflow_id: adjacent[0].workflow_id(),
             });
         }
     }
@@ -1099,6 +1108,7 @@ mod tests {
     const REVIEW_COMMIT: &str = "5555555555555555555555555555555555555555";
     const CHECK_NAME: &str = "required";
     const WORKFLOW_NAME: &str = "continuous-integration";
+    const RENAMED_WORKFLOW_NAME: &str = "continuous-integration-renamed";
     const THREAD_ID: &str = "PRRT_fixture";
     const LABEL_READY: &str = "ready";
     const LABEL_OLD: &str = "old";
@@ -1111,6 +1121,9 @@ mod tests {
     const REVIEW_ID: u64 = 103;
     const WORKFLOW_RUN_ID: u64 = 104;
     const NEXT_WORKFLOW_RUN_ID: u64 = 105;
+    const WORKFLOW_ID: u64 = 106;
+    const OTHER_WORKFLOW_ID: u64 = 107;
+    const WORKFLOW_IDENTITIES: [u64; 2] = [WORKFLOW_ID, OTHER_WORKFLOW_ID];
 
     /// Deterministic event identities; their values are arbitrary and only their order matters.
     struct FixedEventIds {
@@ -1220,7 +1233,16 @@ mod tests {
         id: u64,
         conclusion: CheckConclusion,
     ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
-        workflow_run_attempt(id, 1, conclusion)
+        workflow_run_for(id, WORKFLOW_ID, WORKFLOW_NAME, conclusion)
+    }
+
+    fn workflow_run_for(
+        id: u64,
+        workflow_id: u64,
+        workflow_name: &str,
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
+        workflow_run_for_attempt(id, workflow_id, workflow_name, 1, conclusion)
     }
 
     fn workflow_run_attempt(
@@ -1228,13 +1250,24 @@ mod tests {
         attempt: u64,
         conclusion: CheckConclusion,
     ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
+        workflow_run_for_attempt(id, WORKFLOW_ID, WORKFLOW_NAME, attempt, conclusion)
+    }
+
+    fn workflow_run_for_attempt(
+        id: u64,
+        workflow_id: u64,
+        workflow_name: &str,
+        attempt: u64,
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
         Ok(RepoWatchWorkflowRunObservation::new(
             object_id(id),
+            object_id(workflow_id),
             RepoWatchWorkflowRunAttempt::new(
                 NonZeroU64::new(attempt).expect("fixture workflow attempt is positive"),
             ),
             BranchName::try_new(String::from(BASE_BRANCH))?,
-            WorkflowName::try_new(String::from(WORKFLOW_NAME))?,
+            WorkflowName::try_new(String::from(workflow_name))?,
             conclusion,
         ))
     }
@@ -1437,6 +1470,11 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )?;
+        let current_check_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::TimedOut,
+        );
         let current = observation(
             vec![pull_request(PullRequestFacts {
                 head_sha: CHANGED_HEAD,
@@ -1445,11 +1483,7 @@ mod tests {
                     object_id(CHECK_SUITE_ID),
                     ChecksOutcome::Failure,
                 )],
-                completed_check_runs: vec![RepoWatchCheckRunObservation::new(
-                    object_id(CHECK_RUN_ID),
-                    CheckRunName::try_new(String::from(CHECK_NAME))?,
-                    CheckConclusion::TimedOut,
-                )],
+                completed_check_runs: vec![current_check_run.clone()],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],
             Vec::new(),
@@ -1479,8 +1513,8 @@ mod tests {
         assert_eq!(
             events[3].kind(),
             &RepoWatchEventKindV1::CheckRunCompleted {
-                name: CheckRunName::try_new(String::from(CHECK_NAME))?,
-                conclusion: CheckConclusion::TimedOut,
+                name: current_check_run.name().clone(),
+                conclusion: current_check_run.conclusion(),
             }
         );
         Ok(())
@@ -1736,6 +1770,135 @@ mod tests {
                 workflow: current_run.workflow().clone(),
                 conclusion: current_run.conclusion(),
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_rename_does_not_reemit_an_existing_run() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert!(events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_workflow_identity_upgrade_does_not_reemit_an_existing_run()
+    -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_RUN_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert!(events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn repository_state_accepts_duplicate_workflow_names_with_distinct_identities()
+    -> Result<(), Box<dyn Error>> {
+        let first = workflow_run_for(
+            WORKFLOW_RUN_ID,
+            WORKFLOW_ID,
+            WORKFLOW_NAME,
+            CheckConclusion::Success,
+        )?;
+        let second = workflow_run_for(
+            NEXT_WORKFLOW_RUN_ID,
+            OTHER_WORKFLOW_ID,
+            WORKFLOW_NAME,
+            CheckConclusion::Failure,
+        )?;
+
+        let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![second, first],
+            branch_heads: Vec::new(),
+        })?;
+
+        assert_eq!(state.workflow_runs().len(), WORKFLOW_IDENTITIES.len());
+        assert_eq!(
+            state.workflow_runs()[0].workflow_id(),
+            object_id(WORKFLOW_ID)
+        );
+        assert_eq!(
+            state.workflow_runs()[1].workflow_id(),
+            object_id(OTHER_WORKFLOW_ID)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repository_state_rejects_duplicate_branch_workflow_identities() -> Result<(), Box<dyn Error>>
+    {
+        let first = workflow_run_for(
+            WORKFLOW_RUN_ID,
+            WORKFLOW_ID,
+            WORKFLOW_NAME,
+            CheckConclusion::Success,
+        )?;
+        let duplicate = workflow_run_for(
+            NEXT_WORKFLOW_RUN_ID,
+            WORKFLOW_ID,
+            RENAMED_WORKFLOW_NAME,
+            CheckConclusion::Failure,
+        )?;
+
+        let result = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![first, duplicate],
+            branch_heads: Vec::new(),
+        });
+
+        assert_eq!(
+            result,
+            Err(RepoWatchRepositoryStateError::DuplicateWorkflow {
+                branch: BranchName::try_new(String::from(BASE_BRANCH))?,
+                workflow_id: object_id(WORKFLOW_ID),
+            })
         );
         Ok(())
     }

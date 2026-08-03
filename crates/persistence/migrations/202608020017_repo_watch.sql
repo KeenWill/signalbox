@@ -209,10 +209,10 @@ CREATE TABLE repo_watch_event (
             AND author IS NULL
         )
     ),
-    CHECK (head_sha IS NULL OR head_sha ~ '^[0-9a-f]{40}$'),
-    CHECK (current_sha IS NULL OR current_sha ~ '^[0-9a-f]{40}$'),
-    CHECK (previous_sha IS NULL OR previous_sha ~ '^[0-9a-f]{40}$'),
-    CHECK (review_commit IS NULL OR review_commit ~ '^[0-9a-f]{40}$'),
+    CHECK (head_sha IS NULL OR head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
+    CHECK (current_sha IS NULL OR current_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
+    CHECK (previous_sha IS NULL OR previous_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
+    CHECK (review_commit IS NULL OR review_commit COLLATE "C" ~ '^[0-9a-f]{40}$'),
     CHECK (head_repository IS NULL OR repo_watch_repository_is_valid(head_repository)),
     CHECK (author IS NULL OR repo_watch_login_is_valid(author)),
     CHECK (review_reviewer IS NULL OR repo_watch_login_is_valid(review_reviewer)),
