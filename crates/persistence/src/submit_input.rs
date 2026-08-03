@@ -964,6 +964,46 @@ where
     ))
 }
 
+/// Persists the initial input for a freshly inserted session in the caller's
+/// transaction. Repository-watch dispatch uses this narrow bridge so the
+/// session, its first queued turn, and the dispatch audit become visible at
+/// one commit boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn insert_fresh_initial_input(
+    connection: &mut PgConnection,
+    command: SubmitInput,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+    cancellation_entry: SemanticTranscriptEntryId,
+    cancellation_frontier: ContextFrontierId,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+) -> Result<(), SubmitInputRepositoryError> {
+    let outcome = handle_in_transaction(
+        connection,
+        command,
+        accepted_input,
+        Some(turn),
+        CancelledModelCallTurnIdentities::new(cancellation_entry, cancellation_frontier),
+        |_| turn,
+        |_| (Vec::new(), cancellation_frontier),
+        select_definition,
+    )
+    .await?;
+    match outcome {
+        TransactionDecision::Commit(SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(result)),
+        )) if result.accepted_input() == accepted_input && result.turn() == turn => Ok(()),
+        TransactionDecision::Commit(_)
+        | TransactionDecision::Rollback(SubmitInputHandlingOutcome::Recorded(_))
+        | TransactionDecision::Rollback(SubmitInputHandlingOutcome::ConflictingReuse { .. }) => {
+            Err(SubmitInputCorruption::Inconsistent(
+                "fresh session initial input did not create its reserved turn",
+            )
+            .into())
+        }
+    }
+}
+
 async fn require_recorded(
     connection: &mut PgConnection,
     command_id: DurableCommandId,

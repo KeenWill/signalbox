@@ -1241,7 +1241,6 @@ async fn run_hub(
             model_configuration.clone(),
             model_configuration.session_credential_pin(),
             eligibility_nudge.clone(),
-            tool_dispatch_gate.clone(),
         ) {
             Ok(runtime) => Some(runtime),
             Err(_) => {

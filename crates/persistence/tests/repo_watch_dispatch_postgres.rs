@@ -19,7 +19,7 @@ use signalbox_domain::{
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
     RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance,
+    SessionTemplateName, SessionTemplateProvenance, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
@@ -27,9 +27,7 @@ use signalbox_persistence::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
-    repo_watch_dispatch::{
-        PostgresRepoWatchDispatchStore, RepoWatchDeliveryCandidates, RepoWatchPendingDelivery,
-    },
+    repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -49,6 +47,7 @@ const FIRST_HEAD: &str = "1111111111111111111111111111111111111111";
 const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
+const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -123,8 +122,10 @@ fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Err
     )?)
 }
 
-fn rule() -> Result<RepoWatchRule, Box<dyn Error>> {
-    let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
+fn rule_with_actions_and_cooldown(
+    actions: Vec<RepoWatchRuleActionV1>,
+    cooldown: Duration,
+) -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
@@ -132,15 +133,32 @@ fn rule() -> Result<RepoWatchRule, Box<dyn Error>> {
             mergeable_state: vec![MergeableState::Conflicting],
             ..RepoWatchMatcherV1Input::default()
         }),
+        actions,
+        RepoWatchSingletonScope::PullRequest,
+        cooldown,
+    )?)
+}
+
+fn rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
+    rule_with_actions_and_cooldown(
         vec![
             RepoWatchRuleActionV1::DispatchSession {
                 template: template.clone(),
             },
             RepoWatchRuleActionV1::DispatchSession { template },
         ],
-        RepoWatchSingletonScope::PullRequest,
         Duration::ZERO,
-    )?)
+    )
+}
+
+fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_with_actions_and_cooldown(
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        Duration::from_secs(60 * 60),
+    )
 }
 
 struct TemplateResolver;
@@ -177,6 +195,10 @@ fn credential_pin() -> SessionCredentialPin {
     .expect("fixture credential pin is valid")
 }
 
+fn dispatch_context() -> UserContent {
+    UserContent::try_text(DISPATCH_CONTEXT.to_owned()).expect("fixture dispatch context is valid")
+}
+
 fn generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
     match outcome {
         RepoWatchCommitOutcome::Committed(cursor) => cursor.generation(),
@@ -196,6 +218,17 @@ fn dispatched(
     }
 }
 
+fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
+    matches!(
+        error,
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. }
+    )
+}
+
+fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
+    matches!(outcome, RepoWatchRuleEvaluationOutcome::Dispatched { .. })
+}
+
 struct DispatchFixture {
     _container: ContainerAsync<Postgres>,
     pool: PgPool,
@@ -209,6 +242,10 @@ struct DispatchFixture {
 }
 
 async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
+    dispatch_fixture_for(rule()?).await
+}
+
+async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
@@ -225,9 +262,8 @@ async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
             )
             .await?,
     );
-    let rule = rule()?;
     dispatch_store
-        .activate_rule(&repository, rule.id(), rule.version())
+        .reconcile_rules(&repository, &[(rule.id().clone(), rule.version())])
         .await?;
     let event = conflict_event(101, FIRST_HEAD)?;
     let observation = observation(context(FIRST_HEAD)?)?;
@@ -247,7 +283,13 @@ async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
         .expect("activated fixture rule sees its first event");
     let outcome =
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
-            .evaluate(loaded, &rule, &observation, &TemplateResolver)
+            .evaluate(
+                loaded,
+                &rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
             .await?;
     let (dispatch_id, sessions) = dispatched(outcome);
     Ok(DispatchFixture {
@@ -261,24 +303,6 @@ async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
         dispatch_id,
         sessions,
     })
-}
-
-fn delivery_candidates(value: u128) -> RepoWatchDeliveryCandidates {
-    RepoWatchDeliveryCandidates {
-        submit_command_id: signalbox_domain::DurableCommandId::from_uuid(Uuid::from_u128(value)),
-        accepted_input_id: signalbox_domain::AcceptedInputId::from_uuid(Uuid::from_u128(value + 1)),
-        turn_id: signalbox_domain::TurnId::from_uuid(Uuid::from_u128(value + 2)),
-        cancellation_entry_id: signalbox_domain::SemanticTranscriptEntryId::from_uuid(
-            Uuid::from_u128(value + 3),
-        ),
-        cancellation_frontier_id: signalbox_domain::ContextFrontierId::from_uuid(Uuid::from_u128(
-            value + 4,
-        )),
-    }
-}
-
-fn pending(delivery: Option<RepoWatchPendingDelivery>) -> RepoWatchPendingDelivery {
-    delivery.expect("fixture has an undelivered action")
 }
 
 async fn evaluate_second_conflict(
@@ -312,7 +336,13 @@ async fn evaluate_second_conflict(
         .expect("second conflict remains unevaluated");
     Ok(
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
-            .evaluate(loaded, &fixture.rule, &observation, &TemplateResolver)
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
             .await?,
     )
 }
@@ -345,6 +375,7 @@ async fn equal_event_rule_recovery_replays_the_original_sessions() -> Result<(),
                 &fixture.rule,
                 &fixture.observation,
                 &TemplateResolver,
+                dispatch_context(),
             )
             .await?;
 
@@ -360,24 +391,88 @@ async fn equal_event_rule_recovery_replays_the_original_sessions() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn pending_context_delivery_reuses_its_reserved_identities() -> Result<(), Box<dyn Error>> {
+async fn dispatched_sessions_commit_their_initial_context_and_queued_turn_atomically()
+-> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
-    let first = pending(
-        fixture
-            .store
-            .prepare_next_delivery(&fixture.repository, delivery_candidates(1_001))
-            .await?,
-    );
-    let replay = pending(
-        fixture
-            .store
-            .prepare_next_delivery(&fixture.repository, delivery_candidates(2_001))
-            .await?,
-    );
+    let delivery_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let queued_context_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_dispatch_delivery AS delivery
+           JOIN turn_lifecycle AS turn ON turn.turn_id = delivery.turn_id
+           JOIN submit_input_command AS command
+             ON command.command_id = delivery.submit_command_id
+          WHERE delivery.dispatch_id = $1
+            AND turn.state_kind = 'queued'
+            AND command.content_text = $2",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .bind(DISPATCH_CONTEXT)
+    .fetch_one(&fixture.pool)
+    .await?;
 
-    assert_eq!(first.dispatch_id(), replay.dispatch_id());
-    assert_eq!(first.action_ordinal(), replay.action_ordinal());
-    assert_eq!(first.identities(), replay.identities());
+    assert_eq!(delivery_count, 2);
+    assert_eq!(queued_context_count, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_rule_identity_cannot_resume_from_its_old_activation() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, &[])
+        .await?;
+    let error = fixture
+        .store
+        .reconcile_rules(
+            &fixture.repository,
+            &[(fixture.rule.id().clone(), fixture.rule.version())],
+        )
+        .await
+        .expect_err("retired rule identity must not reactivate");
+
+    assert!(reused_rule_identity(&error));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(cooldown_rule()?).await?;
+    let turn: Uuid = sqlx::query_scalar(
+        "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "SELECT repo_watch_release_completed_dispatch_batches_for_turn(
+            $1, $2, transaction_timestamp() - interval '2 hours')",
+    )
+    .bind(turn)
+    .bind(fixture.sessions[0].as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let release_age_seconds: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM (transaction_timestamp() - released_at))::float8
+           FROM repo_watch_dispatch_release
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let outcome = evaluate_second_conflict(&fixture).await?;
+
+    assert!(release_age_seconds >= 7_199.0);
+    assert!(outcome_is_dispatched(&outcome));
     Ok(())
 }
 

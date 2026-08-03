@@ -3,15 +3,18 @@
 use std::{collections::BTreeSet, error::Error, fmt, future::Future};
 
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
-    DurableCommandId, GitHubObjectId, MergeableState, PreparedCreateSession,
+    AcceptedInputId, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
+    ContextFrontierId, CreateSession, DeliveryRequest, DurableCommandId, GitHubObjectId,
+    MergeableState, ModelSelectionOverride, PerInputConfigurationChoices, PreparedCreateSession,
     PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject,
     RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId,
     RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindV1,
     RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion,
     RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
-    ReviewThreadId, SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionTemplateName, SessionTemplateProvenance, TranscriptAncestry, WorkflowName,
+    ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TranscriptAncestry,
+    TurnId, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -1142,6 +1145,11 @@ pub enum RepoWatchSingletonKey {
 pub struct RepoWatchPreparedDispatchAction {
     action: RepoWatchActionV1,
     prepared_session: PreparedCreateSession,
+    initial_input: SubmitInput,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+    cancellation_entry: SemanticTranscriptEntryId,
+    cancellation_frontier: ContextFrontierId,
 }
 
 impl RepoWatchPreparedDispatchAction {
@@ -1153,8 +1161,26 @@ impl RepoWatchPreparedDispatchAction {
         &self.prepared_session
     }
 
-    pub fn into_parts(self) -> (RepoWatchActionV1, PreparedCreateSession) {
-        (self.action, self.prepared_session)
+    pub fn into_parts(
+        self,
+    ) -> (
+        RepoWatchActionV1,
+        PreparedCreateSession,
+        SubmitInput,
+        AcceptedInputId,
+        TurnId,
+        SemanticTranscriptEntryId,
+        ContextFrontierId,
+    ) {
+        (
+            self.action,
+            self.prepared_session,
+            self.initial_input,
+            self.accepted_input,
+            self.turn,
+            self.cancellation_entry,
+            self.cancellation_frontier,
+        )
     }
 }
 
@@ -1208,6 +1234,10 @@ pub trait RepoWatchDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
+    fn next_turn_id(&mut self) -> TurnId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 /// Production UUIDv7 identity source for repository-watch dispatch.
@@ -1225,6 +1255,22 @@ impl RepoWatchDispatchIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
 
     fn next_session_id(&mut self) -> SessionId {
         SessionId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
+        AcceptedInputId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_turn_id(&mut self) -> TurnId {
+        TurnId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
+        ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
 }
 
@@ -1285,6 +1331,7 @@ where
         rule: &RepoWatchRule,
         observation: &RepoWatchObservation,
         templates: &impl RepoWatchTemplateResolver,
+        context: UserContent,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchServiceError<Transaction::Error>>
     {
         let actions = rule
@@ -1327,9 +1374,26 @@ where
                 .prepare(self.ids.next_session_id())
                 .map_err(|_| RepoWatchDispatchPreparationError::SessionPreparation)
                 .map_err(RepoWatchDispatchServiceError::Preparation)?;
+            let session = prepared_session.applied_result().session();
+            let initial_input = SubmitInput::new(
+                self.ids.next_command_id(),
+                session,
+                context.clone(),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+            );
             prepared_actions.push(RepoWatchPreparedDispatchAction {
                 action,
                 prepared_session,
+                initial_input,
+                accepted_input: self.ids.next_accepted_input_id(),
+                turn: self.ids.next_turn_id(),
+                cancellation_entry: self.ids.next_semantic_entry_id(),
+                cancellation_frontier: self.ids.next_context_frontier_id(),
             });
         }
         self.transaction
@@ -1390,10 +1454,11 @@ fn stack_root(
     context: &PullRequestEventContext,
     observation: &RepoWatchObservation,
 ) -> BranchName {
-    let mut frontier = BTreeSet::from([context.base_branch().clone()]);
+    let mut frontier =
+        BTreeSet::from([(context.base_branch().clone(), context.head_branch().clone())]);
     let mut visited = BTreeSet::new();
     let mut roots = BTreeSet::new();
-    while let Some(branch) = frontier.pop_first() {
+    while let Some((branch, root)) = frontier.pop_first() {
         if !visited.insert(branch.clone()) {
             continue;
         }
@@ -1406,10 +1471,15 @@ fn stack_root(
                     && candidate.context().head_repository() == repository
                     && candidate.context().head_branch() == &branch
             })
-            .map(|parent| parent.context().base_branch().clone())
+            .map(|parent| {
+                (
+                    parent.context().base_branch().clone(),
+                    parent.context().head_branch().clone(),
+                )
+            })
             .collect::<Vec<_>>();
         if parents.is_empty() {
-            roots.insert(branch);
+            roots.insert(root);
         } else {
             frontier.extend(parents);
         }
@@ -1417,8 +1487,7 @@ fn stack_root(
     roots
         .into_iter()
         .next()
-        .or_else(|| visited.into_iter().next())
-        .unwrap_or_else(|| context.base_branch().clone())
+        .unwrap_or_else(|| context.head_branch().clone())
 }
 
 /// Display and error forwarding for repository-watch dispatch service failures.
@@ -1646,6 +1715,42 @@ mod tests {
         ))
     }
 
+    fn stack_context(
+        number: u64,
+        base_branch: &str,
+        head_branch: &str,
+    ) -> Result<PullRequestEventContext, Box<dyn Error>> {
+        Ok(PullRequestEventContext::new(PullRequestEventContextInput {
+            number: pull_request_number(number),
+            head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
+            head_repository: repository()?,
+            base_branch: BranchName::try_new(String::from(base_branch))?,
+            head_branch: BranchName::try_new(String::from(head_branch))?,
+            title: PullRequestTitle::try_new(String::from(TITLE))?,
+            body: PullRequestBody::try_new(String::from(BODY))?,
+            labels: Vec::new(),
+            draft: false,
+            author: Some(RepoWatchAuthorLogin::try_new(String::from(AUTHOR))?),
+        }))
+    }
+
+    fn stack_pull_request(
+        context: PullRequestEventContext,
+    ) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+        Ok(RepoWatchPullRequestState::try_new(
+            RepoWatchPullRequestStateInput {
+                context,
+                lifecycle: RepoWatchPullRequestLifecycle::Open,
+                mergeable_state: MergeableState::Mergeable,
+                completed_check_suites: Vec::new(),
+                completed_check_runs: Vec::new(),
+                reviews: Vec::new(),
+                threads: Vec::new(),
+                reactions: Vec::new(),
+            },
+        )?)
+    }
+
     fn derive(
         previous: Option<&RepoWatchObservation>,
         current: &RepoWatchObservation,
@@ -1656,6 +1761,53 @@ mod tests {
             current,
             &mut FixedEventIds::new(),
         )?)
+    }
+
+    #[test]
+    fn independent_pull_requests_to_one_base_have_distinct_stack_roots()
+    -> Result<(), Box<dyn Error>> {
+        let first = stack_context(17, "main", "feature/first")?;
+        let second = stack_context(18, "main", "feature/second")?;
+        let state = observation(
+            vec![
+                stack_pull_request(first.clone())?,
+                stack_pull_request(second.clone())?,
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert_eq!(
+            stack_root(&repository()?, &first, &state),
+            first.head_branch().clone()
+        );
+        assert_eq!(
+            stack_root(&repository()?, &second, &state),
+            second.head_branch().clone()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chained_pull_requests_share_the_bottom_head_as_stack_root() -> Result<(), Box<dyn Error>> {
+        let bottom = stack_context(17, "main", "stack/bottom")?;
+        let top = stack_context(18, "stack/bottom", "stack/top")?;
+        let state = observation(
+            vec![
+                stack_pull_request(bottom.clone())?,
+                stack_pull_request(top.clone())?,
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert_eq!(
+            stack_root(&repository()?, &top, &state),
+            bottom.head_branch().clone()
+        );
+        Ok(())
     }
 
     fn reaction() -> Result<RepoWatchReactionObservation, RepoWatchTextError> {

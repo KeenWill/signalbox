@@ -296,17 +296,18 @@ validation before polling starts. Dispatch therefore cannot discover a shape
 mismatch at runtime.
 
 **Implemented behavior.** Each admitted action creates a fresh session from the
-complete resolved template copy, then submits the tagged context as the first
-accepted JSON text input through the existing `StartWhenNoActiveTurn` path. The
+complete resolved template copy and submits the tagged context as its first
+accepted JSON text input through the existing `StartWhenNoActiveTurn` path in
+the same durable transaction. No dispatched session can become visible without
+that accepted input, its queued turn, and the dispatch-to-turn audit link. The
 input selects the session's version-one defaults and its template-selected
 model. The JSON object carries `type = "pull_request"` or `type = "branch"`, the
 fields of that tagged context, and an `event` object containing version, event
 identity, repository, complete normalized target, kind, and payload. A durable
-delivery intent reserves the submit-command, accepted-input, turn, and
-cancellation candidates before submission; equal recovery reuses those exact
-identities and records the final dispatch-to-turn link only after applied input
-is durable. A lost scheduler nudge remains recoverable by the ordinary
-eligibility sweep.
+delivery intent records the reserved submit-command, accepted-input, turn, and
+cancellation candidates beside the applied link. Equal recovery reuses the
+complete committed batch. A lost post-commit scheduler nudge remains recoverable
+by the ordinary eligibility sweep.
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
@@ -328,7 +329,9 @@ repository equals the prospective child's event repository (its base repository)
 and its head branch equals the child's base branch. Rule scope keys only by rule
 identity and version; repository scope adds repository. Branch events cannot
 satisfy pull-request or stack scope and make such a rule invalid rather than
-silently changing its key.
+silently changing its key. The component identity is the bottom open PR's head
+branch, so independent PRs that both target the same destination branch do not
+share a singleton.
 
 **Implemented behavior.** One event/rule match admits its complete ordered
 action list as one singleton batch. Admission, creation of every dispatched
@@ -337,19 +340,24 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match. The batch releases it only after every
-dispatched session in that batch is terminal; cooldown begins at release and
-suppresses a successor until its recorded interval has elapsed. Equal recovery
-cannot create a second session for the same admitted action. The append-only
-dispatch records identify the sessions responsible for the PR; no mutable
-assignment flag replaces them.
+singleton refuses another match. The batch releases it at the terminal
+transition that makes every dispatched session in that batch terminal; cooldown
+is measured from that recorded transition rather than from later watcher work
+and suppresses a successor until its interval has elapsed. Equal recovery cannot
+create a second session for the same admitted action. The append-only dispatch
+records identify the sessions responsible for the PR; no mutable assignment flag
+replaces them.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
 later events in cursor and event-ordinal order. Activation and each terminal
 evaluation outcome are append-only. Restart resumes the oldest unevaluated fact
 for that rule version; it neither redispatches an evaluated fact nor treats
-pre-activation history as a new live signal.
+pre-activation history as a new live signal. Reconciliation records an
+append-only deactivation when a configured identity disappears. A deactivated
+rule identity and version cannot be configured again; the replacement uses a new
+identity so no events observed during its absence can be consumed through the
+old activation.
 
 ## First live rule
 

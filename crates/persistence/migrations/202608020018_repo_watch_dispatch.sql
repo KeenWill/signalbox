@@ -42,6 +42,19 @@ CREATE TABLE repo_watch_rule_activation (
         ON DELETE RESTRICT
 );
 
+CREATE TABLE repo_watch_rule_deactivation (
+    repository text NOT NULL,
+    rule_id text NOT NULL,
+    rule_version bigint NOT NULL,
+    deactivated_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+
+    PRIMARY KEY (repository, rule_id, rule_version),
+    FOREIGN KEY (repository, rule_id, rule_version)
+        REFERENCES repo_watch_rule_activation(repository, rule_id, rule_version)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+);
+
 CREATE TABLE repo_watch_dispatch_batch (
     dispatch_id uuid PRIMARY KEY,
     event_id uuid NOT NULL,
@@ -196,6 +209,73 @@ CREATE TABLE repo_watch_dispatch_release (
         ON DELETE RESTRICT
 );
 
+CREATE FUNCTION repo_watch_release_completed_dispatch_batches_for_turn(
+    completed_turn_id uuid,
+    completed_session_id uuid,
+    completed_at timestamptz
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+    SELECT batch.dispatch_id, completed_at
+      FROM repo_watch_dispatch_action AS changed_action
+      JOIN repo_watch_dispatch_batch AS batch
+        ON batch.dispatch_id = changed_action.dispatch_id
+     WHERE changed_action.session_id = completed_session_id
+       AND NOT EXISTS (
+            SELECT 1
+              FROM repo_watch_dispatch_release AS released
+             WHERE released.dispatch_id = batch.dispatch_id
+       )
+       AND batch.action_count = (
+            SELECT count(*)
+              FROM repo_watch_dispatch_action AS action
+              JOIN repo_watch_dispatch_delivery AS delivery
+                ON delivery.dispatch_id = action.dispatch_id
+               AND delivery.action_ordinal = action.action_ordinal
+              JOIN turn_lifecycle AS turn
+                ON turn.turn_id = delivery.turn_id
+               AND (
+                    turn.state_kind = 'terminal'
+                    OR turn.turn_id = completed_turn_id
+               )
+             WHERE action.dispatch_id = batch.dispatch_id
+               AND NOT EXISTS (
+                    SELECT 1
+                     FROM turn_lifecycle AS live_turn
+                     WHERE live_turn.session_id = action.session_id
+                       AND live_turn.state_kind <> 'terminal'
+                       AND live_turn.turn_id <> completed_turn_id
+               )
+       )
+    ON CONFLICT DO NOTHING;
+END;
+$$;
+
+CREATE FUNCTION repo_watch_release_completed_dispatch_batches()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.state_kind <> 'terminal' OR OLD.state_kind = 'terminal' THEN
+        RETURN NULL;
+    END IF;
+    PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
+        NEW.turn_id,
+        NEW.session_id,
+        statement_timestamp()
+    );
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER repo_watch_dispatch_release_on_terminal_turn
+AFTER UPDATE OF state_kind ON turn_lifecycle
+FOR EACH ROW
+EXECUTE FUNCTION repo_watch_release_completed_dispatch_batches();
+
 CREATE TABLE repo_watch_rule_evaluation (
     repository text NOT NULL,
     rule_id text NOT NULL,
@@ -300,6 +380,11 @@ BEFORE UPDATE OR DELETE ON repo_watch_rule_activation
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER repo_watch_rule_deactivation_is_append_only
+BEFORE UPDATE OR DELETE ON repo_watch_rule_deactivation
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER repo_watch_dispatch_batch_is_append_only
 BEFORE UPDATE OR DELETE ON repo_watch_dispatch_batch
 FOR EACH ROW
@@ -332,6 +417,11 @@ EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER repo_watch_rule_activation_reject_truncate
 BEFORE TRUNCATE ON repo_watch_rule_activation
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_repo_watch_table_truncate();
+
+CREATE TRIGGER repo_watch_rule_deactivation_reject_truncate
+BEFORE TRUNCATE ON repo_watch_rule_deactivation
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_repo_watch_table_truncate();
 

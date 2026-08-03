@@ -17,26 +17,22 @@ use reqwest::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    InProcessEligibilityNudge, InProcessToolDispatchGate, RepoWatchBranchHead,
-    RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation, RepoWatchDispatchService,
+    EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead, RepoWatchCheckRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, SubmitInputIdGenerator,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CancelledModelCallTurnIdentities, CheckConclusion, CheckRunName,
-    ChecksOutcome, CommitSha, ContextFrontierId, DeliveryRequest, DurableCommandId, GitHubObjectId,
-    LabelName, MergeableState, ModelSelectionOverride, PerInputConfigurationChoices,
-    PullRequestBody, PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber,
-    PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
-    RepoWatchEvent, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
-    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
-    SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
-    SubmitInput as DomainSubmitInput, SubmitInputAppliedResult, SubmitInputResult, TurnId,
-    UserContent, WorkflowName,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
+    MergeableState, ModelAlias, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
+    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
+    ReviewThreadId, UserContent, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
@@ -44,10 +40,7 @@ use signalbox_persistence::repo_watch::{
     RepoWatchCursorCandidate,
 };
 use signalbox_persistence::repo_watch_dispatch::{
-    PostgresRepoWatchDispatchStore, RepoWatchDeliveryCandidates, RepoWatchPendingDelivery,
-};
-use signalbox_persistence::submit_input::{
-    SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError,
+    PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
 use sqlx::PgPool;
 use tokio::{select, sync::watch, task::JoinSet, time::sleep};
@@ -132,7 +125,6 @@ impl RepositoryWatchRuntime {
         models: HubModelConfiguration,
         credential_pin: signalbox_persistence::SessionCredentialPin,
         eligibility_nudge: InProcessEligibilityNudge,
-        tool_dispatch_gate: InProcessToolDispatchGate,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         for repository in configuration.repositories() {
@@ -146,7 +138,6 @@ impl RepositoryWatchRuntime {
                     models: models.clone(),
                     credential_pin: credential_pin.clone(),
                     eligibility_nudge: eligibility_nudge.clone(),
-                    tool_dispatch_gate: tool_dispatch_gate.clone(),
                 },
             )?);
         }
@@ -205,7 +196,6 @@ async fn supervise_repository_tasks(
 }
 
 struct RepositoryWatchTask {
-    pool: PgPool,
     repository: RepositorySlug,
     interval: Duration,
     poller: GitHubRepositoryPoller,
@@ -215,7 +205,6 @@ struct RepositoryWatchTask {
     templates: SessionTemplateConfiguration,
     models: HubModelConfiguration,
     eligibility_nudge: InProcessEligibilityNudge,
-    tool_dispatch_gate: InProcessToolDispatchGate,
     rules_activated: bool,
 }
 
@@ -227,7 +216,6 @@ struct RepositoryWatchTaskContext {
     models: HubModelConfiguration,
     credential_pin: signalbox_persistence::SessionCredentialPin,
     eligibility_nudge: InProcessEligibilityNudge,
-    tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
 impl RepositoryWatchTask {
@@ -243,7 +231,6 @@ impl RepositoryWatchTask {
             models,
             credential_pin,
             eligibility_nudge,
-            tool_dispatch_gate,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -253,7 +240,6 @@ impl RepositoryWatchTask {
         );
         let store = PostgresRepoWatchStore::new(pool.clone());
         Ok(Self {
-            pool: pool.clone(),
             repository: configuration.repository().clone(),
             interval: configuration.poll_interval(),
             poller: GitHubRepositoryPoller::try_new(
@@ -268,7 +254,6 @@ impl RepositoryWatchTask {
             templates,
             models,
             eligibility_nudge,
-            tool_dispatch_gate,
             rules_activated: false,
         })
     }
@@ -320,13 +305,15 @@ impl RepositoryWatchTask {
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
-        for rule in &self.rules {
-            self.dispatch_store
-                .activate_rule(&self.repository, rule.id(), rule.version())
-                .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        }
-        Ok(())
+        let configured = self
+            .rules
+            .iter()
+            .map(|rule| (rule.id().clone(), rule.version()))
+            .collect::<Vec<_>>();
+        self.dispatch_store
+            .reconcile_rules(&self.repository, &configured)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)
     }
 
     async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
@@ -343,84 +330,42 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Persistence)?
                     .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                let content = UserContent::try_text(dispatch_context_json(&event))
+                    .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
                 let mut service = RepoWatchDispatchService::new(
                     UuidV7RepoWatchDispatchIdGenerator,
-                    self.dispatch_store.clone(),
+                    RepoWatchDispatchPersistence {
+                        store: self.dispatch_store.clone(),
+                        models: &self.models,
+                    },
                 );
-                service
+                let outcome = service
                     .evaluate(
                         event,
                         rule,
                         cursor.candidate().observation(),
                         &self.templates,
+                        content,
                     )
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                self.nudge_dispatched_sessions(&outcome);
             }
-        }
-        while let Some(delivery) = self
-            .dispatch_store
-            .prepare_next_delivery(&self.repository, new_delivery_candidates())
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-        {
-            self.deliver_context(delivery).await?;
         }
         Ok(())
     }
 
-    async fn deliver_context(
-        &self,
-        delivery: RepoWatchPendingDelivery,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        let event = self
-            .store
-            .load_event(&self.repository, delivery.event_id())
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
-            .ok_or(RepositoryWatchAttemptError::Persistence)?;
-        let content = UserContent::try_text(dispatch_context_json(&event))
-            .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
-        let identities = delivery.identities();
-        let request = SubmitInputRequest::try_new(
-            identities.submit_command_id,
-            delivery.session_id(),
-            content,
-            DeliveryRequest::StartWhenNoActiveTurn {
-                configuration: PerInputConfigurationChoices::new(
-                    SessionConfigurationDefaultsVersion::first(),
-                    ModelSelectionOverride::UseSessionDefault,
-                ),
-            },
-        )
-        .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
-        let mut service = SubmitInputService::new(
-            ReservedDeliveryIds { identities },
-            RepoWatchSubmitInputTransaction {
-                repository: SubmitInputRepository::new(self.pool.clone()),
-                models: &self.models,
-            },
-            self.eligibility_nudge.clone(),
-            self.tool_dispatch_gate.clone(),
-        );
-        let outcome = service
-            .execute(request)
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+    fn nudge_dispatched_sessions(&self, outcome: &RepoWatchRuleEvaluationOutcome) {
         match outcome {
-            SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::TurnOrigin(result),
-            )) if result.accepted_input() == identities.accepted_input_id
-                && result.turn() == identities.turn_id =>
-            {
-                self.dispatch_store
-                    .record_delivery(&delivery)
-                    .await
-                    .map_err(|_| RepositoryWatchAttemptError::Persistence)
+            RepoWatchRuleEvaluationOutcome::Dispatched { sessions, .. }
+            | RepoWatchRuleEvaluationOutcome::Replayed { sessions, .. } => {
+                for session in sessions {
+                    let _ = self.eligibility_nudge.nudge(*session);
+                }
             }
-            SubmitInputOutcome::Recorded(_) | SubmitInputOutcome::ConflictingReuse { .. } => {
-                Err(RepositoryWatchAttemptError::Dispatch)
-            }
+            RepoWatchRuleEvaluationOutcome::NotMatched
+            | RepoWatchRuleEvaluationOutcome::Occupied
+            | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
     }
 
@@ -464,80 +409,23 @@ impl RepositoryWatchTask {
     }
 }
 
-fn new_delivery_candidates() -> RepoWatchDeliveryCandidates {
-    RepoWatchDeliveryCandidates {
-        submit_command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
-        accepted_input_id: AcceptedInputId::from_uuid(uuid::Uuid::now_v7()),
-        turn_id: TurnId::from_uuid(uuid::Uuid::now_v7()),
-        cancellation_entry_id: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
-        cancellation_frontier_id: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
-    }
-}
-
-struct ReservedDeliveryIds {
-    identities: RepoWatchDeliveryCandidates,
-}
-
-impl SubmitInputIdGenerator for ReservedDeliveryIds {
-    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
-        self.identities.accepted_input_id
-    }
-
-    fn next_turn_id(&mut self) -> TurnId {
-        self.identities.turn_id
-    }
-
-    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
-        self.identities.cancellation_entry_id
-    }
-
-    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
-        self.identities.cancellation_frontier_id
-    }
-}
-
-struct RepoWatchSubmitInputTransaction<'configuration> {
-    repository: SubmitInputRepository,
+struct RepoWatchDispatchPersistence<'configuration> {
+    store: PostgresRepoWatchDispatchStore,
     models: &'configuration HubModelConfiguration,
 }
 
-impl SubmitInputTransaction for RepoWatchSubmitInputTransaction<'_> {
-    type Error = SubmitInputRepositoryError;
+impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
+    type Error = RepoWatchDispatchRepositoryError;
 
-    async fn handle<NextTurn, NextToolCancellation>(
+    async fn handle_repo_watch_evaluation(
         &mut self,
-        command: DomainSubmitInput,
-        accepted_input: AcceptedInputId,
-        turn: Option<TurnId>,
-        cancellation_identities: CancelledModelCallTurnIdentities,
-        next_reclassified_turn: NextTurn,
-        next_tool_cancellation: NextToolCancellation,
-    ) -> Result<SubmitInputOutcome, Self::Error>
-    where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
-        NextToolCancellation: FnMut(
-                &[signalbox_domain::ToolRequestId],
-            ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
-            + Send,
-    {
-        let outcome = self
-            .repository
-            .handle_with_candidates_alias_resolver(
-                command,
-                accepted_input,
-                turn,
-                cancellation_identities,
-                next_reclassified_turn,
-                next_tool_cancellation,
-                |alias| self.models.resolve_alias(alias),
-            )
-            .await?;
-        Ok(match outcome {
-            SubmitInputHandlingOutcome::Recorded(result) => SubmitInputOutcome::Recorded(result),
-            SubmitInputHandlingOutcome::ConflictingReuse { command_id } => {
-                SubmitInputOutcome::ConflictingReuse { command_id }
-            }
-        })
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
+        self.store
+            .handle_repo_watch_evaluation_with_alias_resolver(evaluation, |alias: ModelAlias| {
+                self.models.resolve_alias(alias)
+            })
+            .await
     }
 }
 

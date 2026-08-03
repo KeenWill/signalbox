@@ -5907,7 +5907,17 @@ pub enum RepoWatchSingletonKey {
 pub struct RepoWatchPreparedDispatchAction { /* private */ }
 impl RepoWatchPreparedDispatchAction {
     // accessors: action(), prepared_session()
-    pub fn into_parts(self) -> (RepoWatchActionV1, PreparedCreateSession);
+    pub fn into_parts(
+        self,
+    ) -> (
+        RepoWatchActionV1,
+        PreparedCreateSession,
+        SubmitInput,
+        AcceptedInputId,
+        TurnId,
+        SemanticTranscriptEntryId,
+        ContextFrontierId,
+    );
 }
 
 pub enum RepoWatchRuleEvaluation {
@@ -5953,6 +5963,10 @@ pub trait RepoWatchDispatchIdGenerator {
     fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
     fn next_command_id(&mut self) -> DurableCommandId;
     fn next_session_id(&mut self) -> SessionId;
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
+    fn next_turn_id(&mut self) -> TurnId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 pub struct UuidV7RepoWatchDispatchIdGenerator;
@@ -5977,6 +5991,7 @@ impl<Ids: RepoWatchDispatchIdGenerator, Transaction: RepoWatchDispatchTransactio
         rule: &RepoWatchRule,
         observation: &RepoWatchObservation,
         templates: &impl RepoWatchTemplateResolver,
+        context: UserContent,
     ) -> Result<
         RepoWatchRuleEvaluationOutcome,
         RepoWatchDispatchServiceError<Transaction::Error>,

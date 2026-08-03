@@ -1,6 +1,6 @@
 //! Durable repository-watch rule consumption, singleton admission, and dispatch audit.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -8,9 +8,8 @@ use signalbox_application::{
     RepoWatchSingletonKey,
 };
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DurableCommandId, RepoWatchActionV1, RepoWatchDispatchId,
-    RepoWatchEvent, RepoWatchEventId, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug,
-    SemanticTranscriptEntryId, SessionId, TurnId,
+    FrozenAliasDefinition, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, SessionId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -25,6 +24,11 @@ pub enum RepoWatchDispatchRepositoryError {
     CommitAmbiguous(sqlx::Error),
     EventStore(crate::repo_watch::RepoWatchStoreError),
     SessionCreation(crate::create_session::CreateSessionRepositoryError),
+    InitialInput(crate::submit_input::SubmitInputRepositoryError),
+    ReusedRuleIdentity {
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+    },
     Corruption(&'static str),
 }
 
@@ -40,7 +44,17 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
                 "repository-watch dispatch commit outcome is ambiguous: {error}"
             ),
             Self::SessionCreation(error) => error.fmt(formatter),
+            Self::InitialInput(error) => error.fmt(formatter),
             Self::EventStore(error) => error.fmt(formatter),
+            Self::ReusedRuleIdentity {
+                rule_id,
+                rule_version,
+            } => write!(
+                formatter,
+                "repository-watch rule {} version {} was retired and cannot be reused",
+                rule_id.as_str(),
+                rule_version.get()
+            ),
             Self::Corruption(reason) => {
                 write!(
                     formatter,
@@ -57,7 +71,8 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::EventStore(error) => Some(error),
             Self::SessionCreation(error) => Some(error),
-            Self::Corruption(_) => None,
+            Self::InitialInput(error) => Some(error),
+            Self::ReusedRuleIdentity { .. } | Self::Corruption(_) => None,
         }
     }
 }
@@ -83,17 +98,67 @@ impl PostgresRepoWatchDispatchStore {
         }
     }
 
-    /// Establishes one rule after the current durable tail, before its task polls.
-    pub async fn activate_rule(
+    /// Reconciles the configured rule set before its repository task polls.
+    pub async fn reconcile_rules(
         &self,
         repository: &RepositorySlug,
-        rule_id: &RepoWatchRuleId,
-        rule_version: RepoWatchRuleVersion,
+        configured: &[(RepoWatchRuleId, RepoWatchRuleVersion)],
     ) -> Result<(), RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, repository.as_str()).await?;
-        sqlx::query(
-            "INSERT INTO repo_watch_rule_activation
+        let configured = configured
+            .iter()
+            .map(|(rule_id, rule_version)| {
+                Ok((
+                    rule_id.as_str().to_owned(),
+                    stored_rule_version(*rule_version)?,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, RepoWatchDispatchRepositoryError>>()?;
+        let existing = sqlx::query(
+            "SELECT activation.rule_id, activation.rule_version,
+                    deactivation.rule_id IS NOT NULL AS deactivated
+               FROM repo_watch_rule_activation AS activation
+               LEFT JOIN repo_watch_rule_deactivation AS deactivation
+                 USING (repository, rule_id, rule_version)
+              WHERE activation.repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut historical = BTreeSet::new();
+        let mut active = BTreeSet::new();
+        for row in existing {
+            let identity = (row.try_get("rule_id")?, row.try_get("rule_version")?);
+            historical.insert(identity.clone());
+            if !row.try_get::<bool, _>("deactivated")? {
+                active.insert(identity);
+            }
+        }
+        for (rule_id, rule_version) in active.difference(&configured) {
+            sqlx::query(
+                "INSERT INTO repo_watch_rule_deactivation
+                    (repository, rule_id, rule_version)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(repository.as_str())
+            .bind(rule_id)
+            .bind(rule_version)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        for (rule_id, rule_version) in configured.difference(&active) {
+            if historical.contains(&(rule_id.clone(), *rule_version)) {
+                transaction.rollback().await?;
+                return Err(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
+                    rule_id: RepoWatchRuleId::try_new(rule_id.clone()).map_err(|_| {
+                        RepoWatchDispatchRepositoryError::Corruption("stored rule identifier")
+                    })?,
+                    rule_version: RepoWatchRuleVersion::V1,
+                });
+            }
+            sqlx::query(
+                "INSERT INTO repo_watch_rule_activation
                 (repository, rule_id, rule_version,
                  after_cursor_generation, after_event_ordinal)
              SELECT $1, $2, $3, tail.cursor_generation, tail.event_ordinal
@@ -105,15 +170,14 @@ impl PostgresRepoWatchDispatchStore {
                      ORDER BY cursor_generation DESC, event_ordinal DESC
                      LIMIT 1
                ) AS tail ON seed.present
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(repository.as_str())
-        .bind(rule_id.as_str())
-        .bind(i64::try_from(rule_version.get()).map_err(|_| {
-            RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
-        })?)
-        .execute(&mut *transaction)
-        .await?;
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(repository.as_str())
+            .bind(rule_id)
+            .bind(rule_version)
+            .execute(&mut *transaction)
+            .await?;
+        }
         commit(transaction).await
     }
 
@@ -138,6 +202,13 @@ impl PostgresRepoWatchDispatchStore {
               WHERE activation.repository = $1
                 AND activation.rule_id = $2
                 AND activation.rule_version = $3
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+                )
                 AND NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_rule_evaluation AS evaluation
@@ -166,159 +237,18 @@ impl PostgresRepoWatchDispatchStore {
             ))
             .map(Some)
     }
+}
 
-    /// Reserves or replays stable identities for the oldest undelivered action.
-    pub async fn prepare_next_delivery(
+impl PostgresRepoWatchDispatchStore {
+    /// Applies one evaluation while resolving any session-default model alias.
+    pub async fn handle_repo_watch_evaluation_with_alias_resolver<SelectDefinition>(
         &self,
-        repository: &RepositorySlug,
-        candidates: RepoWatchDeliveryCandidates,
-    ) -> Result<Option<RepoWatchPendingDelivery>, RepoWatchDispatchRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        lock_text(&mut transaction, repository.as_str()).await?;
-        let row = sqlx::query(
-            "SELECT action.dispatch_id, action.action_ordinal, action.event_id,
-                    action.session_id, intent.submit_command_id,
-                    intent.accepted_input_id, intent.turn_id,
-                    intent.cancellation_entry_id, intent.cancellation_frontier_id
-               FROM repo_watch_dispatch_action AS action
-               JOIN repo_watch_event AS event ON event.event_id = action.event_id
-               LEFT JOIN repo_watch_dispatch_delivery AS delivery
-                 ON delivery.dispatch_id = action.dispatch_id
-                AND delivery.action_ordinal = action.action_ordinal
-               LEFT JOIN repo_watch_dispatch_delivery_intent AS intent
-                 ON intent.dispatch_id = action.dispatch_id
-                AND intent.action_ordinal = action.action_ordinal
-              WHERE event.repository = $1
-                AND delivery.dispatch_id IS NULL
-              ORDER BY action.recorded_at, action.dispatch_id, action.action_ordinal
-              LIMIT 1",
-        )
-        .bind(repository.as_str())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let Some(row) = row else {
-            transaction.rollback().await?;
-            return Ok(None);
-        };
-        let dispatch_id: Uuid = row.try_get("dispatch_id")?;
-        let action_ordinal: i32 = row.try_get("action_ordinal")?;
-        let event_id: Uuid = row.try_get("event_id")?;
-        let session_id: Uuid = row.try_get("session_id")?;
-        let submit_command_id: Option<Uuid> = row.try_get("submit_command_id")?;
-        let identities = match submit_command_id {
-            Some(submit_command_id) => RepoWatchDeliveryCandidates {
-                submit_command_id: DurableCommandId::from_uuid(submit_command_id),
-                accepted_input_id: AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
-                turn_id: TurnId::from_uuid(row.try_get("turn_id")?),
-                cancellation_entry_id: SemanticTranscriptEntryId::from_uuid(
-                    row.try_get("cancellation_entry_id")?,
-                ),
-                cancellation_frontier_id: ContextFrontierId::from_uuid(
-                    row.try_get("cancellation_frontier_id")?,
-                ),
-            },
-            None => {
-                sqlx::query(
-                    "INSERT INTO repo_watch_dispatch_delivery_intent
-                        (dispatch_id, action_ordinal, submit_command_id,
-                         accepted_input_id, turn_id, cancellation_entry_id,
-                         cancellation_frontier_id)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind(dispatch_id)
-                .bind(action_ordinal)
-                .bind(candidates.submit_command_id.as_uuid())
-                .bind(candidates.accepted_input_id.as_uuid())
-                .bind(candidates.turn_id.as_uuid())
-                .bind(candidates.cancellation_entry_id.as_uuid())
-                .bind(candidates.cancellation_frontier_id.as_uuid())
-                .execute(&mut *transaction)
-                .await?;
-                candidates
-            }
-        };
-        commit(transaction).await?;
-        Ok(Some(RepoWatchPendingDelivery {
-            dispatch_id: RepoWatchDispatchId::from_uuid(dispatch_id),
-            action_ordinal,
-            event_id: RepoWatchEventId::from_uuid(event_id),
-            session_id: SessionId::from_uuid(session_id),
-            identities,
-        }))
-    }
-
-    /// Completes the audit link after the existing submit-input command applies.
-    pub async fn record_delivery(
-        &self,
-        delivery: &RepoWatchPendingDelivery,
-    ) -> Result<(), RepoWatchDispatchRepositoryError> {
-        sqlx::query(
-            "INSERT INTO repo_watch_dispatch_delivery
-                (dispatch_id, action_ordinal, submit_command_id,
-                 accepted_input_id, turn_id)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (dispatch_id, action_ordinal) DO NOTHING",
-        )
-        .bind(delivery.dispatch_id.as_uuid())
-        .bind(delivery.action_ordinal)
-        .bind(delivery.identities.submit_command_id.as_uuid())
-        .bind(delivery.identities.accepted_input_id.as_uuid())
-        .bind(delivery.identities.turn_id.as_uuid())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-}
-
-/// Stable candidates reserved before a repository-watch context submission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepoWatchDeliveryCandidates {
-    pub submit_command_id: DurableCommandId,
-    pub accepted_input_id: AcceptedInputId,
-    pub turn_id: TurnId,
-    pub cancellation_entry_id: SemanticTranscriptEntryId,
-    pub cancellation_frontier_id: ContextFrontierId,
-}
-
-/// One dispatched session whose structured context has not yet been delivered.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepoWatchPendingDelivery {
-    dispatch_id: RepoWatchDispatchId,
-    action_ordinal: i32,
-    event_id: RepoWatchEventId,
-    session_id: SessionId,
-    identities: RepoWatchDeliveryCandidates,
-}
-
-impl RepoWatchPendingDelivery {
-    pub const fn dispatch_id(&self) -> RepoWatchDispatchId {
-        self.dispatch_id
-    }
-
-    pub const fn action_ordinal(&self) -> i32 {
-        self.action_ordinal
-    }
-
-    pub const fn event_id(&self) -> RepoWatchEventId {
-        self.event_id
-    }
-
-    pub const fn session_id(&self) -> SessionId {
-        self.session_id
-    }
-
-    pub const fn identities(&self) -> RepoWatchDeliveryCandidates {
-        self.identities
-    }
-}
-
-impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
-    type Error = RepoWatchDispatchRepositoryError;
-
-    async fn handle_repo_watch_evaluation(
-        &mut self,
         evaluation: RepoWatchRuleEvaluation,
-    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
+        select_definition: SelectDefinition,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError>
+    where
+        SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
+    {
         match evaluation {
             RepoWatchRuleEvaluation::NotMatched {
                 event,
@@ -351,8 +281,6 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
                     transaction.rollback().await?;
                     return Ok(outcome);
                 }
-                release_completed_batches(&mut transaction, &rule_id, rule_version, &singleton)
-                    .await?;
                 if singleton_is_occupied(&mut transaction, &rule_id, rule_version, &singleton)
                     .await?
                 {
@@ -406,7 +334,15 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
                             "action ordinal exceeds storage",
                         )
                     })?;
-                    let (configured_action, prepared_session) = action.into_parts();
+                    let (
+                        configured_action,
+                        prepared_session,
+                        initial_input,
+                        accepted_input,
+                        turn,
+                        cancellation_entry,
+                        cancellation_frontier,
+                    ) = action.into_parts();
                     let RepoWatchActionV1::DispatchSession(configured_dispatch) = configured_action;
                     let session = prepared_session.applied_result().session();
                     let command = prepared_session.command();
@@ -420,7 +356,13 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
                             "dispatch action and prepared template disagree",
                         ));
                     }
+                    if initial_input.session() != session {
+                        return Err(RepoWatchDispatchRepositoryError::Corruption(
+                            "dispatch initial input targets another session",
+                        ));
+                    }
                     let command_id = command.command_id();
+                    let submit_command_id = initial_input.command_id();
                     let template_name = provenance.name().as_str().to_owned();
                     let template_digest = provenance.content_digest().as_bytes().to_vec();
                     insert_fresh_prepared(&mut transaction, prepared_session, &self.credential_pin)
@@ -441,6 +383,46 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
                     .bind(template_digest)
                     .execute(&mut *transaction)
                     .await?;
+                    crate::submit_input::insert_fresh_initial_input(
+                        &mut transaction,
+                        initial_input,
+                        accepted_input,
+                        turn,
+                        cancellation_entry,
+                        cancellation_frontier,
+                        select_definition,
+                    )
+                    .await
+                    .map_err(RepoWatchDispatchRepositoryError::InitialInput)?;
+                    sqlx::query(
+                        "INSERT INTO repo_watch_dispatch_delivery_intent
+                            (dispatch_id, action_ordinal, submit_command_id,
+                             accepted_input_id, turn_id, cancellation_entry_id,
+                             cancellation_frontier_id)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    )
+                    .bind(dispatch_id.as_uuid())
+                    .bind(ordinal)
+                    .bind(submit_command_id.as_uuid())
+                    .bind(accepted_input.as_uuid())
+                    .bind(turn.as_uuid())
+                    .bind(cancellation_entry.as_uuid())
+                    .bind(cancellation_frontier.as_uuid())
+                    .execute(&mut *transaction)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO repo_watch_dispatch_delivery
+                            (dispatch_id, action_ordinal, submit_command_id,
+                             accepted_input_id, turn_id)
+                         VALUES ($1, $2, $3, $4, $5)",
+                    )
+                    .bind(dispatch_id.as_uuid())
+                    .bind(ordinal)
+                    .bind(submit_command_id.as_uuid())
+                    .bind(accepted_input.as_uuid())
+                    .bind(turn.as_uuid())
+                    .execute(&mut *transaction)
+                    .await?;
                     sessions.push(session);
                 }
                 insert_evaluation(
@@ -459,6 +441,18 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
                 })
             }
         }
+    }
+}
+
+impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
+    type Error = RepoWatchDispatchRepositoryError;
+
+    async fn handle_repo_watch_evaluation(
+        &mut self,
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
+        self.handle_repo_watch_evaluation_with_alias_resolver(evaluation, |_| None)
+            .await
     }
 }
 
@@ -684,58 +678,6 @@ async fn load_recorded_evaluation(
             "evaluation outcome is unsupported",
         )),
     }
-}
-
-async fn release_completed_batches(
-    transaction: &mut Transaction<'_, Postgres>,
-    rule_id: &RepoWatchRuleId,
-    rule_version: RepoWatchRuleVersion,
-    key: &StoredSingletonKey,
-) -> Result<(), RepoWatchDispatchRepositoryError> {
-    sqlx::query(
-        "INSERT INTO repo_watch_dispatch_release (dispatch_id)
-         SELECT batch.dispatch_id
-           FROM repo_watch_dispatch_batch AS batch
-          WHERE batch.rule_id = $1
-            AND batch.rule_version = $2
-            AND batch.singleton_scope = $3
-            AND batch.singleton_repository IS NOT DISTINCT FROM $4
-            AND batch.singleton_pull_request_number IS NOT DISTINCT FROM $5
-            AND batch.singleton_stack_root IS NOT DISTINCT FROM $6
-            AND NOT EXISTS (
-                SELECT 1 FROM repo_watch_dispatch_release AS released
-                 WHERE released.dispatch_id = batch.dispatch_id
-            )
-            AND batch.action_count = (
-                SELECT count(*)
-                  FROM repo_watch_dispatch_action AS action
-                  JOIN repo_watch_dispatch_delivery AS delivery
-                    ON delivery.dispatch_id = action.dispatch_id
-                   AND delivery.action_ordinal = action.action_ordinal
-                  JOIN turn_lifecycle AS turn
-                    ON turn.turn_id = delivery.turn_id
-                   AND turn.state_kind = 'terminal'
-                 WHERE action.dispatch_id = batch.dispatch_id
-                   AND NOT EXISTS (
-                        SELECT 1
-                          FROM turn_lifecycle AS live_turn
-                         WHERE live_turn.session_id = action.session_id
-                           AND live_turn.state_kind <> 'terminal'
-                   )
-            )
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(rule_id.as_str())
-    .bind(i64::try_from(rule_version.get()).map_err(|_| {
-        RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage")
-    })?)
-    .bind(key.scope)
-    .bind(key.repository.as_deref())
-    .bind(key.pull_request)
-    .bind(key.stack_root.as_deref())
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
 }
 
 async fn singleton_is_occupied(
