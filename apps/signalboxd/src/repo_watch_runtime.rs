@@ -279,6 +279,9 @@ impl RepositoryWatchTask {
                             "repository-watch polling attempt failed closed"
                         ),
                     }
+                    if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                        return;
+                    }
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -316,7 +319,7 @@ impl RepositoryWatchTask {
         self.dispatch_store
             .reconcile_rules(&self.repository, &configured)
             .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)
+            .map_err(rule_activation_error)
     }
 
     async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
@@ -641,6 +644,7 @@ enum RepositoryWatchAttemptError {
     Differ,
     Dispatch,
     Persistence,
+    RetiredRuleIdentity,
 }
 
 impl RepositoryWatchAttemptError {
@@ -658,7 +662,21 @@ impl RepositoryWatchAttemptError {
             Self::Differ => "repository_differ_failed",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
+            Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
         }
+    }
+
+    const fn is_permanent(self) -> bool {
+        matches!(self, Self::RetiredRuleIdentity)
+    }
+}
+
+fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryWatchAttemptError {
+    match error {
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
+            RepositoryWatchAttemptError::RetiredRuleIdentity
+        }
+        _ => RepositoryWatchAttemptError::Persistence,
     }
 }
 
@@ -1998,14 +2016,17 @@ mod tests {
         RepoWatchPullRequestLifecycle, RepoWatchReviewObservation, RepoWatchThreadState,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
         ResourceKey, ReviewState, Url, WorkflowResponse, dispatch_context_json,
-        normalize_pull_request_context, object_id, supervise_repository_tasks,
+        normalize_pull_request_context, object_id, rule_activation_error,
+        supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
-        RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1,
+        RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchRuleId,
+        RepoWatchRuleVersion,
     };
     use signalbox_model_runtime::CredentialReference;
+    use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
 
     const WATCHED_REPOSITORY: &str = "namespace/project";
     const CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
@@ -2628,6 +2649,19 @@ mod tests {
         trigger.await.expect("fixture race trigger completes");
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn retired_rule_identity_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("retired-rule"))
+            .expect("fixture rule ID is valid");
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::RetiredRuleIdentity);
+        assert!(error.is_permanent());
     }
 
     #[tokio::test]
