@@ -1,6 +1,6 @@
 # Model and session settings
 
-Verified against this PR (`agent/model-settings-domain`) for its foundation
+Verified against PR #436 (`agent/model-settings-domain`) for its foundation
 proposal and domain/runtime value shapes.
 
 This page is the foundation proposal at the bottom of the model-settings
