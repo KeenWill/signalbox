@@ -7,11 +7,13 @@ use rustix::fs::{CWD, Mode, mkfifoat};
 use sha1::{Digest, Sha1};
 
 use crate::failure::LocalGitFailure;
-use crate::index_lock::{IndexLock, copy_index_snapshot_with_test_hook, write_index_entries};
+use crate::index_lock::{
+    IndexLock, IndexSnapshot, copy_index_snapshot_with_test_hook, write_index_entries,
+};
 use crate::layout::validate_repository_layout;
 use crate::limits::{MAX_INDEX_BYTES, MAX_INDEX_ENTRIES};
 use crate::pinning::PinnedRepository;
-use crate::tests::support::{Fixture, Sha256Fixture, workspace_root_identity};
+use crate::tests::support::{Fixture, Sha256Fixture, TRACKED_PATH, workspace_root_identity};
 
 #[test]
 fn index_lock_acquisition_failure_removes_the_created_lock() {
@@ -53,6 +55,32 @@ fn repository_index_acquisition_rejects_a_head_transition_after_snapshot() {
 
     assert_eq!(failure, LocalGitFailure::Repository);
     assert!(!lock_path.exists());
+}
+
+#[test]
+fn index_snapshot_rejects_a_live_index_changed_after_capture() {
+    let fixture = Fixture::new();
+    let expected =
+        validate_repository_layout(fixture.root(), workspace_root_identity(fixture.root()))
+            .expect("fixture layout validates");
+    let authority =
+        PinnedRepository::open(fixture.root(), expected).expect("fixture repository pins");
+    let (snapshot, _index) =
+        IndexSnapshot::acquire_for_repository(&authority).expect("index snapshot captures");
+    let repository = git2::Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), b"changed index content")
+        .expect("fixture worktree change writes");
+    let mut index = repository.index().expect("live index opens");
+    index
+        .add_path(std::path::Path::new(TRACKED_PATH))
+        .expect("live index change stages");
+    index.write().expect("live index change publishes");
+
+    let failure = snapshot
+        .validate()
+        .expect_err("changed live index rejects snapshot");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
 }
 
 #[test]

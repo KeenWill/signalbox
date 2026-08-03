@@ -27,12 +27,14 @@ shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
 (`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
-projection is verified against PR #389 (`agent/cost-accounting`). It covers the
-provider-neutral operation, observation, and evidence vocabulary; SSE framing;
-structured-output and tool decode; `ScriptedModel`; the four provider adapters;
-and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
+mappings and advisory exceptions are verified against PR #437
+(`agent/model-settings-adapters`). This page covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the four provider adapters; and their
+credential boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
