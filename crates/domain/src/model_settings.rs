@@ -284,6 +284,30 @@ impl ValidatedModelSettings {
         }
     }
 
+    /// Reconstitutes stored validation evidence only when its complete
+    /// precedence chain resolves to the stored effective value and sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconstitute(
+        precedence: ModelSettingsPrecedence,
+        effective: EffectiveModelSettings,
+        reasoning_source: Option<ModelSettingSource>,
+        fast_mode_source: Option<ModelSettingSource>,
+        service_tier_source: Option<ModelSettingSource>,
+        validated_for: Option<DirectModelSelection>,
+    ) -> Option<Self> {
+        let resolved = ResolvedModelSettings {
+            effective,
+            reasoning_source,
+            fast_mode_source,
+            service_tier_source,
+        };
+        (precedence.resolve() == resolved).then_some(Self {
+            precedence,
+            resolved,
+            validated_for,
+        })
+    }
+
     /// Returns the exact four-layer contributions that produced this value.
     pub const fn precedence(&self) -> ModelSettingsPrecedence {
         self.precedence
@@ -1116,6 +1140,57 @@ mod tests {
             resolved.service_tier_source(),
             Some(ModelSettingSource::Profile)
         );
+    }
+
+    /// INV-003 / INV-053: stored settings reconstitute from self-contained
+    /// structural facts without consulting a mutable capability catalog.
+    #[test]
+    fn inv003_inv053_validated_settings_reconstitute_from_exact_stored_facts() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::Medium], FastModeSupport::Unsupported, []);
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::Medium),
+                SettingOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let stored = supported
+            .validate_precedence(selected, precedence)
+            .expect("the stored setting was capability-validated before persistence");
+        let resolved = stored.resolved();
+
+        let reconstituted = super::ValidatedModelSettings::reconstitute(
+            stored.precedence(),
+            stored.effective(),
+            resolved.reasoning_source(),
+            resolved.fast_mode_source(),
+            resolved.service_tier_source(),
+            stored.validated_for(),
+        );
+
+        assert_eq!(reconstituted, Some(stored));
+    }
+
+    /// INV-003: a stored effective value that disagrees with its precedence
+    /// chain cannot claim validated settings provenance.
+    #[test]
+    fn inv003_inconsistent_stored_settings_fail_reconstitution() {
+        let precedence = ModelSettingsPrecedence::provider_defaults();
+
+        let reconstituted = super::ValidatedModelSettings::reconstitute(
+            precedence,
+            EffectiveModelSettings::new(Some(ReasoningLevel::High), FastMode::Disabled, None),
+            Some(ModelSettingSource::Session),
+            None,
+            None,
+            Some(direct(1)),
+        );
+
+        assert_eq!(reconstituted, None);
     }
 
     /// S37 / INV-051: an explicit unsupported level is a typed error rather
