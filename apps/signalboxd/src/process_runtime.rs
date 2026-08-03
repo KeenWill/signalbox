@@ -11727,7 +11727,7 @@ impl Error for ProcessRuntimeError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeSet, VecDeque},
         error::Error,
         io::{self, Write},
         sync::{Arc, Mutex, mpsc},
@@ -11739,16 +11739,18 @@ mod tests {
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
         AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
-        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay, ReasoningLevel,
-        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
-        ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
-        ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
-        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId,
-        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
-        SessionModelSettingsChanged, SubmitInputRejectedResult, ToolApprovalDecision,
-        ToolAttemptId, TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
+        FastModeOverlay, FastModeSupport, FrozenModelSelection, Goal, GoalStatement,
+        GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelCapabilities,
+        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+        ModelSettingsPrecedence, ReasoningLevel, ReviewPass, ReviewPassAcceptedInputEvidence,
+        ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
+        ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
+        ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewWorkflowKind,
+        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
+        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
+        TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
@@ -14142,7 +14144,24 @@ context_window_tokens = 200000
         let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
         let installed_version = SessionConfigurationDefaultsVersion::first();
         let caller_override = ModelSettingsOverlay::inherit_all();
-        let settings = ValidatedModelSettings::provider_defaults();
+        let session_settings = ModelSettingsOverlay::new(
+            SettingOverlay::ProviderDefault,
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            caller_override,
+            session_settings,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let settings = ModelCapabilities::new(
+            BTreeSet::new(),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(installed_selection, precedence)
+        .expect("the explicit provider default is supported");
         let resolved = TurnModelSettingsResolved::try_new(
             accepted_input,
             turn,
