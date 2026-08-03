@@ -652,7 +652,7 @@ fn derive_pull_request_events(
             events,
         )?;
     }
-    if previous.mergeable_state() != current.mergeable_state() {
+    if !opened_now && previous.mergeable_state() != current.mergeable_state() {
         push_pull_request_event(
             repository,
             context,
@@ -1378,6 +1378,7 @@ mod tests {
         let previous = observation(
             vec![pull_request(PullRequestFacts {
                 lifecycle: RepoWatchPullRequestLifecycle::Closed,
+                mergeable_state: MergeableState::Unknown,
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],
             Vec::new(),

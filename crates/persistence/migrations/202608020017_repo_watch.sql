@@ -13,6 +13,8 @@ CREATE TABLE repo_watch_cursor (
     CHECK (generation > 0),
     CHECK (storage_version = 1),
     CHECK (jsonb_typeof(cursor_payload) = 'object'),
+    CHECK (cursor_payload ? 'storage_version'),
+    CHECK (jsonb_typeof(cursor_payload -> 'storage_version') = 'number'),
     CHECK ((cursor_payload ->> 'storage_version')::bigint = storage_version)
 );
 
@@ -91,6 +93,7 @@ CREATE TABLE repo_watch_event (
         (
             target_kind = 'pull_request'
             AND event_kind <> 'branch_workflow_run_completed'
+            AND pull_request_number IS NOT NULL
             AND pull_request_number > 0
             AND head_sha IS NOT NULL
             AND head_repository IS NOT NULL
@@ -143,6 +146,7 @@ CREATE TABLE repo_watch_event (
         (reaction_subject_kind = 'pull_request_body' AND reaction_subject_id IS NULL)
         OR (
             reaction_subject_kind IN ('issue_comment', 'review_comment')
+            AND reaction_subject_id IS NOT NULL
             AND reaction_subject_id > 0
         )
         OR (reaction_subject_kind IS NULL AND reaction_subject_id IS NULL)
@@ -171,6 +175,7 @@ CREATE TABLE repo_watch_event (
     CHECK (previous_sha IS NULL OR previous_sha <> current_sha),
     CHECK (current_sha IS NULL OR current_sha = head_sha),
     CHECK (advanced_branch IS NULL OR advanced_branch = base_branch),
+    CHECK (labels IS NULL OR array_position(labels, NULL) IS NULL),
     CHECK (event_kind <> 'labeled' OR label_name = ANY(labels)),
     CHECK (event_kind <> 'unlabeled' OR NOT (label_name = ANY(labels))),
     CHECK (head_repository IS NULL OR octet_length(head_repository) BETWEEN 1 AND 201),

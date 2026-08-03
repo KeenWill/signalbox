@@ -422,8 +422,7 @@ impl PostgresRepoWatchStore {
         let current = load_cursor_in_transaction(&mut transaction, repository).await?;
         let current_generation = current.as_ref().map(RepoWatchCursor::generation);
         if current_generation != request.expected_generation() {
-            let replayed =
-                exact_replay(&mut transaction, repository, current.as_ref(), &request).await?;
+            let replayed = exact_replay(&mut transaction, repository, &request).await?;
             transaction.rollback().await?;
             return Ok(match replayed {
                 Some(cursor) => RepoWatchCommitOutcome::Replayed(cursor),
@@ -529,6 +528,25 @@ async fn load_cursor_in_transaction(
         .transpose()
 }
 
+async fn load_cursor_generation_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    generation: RepoWatchCursorGeneration,
+) -> Result<Option<RepoWatchCursor>, RepoWatchStoreError> {
+    let row = sqlx::query_as::<_, CursorRow>(
+        "SELECT generation, cursor_payload
+           FROM repo_watch_cursor
+          WHERE repository = $1
+            AND generation = $2",
+    )
+    .bind(repository.as_str())
+    .bind(generation_to_i64(generation))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(|row| decode_cursor_row(repository, row))
+        .transpose()
+}
+
 fn decode_cursor_row(
     repository: &RepositorySlug,
     row: CursorRow,
@@ -547,26 +565,29 @@ fn generation_to_i64(generation: RepoWatchCursorGeneration) -> i64 {
 async fn exact_replay(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
-    current: Option<&RepoWatchCursor>,
     request: &RepoWatchCommitRequest,
 ) -> Result<Option<RepoWatchCursor>, RepoWatchStoreError> {
     let expected_replay_generation = match request.expected_generation() {
         Some(generation) => generation.next(),
         None => Some(RepoWatchCursorGeneration::INITIAL),
     };
-    let Some(current) = current else {
+    let Some(expected_replay_generation) = expected_replay_generation else {
         return Ok(None);
     };
-    if Some(current.generation()) != expected_replay_generation
-        || current.candidate() != request.candidate()
-    {
+    let Some(replayed) =
+        load_cursor_generation_in_transaction(transaction, repository, expected_replay_generation)
+            .await?
+    else {
+        return Ok(None);
+    };
+    if replayed.candidate() != request.candidate() {
         return Ok(None);
     }
     let stored =
-        load_generation_events_in_transaction(transaction, repository, current.generation())
+        load_generation_events_in_transaction(transaction, repository, expected_replay_generation)
             .await?;
     if stored == request.events() {
-        Ok(Some(current.clone()))
+        Ok(Some(replayed))
     } else {
         Ok(None)
     }

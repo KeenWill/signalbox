@@ -43,6 +43,7 @@ const CHANGED_HEAD: &str = "2222222222222222222222222222222222222222";
 const TITLE: &str = "Persist repository-watch facts";
 const BODY: &str = "A complete fixture pull request body.";
 const AUTHOR: &str = "fixture-author";
+const LABEL: &str = "watch-me";
 const PULL_REQUEST: u64 = 41;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -129,13 +130,20 @@ fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGener
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn cursor_event_commit_replay_conflict_and_keyset_page_are_durable()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+struct CommittedFixture {
+    _container: ContainerAsync<Postgres>,
+    repository: RepositorySlug,
+    store: PostgresRepoWatchStore,
+    second_candidate: RepoWatchCursorCandidate,
+    events: Vec<signalbox_domain::RepoWatchEvent>,
+    first_generation: RepoWatchCursorGeneration,
+    second_generation: RepoWatchCursorGeneration,
+}
+
+async fn committed_fixture() -> Result<CommittedFixture, Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
     let repository = repository()?;
-    let store = PostgresRepoWatchStore::new(pool);
+    let store = PostgresRepoWatchStore::new(pool.clone());
     let first_candidate = candidate(None)?;
     let first_generation = committed_generation(
         store
@@ -164,48 +172,178 @@ async fn cursor_event_commit_replay_conflict_and_keyset_page_are_durable()
             )
             .await?,
     );
-    let first_page = store
+    Ok(CommittedFixture {
+        _container: container,
+        repository,
+        store,
+        second_candidate,
+        events,
+        first_generation,
+        second_generation,
+    })
+}
+
+fn replayed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
+    match outcome {
+        RepoWatchCommitOutcome::Replayed(cursor) => cursor.generation(),
+        _ => panic!("fixture commit must be recognized as a replay"),
+    }
+}
+
+fn unchanged_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
+    match outcome {
+        RepoWatchCommitOutcome::Unchanged(cursor) => cursor.generation(),
+        _ => panic!("fixture commit must be recognized as unchanged"),
+    }
+}
+
+fn conflict_generation(outcome: RepoWatchCommitOutcome) -> Option<RepoWatchCursorGeneration> {
+    match outcome {
+        RepoWatchCommitOutcome::Conflict { current } => current,
+        _ => panic!("fixture commit must conflict"),
+    }
+}
+
+fn corruption_kind(error: RepoWatchStoreError) -> Option<RepoWatchPersistenceCorruption> {
+    match error {
+        RepoWatchStoreError::Corruption(corruption) => Some(corruption),
+        _ => None,
+    }
+}
+
+fn is_database_failure(result: Result<RepoWatchCommitOutcome, RepoWatchStoreError>) -> bool {
+    match result {
+        Err(RepoWatchStoreError::Database(_)) => true,
+        Ok(_) | Err(_) => false,
+    }
+}
+
+fn next_generation_value(generation: RepoWatchCursorGeneration) -> u64 {
+    generation
+        .get()
+        .checked_add(1)
+        .expect("fixture generation has a successor")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_commits_advance_one_generation_at_a_time() -> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+
+    assert_eq!(fixture.first_generation, RepoWatchCursorGeneration::INITIAL);
+    assert_eq!(
+        fixture.second_generation.get(),
+        next_generation_value(fixture.first_generation)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn exact_retry_finds_its_replay_after_a_later_generation_commits()
+-> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let changed = candidate(Some(CHANGED_HEAD))?;
+    let changed_events = derive_repo_watch_events(
+        &fixture.repository,
+        Some(fixture.second_candidate.observation()),
+        changed.observation(),
+        &mut FixedEventIds(100),
+    )?;
+    fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(Some(fixture.second_generation), changed, changed_events),
+        )
+        .await?;
+    let replay = fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(fixture.first_generation),
+                fixture.second_candidate.clone(),
+                fixture.events.clone(),
+            ),
+        )
+        .await?;
+
+    assert_eq!(replayed_generation(replay), fixture.second_generation);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_non_replay_commit_reports_the_current_generation() -> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let conflict = fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(None, fixture.second_candidate, Vec::new()),
+        )
+        .await?;
+
+    assert_eq!(
+        conflict_generation(conflict),
+        Some(fixture.second_generation)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unchanged_candidate_without_events_does_not_advance() -> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let unchanged = fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(fixture.second_generation),
+                fixture.second_candidate,
+                Vec::new(),
+            ),
+        )
+        .await?;
+
+    assert_eq!(unchanged_generation(unchanged), fixture.second_generation);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn event_pages_use_the_last_position_as_the_next_keyset_cursor() -> Result<(), Box<dyn Error>>
+{
+    let fixture = committed_fixture().await?;
+    let first_page = fixture
+        .store
         .load_event_page(
-            &repository,
+            &fixture.repository,
             None,
             RepoWatchEventPageSize::try_new(NonZeroU16::MIN)?,
         )
         .await?;
-    let second_page = store
+    let second_page = fixture
+        .store
         .load_event_page(
-            &repository,
+            &fixture.repository,
             first_page.next_after(),
             RepoWatchEventPageSize::try_new(NonZeroU16::MIN)?,
         )
         .await?;
-    let replay = store
-        .commit(
-            &repository,
-            RepoWatchCommitRequest::new(Some(first_generation), second_candidate.clone(), events),
-        )
-        .await?;
-    let conflict = store
-        .commit(
-            &repository,
-            RepoWatchCommitRequest::new(None, second_candidate.clone(), Vec::new()),
-        )
-        .await?;
-    let unchanged = store
-        .commit(
-            &repository,
-            RepoWatchCommitRequest::new(Some(second_generation), second_candidate, Vec::new()),
-        )
-        .await?;
 
-    assert_eq!(first_generation, RepoWatchCursorGeneration::INITIAL);
-    assert_eq!(second_generation.get(), 2);
-    assert_eq!(first_page.events().len(), 1);
+    assert_eq!(
+        first_page.events().len(),
+        usize::from(NonZeroU16::MIN.get())
+    );
     assert!(first_page.next_after().is_some());
-    assert_eq!(second_page.events().len(), 1);
+    assert_eq!(
+        second_page.events().len(),
+        usize::from(NonZeroU16::MIN.get())
+    );
     assert!(second_page.next_after().is_none());
-    assert!(matches!(replay, RepoWatchCommitOutcome::Replayed(_)));
-    assert!(matches!(conflict, RepoWatchCommitOutcome::Conflict { .. }));
-    assert!(matches!(unchanged, RepoWatchCommitOutcome::Unchanged(_)));
     Ok(())
 }
 
@@ -263,7 +401,7 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
             .fetch_one(&pool)
             .await?;
 
-    assert!(matches!(failure, Err(RepoWatchStoreError::Database(_))));
+    assert!(is_database_failure(failure));
     assert_eq!(cursor.generation(), second_generation);
     assert_eq!(cursor_rows, 2);
     Ok(())
@@ -271,11 +409,10 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn append_only_guards_and_malformed_cursor_reads_fail_closed() -> Result<(), Box<dyn Error>> {
+async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
-    let store = PostgresRepoWatchStore::new(pool.clone());
-    store
+    PostgresRepoWatchStore::new(pool.clone())
         .commit(
             &repository,
             RepoWatchCommitRequest::new(None, candidate(None)?, Vec::new()),
@@ -294,6 +431,25 @@ async fn append_only_guards_and_malformed_cursor_reads_fail_closed() -> Result<(
     let truncate = sqlx::query("TRUNCATE repo_watch_cursor CASCADE")
         .execute(&pool)
         .await;
+
+    assert!(update.is_err());
+    assert!(delete.is_err());
+    assert!(truncate.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(None)?, Vec::new()),
+        )
+        .await?;
     let mut corruption_connection = pool.acquire().await?;
     sqlx::query("SET session_replication_role = replica")
         .execute(&mut *corruption_connection)
@@ -308,16 +464,196 @@ async fn append_only_guards_and_malformed_cursor_reads_fail_closed() -> Result<(
         .execute(&mut *corruption_connection)
         .await?;
     drop(corruption_connection);
-    let corrupt = store.load_cursor(&repository).await;
+    let corruption = store
+        .load_cursor(&repository)
+        .await
+        .expect_err("malformed cursor is rejected");
+
+    assert_eq!(
+        corruption_kind(corruption),
+        Some(RepoWatchPersistenceCorruption::MalformedCursorDocument)
+    );
+    Ok(())
+}
+
+async fn migrated_cursor_fixture()
+-> Result<(ContainerAsync<Postgres>, PgPool, RepositorySlug), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    PostgresRepoWatchStore::new(pool.clone())
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(None)?, Vec::new()),
+        )
+        .await?;
+    Ok((container, pool, repository))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_constraint_rejects_a_missing_payload_storage_version() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE repo_watch_cursor SET cursor_payload = '{}'::jsonb WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .execute(&mut *connection)
+    .await;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
 
     assert!(update.is_err());
-    assert!(delete.is_err());
-    assert!(truncate.is_err());
-    assert!(matches!(
-        corrupt,
-        Err(RepoWatchStoreError::Corruption(
-            RepoWatchPersistenceCorruption::MalformedCursorDocument
-        ))
-    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_constraint_rejects_a_null_payload_storage_version() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = '{\"storage_version\": null}'::jsonb
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .execute(&mut *connection)
+    .await;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+
+    assert!(update.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_constraint_rejects_a_non_numeric_payload_storage_version()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = '{\"storage_version\": \"1\"}'::jsonb
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .execute(&mut *connection)
+    .await;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+
+    assert!(update.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_target_constraint_rejects_a_null_number() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', NULL,
+            $4, $5, $6, $7, $8, $9, ARRAY[]::text[], false
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn comment_reaction_constraint_rejects_a_null_subject_id() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft,
+            reaction_subject_kind, reaction_subject_id, reaction_reactor,
+            reaction_content, reaction_change
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
+            'issue_comment', NULL, $11, '+1', 'added'
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(AUTHOR)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn label_array_constraint_rejects_a_null_member() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft, label_name
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[$11, NULL]::text[], false, $11
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(LABEL)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
     Ok(())
 }
