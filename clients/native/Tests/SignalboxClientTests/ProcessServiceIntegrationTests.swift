@@ -508,17 +508,30 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
   }
 
-  func testProposedToolSideProjectionSelectsUsageForExactModelCall() throws {
+  func testProposedToolSideProjectionExcludesLaterUsageForExactModelCall() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithProposedToolAndUnrelatedUsage()
     let trigger = try ProcessProjectionFixture.proposedToolTrigger()
     var projector = SignalboxProcessTranscriptProjector()
 
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
 
+    XCTAssertTrue(ProcessProjectionFixture.modelCallUsageIDs(in: projection).isEmpty)
+  }
+
+  func testProjectedResultsSideProjectionExcludesLaterUsageForExactModelCall() throws {
+    let seed = try ProcessProjectionFixture.snapshotWithProposedTool()
+    let snapshot = try ProcessProjectionFixture.snapshotWithProjectedResultAndLaterUsage()
+    let trigger = try ProcessProjectionFixture.projectedResultsTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(seed)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
     XCTAssertEqual(
-      ProcessProjectionFixture.modelCallUsageIDs(in: projection),
-      ProcessProjectionFixture.triggeredModelCallUsageIDs
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.terminalFailureToolNames
     )
+    XCTAssertTrue(ProcessProjectionFixture.modelCallUsageIDs(in: projection).isEmpty)
   }
 
   func testPreparedModelCallSideProjectionExcludesLaterUsageForSameCall() throws {
@@ -1101,14 +1114,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testPlanReadWithPriorSessionTurnHistoryUsesTypedPresentation() throws {
+  func testPlanReadWithOtherwiseCorrelatedHistoryKeepsRawEvidenceVisible() throws {
     let record = ProcessProjectionFixture.priorSessionTurnPlanHistoryToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
 
     XCTAssertEqual(
-      tool.presentationOutput,
-      ProcessProjectionFixture.priorSessionTurnPlanHistoryPresentation
+      tool.outputPreview,
+      ProcessProjectionFixture.uncorrelatedPlanHistoryPreview
     )
   }
 
@@ -6088,6 +6101,8 @@ private enum ProcessProjectionFixture {
   static let planProvenance = #""provenance":{"turn_id":"\#(planTurnID)","issuing_attempt_id":"\#(planIssuingAttemptID)","request_id":"\#(planProvenanceRequestID)","attempt_id":"\#(planAttemptID)","generation":\#(planGeneration)}"#
   static let planReadArguments = #"{"include_history":true}"#
   static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":[{"ordinal":1,"kind":"created","entry_id":1,"text":"Audit protocol",\#(planProvenance)}],"history_truncated":false}"#
+  static let planReadWithoutHistoryArguments = #"{"include_history":false}"#
+  static let planReadWithoutHistoryOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
   static let planHistoryWriteOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Audit protocol",\#(planProvenance)}}"#
   static let uncorrelatedPlanHistoryOutput = planReadOutput.replacingOccurrences(
     of: planTurnID,
@@ -6209,7 +6224,7 @@ private enum ProcessProjectionFixture {
   static let mismatchedIssuingAttemptPlanCreateOutputPreview = rawToolOutputPreview(
     mismatchedIssuingAttemptPlanCreateOutput
   )
-  static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
+  static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: No"
   static let planCreateArgumentPresentation = "Create entry: Draft protocol"
   static let planReviseArgumentPresentation = "Revise entry #1: Audit protocol"
   static let planStatusArgumentPresentation = "Set entry #1 to Completed"
@@ -6221,16 +6236,9 @@ private enum ProcessProjectionFixture {
     Continue after: None
     Plan truncated: No
     History
-    Event #1: Create entry #1: Audit protocol
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planProvenanceRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
+    Not included
     History truncated: No
     """
-  static let priorSessionTurnPlanHistoryPresentation =
-    planReadOutputPresentation.replacingOccurrences(of: planTurnID, with: crossTurn)
   static let planReviseRawOutputPreview = rawToolOutputPreview(planReviseOutput)
   static let planStatusRawOutputPreview = rawToolOutputPreview(planStatusOutput)
   static let planDependencyRawOutputPreview = rawToolOutputPreview(planWriteOutput)
@@ -7424,6 +7432,81 @@ private enum ProcessProjectionFixture {
       usageEvidence: [
         modelUsageMessage(index: 0, modelCallID: earlierModelCall),
         modelUsageMessage(index: 1, modelCallID: ProcessDriverFixture.modelCall),
+      ]
+    )
+  }
+
+  static func snapshotWithProjectedResultAndLaterUsage() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"2"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall),
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_attempt_id":"\(reconciliationAttempt)",
+            "content":"\(reconciliationOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"2",
+          "turn_count":"1",
+          "entry_count":"2"
+        }
+        """,
       ]
     )
   }
@@ -8824,8 +8907,8 @@ private enum ProcessProjectionFixture {
     planToolRecord(
       requestID: planReadRequestID,
       toolName: "plan_read",
-      arguments: planReadArguments,
-      output: planReadOutput,
+      arguments: planReadWithoutHistoryArguments,
+      output: planReadWithoutHistoryOutput,
       status: .completed
     )
   }
@@ -10036,6 +10119,23 @@ private enum ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func projectedResultsTrigger() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_batch_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{
+          "type":"results_projected",
+          "frontier_id":"\(ProcessDriverFixture.frontier)"
+        }
+      }
+      """,
+      cursor: 2
     )
   }
 

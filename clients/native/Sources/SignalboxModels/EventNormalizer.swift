@@ -757,10 +757,7 @@ public enum SignalboxEventNormalizer {
             let presentationOutput = decodedArguments.flatMap { arguments in
                 decodedOutput.flatMap { output in
                     validPlanReadResponse(arguments: arguments, output: output)
-                        && validPlanHistoryCorrelation(
-                            output.history,
-                            tool: tool
-                        )
+                        && planHistoryIsPresentable(output.history)
                         ? formattedPlanReadOutput(output)
                         : nil
                 }
@@ -1011,51 +1008,8 @@ public enum SignalboxEventNormalizer {
         return foldedPlanHistory(history) != nil
     }
 
-    private static func validPlanHistoryCorrelation(
-        _ history: [PlanEvent]?,
-        tool: SignalboxProcessToolEvent
-    ) -> Bool {
-        guard let history, !history.isEmpty else {
-            return true
-        }
-        guard let owningTurnID = tool.turnID,
-            let sessionTurnAcceptancePositions = tool.sessionTurnAcceptancePositions,
-            let owningPosition = sessionTurnAcceptancePositions[owningTurnID]
-        else {
-            return false
-        }
-        return history.allSatisfy { event in
-            guard
-                let eventPosition = sessionTurnAcceptancePositions[
-                    event.provenance.turnID
-                ],
-                let sessionToolRequestPositions = tool.sessionToolRequestPositions,
-                let eventRequestPosition = sessionToolRequestPositions[
-                    event.provenance.requestID
-                ],
-                eventRequestPosition.turnID == event.provenance.turnID,
-                eventRequestPosition.toolName == "plan_write",
-                eventRequestPosition.toolAttemptID == event.provenance.attemptID,
-                eventRequestPosition.toolOutput.flatMap({
-                    decode(PlanWriteOutput.self, from: $0)
-                })?.event == event
-            else {
-                return false
-            }
-            guard event.provenance.turnID == owningTurnID else {
-                return eventPosition < owningPosition
-            }
-            guard let owningRequestID = try? SignalboxCanonicalUUID(
-                    validating: tool.toolRequestID.rawValue
-                ),
-                let owningRequestPosition = sessionToolRequestPositions[owningRequestID],
-                owningRequestPosition.turnID == owningTurnID,
-                owningRequestPosition.toolName == "plan_read"
-            else {
-                return false
-            }
-            return eventRequestPosition.entryIndex < owningRequestPosition.entryIndex
-        }
+    private static func planHistoryIsPresentable(_ history: [PlanEvent]?) -> Bool {
+        history?.isEmpty ?? true
     }
 
     private static func foldedPlanHistory(_ history: [PlanEvent]) -> [PlanEntry]? {

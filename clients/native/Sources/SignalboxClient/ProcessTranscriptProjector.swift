@@ -1087,11 +1087,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .modelCallTransition(_, _, .cancellationRequested),
         .modelCallTransition(_, _, .unknown):
         return false
-      case .toolBatchTransition(let turnID, let modelCallID, let state):
+      case .toolBatchTransition(_, _, let state):
         switch state {
-        case .proposed, .resultsProjected:
-          return turnID == evidence.turnID && modelCallID == evidence.modelCallID
-        case .recoveryRequired, .unknown:
+        case .proposed, .resultsProjected, .recoveryRequired, .unknown:
           return false
         }
       case .contextCompacted(_, let modelCallID, _, _, _):
