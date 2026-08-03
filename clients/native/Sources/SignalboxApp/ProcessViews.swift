@@ -1786,23 +1786,6 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         }
         streamedText = nil
       case .event(let followed):
-        switch followed.event {
-        case .modelCallTransition(_, _, .unknown),
-          .modelCallTransition(_, _, .terminal(.unknown)),
-          .toolBatchTransition(_, _, .unknown):
-          if let event = projector.projectUnrecognizedFollowedEvent(followed) {
-            retainUnrecognizedLiveEvent(
-              kind: event.kind,
-              diagnostic: event.diagnostic,
-              cursor: followed.cursor
-            )
-          }
-        case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-          .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
-          .turnRefused, .turnCancelled, .turnReconciliationRequired,
-          .turnToolReconciliationRequired, .unknown:
-          break
-        }
         applyLiveEvent(followed)
       case .providerTextDelta(let delta):
         if var current = streamedText,
@@ -2013,6 +1996,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
       }
+      retainUnrecognizedNestedLiveEvent(followed)
       if modelCallStateBlocksMutation(state) {
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
@@ -2027,6 +2011,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
       }
+      retainUnrecognizedNestedLiveEvent(followed)
       switch state {
       case .proposed:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
@@ -2096,6 +2081,19 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .sessionCreated, .contextCompacted:
       break
     }
+  }
+
+  private func retainUnrecognizedNestedLiveEvent(
+    _ followed: SignalboxFollowedSessionEvent
+  ) {
+    guard let event = projector.projectUnrecognizedFollowedEvent(followed) else {
+      return
+    }
+    retainUnrecognizedLiveEvent(
+      kind: event.kind,
+      diagnostic: event.diagnostic,
+      cursor: followed.cursor
+    )
   }
 
   private func retainUnrecognizedLiveEvent(

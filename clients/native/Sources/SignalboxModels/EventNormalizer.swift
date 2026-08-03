@@ -1176,10 +1176,24 @@ public enum SignalboxEventNormalizer {
     }
 
     private static func escapedPlanText(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\r", with: "\\r")
-            .replacingOccurrences(of: "\n", with: "\\n")
+        var escaped = ""
+        escaped.reserveCapacity(text.utf8.count)
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\\":
+                escaped += "\\\\"
+            case "\r":
+                escaped += "\\r"
+            case "\n":
+                escaped += "\\n"
+            case _ where CharacterSet.newlines.contains(scalar):
+                let value = String(scalar.value, radix: 16, uppercase: true)
+                escaped += "\\u{\(value)}"
+            default:
+                escaped.unicodeScalars.append(scalar)
+            }
+        }
+        return escaped
     }
 
     private static func planStatusLabel(_ status: String) -> String {

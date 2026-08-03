@@ -1311,6 +1311,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
     XCTAssertTrue(viewModel.canStopAndSend)
+    XCTAssertTrue(viewModel.timeline.isEmpty)
   }
 
   @MainActor
@@ -5439,6 +5440,10 @@ private enum ProcessProjectionFixture {
   static let multilinePlanText = "Draft\nHistory"
   static let multilinePlanArguments = #"{"kind":"create","text":"Draft\nHistory"}"#
   static let multilinePlanOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft\nHistory",\#(planProvenance)}}"#
+  static let alternateNewlinePlanArguments =
+    #"{"kind":"create","text":"Vertical\u000bForm\u000cNext\u0085Line\u2028Paragraph\u2029End"}"#
+  static let alternateNewlinePlanOutput =
+    #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Vertical\u000bForm\u000cNext\u0085Line\u2028Paragraph\u2029End",\#(planProvenance)}}"#
   static let incompletePlanHistoryPreview = rawToolOutputPreview(incompletePlanHistoryOutput)
   static let mismatchedPlanHistoryPreview = rawToolOutputPreview(mismatchedPlanHistoryOutput)
   static let repeatedPlanHistoryAttemptPreview = rawToolOutputPreview(
@@ -5505,6 +5510,16 @@ private enum ProcessProjectionFixture {
   static let multilinePlanArgumentPresentation = "Create entry: Draft\\nHistory"
   static let multilinePlanOutputPresentation = """
     Event #1: Create entry #1: Draft\\nHistory
+    Turn: \(planTurnID)
+    Issuing attempt: \(planIssuingAttemptID)
+    Request: \(planProvenanceRequestID)
+    Attempt: \(planAttemptID)
+    Generation: \(planGeneration)
+    """
+  static let alternateNewlinePlanArgumentPresentation =
+    "Create entry: Vertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End"
+  static let alternateNewlinePlanOutputPresentation = """
+    Event #1: Create entry #1: Vertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End
     Turn: \(planTurnID)
     Issuing attempt: \(planIssuingAttemptID)
     Request: \(planProvenanceRequestID)
@@ -7283,6 +7298,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func alternateNewlinePlanCreateToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: alternateNewlinePlanArguments,
+      output: alternateNewlinePlanOutput,
+      status: .completed
+    )
+  }
+
   private static func planToolRecord(
     requestID: String,
     toolName: String,
@@ -8615,6 +8640,21 @@ extension ProcessServiceIntegrationTests {
     XCTAssertEqual(
       tool.outputPreview,
       ProcessProjectionFixture.multilinePlanOutputPresentation
+    )
+  }
+
+  func testAlternatePlanNewlineScalarsCannotCreateSummaryLabels() throws {
+    let record = ProcessProjectionFixture.alternateNewlinePlanCreateToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.alternateNewlinePlanArgumentPresentation
+    )
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.alternateNewlinePlanOutputPresentation
     )
   }
 }
