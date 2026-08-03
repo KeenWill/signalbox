@@ -824,7 +824,7 @@ public enum SignalboxEventNormalizer {
             history = events.map(formattedPlanEvent)
         }
         return (["Entries"] + (entries.isEmpty ? ["None"] : entries) + [
-            "Next entry: \(value.nextAfterEntryID?.description ?? "None")",
+            "Continue after: \(value.nextAfterEntryID?.description ?? "None")",
             "Plan truncated: \(yesNo(value.planTruncated))",
             "History",
         ] + history + [

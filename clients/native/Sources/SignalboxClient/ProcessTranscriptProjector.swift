@@ -1032,9 +1032,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .turnCompleted(let turnID, _, let completionEntryID, _):
+    case .turnCompleted(_, _, let completionEntryID, _):
       return message.entryID == completionEntryID
-        || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
     case .turnFailed(let turnID, let failureEntryID, _):
       return message.entryID == failureEntryID
         || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)

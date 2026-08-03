@@ -498,6 +498,25 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testSharedDecoderIsolatesConcurrentDuplicateScans() async throws {
+        let decoder = SignalboxJSONCoding.decoder()
+        async let identity = decoder.decode(
+            SignalboxStoredEvent.self,
+            from: Self.duplicateModelIdentityData
+        )
+        async let tool = decoder.decode(
+            SignalboxStoredEvent.self,
+            from: Self.duplicateProcessToolData
+        )
+
+        let values = try await (identity, tool)
+        let identityUnknown = try Self.unknownEvent(in: values.0)
+        let toolUnknown = try Self.unknownEvent(in: values.1)
+
+        XCTAssertEqual(identityUnknown.kind, Self.processModelIdentityKind)
+        XCTAssertEqual(toolUnknown.kind, Self.processToolKind)
+    }
+
     func testExpandedStoredProcessToolDegradesToPayloadPreservingUnknown() throws {
         let data = Data(
             #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_tool","toolRequestID":"\#(Self.storedModelCallID)","toolName":"plan_read","arguments":null,"output":null,"status":"proposed","future_field":"\#(Self.expandedProcessEventFieldValue)"}}"#.utf8
@@ -526,9 +545,19 @@ final class SignalboxModelsTests: XCTestCase {
     private static let importedSpeakerAbsentAttribution = "imported_speaker_absent"
     private static let futureSpeakerKind = "fixture_future_speaker"
     private static let assistantRole = "assistant"
+    private static let processModelIdentityKind = "process_model_identity"
+    private static let processToolKind = "process_tool"
     private static let storedTurnID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     private static let storedModelCallID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     private static let storedEventID = 9
+
+    private static let duplicateModelIdentityData = Data(
+        #"{"event_id":\#(storedEventID),"event":{"kind":"\#(processModelIdentityKind)","turn_id":"\#(storedTurnID)","defaults_version":"1","defaults_version":"2","selected_model_id":"\#(storedModelCallID)"}}"#.utf8
+    )
+
+    private static let duplicateProcessToolData = Data(
+        #"{"event_id":\#(storedEventID),"event":{"kind":"\#(processToolKind)","toolRequestID":"\#(storedModelCallID)","toolName":"plan_read","arguments":null,"output":null,"status":"proposed","status":"completed"}}"#.utf8
+    )
 
     private static func unknownEvent(in stored: SignalboxStoredEvent) throws -> SignalboxUnknownEvent {
         guard case .unknown(let unknown) = stored.event else {

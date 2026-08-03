@@ -410,6 +410,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
+  func testCompletedTurnSideProjectionExcludesPriorToolEvidence() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnAndPriorToolResult()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(ProcessProjectionFixture.toolNames(in: projection).isEmpty)
+  }
+
   func testSideProjectionRejectsReconciliationResultFromAnotherTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCrossTurnReconciliationResult()
     let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
@@ -5854,7 +5865,7 @@ private enum ProcessProjectionFixture {
     Entries
     #1 [Pending, Ready] Audit protocol
     Dependencies: None
-    Next entry: None
+    Continue after: None
     Plan truncated: No
     History
     Event #1: Create entry #1: Audit protocol
@@ -8379,6 +8390,17 @@ private enum ProcessProjectionFixture {
     }.sorted()
   }
 
+  static func toolNames(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [String] {
+    projection.records.compactMap { record in
+      guard case .processTool(let tool) = record.event else {
+        return nil
+      }
+      return tool.toolName
+    }
+  }
+
   static func modelCallUsageIDs(
     in timeline: [SignalboxTimelineItem]
   ) -> [String] {
@@ -8587,6 +8609,96 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"0",
           "entry_count":"3"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCompletedTurnAndPriorToolResult() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(completedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_attempt_id":"\(reconciliationAttempt)",
+            "content":"\(reconciliationOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"4"
         }
         """,
       ]

@@ -3158,10 +3158,16 @@ extension Decoder {
 }
 
 final class SignalboxDuplicateAwareJSONDecoder: JSONDecoder, @unchecked Sendable {
+  private let duplicateScanLock = NSLock()
+
   override func decode<Value: Decodable>(
     _ type: Value.Type,
     from data: Data
   ) throws -> Value {
+    duplicateScanLock.lock()
+    defer {
+      duplicateScanLock.unlock()
+    }
     if userInfo[.signalboxDuplicateObjectPaths] == nil {
       var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
       userInfo[.signalboxDuplicateObjectPaths] = try scanner.scan()
