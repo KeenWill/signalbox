@@ -742,8 +742,18 @@ fn freeze_origin_configuration(
             select_definition,
             capabilities,
         ),
-        None => OriginConfiguration::freeze(checked, select_definition)
-            .map_err(OriginModelSettingsError::UnknownAlias),
+        None => {
+            let origin = OriginConfiguration::freeze(checked, select_definition)
+                .map_err(OriginModelSettingsError::UnknownAlias)?;
+            if origin.requested().per_call_model_settings()
+                != crate::ModelSettingsOverlay::inherit_all()
+            {
+                return Err(OriginModelSettingsError::MissingCapabilities {
+                    selection: origin.effective().model().selected_direct(),
+                });
+            }
+            Ok(origin)
+        }
     }
 }
 
@@ -3353,17 +3363,17 @@ mod tests {
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCapabilities,
         ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
         ModelSelectionRequest, ModelSettingsOverlay, NonEmptyIssuedOperationRefs,
-        NormalizedToolArguments, OriginConfiguration, PerInputConfigurationChoices,
-        PinnedProviderTargetReconstitutionInput, ReasoningLevel, ReconciliationReason,
-        ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-        ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
-        SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
-        SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionInputPosition, SessionReconstitutionInput, SettingOverlay, SteeringBinding,
-        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
-        ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
-        UserContent,
+        NormalizedToolArguments, OriginConfiguration, OriginModelSettingsError,
+        PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, ReasoningLevel,
+        ReconciliationReason, ResolvedContextFrontierReconstitutionInput,
+        ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
+        SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
+        SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+        SessionCreationProvenance, SessionInputPosition, SessionReconstitutionInput,
+        SettingOverlay, SteeringBinding, ToolBatchPhaseReconstitutionInput,
+        ToolBatchReconstitutionInput, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        TranscriptAncestry, TurnDisposition, UserContent,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -4174,6 +4184,36 @@ mod tests {
         assert_eq!(
             event.settings(),
             applied.origin_configuration().effective().model_settings()
+        );
+    }
+
+    /// S37 / INV-051: the legacy preparation path fails closed when a caller
+    /// supplies settings that require a capability record.
+    #[test]
+    fn s37_inv051_legacy_preparation_rejects_unvalidated_per_call_settings() {
+        let selection = direct(2);
+        let per_call = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let command = start_command_with_settings(1, "settings input", 1, per_call);
+
+        let error = command
+            .prepare_when_no_active_turn(
+                &session(1, 1, ModelSelectionRequest::Direct(selection)),
+                accepted_input_id(3),
+                Some(turn_id(4)),
+                None,
+                |_| None,
+            )
+            .expect_err("the legacy path has no capability record");
+
+        assert_eq!(
+            error.failure(),
+            SubmitInputPreparationFailure::ModelSettingsResolution(
+                OriginModelSettingsError::MissingCapabilities { selection }
+            )
         );
     }
 

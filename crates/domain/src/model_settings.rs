@@ -170,6 +170,23 @@ impl ModelSettingsOverlay {
     pub const fn service_tier(&self) -> SettingOverlay<ServiceTier> {
         self.service_tier
     }
+
+    const fn inheriting_from(self, prior: Self) -> Self {
+        Self {
+            reasoning_level: match self.reasoning_level {
+                SettingOverlay::Inherit => prior.reasoning_level,
+                SettingOverlay::ProviderDefault | SettingOverlay::Value(_) => self.reasoning_level,
+            },
+            fast_mode: match self.fast_mode {
+                FastModeOverlay::Inherit => prior.fast_mode,
+                FastModeOverlay::Value(_) => self.fast_mode,
+            },
+            service_tier: match self.service_tier {
+                SettingOverlay::Inherit => prior.service_tier,
+                SettingOverlay::ProviderDefault | SettingOverlay::Value(_) => self.service_tier,
+            },
+        }
+    }
 }
 
 impl Default for ModelSettingsOverlay {
@@ -428,6 +445,12 @@ impl ModelSettingsPrecedence {
     /// session, profile, and global layers.
     pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self {
         Self { per_call, ..self }
+    }
+
+    /// Replaces only the durable session layer while retaining the other
+    /// copied precedence contributions.
+    const fn with_session(self, session: ModelSettingsOverlay) -> Self {
+        Self { session, ..self }
     }
 
     /// Resolves each knob independently through the fixed precedence chain.
@@ -777,7 +800,8 @@ impl std::error::Error for UnsupportedModelSetting {}
 /// One automatic adjustment caused by changing model capability.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ModelChangeAdjustment {
-    /// Reasoning moved to a supported level without increasing it.
+    /// Reasoning moved to the nearest supported level at or below the prior
+    /// value, or to the lowest supported level when none lies below it.
     ReasoningLevelClamped {
         /// Prior inherited level.
         from: ReasoningLevel,
@@ -856,18 +880,31 @@ impl SessionModelSettingsChanged {
         let is_successor =
             prior_defaults_version.checked_next() == Some(installed_defaults_version);
         let records_change = prior_model != installed_model || prior_settings != installed_settings;
-        (is_successor && records_change).then(|| Self {
-            session,
-            command_id,
-            prior_defaults_version,
-            installed_defaults_version,
-            prior_model,
-            installed_model,
-            prior_settings,
-            installed_settings,
-            caller_override,
-            adjustments: adjustments.into_boxed_slice(),
-        })
+        let model_changed = prior_model != installed_model;
+        let prior_precedence = prior_settings.precedence();
+        let unadjusted_precedence = prior_precedence
+            .with_session(caller_override.inheriting_from(prior_precedence.session()));
+        let unadjusted = unadjusted_precedence.resolve();
+        let adjusted = apply_recorded_model_change_adjustments(unadjusted, &adjustments);
+        let provenance_matches = adjusted.is_some_and(|adjusted| {
+            let expected = unadjusted_precedence.with_effective_adjustment(unadjusted, adjusted);
+            installed_settings.precedence() == expected
+                && installed_settings.resolved() == expected.resolve()
+        });
+        let adjustments_match_model_change = adjustments.is_empty() || model_changed;
+        (is_successor && records_change && provenance_matches && adjustments_match_model_change)
+            .then(|| Self {
+                session,
+                command_id,
+                prior_defaults_version,
+                installed_defaults_version,
+                prior_model,
+                installed_model,
+                prior_settings,
+                installed_settings,
+                caller_override,
+                adjustments: adjustments.into_boxed_slice(),
+            })
     }
 
     /// Returns the affected session.
@@ -948,7 +985,8 @@ impl TurnModelSettingsResolved {
         let settings_selection = settings.validated_for();
         let selection_matches =
             settings_selection.is_none() || settings_selection == Some(selection.selected_direct());
-        selection_matches.then(|| Self {
+        let caller_matches = settings.precedence().per_call() == per_call_override;
+        (selection_matches && caller_matches).then(|| Self {
             accepted_input,
             turn,
             defaults_version,
@@ -993,6 +1031,80 @@ impl TurnModelSettingsResolved {
     pub fn adjustments(&self) -> &[ModelChangeAdjustment] {
         &self.adjustments
     }
+}
+
+pub(crate) fn apply_recorded_model_change_adjustments(
+    prior: ResolvedModelSettings,
+    adjustments: &[ModelChangeAdjustment],
+) -> Option<EffectiveModelSettings> {
+    let mut effective = prior.effective();
+    let mut last_knob = 0_u8;
+    for adjustment in adjustments {
+        let knob = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { from, to } => {
+                if last_knob > 1
+                    || prior.reasoning_source() == Some(ModelSettingSource::PerCall)
+                    || effective.reasoning_level() != Some(*from)
+                    || to == from
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    Some(*to),
+                    effective.fast_mode(),
+                    effective.service_tier(),
+                );
+                1
+            }
+            ModelChangeAdjustment::ReasoningLevelCleared { from } => {
+                if last_knob > 1
+                    || prior.reasoning_source() == Some(ModelSettingSource::PerCall)
+                    || effective.reasoning_level() != Some(*from)
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    None,
+                    effective.fast_mode(),
+                    effective.service_tier(),
+                );
+                1
+            }
+            ModelChangeAdjustment::FastModeDisabled => {
+                if last_knob > 2
+                    || prior.fast_mode_source() == Some(ModelSettingSource::PerCall)
+                    || effective.fast_mode() != FastMode::Enabled
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    effective.reasoning_level(),
+                    FastMode::Disabled,
+                    effective.service_tier(),
+                );
+                2
+            }
+            ModelChangeAdjustment::ServiceTierCleared { from } => {
+                if last_knob > 3
+                    || prior.service_tier_source() == Some(ModelSettingSource::PerCall)
+                    || effective.service_tier() != Some(*from)
+                {
+                    return None;
+                }
+                effective = EffectiveModelSettings::new(
+                    effective.reasoning_level(),
+                    effective.fast_mode(),
+                    None,
+                );
+                3
+            }
+        };
+        if knob == last_knob {
+            return None;
+        }
+        last_knob = knob;
+    }
+    Some(effective)
 }
 
 /// One direct selection and its exact settings capability record.
@@ -1090,8 +1202,10 @@ mod tests {
     };
     use crate::test_support::{command_id, direct, provider_model_identity, session_id};
     use crate::{
-        ModelSelectionRequest, ResolvedProviderTarget, SessionConfigurationDefaultsVersion,
+        AcceptedInputId, FrozenModelSelection, ModelSelectionRequest, ResolvedProviderTarget,
+        SessionConfigurationDefaultsVersion, TurnId, TurnModelSettingsResolved,
     };
+    use uuid::Uuid;
 
     fn capabilities(
         levels: impl IntoIterator<Item = ReasoningLevel>,
@@ -1417,7 +1531,23 @@ mod tests {
     #[test]
     fn s37_inv053_defaults_event_retains_ordered_automatic_adjustments() {
         let selection = direct(1);
+        let prior_selection = direct(2);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
+        let prior = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
+            .validate_precedence(
+                prior_selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::High),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the prior fixture level is declared supported");
         let installed = supported
             .validate_precedence(
                 selection,
@@ -1447,9 +1577,9 @@ mod tests {
             command_id(1),
             prior_version,
             installed_version,
-            ModelSelectionRequest::Direct(direct(2)),
+            ModelSelectionRequest::Direct(prior_selection),
             ModelSelectionRequest::Direct(selection),
-            super::ValidatedModelSettings::provider_defaults(),
+            prior,
             installed,
             ModelSettingsOverlay::inherit_all(),
             vec![adjustment],
@@ -1458,5 +1588,86 @@ mod tests {
 
         assert_eq!(event.adjustments(), [adjustment]);
         assert_eq!(event.installed_settings(), installed);
+    }
+
+    /// INV-003 / INV-053: a turn settings event cannot contradict the
+    /// per-call contribution sealed into its complete precedence chain.
+    #[test]
+    fn inv003_inv053_turn_event_rejects_mismatched_per_call_provenance() {
+        let selection = direct(1);
+        let settings = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, [])
+            .validate_precedence(selection, ModelSettingsPrecedence::provider_defaults())
+            .expect("provider defaults are supported");
+        let contradictory = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+
+        let event = TurnModelSettingsResolved::try_new(
+            AcceptedInputId::from_uuid(Uuid::from_u128(1)),
+            TurnId::from_uuid(Uuid::from_u128(2)),
+            SessionConfigurationDefaultsVersion::first(),
+            FrozenModelSelection::Direct(selection),
+            contradictory,
+            settings,
+            Vec::new(),
+        );
+
+        assert_eq!(event, None);
+    }
+
+    /// INV-003 / INV-053: a defaults event cannot claim a caller override
+    /// that does not derive its installed settings snapshot.
+    #[test]
+    fn inv003_inv053_defaults_event_rejects_contradictory_caller_provenance() {
+        let selection = direct(1);
+        let supported = capabilities(
+            [ReasoningLevel::Low, ReasoningLevel::High],
+            FastModeSupport::Unsupported,
+            [],
+        );
+        let prior = supported
+            .validate_precedence(selection, ModelSettingsPrecedence::provider_defaults())
+            .expect("provider defaults are supported");
+        let installed = supported
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the installed fixture level is supported");
+        let contradictory = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let prior_version = SessionConfigurationDefaultsVersion::first();
+        let installed_version = prior_version
+            .checked_next()
+            .expect("the first version has a successor");
+
+        let event = SessionModelSettingsChanged::try_new(
+            session_id(1),
+            command_id(1),
+            prior_version,
+            installed_version,
+            ModelSelectionRequest::Direct(selection),
+            ModelSelectionRequest::Direct(selection),
+            prior,
+            installed,
+            contradictory,
+            Vec::new(),
+        );
+
+        assert_eq!(event, None);
     }
 }
