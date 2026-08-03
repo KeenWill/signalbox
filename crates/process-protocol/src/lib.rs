@@ -1366,6 +1366,7 @@ pub enum ReasoningLevel {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
     XHigh,
     Max,
     Ultra,
@@ -1535,6 +1536,19 @@ impl ModelSettingsSnapshot {
             return Err(FrameValidationError::ModelSettingsShape);
         }
         Ok(())
+    }
+
+    fn validate_defaults(&self) -> Result<(), FrameValidationError> {
+        self.validate()?;
+        if self.precedence.per_call != ModelSettingsOverlay::inherit_all() {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        Ok(())
+    }
+
+    /// Reports whether this snapshot can belong to the supplied model selection.
+    pub fn matches_model(&self, model: &ModelSelection) -> bool {
+        snapshot_matches_model(model, self)
     }
 
     fn is_model_independent_provider_defaults(&self) -> bool {
@@ -3071,6 +3085,8 @@ pub enum ClientRequest {
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
+        /// Per-call settings contribution for the immediate successor origin.
+        model_settings: ModelSettingsOverlay,
     },
     /// Register one immutable external review target snapshot.
     CreateReviewTarget {
@@ -3246,6 +3262,8 @@ pub enum ClientRequest {
         content: InputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
+        /// Per-call settings contribution for the immediate successor origin.
+        model_settings: ModelSettingsOverlay,
     },
     /// Supply the user decision for one pending tool request.
     DecideToolRequest {
@@ -4949,8 +4967,8 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             adjustments,
             ..
         } => {
-            prior_settings.validate()?;
-            installed_settings.validate()?;
+            prior_settings.validate_defaults()?;
+            installed_settings.validate_defaults()?;
             validate_adjustments(adjustments)?;
             let validation_changed = matches!(
                 (
@@ -4959,7 +4977,6 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
                 ),
                 (Some(prior), Some(installed)) if prior != installed
             );
-            let model_changed = prior_model != installed_model || validation_changed;
             let copied_precedence = ModelSettingsPrecedence {
                 per_call: prior_settings.precedence.per_call,
                 session: prior_settings.precedence.session,
@@ -4982,7 +4999,7 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
                 || !snapshot_matches_model(prior_model, prior_settings)
                 || !snapshot_matches_model(installed_model, installed_settings)
                 || !provenance_matches
-                || (!adjustments.is_empty() && !model_changed)
+                || (!adjustments.is_empty() && !validation_changed)
                 || adjustments_target_explicit_overlay(*caller_override, adjustments)
             {
                 return Err(FrameValidationError::ModelSettingsShape);
@@ -5014,6 +5031,8 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
                 || direct_selection_mismatch
                 || validation_mismatch
                 || settings.precedence.per_call != *per_call_override
+                || (!adjustments.is_empty()
+                    && matches!(requested_model, ModelSelection::Direct { .. }))
                 || adjustment_provenance_mismatch
             {
                 return Err(FrameValidationError::ModelSettingsShape);
@@ -5598,8 +5617,8 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
-            Self::SessionCreated { model_settings, .. }
-            | Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
+            Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
+            Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
             Self::SessionDefaultsReplaced {
                 model_selection,
                 model_settings,
@@ -5610,7 +5629,7 @@ impl ServerMessage {
                 model_settings,
                 ..
             } => {
-                model_settings.validate()?;
+                model_settings.validate_defaults()?;
                 if !snapshot_matches_model(model_selection, model_settings) {
                     return Err(FrameValidationError::ModelSettingsShape);
                 }
@@ -6626,6 +6645,32 @@ mod tests {
         }
     }
 
+    fn session_settings_snapshot_fixture() -> ModelSettingsSnapshot {
+        let inherited = ModelSettingsOverlay::inherit_all();
+        let session = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::ProviderDefault,
+        };
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call: inherited,
+                session,
+                profile: inherited,
+                global_default: inherited,
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: Some(ReasoningLevel::High),
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: Some(ModelSettingSource::Session),
+            fast_mode_source: None,
+            service_tier_source: Some(ModelSettingSource::Session),
+            validated_for_selection_id: Some(uuid(4)),
+        }
+    }
+
     const SETTINGS_SNAPSHOT_JSON: &str = concat!(
         "{\"precedence\":{",
         "\"per_call\":{\"reasoning_level\":{\"kind\":\"value\",\"value\":\"high\"},",
@@ -6644,6 +6689,26 @@ mod tests {
         "\"service_tier\":null},\"reasoning_source\":\"per_call\",",
         "\"fast_mode_source\":null,\"service_tier_source\":\"per_call\",",
         "\"validated_for_selection_id\":\"00000000-0000-0000-0000-000000000004\"}"
+    );
+
+    const PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON: &str = concat!(
+        "{\"precedence\":{",
+        "\"per_call\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"session\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"profile\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"global_default\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}}},",
+        "\"effective\":{\"reasoning_level\":null,\"fast_mode\":\"disabled\",",
+        "\"service_tier\":null},\"reasoning_source\":null,",
+        "\"fast_mode_source\":null,\"service_tier_source\":null,",
+        "\"validated_for_selection_id\":null}"
     );
 
     fn orchestration_snapshot_fixture(
@@ -8717,6 +8782,7 @@ mod tests {
                 expected_active_turn_id: uuid(7),
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -8737,6 +8803,7 @@ mod tests {
             expected_active_turn_id: uuid(7),
             content: InputContent::new(String::from("continue after reconciliation")),
             expected_defaults_version: CanonicalU64::new(1),
+            model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         let frame =
@@ -8749,7 +8816,10 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
              \"content\":\"continue after reconciliation\",\
-             \"expected_defaults_version\":\"1\"}}\n"
+             \"expected_defaults_version\":\"1\",\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\
+             \"service_tier\":{\"kind\":\"inherit\"}}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -9443,7 +9513,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
-            model_settings: settings_snapshot_fixture(),
+            model_settings: provider_default_settings_snapshot_fixture(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(None),
         };
@@ -9451,7 +9521,7 @@ mod tests {
             request(7)?,
             replacement_receipt,
             &format!(
-                "{{\"type\":\"session_defaults_replaced\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}"
+                "{{\"type\":\"session_defaults_replaced\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}"
             ),
         )?;
         let model_identity_entry = ServerMessage::TranscriptEntry {
@@ -9630,7 +9700,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
-            model_settings: settings_snapshot_fixture(),
+            model_settings: provider_default_settings_snapshot_fixture(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
@@ -9646,7 +9716,7 @@ mod tests {
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
              \"model_settings\":"
                 .to_owned()
-                + SETTINGS_SNAPSHOT_JSON
+                + PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON
                 + ",\
              \"dangerous_tool_auto_approval\":true,\
              \"system_prompt\":\"exact prompt text\"}}\n"
@@ -9662,7 +9732,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
-            model_settings: settings_snapshot_fixture(),
+            model_settings: provider_default_settings_snapshot_fixture(),
             dangerous_tool_auto_approval: false,
             system_prompt: Some(SystemPromptText::try_new("exact prompt text".to_owned())?),
         };
@@ -9670,7 +9740,7 @@ mod tests {
             request(13)?,
             defaults_read,
             &format!(
-                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":\"exact prompt text\"}}"
+                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":\"exact prompt text\"}}"
             ),
         )?;
         assert_server_message_round_trip(
@@ -9681,12 +9751,12 @@ mod tests {
                 model_selection: ModelSelection::Direct {
                     selection_id: uuid(4),
                 },
-                model_settings: settings_snapshot_fixture(),
+                model_settings: provider_default_settings_snapshot_fixture(),
                 dangerous_tool_auto_approval: false,
                 system_prompt: None,
             },
             &format!(
-                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"1\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":null}}"
+                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"1\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":null}}"
             ),
         )?;
         Ok(())
@@ -10028,6 +10098,7 @@ mod tests {
             expected_active_turn_id: uuid(7),
             content: InputContent::new(String::from("continue after the stop")),
             expected_defaults_version: CanonicalU64::new(1),
+            model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         let frame =
@@ -10040,7 +10111,10 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
              \"content\":\"continue after the stop\",\
-             \"expected_defaults_version\":\"1\"}}\n"
+             \"expected_defaults_version\":\"1\",\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\
+             \"service_tier\":{\"kind\":\"inherit\"}}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -10992,10 +11066,10 @@ mod tests {
             request(1)?,
             ServerMessage::SessionCreated {
                 session_id: uuid(1),
-                model_settings: settings_snapshot_fixture(),
+                model_settings: provider_default_settings_snapshot_fixture(),
             },
             &format!(
-                "{{\"type\":\"session_created\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"model_settings\":{SETTINGS_SNAPSHOT_JSON}}}"
+                "{{\"type\":\"session_created\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"model_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON}}}"
             ),
         )?;
         assert_server_message_round_trip(
@@ -11453,12 +11527,12 @@ mod tests {
             ServerMessage::ModelCapabilityItem {
                 selection_id: uuid(4),
                 capabilities: ModelCapabilities {
-                    reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::High],
+                    reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::XHigh],
                     fast_mode_supported: true,
                     service_tiers: vec![ServiceTier::OpenAi(OpenAiServiceTier::Priority)],
                 },
             },
-            r#"{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":["low","high"],"fast_mode_supported":true,"service_tiers":[{"provider":"open_ai","value":"priority"}]}}"#,
+            r#"{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":["low","xhigh"],"fast_mode_supported":true,"service_tiers":[{"provider":"open_ai","value":"priority"}]}}"#,
         )?;
         Ok(())
     }
@@ -11495,7 +11569,7 @@ mod tests {
     /// precedence provenance.
     #[test]
     fn inv033_model_settings_snapshot_rejects_inconsistent_effective_values() {
-        let mut model_settings = settings_snapshot_fixture();
+        let mut model_settings = session_settings_snapshot_fixture();
         model_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
         let error = ServerFrame::try_new(
             RequestId::try_new(1).expect("fixture request identity is admitted"),
@@ -11513,7 +11587,7 @@ mod tests {
     /// model-independent.
     #[test]
     fn inv033_nondefault_settings_snapshot_requires_validation_identity() {
-        let mut model_settings = settings_snapshot_fixture();
+        let mut model_settings = session_settings_snapshot_fixture();
         model_settings.validated_for_selection_id = None;
 
         let error = ServerFrame::try_new(
@@ -11524,6 +11598,21 @@ mod tests {
             },
         )
         .expect_err("nondefault settings require their validating direct selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: durable defaults snapshots cannot retain a per-call layer.
+    #[test]
+    fn inv033_defaults_snapshot_rejects_per_call_settings() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionCreated {
+                session_id: uuid(1),
+                model_settings: settings_snapshot_fixture(),
+            },
+        )
+        .expect_err("defaults cannot retain an origin-only per-call contribution");
 
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
@@ -11556,16 +11645,47 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
+    /// INV-033: direct requests cannot claim alias-retarget adjustment evidence.
+    #[test]
+    fn inv033_turn_settings_event_rejects_adjustments_for_direct_request() {
+        let mut settings = settings_snapshot_fixture();
+        settings.precedence.session = settings.precedence.per_call;
+        settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
+        settings.reasoning_source = Some(ModelSettingSource::Session);
+        settings.service_tier_source = Some(ModelSettingSource::Session);
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings,
+                    adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                        from: ReasoningLevel::XHigh,
+                        to: ReasoningLevel::High,
+                    }],
+                },
+            },
+        )
+        .expect_err("direct requests cannot carry model-change adjustments");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
     /// INV-033: caller and adjustment evidence must derive the exact installed
     /// defaults snapshot.
     #[test]
     fn inv033_settings_change_event_rejects_unrelated_installed_snapshot() {
         let prior_settings = provider_default_settings_snapshot_fixture();
-        let mut installed_settings = settings_snapshot_fixture();
-        installed_settings.precedence.session = installed_settings.precedence.per_call;
-        installed_settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
-        installed_settings.reasoning_source = Some(ModelSettingSource::Session);
-        installed_settings.service_tier_source = Some(ModelSettingSource::Session);
+        let installed_settings = session_settings_snapshot_fixture();
         let model = ModelSelection::Direct {
             selection_id: uuid(4),
         };
@@ -11652,7 +11772,7 @@ mod tests {
                 model_selection: ModelSelection::Direct {
                     selection_id: uuid(5),
                 },
-                model_settings: settings_snapshot_fixture(),
+                model_settings: session_settings_snapshot_fixture(),
                 dangerous_tool_auto_approval: false,
                 system_prompt: None,
             },
@@ -11667,7 +11787,7 @@ mod tests {
     #[test]
     fn inv012_inv033_settings_change_event_rejects_command_sentinels() {
         let nil = format!(
-            "{{\"version\":1,\"request_id\":\"1\",\"message\":{{\"type\":\"session_event\",\"cursor\":\"1\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"event\":{{\"type\":\"session_model_settings_changed\",\"command_id\":\"00000000-0000-0000-0000-000000000000\",\"prior_defaults_version\":\"1\",\"installed_defaults_version\":\"2\",\"prior_model\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"installed_model\":{{\"kind\":\"alias\",\"alias_id\":\"00000000-0000-0000-0000-000000000005\"}},\"prior_settings\":{SETTINGS_SNAPSHOT_JSON},\"installed_settings\":{SETTINGS_SNAPSHOT_JSON},\"caller_override\":{{\"reasoning_level\":{{\"kind\":\"inherit\"}},\"fast_mode\":{{\"kind\":\"inherit\"}},\"service_tier\":{{\"kind\":\"inherit\"}}}},\"adjustments\":[]}}}}}}"
+            "{{\"version\":1,\"request_id\":\"1\",\"message\":{{\"type\":\"session_event\",\"cursor\":\"1\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"event\":{{\"type\":\"session_model_settings_changed\",\"command_id\":\"00000000-0000-0000-0000-000000000000\",\"prior_defaults_version\":\"1\",\"installed_defaults_version\":\"2\",\"prior_model\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"installed_model\":{{\"kind\":\"alias\",\"alias_id\":\"00000000-0000-0000-0000-000000000005\"}},\"prior_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"installed_settings\":{PROVIDER_DEFAULT_SETTINGS_SNAPSHOT_JSON},\"caller_override\":{{\"reasoning_level\":{{\"kind\":\"inherit\"}},\"fast_mode\":{{\"kind\":\"inherit\"}},\"service_tier\":{{\"kind\":\"inherit\"}}}},\"adjustments\":[]}}}}}}"
         );
         let all_ones = nil.replace(
             "00000000-0000-0000-0000-000000000000",
@@ -11756,8 +11876,8 @@ mod tests {
                         selection_id: uuid(4),
                     },
                     installed_model: ModelSelection::Alias { alias_id: uuid(5) },
-                    prior_settings: settings_snapshot_fixture(),
-                    installed_settings: settings_snapshot_fixture(),
+                    prior_settings: provider_default_settings_snapshot_fixture(),
+                    installed_settings: provider_default_settings_snapshot_fixture(),
                     caller_override: ModelSettingsOverlay::inherit_all(),
                     adjustments: Vec::new(),
                 },
@@ -11784,8 +11904,8 @@ mod tests {
                     installed_defaults_version: CanonicalU64::new(2),
                     prior_model: model,
                     installed_model: model,
-                    prior_settings: settings_snapshot_fixture(),
-                    installed_settings: settings_snapshot_fixture(),
+                    prior_settings: provider_default_settings_snapshot_fixture(),
+                    installed_settings: provider_default_settings_snapshot_fixture(),
                     caller_override: ModelSettingsOverlay::inherit_all(),
                     adjustments: Vec::new(),
                 },

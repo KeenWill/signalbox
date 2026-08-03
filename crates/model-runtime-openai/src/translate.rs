@@ -523,16 +523,25 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_and_fast_mode_use_openai_wire_controls() {
+    fn reasoning_uses_the_openai_effort_control() {
         let mut operation = operation("call-settings");
         operation.settings.reasoning_level = Some(ReasoningLevel::Minimal);
+
+        let request = build_request(&operation).expect("supported reasoning translates");
+        let value = serde_json::to_value(request).expect("wire request serializes");
+
+        assert_eq!(value["reasoning_effort"], "minimal");
+    }
+
+    #[test]
+    fn fast_mode_and_tier_use_the_openai_wire_control() {
+        let mut operation = operation("call-settings");
         operation.settings.fast_mode = FastMode::Enabled;
         operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Fast));
 
         let request = build_request(&operation).expect("supported controls translate");
         let value = serde_json::to_value(request).expect("wire request serializes");
 
-        assert_eq!(value["reasoning_effort"], "minimal");
         assert_eq!(value["service_tier"], "fast");
     }
 

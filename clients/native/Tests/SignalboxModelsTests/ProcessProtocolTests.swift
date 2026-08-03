@@ -435,6 +435,167 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testSettingsChangeSessionEventDecodesAsKnown() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"session_model_settings_changed",
+            "command_id":"33333333-3333-4333-8333-333333333333",
+            "prior_defaults_version":"1",
+            "installed_defaults_version":"2",
+            "prior_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "installed_model":{"kind":"alias","alias_id":"\(sessionID)"},
+            "prior_settings":\(settings),
+            "installed_settings":\(settings),
+            "caller_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "adjustments":[]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 12),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .sessionModelSettingsChanged
+        )
+      )
+    )
+  }
+
+  func testTurnSettingsSessionEventDecodesAsKnown() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"turn_model_settings_resolved",
+            "accepted_input_id":"33333333-3333-4333-8333-333333333333",
+            "turn_id":"\(turnID)",
+            "defaults_version":"1",
+            "requested_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "selected_direct_id":"\(turnID)",
+            "per_call_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "settings":\(settings),
+            "adjustments":[]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 12),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .turnModelSettingsResolved
+        )
+      )
+    )
+  }
+
+  func testSettingsChangeSessionEventRejectsUnknownMembers() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"session_model_settings_changed",
+            "command_id":"33333333-3333-4333-8333-333333333333",
+            "prior_defaults_version":"1",
+            "installed_defaults_version":"2",
+            "prior_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "installed_model":{"kind":"alias","alias_id":"\(sessionID)"},
+            "prior_settings":\(settings),
+            "installed_settings":\(settings),
+            "caller_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "adjustments":[],
+            "unexpected":true
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventRejectsMalformedAdjustments() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"turn_model_settings_resolved",
+            "accepted_input_id":"33333333-3333-4333-8333-333333333333",
+            "turn_id":"\(turnID)",
+            "defaults_version":"1",
+            "requested_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "selected_direct_id":"\(turnID)",
+            "per_call_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "settings":\(settings),
+            "adjustments":[{"type":"reasoning_level_clamped","from":"high"}]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
   func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
     let contextCompactionID = "33333333-3333-4333-8333-333333333333"
     let modelCallID = "44444444-4444-4444-8444-444444444444"
@@ -1572,6 +1733,18 @@ private enum ProcessProtocolFixture {
     guard
       case .transcriptTurn(let turn) = message,
       case .unknown(_, _, let diagnostic) = turn.state
+    else {
+      return nil
+    }
+    return diagnostic
+  }
+
+  static func sessionEventDecodingDiagnostic(
+    in frame: SignalboxProcessServerFrame
+  ) -> SignalboxDecodingDiagnostic? {
+    guard
+      case .sessionEvent(let followed) = frame.message,
+      case .unknown(_, _, let diagnostic) = followed.event
     else {
       return nil
     }

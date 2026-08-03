@@ -608,15 +608,23 @@ mod tests {
     }
 
     #[test]
-    fn codex_controls_map_the_closed_signalbox_ladder_and_fast_tier() {
+    fn codex_controls_map_ultra_reasoning() {
         let mut settings = ModelSettings::new(64);
         settings.reasoning_level = Some(ReasoningLevel::Ultra);
+
+        let controls = codex_controls(&settings).expect("supported reasoning maps");
+
+        assert_eq!(controls.reasoning_effort, Some("ultra"));
+    }
+
+    #[test]
+    fn codex_controls_map_the_fast_tier() {
+        let mut settings = ModelSettings::new(64);
         settings.fast_mode = FastMode::Enabled;
         settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
 
         let controls = codex_controls(&settings).expect("supported controls map");
 
-        assert_eq!(controls.reasoning_effort, Some("ultra"));
         assert!(controls.enable_tier_control);
         assert_eq!(controls.service_tier, Some("priority"));
     }
