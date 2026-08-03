@@ -251,7 +251,8 @@ pub struct ResolvedModelSettings {
 /// selection whose capability record admitted it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ValidatedModelSettings {
-    effective: EffectiveModelSettings,
+    precedence: ModelSettingsPrecedence,
+    resolved: ResolvedModelSettings,
     validated_for: Option<DirectModelSelection>,
 }
 
@@ -259,25 +260,43 @@ impl ValidatedModelSettings {
     /// Model-independent provider defaults.
     pub const fn provider_defaults() -> Self {
         Self {
-            effective: EffectiveModelSettings::provider_defaults(),
+            precedence: ModelSettingsPrecedence::provider_defaults(),
+            resolved: ResolvedModelSettings {
+                effective: EffectiveModelSettings::provider_defaults(),
+                reasoning_source: None,
+                fast_mode_source: None,
+                service_tier_source: None,
+            },
             validated_for: None,
         }
     }
 
     /// Binds a complete value to the exact direct selection that validated it.
     const fn for_selection(
-        effective: EffectiveModelSettings,
+        precedence: ModelSettingsPrecedence,
+        resolved: ResolvedModelSettings,
         validated_for: DirectModelSelection,
     ) -> Self {
         Self {
-            effective,
+            precedence,
+            resolved,
             validated_for: Some(validated_for),
         }
     }
 
+    /// Returns the exact four-layer contributions that produced this value.
+    pub const fn precedence(&self) -> ModelSettingsPrecedence {
+        self.precedence
+    }
+
+    /// Returns the resolved value and per-knob source evidence.
+    pub const fn resolved(&self) -> ResolvedModelSettings {
+        self.resolved
+    }
+
     /// Returns the complete effective value.
     pub const fn effective(&self) -> EffectiveModelSettings {
-        self.effective
+        self.resolved.effective
     }
 
     /// Returns the direct selection that validated non-default settings.
@@ -324,6 +343,16 @@ pub struct ModelSettingsPrecedence {
 }
 
 impl ModelSettingsPrecedence {
+    /// A chain that selects provider defaults at every layer.
+    pub const fn provider_defaults() -> Self {
+        Self {
+            per_call: ModelSettingsOverlay::inherit_all(),
+            session: ModelSettingsOverlay::inherit_all(),
+            profile: ModelSettingsOverlay::inherit_all(),
+            global_default: ModelSettingsOverlay::inherit_all(),
+        }
+    }
+
     /// Constructs the fixed per-call, session, profile, global chain.
     pub const fn new(
         per_call: ModelSettingsOverlay,
@@ -337,6 +366,26 @@ impl ModelSettingsPrecedence {
             profile,
             global_default,
         }
+    }
+
+    /// Returns the per-call contribution.
+    pub const fn per_call(&self) -> ModelSettingsOverlay {
+        self.per_call
+    }
+
+    /// Returns the durable session contribution.
+    pub const fn session(&self) -> ModelSettingsOverlay {
+        self.session
+    }
+
+    /// Returns the copied named-profile contribution.
+    pub const fn profile(&self) -> ModelSettingsOverlay {
+        self.profile
+    }
+
+    /// Returns the copied global-default contribution.
+    pub const fn global_default(&self) -> ModelSettingsOverlay {
+        self.global_default
     }
 
     /// Resolves each knob independently through the fixed precedence chain.
@@ -466,19 +515,20 @@ impl ModelCapabilities {
         Ok(())
     }
 
-    /// Validates a complete resolved value and returns its sealed evidence.
-    pub fn validate_resolved(
+    /// Resolves and validates a complete precedence chain, retaining its
+    /// override provenance in the sealed result.
+    pub fn validate_precedence(
         &self,
         selection: DirectModelSelection,
-        resolved: ResolvedModelSettings,
+        precedence: ModelSettingsPrecedence,
     ) -> Result<ValidatedModelSettings, UnsupportedModelSetting> {
+        let resolved = precedence.resolve();
         self.validate_explicit(
             selection,
             ModelSettingsOverlay::from_effective(resolved.effective),
         )?;
         Ok(ValidatedModelSettings::for_selection(
-            resolved.effective,
-            selection,
+            precedence, resolved, selection,
         ))
     }
 
@@ -1068,19 +1118,20 @@ mod tests {
     fn s37_inv053_defaults_event_retains_ordered_automatic_adjustments() {
         let selection = direct(1);
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
-        let resolved = ModelSettingsPrecedence::new(
-            ModelSettingsOverlay::inherit_all(),
-            ModelSettingsOverlay::new(
-                SettingOverlay::Value(ReasoningLevel::Low),
-                SettingOverlay::Inherit,
-                SettingOverlay::Inherit,
-            ),
-            ModelSettingsOverlay::inherit_all(),
-            ModelSettingsOverlay::inherit_all(),
-        )
-        .resolve();
         let installed = supported
-            .validate_resolved(selection, resolved)
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        SettingOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
             .expect("the fixture level is declared supported");
         let prior_version = SessionConfigurationDefaultsVersion::first();
         let installed_version = prior_version

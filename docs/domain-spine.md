@@ -1712,14 +1712,15 @@ impl ResolvedModelSettings {
 }
 
 pub struct ValidatedModelSettings { /* private */ }
-// sealed: provider_defaults or ModelCapabilities::validate_resolved
+// sealed: provider_defaults or ModelCapabilities::validate_precedence
 impl ValidatedModelSettings {
     pub const fn provider_defaults() -> Self;
-    // accessors: effective(), validated_for()
+    // accessors: precedence(), resolved(), effective(), validated_for()
 }
 
 pub struct ModelSettingsPrecedence { /* private */ }
 impl ModelSettingsPrecedence {
+    pub const fn provider_defaults() -> Self;
     pub const fn new(
         per_call: ModelSettingsOverlay,
         session: ModelSettingsOverlay,
@@ -1727,6 +1728,7 @@ impl ModelSettingsPrecedence {
         global_default: ModelSettingsOverlay,
     ) -> Self;
     pub fn resolve(self) -> ResolvedModelSettings;
+    // accessors: per_call(), session(), profile(), global_default()
 }
 
 pub enum FastModeSupport {
@@ -1747,10 +1749,10 @@ impl ModelCapabilities {
         selection: DirectModelSelection,
         overlay: ModelSettingsOverlay,
     ) -> Result<(), UnsupportedModelSetting>;
-    pub fn validate_resolved(
+    pub fn validate_precedence(
         &self,
         selection: DirectModelSelection,
-        resolved: ResolvedModelSettings,
+        precedence: ModelSettingsPrecedence,
     ) -> Result<ValidatedModelSettings, UnsupportedModelSetting>;
     pub fn adjust_for_model_change(
         &self,
