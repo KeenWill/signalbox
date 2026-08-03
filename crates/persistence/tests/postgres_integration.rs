@@ -3554,17 +3554,24 @@ async fn approval_judge_terminal_transition_accepts_estimated_usage_provenance()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn approval_judge_repository_defaults_to_the_producing_model() -> Result<(), Box<dyn Error>> {
+async fn approval_judge_repository_defaults_to_durable_producing_model_after_catalog_removal()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7ec0;
-    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+    let (fixture, _model_repository, _, requests) = checkpoint_tool_batch_with_approval(
         &pool,
         seed,
         APPROVAL_PROPOSAL,
         InitialToolApproval::Delegated,
     )
     .await?;
-    let repository = model_repository.approval_judge_repository();
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        ModelTargetCatalog::try_from_definitions([])
+            .expect("an empty replacement target catalog is valid"),
+        model_credential_reference(),
+    )
+    .approval_judge_repository();
     let prepared = ready_approval_judge(
         repository
             .prepare(
@@ -3582,9 +3589,17 @@ async fn approval_judge_repository_defaults_to_the_producing_model() -> Result<(
     .bind(fixture.call.into_uuid())
     .fetch_one(&pool)
     .await?;
+    let producing_target: Uuid = sqlx::query_scalar(
+        "SELECT resolved_provider_model_identity_id
+           FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(prepared.request().id(), requests[0]);
     assert_eq!(prepared.selection().into_uuid(), producing_selection);
+    assert_eq!(prepared.target().identity().into_uuid(), producing_target);
 
     pool.close().await;
     drop(container);

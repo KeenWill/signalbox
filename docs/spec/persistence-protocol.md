@@ -613,11 +613,12 @@ Locks per transaction, in acquisition order:
   lock. Preparation then inserts the call; its schema guard takes the exact
   `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
   `FOR UPDATE`, before checking for an existing decision and validating the
-  prepared call. Completion's decision insert takes the request row after the
-  scheduler lock and before its guarded lifecycle transition. Authorization and
-  failure need no additional explicit lock. The shared scheduler-first prefix
-  prevents approval-judge, tool-loop, and lifecycle-transition transactions from
-  holding these rows in reverse order.
+  prepared call. Completion performs its guarded lifecycle transition under the
+  scheduler lock; at commit, the deferred decision-authority trigger then takes
+  the `tool_request` row `FOR UPDATE`. Authorization and failure need no
+  additional explicit lock. The shared scheduler-first prefix prevents
+  approval-judge, tool-loop, and lifecycle-transition transactions from holding
+  these rows in reverse order.
 
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and

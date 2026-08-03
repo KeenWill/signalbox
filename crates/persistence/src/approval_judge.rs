@@ -182,14 +182,18 @@ impl PostgresApprovalJudgeRepository {
                 ApprovalJudgeStateStorageKind::Terminal => Ok(PrepareApprovalJudgeOutcome::NoWork),
             };
         }
-        let judged_selection =
-            load_producing_selection(&mut transaction, batch.producing_call()).await?;
-        let selection = configured_selection.unwrap_or(judged_selection);
-        let resolved = self
-            .targets
-            .resolve(FrozenModelSelection::Direct(selection))
-            .map_err(|_| ApprovalJudgeRepositoryError::TargetUnavailable)?;
-        let target = resolved.target();
+        let producing_model =
+            load_producing_model(&mut transaction, batch.producing_call()).await?;
+        let (selection, target) = match configured_selection {
+            Some(selection) => {
+                let resolved = self
+                    .targets
+                    .resolve(FrozenModelSelection::Direct(selection))
+                    .map_err(|_| ApprovalJudgeRepositoryError::TargetUnavailable)?;
+                (selection, resolved.target())
+            }
+            None => (producing_model.selection, producing_model.target),
+        };
         let credential = resolve_session_credential(
             &mut transaction,
             session,
@@ -594,21 +598,32 @@ fn decode_prepared(
     })
 }
 
-async fn load_producing_selection(
+struct ProducingModel {
+    selection: DirectModelSelection,
+    target: ResolvedProviderTarget,
+}
+
+async fn load_producing_model(
     connection: &mut PgConnection,
     call: ModelCallId,
-) -> Result<DirectModelSelection, ApprovalJudgeRepositoryError> {
-    let selection: Option<Uuid> = sqlx::query_scalar(
+) -> Result<ProducingModel, ApprovalJudgeRepositoryError> {
+    let row = sqlx::query(
         "SELECT COALESCE(direct_model_selection_id, frozen_alias_selected_direct_id)
+                    AS direct_model_selection_id,
+                resolved_provider_model_identity_id
            FROM model_call WHERE model_call_id = $1",
     )
     .bind(call.into_uuid())
     .fetch_optional(connection)
     .await?
-    .flatten();
-    selection
-        .map(DirectModelSelection::from_uuid)
-        .ok_or_else(|| ApprovalJudgeCorruption::Missing("producing direct selection").into())
+    .ok_or(ApprovalJudgeCorruption::Missing("producing model call"))?;
+    Ok(ProducingModel {
+        selection: DirectModelSelection::from_uuid(required(&row, "direct_model_selection_id")?),
+        target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
+            &row,
+            "resolved_provider_model_identity_id",
+        )?)),
+    })
 }
 
 async fn require_exact_judge(
@@ -798,7 +813,24 @@ pub enum ApprovalJudgeCorruption {
 
 impl fmt::Display for ApprovalJudgeCorruption {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("approval judge storage is inconsistent")
+        match self {
+            Self::Missing(relationship) => {
+                write!(
+                    formatter,
+                    "approval judge storage is missing {relationship}"
+                )
+            }
+            Self::Inconsistent(relationship) => {
+                write!(
+                    formatter,
+                    "approval judge storage has inconsistent {relationship}"
+                )
+            }
+            Self::UnsupportedState(discriminator) => write!(
+                formatter,
+                "approval judge storage has unsupported state {discriminator}"
+            ),
+        }
     }
 }
 

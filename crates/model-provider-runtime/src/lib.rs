@@ -13,7 +13,7 @@ mod context_compaction;
 
 pub use approval_judge::{
     ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
-    ApprovalJudgeModelResult, RuntimeApprovalJudgeModel,
+    ApprovalJudgeModelResult, PreparedApprovalJudgeModelCall, RuntimeApprovalJudgeModel,
 };
 pub use context_compaction::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,

@@ -64,34 +64,74 @@ pub struct ApprovalJudgeModelResult {
 
 /// One provider adapter capable of executing a dedicated approval-judge call.
 pub trait ApprovalJudgeModel: fmt::Debug + Send + Sync {
-    /// Executes the already-durably-authorized request exactly once.
-    fn execute<'a>(
+    /// Prepares one provider capability without provider traffic.
+    fn prepare<'a>(
         &'a self,
         request: ApprovalJudgeModelRequest,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<ApprovalJudgeModelResult, ApprovalJudgeModelError>>
+            dyn Future<Output = Result<PreparedApprovalJudgeModelCall, ApprovalJudgeModelError>>
                 + Send
                 + 'a,
         >,
     >;
 }
 
-impl<Model> ApprovalJudgeModel for std::sync::Arc<Model>
-where
-    Model: ApprovalJudgeModel + ?Sized,
-{
-    fn execute<'a>(
-        &'a self,
-        request: ApprovalJudgeModelRequest,
+type ApprovalJudgeExecutionFuture = Pin<
+    Box<
+        dyn Future<Output = Result<ApprovalJudgeModelResult, ApprovalJudgeModelError>>
+            + Send
+            + 'static,
+    >,
+>;
+
+/// One prepared, non-cloneable approval-judge provider capability.
+pub struct PreparedApprovalJudgeModelCall {
+    execute: Box<dyn FnOnce() -> ApprovalJudgeExecutionFuture + Send>,
+}
+
+impl PreparedApprovalJudgeModelCall {
+    fn new(execute: impl FnOnce() -> ApprovalJudgeExecutionFuture + Send + 'static) -> Self {
+        Self {
+            execute: Box::new(execute),
+        }
+    }
+
+    /// Consumes the durably authorized capability exactly once.
+    pub fn execute(
+        self,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ApprovalJudgeModelResult, ApprovalJudgeModelError>>
                 + Send
+                + 'static,
+        >,
+    > {
+        (self.execute)()
+    }
+}
+
+impl fmt::Debug for PreparedApprovalJudgeModelCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PreparedApprovalJudgeModelCall")
+    }
+}
+
+impl<Model> ApprovalJudgeModel for std::sync::Arc<Model>
+where
+    Model: ApprovalJudgeModel + ?Sized,
+{
+    fn prepare<'a>(
+        &'a self,
+        request: ApprovalJudgeModelRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<PreparedApprovalJudgeModelCall, ApprovalJudgeModelError>>
+                + Send
                 + 'a,
         >,
     > {
-        (**self).execute(request)
+        (**self).prepare(request)
     }
 }
 
@@ -111,15 +151,15 @@ impl<R> RuntimeApprovalJudgeModel<R> {
 
 impl<R> ApprovalJudgeModel for RuntimeApprovalJudgeModel<R>
 where
-    R: ModelRuntime<ModelCallId> + fmt::Debug + Send + Sync,
-    R::Prepared: Send,
+    R: ModelRuntime<ModelCallId> + Clone + fmt::Debug + Send + Sync + 'static,
+    R::Prepared: Send + 'static,
 {
-    fn execute<'a>(
+    fn prepare<'a>(
         &'a self,
         request: ApprovalJudgeModelRequest,
     ) -> Pin<
         Box<
-            dyn Future<Output = Result<ApprovalJudgeModelResult, ApprovalJudgeModelError>>
+            dyn Future<Output = Result<PreparedApprovalJudgeModelCall, ApprovalJudgeModelError>>
                 + Send
                 + 'a,
         >,
@@ -142,11 +182,12 @@ where
             operation.system = Some(request.system_prompt);
             operation.output_contract = Some(contract.clone());
             operation.delivery = DeliveryMode::Buffered;
-            let prepared = match self
+            let preparation = self
                 .runtime
                 .prepare(operation, CancellationSignal::never())
-                .await
-            {
+                .await;
+            require_preparation_correlation(&preparation, request.call)?;
+            let prepared = match preparation {
                 PreparationOutcome::Prepared(prepared) => prepared,
                 PreparationOutcome::Cancelled { .. } => {
                     return Err(ApprovalJudgeModelError::CancelledBeforeSend);
@@ -158,78 +199,109 @@ where
                     return Err(ApprovalJudgeModelError::PreparationDefect);
                 }
             };
-            let mut observations: Vec<Observation<ModelCallId>> = Vec::new();
-            let report = self
-                .runtime
-                .execute(prepared, &mut observations, CancellationSignal::never())
-                .await;
-            require_terminal_correlation(report.correlation, request.call)?;
-            let usage = terminal_usage(&report.evidence);
-            require_observation_correlations(&observations, request.call, usage)?;
-            for reported in observations.iter().filter_map(|observation| {
-                let signalbox_model_runtime::ObservationFact::ProviderModelReported(reported) =
-                    &observation.fact
-                else {
-                    return None;
-                };
-                Some(reported)
-            }) {
-                require_same_target(&resolved, reported, usage)?;
-            }
-            let reported_model = match &report.evidence {
-                TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
-                TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
-                TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
-                TerminalEvidence::CancellationConfirmed(evidence) => {
-                    evidence.reported_model.as_ref()
-                }
-                TerminalEvidence::BoundaryLoss(evidence) => evidence.reported_model.as_ref(),
-                TerminalEvidence::ProvenUnsent(_) => None,
-            };
-            if let Some(reported) = reported_model {
-                require_same_target(&resolved, reported, usage)?;
-            }
-            let completed = match report.evidence {
-                TerminalEvidence::Completed(completed) => completed,
-                TerminalEvidence::Refused(evidence) => {
-                    return Err(ApprovalJudgeModelError::Refused(evidence.usage));
-                }
-                TerminalEvidence::ProviderError(evidence) => {
-                    return Err(ApprovalJudgeModelError::ProviderError(evidence.usage));
-                }
-                TerminalEvidence::CancellationConfirmed(_) => {
-                    return Err(ApprovalJudgeModelError::CancellationConfirmed);
-                }
-                TerminalEvidence::ProvenUnsent(evidence) => {
-                    return Err(match evidence.cause {
-                        UnsentCause::CancelledBeforeSend => {
-                            ApprovalJudgeModelError::CancelledBeforeSend
-                        }
-                        UnsentCause::ConnectFailed(_)
-                        | UnsentCause::SendIncompleteProvenUnacceptable(_) => {
-                            ApprovalJudgeModelError::ProvenUnsent
-                        }
-                    });
-                }
-                TerminalEvidence::BoundaryLoss(evidence) => {
-                    return Err(ApprovalJudgeModelError::BoundaryLoss(evidence.usage));
-                }
-            };
-            if completed.finish != CompletionFinish::ToolUse {
-                return Err(ApprovalJudgeModelError::IncompleteDecision(completed.usage));
-            }
-            let decoded: Value =
-                decode_structured(&completed.content, &contract, &NoDomainConstraints)
-                    .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
-            let (recommendation, rationale) = decode_decision(decoded)
-                .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
-            Ok(ApprovalJudgeModelResult {
-                recommendation,
-                rationale,
-                usage: completed.usage,
-            })
+            let runtime = self.runtime.clone();
+            let call = request.call;
+            Ok(PreparedApprovalJudgeModelCall::new(move || {
+                Box::pin(execute_prepared(
+                    runtime, prepared, resolved, contract, call,
+                ))
+            }))
         })
     }
+}
+
+async fn execute_prepared<R>(
+    runtime: R,
+    prepared: R::Prepared,
+    resolved: ResolvedTarget,
+    contract: StructuredOutputContract,
+    call: ModelCallId,
+) -> Result<ApprovalJudgeModelResult, ApprovalJudgeModelError>
+where
+    R: ModelRuntime<ModelCallId> + Send,
+    R::Prepared: Send,
+{
+    let mut observations: Vec<Observation<ModelCallId>> = Vec::new();
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+    require_terminal_correlation(report.correlation, call)?;
+    let usage = terminal_usage(&report.evidence);
+    require_observation_correlations(&observations, call, usage)?;
+    for reported in observations.iter().filter_map(|observation| {
+        let signalbox_model_runtime::ObservationFact::ProviderModelReported(reported) =
+            &observation.fact
+        else {
+            return None;
+        };
+        Some(reported)
+    }) {
+        require_same_target(&resolved, reported, usage)?;
+    }
+    let reported_model = match &report.evidence {
+        TerminalEvidence::Completed(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::Refused(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::ProviderError(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::CancellationConfirmed(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::BoundaryLoss(evidence) => evidence.reported_model.as_ref(),
+        TerminalEvidence::ProvenUnsent(_) => None,
+    };
+    if let Some(reported) = reported_model {
+        require_same_target(&resolved, reported, usage)?;
+    }
+    let completed = match report.evidence {
+        TerminalEvidence::Completed(completed) => completed,
+        TerminalEvidence::Refused(evidence) => {
+            return Err(ApprovalJudgeModelError::Refused(evidence.usage));
+        }
+        TerminalEvidence::ProviderError(evidence) => {
+            return Err(ApprovalJudgeModelError::ProviderError(evidence.usage));
+        }
+        TerminalEvidence::CancellationConfirmed(_) => {
+            return Err(ApprovalJudgeModelError::CancellationConfirmed);
+        }
+        TerminalEvidence::ProvenUnsent(evidence) => {
+            return Err(match evidence.cause {
+                UnsentCause::CancelledBeforeSend => ApprovalJudgeModelError::CancelledBeforeSend,
+                UnsentCause::ConnectFailed(_)
+                | UnsentCause::SendIncompleteProvenUnacceptable(_) => {
+                    ApprovalJudgeModelError::ProvenUnsent
+                }
+            });
+        }
+        TerminalEvidence::BoundaryLoss(evidence) => {
+            return Err(ApprovalJudgeModelError::BoundaryLoss(evidence.usage));
+        }
+    };
+    if completed.finish != CompletionFinish::ToolUse {
+        return Err(ApprovalJudgeModelError::IncompleteDecision(completed.usage));
+    }
+    let decoded: Value = decode_structured(&completed.content, &contract, &NoDomainConstraints)
+        .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
+    let (recommendation, rationale) = decode_decision(decoded)
+        .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
+    Ok(ApprovalJudgeModelResult {
+        recommendation,
+        rationale,
+        usage: completed.usage,
+    })
+}
+
+fn require_preparation_correlation<P>(
+    preparation: &PreparationOutcome<ModelCallId, P>,
+    expected: ModelCallId,
+) -> Result<(), ApprovalJudgeModelError> {
+    let correlation = match preparation {
+        PreparationOutcome::Prepared(_) => return Ok(()),
+        PreparationOutcome::Cancelled { correlation }
+        | PreparationOutcome::Failed { correlation, .. }
+        | PreparationOutcome::Defect { correlation, .. } => correlation,
+    };
+    (*correlation == expected)
+        .then_some(())
+        .ok_or(ApprovalJudgeModelError::CorrelationMismatch(
+            TokenUsage::default(),
+        ))
 }
 
 fn output_contract() -> Result<StructuredOutputContract, ApprovalJudgeModelError> {
@@ -486,6 +558,12 @@ mod tests {
         )
     }
 
+    async fn execute(
+        model: &impl ApprovalJudgeModel,
+    ) -> Result<super::ApprovalJudgeModelResult, ApprovalJudgeModelError> {
+        model.prepare(request()).await?.execute().await
+    }
+
     #[tokio::test]
     async fn typed_approval_result_preserves_all_evidence() {
         let model = RuntimeApprovalJudgeModel::new(
@@ -493,8 +571,7 @@ mod tests {
             catalog(),
         );
 
-        let result = model
-            .execute(request())
+        let result = execute(&model)
             .await
             .expect("the typed decision is admitted");
 
@@ -520,8 +597,7 @@ mod tests {
             catalog(),
         );
 
-        let error = model
-            .execute(request())
+        let error = execute(&model)
             .await
             .expect_err("an open recommendation vocabulary is rejected");
 
@@ -545,8 +621,7 @@ mod tests {
             catalog(),
         );
 
-        let error = model
-            .execute(request())
+        let error = execute(&model)
             .await
             .expect_err("a tool decision requires a tool-use finish");
 
@@ -585,5 +660,20 @@ mod tests {
         .expect_err("an unrelated terminal report is rejected before its evidence is read");
 
         assert_eq!(error.usage(), TokenUsage::default());
+    }
+
+    #[test]
+    fn mismatched_preparation_correlation_fails_closed_without_usage() {
+        let preparation = signalbox_model_runtime::PreparationOutcome::<_, ()>::Cancelled {
+            correlation: ModelCallId::from_uuid(Uuid::from_u128(99)),
+        };
+
+        let error = super::require_preparation_correlation(&preparation, request().call)
+            .expect_err("an unrelated preparation outcome is rejected");
+
+        assert_eq!(
+            error,
+            ApprovalJudgeModelError::CorrelationMismatch(TokenUsage::default())
+        );
     }
 }
