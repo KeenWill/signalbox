@@ -30,11 +30,11 @@ use signalbox_process_protocol::{
     ConversationOriginFilter, ConversationSummary, ErrorCode, ErrorDetail, FrameEncodeError,
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
     MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-    ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion, RejectionDetail,
+    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
@@ -976,7 +976,18 @@ async fn update_session_placement(
             code,
             message,
             detail,
-        } => Err(ClientError::remote(code, message, detail).mutation()),
+        } => {
+            if code == ErrorCode::Rejected
+                && !placement_update_rejection_matches(
+                    detail.value(),
+                    requested_session,
+                    expected_placement_version,
+                )
+            {
+                return Err(ClientError::Protocol("place returned incoherent rejection").mutation());
+            }
+            Err(ClientError::remote(code, message, detail).mutation())
+        }
         _ => Err(ClientError::Protocol("place returned an unexpected response").mutation()),
     }
 }
@@ -992,6 +1003,26 @@ fn placement_update_receipt_matches(
     actual_session == requested_session
         && expected_version.value().checked_add(1) == Some(actual_version.value())
         && actual_placement == requested_placement
+}
+
+fn placement_update_rejection_matches(
+    detail: Option<RejectionDetail>,
+    requested_session: CanonicalUuid,
+    expected_version: CanonicalU64,
+) -> bool {
+    match detail {
+        Some(RejectionDetail::SessionNotFound { session_id }) => session_id == requested_session,
+        Some(RejectionDetail::SessionPlacementCurrentVersionMismatch {
+            session_id,
+            expected_placement_version,
+            ..
+        }) => session_id == requested_session && expected_placement_version == expected_version,
+        Some(RejectionDetail::SessionPlacementVersionExhausted {
+            session_id,
+            current_placement_version,
+        }) => session_id == requested_session && current_placement_version == expected_version,
+        _ => false,
+    }
 }
 
 async fn continue_imported(
@@ -4481,15 +4512,16 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-        ConversationSummary, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState,
-        ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
-        InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
-        ModelCallState, ModelSelection, ProtocolVersion, RequestId, ReviewConcernTerminalOutcome,
-        ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState,
-        ReviewPassKind, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-        ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame,
-        ServerMessage, SessionEvent, SessionPlacement, ToolBatchState, ToolDecision, TurnState,
+        ConversationSummary, FrameEncodeError, GoalCommandRejection, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedSessionRelationship,
+        ImportedSourceSpeaker, InputContent, InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+        MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ProtocolVersion,
+        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewExternalObjectKind,
+        ReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus,
+        ReviewJudgmentEffectTerminalOutcome, ReviewOrchestrationState, ReviewPassKind,
+        ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewRunLifecycle,
+        ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, ServerFrame, ServerMessage,
+        SessionEvent, SessionPlacement, ToolBatchState, ToolDecision, TurnState,
         decode_client_line, encode_server_line,
     };
     use tokio::{
@@ -4509,9 +4541,9 @@ mod tests {
         conversation_import_chunk_read_limit, conversations, create, decide,
         decode_goal_mutation_receipt, import_conversation_file, imported,
         model_call_recovery_transition, open_scanned_import_source,
-        placement_update_receipt_matches, read_goal_text_file, read_import_file, read_input,
-        read_review_json_file, read_system_prompt_file, reconcile_turn, review,
-        review_concern_state_is_coherent, review_finding_event_status,
+        placement_update_receipt_matches, placement_update_rejection_matches, read_goal_text_file,
+        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
+        reconcile_turn, review, review_concern_state_is_coherent, review_finding_event_status,
         review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
         review_pass_completion_is_coherent, review_publication_state_is_coherent,
         review_repair_state_is_coherent, run, search, session_recovery_transition, socket_path,
@@ -4644,6 +4676,67 @@ mod tests {
             requested_session,
             expected_version,
             &requested_placement,
+        ));
+    }
+
+    #[test]
+    fn placement_update_rejection_requires_the_exact_request_evidence() {
+        let requested_session = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let foreign_session = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let expected_version = CanonicalU64::new(u64::MAX);
+
+        assert!(placement_update_rejection_matches(
+            Some(RejectionDetail::SessionNotFound {
+                session_id: requested_session,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            Some(RejectionDetail::SessionNotFound {
+                session_id: foreign_session,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(placement_update_rejection_matches(
+            Some(RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                session_id: requested_session,
+                expected_placement_version: expected_version,
+                current_placement_version: CanonicalU64::new(3),
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            Some(RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                session_id: requested_session,
+                expected_placement_version: CanonicalU64::new(3),
+                current_placement_version: CanonicalU64::new(4),
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(placement_update_rejection_matches(
+            Some(RejectionDetail::SessionPlacementVersionExhausted {
+                session_id: requested_session,
+                current_placement_version: expected_version,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            Some(RejectionDetail::GoalCommandRejected {
+                session_id: requested_session,
+                reason: GoalCommandRejection::SessionNotFound,
+            }),
+            requested_session,
+            expected_version,
+        ));
+        assert!(!placement_update_rejection_matches(
+            None,
+            requested_session,
+            expected_version,
         ));
     }
 

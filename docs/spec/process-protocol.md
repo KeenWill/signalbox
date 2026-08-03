@@ -17,7 +17,7 @@ import transport in PR #401 (`agent/import-chunks-protocol`). This page is the
 normative boundary between a local client process and `signalboxd`; domain
 values, PostgreSQL records, and wire messages remain distinct representations.
 The path-scoped session-placement wire and terminal-client surface were verified
-through `agent/scoped-visibility-wiring`.
+through PR #400 (`agent/scoped-visibility-wiring`).
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1155,7 +1155,10 @@ additionally requires distinct expected and current versions; equality is a
 contradictory frame rather than durable mismatch evidence. Version-exhausted
 evidence requires the maximum placement version. Each is the durable typed
 result of handling the exact update command; equal replay returns the same
-result and conflicting command reuse remains distinct.
+result and conflicting command reuse remains distinct. The terminal client
+accepts one only when its variant, session, expected version, and current
+version cohere with the submitted update; contradictory evidence is an ambiguous
+mutation result.
 
 The proposed `replace_lost_runner` rejection admits
 `session_not_found { session_id }`, `runner_placement_not_found { session_id }`,
