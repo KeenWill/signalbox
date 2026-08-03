@@ -23,20 +23,27 @@ use signalbox_application::{
     ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
-    FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    ProviderModelCallFailureCause, ProviderReportedTokenUsage, ResolvedProviderTarget, SessionId,
-    ToolArgumentsKind, ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind,
-    ToolName as DomainToolName, ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId,
-    TurnId,
+    AnthropicServiceTier as DomainAnthropicServiceTier, AssistantResponsePart, AssistantText,
+    AuthorizedModelCall, CodexCliServiceTier as DomainCodexCliServiceTier, ContextFrontierId,
+    FastMode as DomainFastMode, FrozenModelSelection, ModelCallId, ModelCallTerminalObservation,
+    NormalizedToolArguments, OpenAiServiceTier as DomainOpenAiServiceTier,
+    ProviderModelCallFailureCause, ProviderReportedTokenUsage,
+    ReasoningLevel as DomainReasoningLevel, ResolvedProviderTarget,
+    ServiceTier as DomainServiceTier, SessionId, ToolArgumentsKind,
+    ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
+    ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId, ValidatedModelSettings,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
-    CredentialAccessFailure, CredentialReference, DeliveryMode, LossCause, MessagePart,
-    ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderReportedModel,
-    RequestedTarget, ResolvedTarget, TerminalEvidence, ToolCallId, ToolCallProposal,
-    ToolDefinition, ToolName as RuntimeToolName, ToolResultRecord, UnsentCause,
+    AnthropicServiceTier as RuntimeAnthropicServiceTier, AssistantPart, CancellationSignal,
+    CodexCliServiceTier as RuntimeCodexCliServiceTier, CompletionFinish, ConversationMessage,
+    ConversationRole, CredentialAccessFailure, CredentialReference, DeliveryMode,
+    FastMode as RuntimeFastMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
+    ModelSettings, Observation, ObservationFact, ObservationSink,
+    OpenAiServiceTier as RuntimeOpenAiServiceTier, PreparationFailure, PreparationOutcome,
+    ProviderErrorKind, ProviderReportedModel, ReasoningLevel as RuntimeReasoningLevel,
+    RequestedTarget, ResolvedTarget, ServiceTier as RuntimeServiceTier, TerminalEvidence,
+    ToolCallId, ToolCallProposal, ToolDefinition, ToolName as RuntimeToolName, ToolResultRecord,
+    UnsentCause,
 };
 
 /// The longest provider-reported model identity retained for operator
@@ -124,6 +131,7 @@ impl ProviderTextDeltaSink for DiscardProviderTextDeltas {
 pub struct RuntimeModelDefinition {
     target: ResolvedProviderTarget,
     provider_model: String,
+    fast_target: Option<ResolvedProviderTarget>,
     max_output_tokens: u32,
     context_window_tokens: u32,
 }
@@ -151,6 +159,7 @@ impl RuntimeModelDefinition {
         Ok(Self {
             target,
             provider_model,
+            fast_target: None,
             max_output_tokens,
             context_window_tokens,
         })
@@ -164,6 +173,18 @@ impl RuntimeModelDefinition {
     /// Returns the exact provider-native model spelling.
     pub fn provider_model(&self) -> &str {
         &self.provider_model
+    }
+
+    /// Declares the separately configured provider target authorized when
+    /// this model's validated settings enable mapped fast serving.
+    pub const fn with_fast_target(mut self, fast_target: ResolvedProviderTarget) -> Self {
+        self.fast_target = Some(fast_target);
+        self
+    }
+
+    /// Returns the authorized mapped fast target, when one is declared.
+    pub const fn fast_target(&self) -> Option<ResolvedProviderTarget> {
+        self.fast_target
     }
 
     /// Returns the required provider output-token ceiling.
@@ -227,6 +248,16 @@ impl RuntimeModelCatalog {
             }
             by_target.insert(definition.target, definition);
         }
+        for definition in by_target.values() {
+            if let Some(fast_target) = definition.fast_target
+                && !by_target.contains_key(&fast_target)
+            {
+                return Err(RuntimeModelCatalogError::MissingFastTarget {
+                    target: definition.target,
+                    fast_target,
+                });
+            }
+        }
         Ok(Self {
             definitions: by_target,
         })
@@ -235,6 +266,18 @@ impl RuntimeModelCatalog {
     /// Looks up the exact runtime delivery mapping for a durable target.
     pub fn resolve(&self, target: ResolvedProviderTarget) -> Option<&RuntimeModelDefinition> {
         self.definitions.get(&target)
+    }
+
+    fn effective_provider_target(
+        &self,
+        definition: &RuntimeModelDefinition,
+        fast_mode: DomainFastMode,
+    ) -> Option<ResolvedTarget> {
+        let effective = match (fast_mode, definition.fast_target) {
+            (DomainFastMode::Enabled, Some(target)) => self.resolve(target)?,
+            (DomainFastMode::Disabled, _) | (DomainFastMode::Enabled, None) => definition,
+        };
+        Some(ResolvedTarget::new(effective.provider_model.clone()))
     }
 }
 
@@ -246,11 +289,23 @@ pub enum RuntimeModelCatalogError {
         /// The target whose immutable meaning conflicted.
         target: ResolvedProviderTarget,
     },
+    /// A mapped fast target has no runtime delivery definition.
+    MissingFastTarget {
+        /// Source target declaring mapped fast serving.
+        target: ResolvedProviderTarget,
+        /// Missing authorized fast target.
+        fast_target: ResolvedProviderTarget,
+    },
 }
 
 impl fmt::Display for RuntimeModelCatalogError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runtime model catalog contains a conflicting target")
+        formatter.write_str(match self {
+            Self::ConflictingTarget { .. } => "runtime model catalog contains a conflicting target",
+            Self::MissingFastTarget { .. } => {
+                "runtime model catalog contains a missing mapped fast target"
+            }
+        })
     }
 }
 
@@ -966,6 +1021,60 @@ impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
     }
 }
 
+fn runtime_model_settings(
+    max_output_tokens: u32,
+    validated: ValidatedModelSettings,
+) -> ModelSettings {
+    let effective = validated.effective();
+    let mut settings = ModelSettings::new(max_output_tokens);
+    settings.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
+    settings.fast_mode = runtime_fast_mode(effective.fast_mode());
+    settings.service_tier = effective.service_tier().map(runtime_service_tier);
+    settings
+}
+
+const fn runtime_reasoning_level(value: DomainReasoningLevel) -> RuntimeReasoningLevel {
+    match value {
+        DomainReasoningLevel::None => RuntimeReasoningLevel::None,
+        DomainReasoningLevel::Minimal => RuntimeReasoningLevel::Minimal,
+        DomainReasoningLevel::Low => RuntimeReasoningLevel::Low,
+        DomainReasoningLevel::Medium => RuntimeReasoningLevel::Medium,
+        DomainReasoningLevel::High => RuntimeReasoningLevel::High,
+        DomainReasoningLevel::XHigh => RuntimeReasoningLevel::XHigh,
+        DomainReasoningLevel::Max => RuntimeReasoningLevel::Max,
+        DomainReasoningLevel::Ultra => RuntimeReasoningLevel::Ultra,
+    }
+}
+
+const fn runtime_fast_mode(value: DomainFastMode) -> RuntimeFastMode {
+    match value {
+        DomainFastMode::Disabled => RuntimeFastMode::Disabled,
+        DomainFastMode::Enabled => RuntimeFastMode::Enabled,
+    }
+}
+
+const fn runtime_service_tier(value: DomainServiceTier) -> RuntimeServiceTier {
+    match value {
+        DomainServiceTier::Anthropic(value) => RuntimeServiceTier::Anthropic(match value {
+            DomainAnthropicServiceTier::Auto => RuntimeAnthropicServiceTier::Auto,
+            DomainAnthropicServiceTier::StandardOnly => RuntimeAnthropicServiceTier::StandardOnly,
+        }),
+        DomainServiceTier::OpenAi(value) => RuntimeServiceTier::OpenAi(match value {
+            DomainOpenAiServiceTier::Auto => RuntimeOpenAiServiceTier::Auto,
+            DomainOpenAiServiceTier::Default => RuntimeOpenAiServiceTier::Default,
+            DomainOpenAiServiceTier::Flex => RuntimeOpenAiServiceTier::Flex,
+            DomainOpenAiServiceTier::Scale => RuntimeOpenAiServiceTier::Scale,
+            DomainOpenAiServiceTier::Priority => RuntimeOpenAiServiceTier::Priority,
+            DomainOpenAiServiceTier::Fast => RuntimeOpenAiServiceTier::Fast,
+        }),
+        DomainServiceTier::CodexCli(value) => RuntimeServiceTier::CodexCli(match value {
+            DomainCodexCliServiceTier::Default => RuntimeCodexCliServiceTier::Default,
+            DomainCodexCliServiceTier::Priority => RuntimeCodexCliServiceTier::Priority,
+            DomainCodexCliServiceTier::Flex => RuntimeCodexCliServiceTier::Flex,
+        }),
+    }
+}
+
 impl<R> ModelCallInputTokenCounter for RuntimeModelCallProvider<R>
 where
     R: signalbox_model_runtime::ModelInputTokenCounter<ModelCallId> + Send + Sync,
@@ -1007,7 +1116,7 @@ where
             RequestedTarget::new(render_requested_target(call.selection())),
             ResolvedTarget::new(definition.provider_model().to_owned()),
             messages,
-            ModelSettings::new(definition.max_output_tokens()),
+            runtime_model_settings(definition.max_output_tokens(), request.model_settings()),
         );
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
@@ -1098,14 +1207,25 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let resolved_target = ResolvedTarget::new(definition.provider_model().to_owned());
+        let configured_target = ResolvedTarget::new(definition.provider_model().to_owned());
+        let effective_settings = request.model_settings().effective();
+        let resolved_target = self
+            .models
+            .effective_provider_target(definition, effective_settings.fast_mode())
+            .ok_or_else(|| {
+                fail_closed(
+                    telemetry,
+                    RuntimeModelCallProviderError::UnconfiguredTarget,
+                    None,
+                )
+            })?;
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
-            resolved_target.clone(),
+            configured_target,
             messages,
-            ModelSettings::new(definition.max_output_tokens()),
+            runtime_model_settings(definition.max_output_tokens(), request.model_settings()),
         );
         // The session system prompt frozen through the calling turn's
         // defaults epoch rides every operation; adapters translate a `None`
@@ -1793,6 +1913,7 @@ fn provider_reported_token_usage(evidence: &TerminalEvidence) -> ProviderReporte
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1801,12 +1922,14 @@ mod tests {
     use expect_test::expect;
     use signalbox_application::{ClassifyOperatorFailure, ModelConversationMessage};
     use signalbox_domain::{
-        AssistantText, DirectModelSelection, ImportedText, ImportedTranscriptEntryId, ModelCallId,
-        ModelCallTerminalObservation, NormalizedToolArguments, ProviderModelCallFailureCause,
-        ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
-        SessionConfigurationDefaultsVersion, SessionId, ToolExecutionError, ToolExecutionErrorKind,
-        ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        TurnAttemptId, TurnId,
+        AssistantText, DirectModelSelection, FastMode, FastModeOverlay, FastModeSupport,
+        ImportedText, ImportedTranscriptEntryId, ModelCallId, ModelCallTerminalObservation,
+        ModelCapabilities, ModelSettingsOverlay, ModelSettingsPrecedence, NormalizedToolArguments,
+        OpenAiServiceTier, ProviderModelCallFailureCause, ProviderModelIdentity, ReasoningLevel,
+        SemanticTranscriptEntryId, SemanticTranscriptEntryRef, ServiceTier,
+        SessionConfigurationDefaultsVersion, SessionId, SettingOverlay, ToolExecutionError,
+        ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
     };
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
@@ -1814,7 +1937,8 @@ mod tests {
         CompletionFinish, ConversationMessage, CredentialAccessError, CredentialAccessFailure,
         ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
         PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
-        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
+        ProviderReportedModel, ReasoningLevel as RuntimeReasoningLevel, RefusalEvidence,
+        ServiceTier as RuntimeServiceTier, TerminalEvidence, TokenUsage, ToolCallId,
         ToolCallProposal, ToolName, TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
@@ -1824,7 +1948,7 @@ mod tests {
         ProviderTextDeltaSink, RuntimeInputTokenCountError, RuntimeModelCallProviderError,
         RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition,
         RuntimeModelDefinitionError, classify_terminal, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages,
+        provider_reported_token_usage, render_runtime_messages, runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -3042,6 +3166,96 @@ mod tests {
                     .expect("fixture definition is valid"),
             ]),
             Err(RuntimeModelCatalogError::ConflictingTarget { target: target(1) })
+        );
+    }
+
+    #[test]
+    fn validated_domain_settings_map_completely_into_runtime_settings() {
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(1));
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Max]),
+            FastModeSupport::RequestControl,
+            BTreeSet::from([ServiceTier::OpenAi(OpenAiServiceTier::Priority)]),
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::Max),
+                FastModeOverlay::Value(FastMode::Enabled),
+                SettingOverlay::Value(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let validated = capabilities
+            .validate_precedence(selection, precedence)
+            .expect("fixture settings are declared by the capability record");
+
+        let mapped = runtime_model_settings(512, validated);
+
+        assert_eq!(mapped.max_output_tokens, 512);
+        assert_eq!(mapped.reasoning_level, Some(RuntimeReasoningLevel::Max));
+        assert_eq!(mapped.fast_mode, signalbox_model_runtime::FastMode::Enabled);
+        assert_eq!(
+            mapped.service_tier,
+            Some(RuntimeServiceTier::OpenAi(
+                signalbox_model_runtime::OpenAiServiceTier::Priority
+            ))
+        );
+    }
+
+    #[test]
+    fn mapped_fast_target_is_the_authorized_lineage_only_when_enabled() {
+        let ordinary = RuntimeModelDefinition::try_new(
+            target(1),
+            String::from("fixture-standard"),
+            64,
+            200_000,
+        )
+        .expect("ordinary fixture definition is valid")
+        .with_fast_target(target(2));
+        let fast =
+            RuntimeModelDefinition::try_new(target(2), String::from("fixture-fast"), 64, 200_000)
+                .expect("fast fixture definition is valid");
+        let catalog = RuntimeModelCatalog::try_from_definitions([ordinary, fast])
+            .expect("mapped target is present");
+        let source = catalog
+            .resolve(target(1))
+            .expect("source target is present");
+
+        assert_eq!(
+            catalog
+                .effective_provider_target(source, FastMode::Disabled)
+                .expect("ordinary target resolves")
+                .as_str(),
+            "fixture-standard"
+        );
+        assert_eq!(
+            catalog
+                .effective_provider_target(source, FastMode::Enabled)
+                .expect("mapped fast target resolves")
+                .as_str(),
+            "fixture-fast"
+        );
+    }
+
+    #[test]
+    fn runtime_catalog_rejects_a_missing_mapped_fast_target() {
+        let ordinary = RuntimeModelDefinition::try_new(
+            target(1),
+            String::from("fixture-standard"),
+            64,
+            200_000,
+        )
+        .expect("ordinary fixture definition is valid")
+        .with_fast_target(target(2));
+
+        assert_eq!(
+            RuntimeModelCatalog::try_from_definitions([ordinary]),
+            Err(RuntimeModelCatalogError::MissingFastTarget {
+                target: target(1),
+                fast_target: target(2),
+            })
         );
     }
 }

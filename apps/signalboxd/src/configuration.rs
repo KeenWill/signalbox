@@ -548,6 +548,10 @@ impl HubModelConfiguration {
                 required_uuid(model, "target_id")?,
             ));
             let capabilities = parse_model_capabilities(model, mapping.adapter)?;
+            let fast_target = match capabilities.fast_mode() {
+                FastModeSupport::AlternateTarget(target) => Some(target),
+                FastModeSupport::Unsupported | FastModeSupport::RequestControl => None,
+            };
             let provider_model = provider_model.to_owned();
             let rates = parse_model_billing_rates(model)?;
             if let Some(previous) = target_billing_rates.insert(target, rates.clone())
@@ -590,15 +594,17 @@ impl HubModelConfiguration {
                 provider_model: provider_model.clone(),
                 capabilities,
             });
-            runtime_definitions.push(
-                RuntimeModelDefinition::try_new(
-                    target,
-                    provider_model,
-                    max_output_tokens,
-                    context_window_tokens,
-                )
-                .map_err(|_| HubModelConfigurationError::InvalidField)?,
-            );
+            let runtime_definition = RuntimeModelDefinition::try_new(
+                target,
+                provider_model,
+                max_output_tokens,
+                context_window_tokens,
+            )
+            .map_err(|_| HubModelConfigurationError::InvalidField)?;
+            runtime_definitions.push(match fast_target {
+                Some(target) => runtime_definition.with_fast_target(target),
+                None => runtime_definition,
+            });
         }
 
         if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
