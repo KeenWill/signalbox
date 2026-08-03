@@ -203,8 +203,10 @@ Implemented table families (across the forward-only migrations):
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale, and adds the typed
-  `tool_approval_decided_outbox_event` family; and
+  recommendation, and rationale;
+- migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
+  family and requires each explicit approval decision to install exactly one
+  ordered lifecycle effect and outbox event atomically; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
