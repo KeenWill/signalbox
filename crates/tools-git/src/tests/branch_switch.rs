@@ -1,6 +1,9 @@
 //! Branch switch checkout properties.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use git2::Repository;
 
@@ -17,6 +20,26 @@ use crate::tests::support::{
     TARGET_CONTENT, TRACKED_PATH, UNTRACKED_CONTENT, UNTRACKED_PATH, commit_all, execute,
     raw_commit_with_tree,
 };
+
+fn create_over_depth_quarantine_chain(root: PathBuf) {
+    let _deepest = (0..=MAX_QUARANTINE_DEPTH).fold(root, |parent, index| {
+        let child = parent.join(format!("d{index}"));
+        fs::create_dir(&child).expect("over-depth quarantine directory creates");
+        child
+    });
+}
+
+fn cleanup_directories(root: &Path) -> Vec<PathBuf> {
+    fs::read_dir(root)
+        .expect("fixture root reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".signalbox-cleanup-"))
+        })
+        .collect()
+}
 
 #[test]
 fn branch_switch_changes_real_head() {
@@ -364,6 +387,7 @@ fn branch_switch_replaces_a_clean_tracked_directory_with_a_file() {
         fs::read(fixture.root().join("src")).expect("switched flat fixture reads"),
         flat_content
     );
+    assert!(cleanup_directories(fixture.root()).is_empty());
 }
 
 #[test]
@@ -630,12 +654,7 @@ fn quarantine_snapshot_failure_restores_the_original_directory() {
                     .map(|entry| entry.path().join("entry"))
                     .find(|path| path.join("main.txt").is_file())
                     .expect("quarantined source exists");
-                let _deepest =
-                    (0..=MAX_QUARANTINE_DEPTH).fold(quarantined_source, |parent, index| {
-                        let child = parent.join(format!("d{index}"));
-                        fs::create_dir(&child).expect("over-depth quarantine directory creates");
-                        child
-                    });
+                create_over_depth_quarantine_chain(quarantined_source);
             },
         )
         .expect_err("over-depth quarantine snapshot rejects");

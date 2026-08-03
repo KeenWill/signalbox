@@ -979,19 +979,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             } else {
                 transition.target_snapshot.clone()
             };
-            transition.target.clear_on_drop_only_if_unchanged(&expected);
+            let _ = transition.target.clear_if_unchanged(&expected);
         }
     }
 
     fn cleanup_published_quarantines(quarantined: &mut [QuarantinedCheckoutDirectory]) {
         for transition in quarantined {
-            transition
+            let _ = transition
                 .quarantine
-                .clear_on_drop_only_if_unchanged(&transition.quarantine_snapshot);
-            let target_remainder = transition.target_snapshot.without_subtree(&transition.path);
-            transition
-                .target
-                .clear_on_drop_only_if_unchanged(&target_remainder);
+                .clear_if_unchanged(&transition.quarantine_snapshot);
+            let expected_target = if transition.target_published {
+                transition.target_snapshot.without_subtree(&transition.path)
+            } else {
+                transition.target_snapshot.clone()
+            };
+            let _ = transition.target.clear_if_unchanged(&expected_target);
         }
     }
 
