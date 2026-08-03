@@ -1009,22 +1009,26 @@ reason/provenance shape does not match its kind.
 
 `session_delegation_wait` records the exact awaiting tool request, relationship,
 parent turn, and foreground/background mode. A foreground row correlates the
-turn's `awaiting_child` phase; a background row cannot. `session_message` is
-append-only, uniquely orders messages per relationship, and requires exact
-parent/child sender and recipient plus the sending tool request.
-`session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, result-unavailable, and child-originated
-terminal outcomes, or one of the same exclusive parent-turn-command and
-parent-goal-command provenance arms for a policy-driven stop or cancellation.
-Delivery satellites bind messages/results to their exact semantic entries; no
-transcript query supplies result content. Every pending message and background
-result delivery additionally receives one positive recipient-wide
-`delivery_sequence` under the recipient session lock. That sequence is unique
-and gap-free per recipient across both kinds; relationship ordinals remain
-relationship-local evidence and never order two different relationships.
-Foreground results stay ordered by their exact awaiting request and do not
-consume an inbox sequence.
+turn's `awaiting_child` phase; a background row cannot and instead requires the
+exact completed effect-free attempt and normalized registration receipt for its
+awaiting request. `session_message` is append-only, uniquely orders messages per
+relationship, and requires exact parent/child sender and recipient plus the
+sending tool request. `session_child_result` has at most one row per spawning
+request and carries exactly one returned-text, failed, stopped, or cancelled
+shape with child turn provenance for returned, failed, result-unavailable, and
+child-originated terminal outcomes, or one of the same exclusive
+parent-turn-command and parent-goal-command provenance arms for a policy-driven
+stop or cancellation. Delivery satellites bind messages/results to their exact
+semantic entries; no transcript query supplies result content. Every pending
+message and background result delivery additionally receives one positive
+recipient-wide `delivery_sequence` under the recipient session lock. That
+sequence is unique and gap-free per recipient across both kinds; relationship
+ordinals remain relationship-local evidence and never order two different
+relationships. Foreground results stay ordered by their exact awaiting request
+and do not consume an inbox sequence. Their semantic entry repeats that awaiting
+request as the ordinary logical tool-result correlation, so the unchanged
+proposal-order and single-result checks admit it as the `await_session` result
+without admitting a second result for the same request.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated
@@ -1040,8 +1044,11 @@ The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Every result
 and message commit also writes exactly one distinct parent- or recipient-scoped
 `delegation_wake` outbox event in the same transaction. A consumer may ignore
-the nudge while that session is already active; the ordinary nudge remains best
-effort and the durable predicate is authoritative after restart.
+the nudge while that session is already active. When a foreground wait is
+registered after its result and original wake already committed, the wait
+transaction writes a fresh result wake keyed by the awaiting request and ordered
+after the wait update. The ordinary nudge remains best effort and the durable
+predicate is authoritative after restart.
 
 ## Transactional outbox
 
@@ -1094,14 +1101,19 @@ plus nullable result content for `child_result`, or message identity, endpoints,
 ordinal, and content for `session_message`. A separate version-one
 `delegation_wake_outbox_event` typed table carries the internal
 `delegation_wake` event kind and one closed wake subject: `result` requires an
-equal `result_spawning_request_id`, while `message` requires a
-`DelegationMessageId` belonging to that relationship. The header's `session_id`
-is the stream receiving the update or wake. Per-kind checks require exactly that
-shape's columns and reject all others; foreign keys correlate every supplied
-identity to the same relationship. Dispatch decodes both closed unions and
-rejects every other storage version. The header completeness trigger includes
-both record kinds, and both typed records are append-only and reject `TRUNCATE`
-with the rest of the family.
+equal `result_spawning_request_id`; its nullable `awaiting_tool_request_id`
+distinguishes the one initial result wake from a fresh late-foreground-wait wake
+and, when present, must name that relationship's exact wait. `message` instead
+requires a `DelegationMessageId` belonging to that relationship and no awaiting
+request. The header's `session_id` is the stream receiving the update or wake.
+Per-kind checks require exactly that shape's columns and reject all others;
+foreign keys correlate every supplied identity to the same relationship.
+Lifecycle-disposition updates admit only parent-turn-command or
+parent-goal-command stop/cancel cascade evaluations; child-origin terminal
+events are delivered through `child_result` instead. Dispatch decodes both
+closed unions and rejects every other storage version. The header completeness
+trigger includes both record kinds, and both typed records are append-only and
+reject `TRUNCATE` with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,

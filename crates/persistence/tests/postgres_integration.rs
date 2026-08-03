@@ -2569,21 +2569,28 @@ async fn record_stale_active_input(
 async fn active_origin_collision(
     repository: &SubmitInputRepository,
     pool: &PgPool,
-    command_value: u128,
+    command_id: DurableCommandId,
+    session: SessionId,
+    active_origin_input: AcceptedInputId,
     delivery: DeliveryRequest,
     turn: Option<u128>,
 ) -> Result<(SubmitInputRepositoryError, i64), Box<dyn Error>> {
-    let command = input_with_delivery(command_value, 0x841, "colliding active origin", delivery);
+    let command = input_with_delivery(
+        command_id.into_uuid().as_u128(),
+        session.into_uuid().as_u128(),
+        "colliding active origin",
+        delivery,
+    );
     let error = repository
         .handle(
             command,
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
+            active_origin_input,
             turn.map(|value| TurnId::from_uuid(Uuid::from_u128(value))),
         )
         .await
         .expect_err("new acceptance cannot reuse the active origin identity");
     let claimed = sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
-        .bind(Uuid::from_u128(command_value))
+        .bind(command_id.into_uuid())
         .fetch_one(pool)
         .await?;
     Ok((error, claimed))
@@ -2679,6 +2686,58 @@ where
             }
         }
     }
+}
+
+type CancellationDispatch = (
+    SessionId,
+    TurnId,
+    SemanticTranscriptEntryId,
+    ContextFrontierId,
+);
+
+async fn drain_cancellation_dispatches(
+    pool: &PgPool,
+) -> Result<Vec<CancellationDispatch>, OutboxDispatchError> {
+    let mut cancellations = Vec::new();
+    drain_outbox(pool, |event| {
+        let DispatchedOutboxEventKind::TurnCancelled {
+            turn,
+            cancellation_entry,
+            terminal_frontier,
+        } = event.kind()
+        else {
+            return;
+        };
+        cancellations.push((
+            event.session(),
+            *turn,
+            *cancellation_entry,
+            *terminal_frontier,
+        ));
+    })
+    .await?;
+    Ok(cancellations)
+}
+
+type ReconciliationDispatch = (SessionId, TurnId, ModelCallId, ContextFrontierId);
+
+async fn drain_reconciliation_dispatches(
+    pool: &PgPool,
+) -> Result<Vec<ReconciliationDispatch>, OutboxDispatchError> {
+    let mut reconciliations = Vec::new();
+    drain_outbox(pool, |event| {
+        let DispatchedOutboxEventKind::TurnReconciliationRequired {
+            turn,
+            operation: DispatchedReconciliationOperation::ModelCall(call),
+            terminal_frontier,
+        } = event.kind()
+        else {
+            return;
+        };
+        reconciliations.push((event.session(), *turn, *call, *terminal_frontier));
+    })
+    .await?;
+    Ok(reconciliations)
 }
 
 async fn corrupt_ended_attempt_disposition(
@@ -6372,17 +6431,10 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         "an interrupt that consumed the batch makes a stale continuation hint no work"
     );
 
-    let mut cancelled_turns = Vec::new();
-    drain_outbox(&pool, |event| {
-        let DispatchedOutboxEventKind::TurnCancelled { turn, .. } = event.kind() else {
-            return;
-        };
-        cancelled_turns.push(*turn);
-    })
-    .await?;
+    let cancellation_events = drain_cancellation_dispatches(&pool).await?;
+    assert_eq!(cancellation_events.len(), 1);
     assert_eq!(
-        cancelled_turns,
-        vec![fixture.turn],
+        cancellation_events[0].1, fixture.turn,
         "tool-batch cancellation must remain deliverable after its producing call",
     );
 
@@ -7800,6 +7852,132 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// The delegation migration retains the reviewed lock, result, wake, and
+/// cascade predicates after PostgreSQL parses every definition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let spawn_lock: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('lock_delegation_parent_for_spawn()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(spawn_lock.contains("FOR NO KEY UPDATE"));
+
+    let delivery_lock: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('guard_session_pending_delivery_append()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(delivery_lock.contains("FOR NO KEY UPDATE"));
+
+    let cascade_frontier: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'delegation_cascade_expected_frontier(uuid,text)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(cascade_frontier.contains("LEFT JOIN session_child_result"));
+    assert!(cascade_frontier.contains("parent.effective_parent_kind"));
+    let empty_cascade_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM delegation_cascade_expected_frontier($1, 'stopped')",
+    )
+    .bind(Uuid::nil())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(empty_cascade_count, 0);
+
+    let delivery_shape: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = 'session_child_result_delivery_sequence_shape'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(delivery_shape.contains("delivery_kind IS NOT NULL"));
+
+    let lifecycle_update: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_lifecycle_update()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(lifecycle_update.contains("parent_turn_command"));
+    assert!(lifecycle_update.contains("parent_goal_command"));
+
+    let lifecycle_update_shape: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = 'delegation_update_subject_shape'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(lifecycle_update_shape.contains("parent_stopped_parent_and_descendants"));
+    assert!(lifecycle_update_shape.contains("parent_cancelled_parent_and_descendants"));
+    assert!(lifecycle_update_shape.contains("parent_turn_command"));
+    assert!(lifecycle_update_shape.contains("parent_goal_command"));
+
+    let lifecycle_update_subject: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_update_subject()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(lifecycle_update_subject.contains("parent_stopped_parent_and_descendants"));
+    assert!(lifecycle_update_subject.contains("parent_cancelled_parent_and_descendants"));
+    assert!(lifecycle_update_subject.contains("parent_turn_command"));
+    assert!(lifecycle_update_subject.contains("parent_goal_command"));
+
+    let wait_purpose: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_wait_purpose()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(wait_purpose.contains("state_kind = 'terminal'"));
+    assert!(wait_purpose.contains("terminal_disposition_kind = 'completed'"));
+    assert!(wait_purpose.contains("effect_class = 'effect_free'"));
+    assert!(wait_purpose.contains("session_await_registered"));
+    assert!(wait_purpose.contains("tool_request_id"));
+
+    let late_wait: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_wait_update()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(late_wait.contains("wake.event_sequence > waiting_update_sequence"));
+    assert!(late_wait.contains("wake.awaiting_tool_request_id"));
+
+    let continued_call: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'assert_model_call_steering_final_state(uuid)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(continued_call.contains("delegation_result"));
+    let extended_validator_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_proc
+          WHERE proname IN (
+                'assert_tool_request_single_result',
+                'assert_tool_loop_turn_final_state_pre_delegation',
+                'assert_reconciliation_required_turn_final_state',
+                'continuation_frontier_closes_predecessor_tool_round'
+          )
+            AND pg_get_functiondef(oid) LIKE '%delegation_result%'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(extended_validator_count, 4);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-014: the credential-reference column is total; the migrated schema
 /// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
@@ -8840,24 +9018,7 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
         interrupt_outcome
     );
 
-    let mut cancellation_events = Vec::new();
-    drain_outbox(&pool, |event| {
-        let DispatchedOutboxEventKind::TurnCancelled {
-            turn,
-            cancellation_entry,
-            terminal_frontier,
-        } = event.kind()
-        else {
-            return;
-        };
-        cancellation_events.push((
-            event.session(),
-            *turn,
-            *cancellation_entry,
-            *terminal_frontier,
-        ));
-    })
-    .await?;
+    let cancellation_events = drain_cancellation_dispatches(&pool).await?;
     assert_eq!(
         cancellation_events,
         vec![(
@@ -9007,19 +9168,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
         }
     );
 
-    let mut reconciliation_events = Vec::new();
-    drain_outbox(&pool, |event| {
-        let DispatchedOutboxEventKind::TurnReconciliationRequired {
-            turn,
-            operation: DispatchedReconciliationOperation::ModelCall(call),
-            terminal_frontier,
-        } = event.kind()
-        else {
-            return;
-        };
-        reconciliation_events.push((event.session(), *turn, *call, *terminal_frontier));
-    })
-    .await?;
+    let reconciliation_events = drain_reconciliation_dispatches(&pool).await?;
     assert_eq!(
         reconciliation_events,
         vec![(
@@ -18553,8 +18702,10 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
 async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let prepared_session = prepared(0x441, 0x841, direct(0xc41));
+    let session = prepared_session.session().id();
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(0x441, 0x841, direct(0xc41)))
+        .handle(prepared_session)
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x941));
     let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa41));
@@ -18575,7 +18726,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     let activated = activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
-            session: Uuid::from_u128(0x841),
+            session: session.into_uuid(),
             origin_entry: Uuid::from_u128(0xd41),
             starting_frontier: Uuid::from_u128(0xe41),
             initial_attempt: Uuid::from_u128(0xb41),
@@ -18603,17 +18754,18 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         active_start_outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::ActiveTurnPresent {
-                session: SessionId::from_uuid(Uuid::from_u128(0x841)),
-                active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+                session,
+                active_turn: active_origin_turn,
             },
         ))
     );
 
+    let stale_expected_turn = TurnId::from_uuid(Uuid::from_u128(0xaff));
     let stale_after = record_stale_active_input(
         &repository,
         0x444,
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            expected_active_turn: stale_expected_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
         0x943,
@@ -18624,7 +18776,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         &repository,
         0x445,
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            expected_active_turn: stale_expected_turn,
         },
         0x944,
         None,
@@ -18634,7 +18786,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         &repository,
         0x446,
         DeliveryRequest::Interrupt {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            expected_active_turn: stale_expected_turn,
             descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
@@ -18644,32 +18796,38 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     .await?;
     let stale_expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
         SubmitInputRejectedResult::ActiveTurnMismatch {
-            session: SessionId::from_uuid(Uuid::from_u128(0x841)),
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
-            actual_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            session,
+            expected_active_turn: stale_expected_turn,
+            actual_active_turn: active_origin_turn,
         },
     ));
     assert_eq!(stale_after.1, stale_expected);
     assert_eq!(stale_safe_point.1, stale_expected);
     assert_eq!(stale_interrupt.1, stale_expected);
 
+    let after_collision_command = DurableCommandId::from_uuid(Uuid::from_u128(0x449));
     let after_collision = active_origin_collision(
         &repository,
         &pool,
-        0x449,
+        after_collision_command,
+        session,
+        active_origin_input,
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
         Some(0xa49),
     )
     .await?;
+    let safe_point_collision_command = DurableCommandId::from_uuid(Uuid::from_u128(0x44a));
     let safe_point_collision = active_origin_collision(
         &repository,
         &pool,
-        0x44a,
+        safe_point_collision_command,
+        session,
+        active_origin_input,
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
         },
         None,
     )
@@ -18682,15 +18840,9 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     else {
         panic!("after-current collision retains exact authority")
     };
-    assert_eq!(
-        command_id,
-        DurableCommandId::from_uuid(Uuid::from_u128(0x449))
-    );
-    assert_eq!(active_turn, TurnId::from_uuid(Uuid::from_u128(0xa41)));
-    assert_eq!(
-        accepted_input,
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
-    );
+    assert_eq!(command_id, after_collision_command);
+    assert_eq!(active_turn, active_origin_turn);
+    assert_eq!(accepted_input, active_origin_input);
     assert_eq!(after_collision.1, 0);
     let SubmitInputRepositoryError::AcceptedInputIdentityCollision {
         command_id,
@@ -18700,15 +18852,9 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     else {
         panic!("safe-point collision retains exact authority")
     };
-    assert_eq!(
-        command_id,
-        DurableCommandId::from_uuid(Uuid::from_u128(0x44a))
-    );
-    assert_eq!(active_turn, TurnId::from_uuid(Uuid::from_u128(0xa41)));
-    assert_eq!(
-        accepted_input,
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
-    );
+    assert_eq!(command_id, safe_point_collision_command);
+    assert_eq!(active_turn, active_origin_turn);
+    assert_eq!(accepted_input, active_origin_input);
     assert_eq!(safe_point_collision.1, 0);
 
     let queued_before_interrupt = repository
@@ -18758,16 +18904,17 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         0x841,
         "matching interrupt",
         DeliveryRequest::Interrupt {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
             descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
+    let matching_successor_turn = TurnId::from_uuid(Uuid::from_u128(0xa46));
     let outcome = repository
         .handle(
             matching_interrupt.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x946)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa46))),
+            Some(matching_successor_turn),
         )
         .await
         .expect("matching interrupt applies atomically");
@@ -18777,7 +18924,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     else {
         panic!("matching interrupt records its successor origin")
     };
-    assert_eq!(applied.turn(), TurnId::from_uuid(Uuid::from_u128(0xa46)));
+    assert_eq!(applied.turn(), matching_successor_turn);
     assert!(applied.applied_interrupt().is_some());
     let claimed: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -18818,7 +18965,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         0x841,
         "safe point after direct cancellation",
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
         },
     );
     let next_outcome = repository
@@ -18832,8 +18979,8 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         next_outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                session: SessionId::from_uuid(Uuid::from_u128(0x841)),
-                expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+                session,
+                expected_active_turn: active_origin_turn,
             },
         ))
     );
@@ -18932,17 +19079,14 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     let interrupt_successor = activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
-            session: Uuid::from_u128(0x841),
+            session: session.into_uuid(),
             origin_entry: Uuid::from_u128(0xd46),
             starting_frontier: Uuid::from_u128(0xe46),
             initial_attempt: Uuid::from_u128(0xb46),
         },
     )
     .await?;
-    assert_eq!(
-        interrupt_successor.turn(),
-        TurnId::from_uuid(Uuid::from_u128(0xa46))
-    );
+    assert_eq!(interrupt_successor.turn(), matching_successor_turn);
     assert_eq!(
         interrupt_successor.start().lineage(),
         AcceptedInputStartingLineage::After {
@@ -18970,7 +19114,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
-                SessionId::from_uuid(Uuid::from_u128(0x841)),
+                session,
                 signalbox_domain::AcceptedInputTurnFailureIdentities::new(
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd47)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xe47)),
@@ -18983,7 +19127,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     let ordinary_successor = activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
-            session: Uuid::from_u128(0x841),
+            session: session.into_uuid(),
             origin_entry: Uuid::from_u128(0xd48),
             starting_frontier: Uuid::from_u128(0xe48),
             initial_attempt: Uuid::from_u128(0xb48),
@@ -18997,7 +19141,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     assert_eq!(
         ordinary_successor.start().lineage(),
         AcceptedInputStartingLineage::After {
-            immediate_predecessor: TurnId::from_uuid(Uuid::from_u128(0xa46)),
+            immediate_predecessor: matching_successor_turn,
         }
     );
 
@@ -19917,8 +20061,13 @@ async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
 async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
-    create.handle(prepared(0x311, 0x711, direct(0x811))).await?;
-    create.handle(prepared(0x312, 0x712, alias(0x812))).await?;
+    let direct_session_fixture = prepared(0x311, 0x711, direct(0x811));
+    let direct_session = direct_session_fixture.session().id();
+    create.handle(direct_session_fixture).await?;
+    let default_alias = ModelAlias::from_uuid(Uuid::from_u128(0x812));
+    let alias_session_fixture = prepared(0x312, 0x712, ModelSelectionRequest::Alias(default_alias));
+    let alias_session = alias_session_fixture.session().id();
+    create.handle(alias_session_fixture).await?;
     let repository = SubmitInputRepository::new(pool.clone());
 
     let missing = start_input(
@@ -19974,7 +20123,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                session: SessionId::from_uuid(Uuid::from_u128(0x711)),
+                session: direct_session,
                 expected_active_turn: expected_turn,
             },
         ))
@@ -19998,7 +20147,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                session: SessionId::from_uuid(Uuid::from_u128(0x711)),
+                session: direct_session,
                 expected_active_turn: expected_turn,
             },
         ))
@@ -20023,7 +20172,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                session: SessionId::from_uuid(Uuid::from_u128(0x711)),
+                session: direct_session,
                 expected_active_turn: expected_turn,
             },
         ))
@@ -20053,7 +20202,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
     else {
         panic!("stale defaults must record the exact version mismatch")
     };
-    assert_eq!(*session, SessionId::from_uuid(Uuid::from_u128(0x711)));
+    assert_eq!(*session, direct_session);
     assert_eq!(expected.as_u64(), 2);
     assert_eq!(current.as_u64(), 1);
     ReplaceSessionDefaultsRepository::new(pool.clone())
@@ -20087,18 +20236,19 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::UnknownModelAlias {
-                session: SessionId::from_uuid(Uuid::from_u128(0x712)),
-                alias: ModelAlias::from_uuid(Uuid::from_u128(0x812)),
+                session: alias_session,
+                alias: default_alias,
             },
         ))
     );
 
+    let explicit_alias = ModelAlias::from_uuid(Uuid::from_u128(0x81c));
     let explicit_unknown = start_input(
         0x31c,
         0x711,
         "explicit alias",
         2,
-        ModelSelectionOverride::ReplaceWith(alias(0x81c)),
+        ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(explicit_alias)),
     );
     assert_eq!(
         repository
@@ -20110,8 +20260,8 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::UnknownModelAlias {
-                session: SessionId::from_uuid(Uuid::from_u128(0x711)),
-                alias: ModelAlias::from_uuid(Uuid::from_u128(0x81c)),
+                session: direct_session,
+                alias: explicit_alias,
             },
         ))
     );
