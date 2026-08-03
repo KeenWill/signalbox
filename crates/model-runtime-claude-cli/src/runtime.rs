@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentVariable,
-    CliProcessRequest, DeliveryMode, ModelOperation, ModelRuntime, ObservationSink,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProvenUnsentEvidence,
-    TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
+    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentOverride,
+    CliEnvironmentVariable, CliProcessRequest, DeliveryMode, FastMode, ModelCapabilityCatalog,
+    ModelOperation, ModelRuntime, ModelSettings, ObservationSink, PreparationDefect,
+    PreparationFailure, PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, TerminalEvidence,
+    TerminalReport, UnsentCause, execute_cli_process,
 };
 use tempfile::TempDir;
 
@@ -92,6 +93,7 @@ pub struct ClaudeCliRuntime {
     interrupt_grace: Duration,
     event_limit: usize,
     stderr_limit: usize,
+    model_capabilities: ModelCapabilityCatalog,
 }
 
 /// Opaque one-shot capability for one Claude Code process spawn.
@@ -111,6 +113,8 @@ pub struct ClaudeCliPreparedRequest<C> {
     interrupt_grace: Duration,
     event_limit: usize,
     stderr_limit: usize,
+    reasoning_effort: Option<&'static str>,
+    max_output_tokens: u32,
 }
 
 /// Why a [`ClaudeCliRuntime`] could not be constructed.
@@ -175,6 +179,7 @@ impl std::fmt::Debug for ClaudeCliRuntime {
             .field("interrupt_grace", &self.interrupt_grace)
             .field("event_limit", &self.event_limit)
             .field("stderr_limit", &self.stderr_limit)
+            .field("model_capabilities", &self.model_capabilities)
             .finish()
     }
 }
@@ -225,6 +230,7 @@ impl ClaudeCliRuntime {
             interrupt_grace: config.interrupt_grace,
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
+            model_capabilities: config.model_capabilities,
         })
     }
 
@@ -233,18 +239,7 @@ impl ClaudeCliRuntime {
         operation: ModelOperation<C>,
     ) -> PreparationOutcome<C, ClaudeCliPreparedRequest<C>> {
         let correlation = operation.correlation;
-        if operation.credential_reference != self.credential_reference {
-            return PreparationOutcome::Failed {
-                correlation,
-                failure: PreparationFailure::CredentialUnavailable {
-                    error: signalbox_model_runtime::CredentialAccessError::new(
-                        operation.credential_reference,
-                        signalbox_model_runtime::CredentialAccessFailure::Unmapped,
-                    ),
-                },
-            };
-        }
-        let operation = ModelOperation {
+        let mut operation = ModelOperation {
             correlation: (),
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,
@@ -257,6 +252,46 @@ impl ClaudeCliRuntime {
             output_contract: operation.output_contract,
             delivery: operation.delivery,
         };
+        let capabilities = match self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)
+        {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: error.to_string(),
+                    },
+                };
+            }
+        };
+        if let Some(capabilities) = capabilities {
+            operation.resolved_target = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .expect("validated fast mode has a declared target")
+                .clone();
+        }
+        let reasoning_effort = match claude_reasoning_effort(&operation.settings) {
+            Ok(reasoning_effort) => reasoning_effort,
+            Err(failure) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                };
+            }
+        };
+        if operation.credential_reference != self.credential_reference {
+            return PreparationOutcome::Failed {
+                correlation,
+                failure: PreparationFailure::CredentialUnavailable {
+                    error: signalbox_model_runtime::CredentialAccessError::new(
+                        operation.credential_reference,
+                        signalbox_model_runtime::CredentialAccessFailure::Unmapped,
+                    ),
+                },
+            };
+        }
         let mut translated = match translate(&operation) {
             Ok(translated) => translated,
             Err(TranslationError::Failure(failure)) => {
@@ -272,7 +307,11 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        let support = match create_support_files(&self.mcp_bridge_executable, &translated) {
+        let support = match create_support_files(
+            &self.mcp_bridge_executable,
+            &translated,
+            operation.settings.fast_mode,
+        ) {
             Ok(support) => support,
             Err(detail) => {
                 return PreparationOutcome::Defect {
@@ -297,8 +336,30 @@ impl ClaudeCliRuntime {
             interrupt_grace: self.interrupt_grace,
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
+            reasoning_effort,
+            max_output_tokens: operation.settings.max_output_tokens,
         })
     }
+}
+
+fn claude_reasoning_effort(
+    settings: &ModelSettings,
+) -> Result<Option<&'static str>, PreparationFailure> {
+    settings
+        .reasoning_level
+        .map(|level| match level {
+            ReasoningLevel::Low => Ok("low"),
+            ReasoningLevel::Medium => Ok("medium"),
+            ReasoningLevel::High => Ok("high"),
+            ReasoningLevel::XHigh => Ok("xhigh"),
+            ReasoningLevel::Max => Ok("max"),
+            ReasoningLevel::None | ReasoningLevel::Minimal | ReasoningLevel::Ultra => {
+                Err(PreparationFailure::UnsupportedOperation {
+                    detail: "Claude CLI cannot enforce the requested reasoning level".to_string(),
+                })
+            }
+        })
+        .transpose()
 }
 
 struct SupportFiles {
@@ -310,6 +371,7 @@ struct SupportFiles {
 fn create_support_files(
     bridge: &Path,
     translated: &crate::translate::TranslatedOperation,
+    fast_mode: FastMode,
 ) -> Result<SupportFiles, String> {
     let temporary_directory = std::path::absolute(std::env::temp_dir())
         .map_err(|error| format!("could not absolutize temporary directory: {error}"))?;
@@ -352,6 +414,7 @@ fn create_support_files(
         shell_quote(ready_text)
     );
     let isolated_settings = serde_json::json!({
+        "fastMode": fast_mode == FastMode::Enabled,
         "hooks": {"SessionStart": [{"hooks": [{
             "type": "command", "command": hook_command, "timeout": 10
         }]}]}
@@ -446,6 +509,9 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg("--model")
         .arg(&prepared.resolved_target)
         .current_dir(&prepared.working_directory);
+    if let Some(effort) = prepared.reasoning_effort {
+        command.arg("--effort").arg(effort);
+    }
     let decoder = EventDecoder::new(
         prepared.correlation.clone(),
         prepared.delivery,
@@ -460,6 +526,10 @@ async fn execute_process<C: Clone + Send + Sync>(
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CLAUDE_ENVIRONMENT,
+        environment_overrides: vec![CliEnvironmentOverride::new(
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+            prepared.max_output_tokens.to_string(),
+        )],
     };
     let _support_directory = prepared.support_directory;
     execute_cli_process(request, sink, cancellation).await
@@ -467,7 +537,10 @@ async fn execute_process<C: Clone + Send + Sync>(
 
 #[cfg(test)]
 mod tests {
-    use super::{CLAUDE_CONFIG_HOME_VARIABLE, CLAUDE_ENVIRONMENT, CliEnvironmentVariable};
+    use super::{
+        CLAUDE_CONFIG_HOME_VARIABLE, CLAUDE_ENVIRONMENT, CliEnvironmentVariable, ModelSettings,
+        ReasoningLevel, claude_reasoning_effort,
+    };
 
     const DIRECT_CREDENTIAL_VARIABLE: &str = "ANTHROPIC_API_KEY";
 
@@ -491,5 +564,24 @@ mod tests {
                 .any(|variable| variable.name() == DIRECT_CREDENTIAL_VARIABLE),
             "direct credential values never reach the child"
         );
+    }
+
+    #[test]
+    fn claude_effort_mapping_uses_the_supported_cli_value() {
+        let mut settings = ModelSettings::new(64);
+        settings.reasoning_level = Some(ReasoningLevel::Max);
+
+        assert_eq!(
+            claude_reasoning_effort(&settings).expect("max is supported"),
+            Some("max")
+        );
+    }
+
+    #[test]
+    fn claude_effort_mapping_rejects_ultra() {
+        let mut settings = ModelSettings::new(64);
+        settings.reasoning_level = Some(ReasoningLevel::Ultra);
+
+        assert!(claude_reasoning_effort(&settings).is_err());
     }
 }

@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use signalbox_model_runtime::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentVariable,
-    CliProcessRequest, DeliveryMode, ModelOperation, ModelRuntime, ObservationSink,
-    PreparationDefect, PreparationFailure, PreparationOutcome, ProvenUnsentEvidence,
+    CliProcessRequest, CodexCliServiceTier, DeliveryMode, FastMode, ModelCapabilityCatalog,
+    ModelOperation, ModelRuntime, ModelSettings, ObservationSink, PreparationDefect,
+    PreparationFailure, PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, ServiceTier,
     TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
 };
 use tempfile::NamedTempFile;
@@ -135,6 +136,7 @@ pub struct CodexCliRuntime {
     interrupt_grace: Duration,
     event_limit: usize,
     stderr_limit: usize,
+    model_capabilities: ModelCapabilityCatalog,
 }
 
 /// Opaque one-shot capability for one Codex CLI spawn.
@@ -156,6 +158,13 @@ pub struct CodexCliPreparedRequest<C> {
     interrupt_grace: Duration,
     event_limit: usize,
     stderr_limit: usize,
+    controls: CodexControls,
+}
+
+struct CodexControls {
+    reasoning_effort: Option<&'static str>,
+    enable_tier_control: bool,
+    service_tier: Option<&'static str>,
 }
 
 /// Why a [`CodexCliRuntime`] could not be constructed.
@@ -224,6 +233,7 @@ impl std::fmt::Debug for CodexCliRuntime {
             .field("interrupt_grace", &self.interrupt_grace)
             .field("event_limit", &self.event_limit)
             .field("stderr_limit", &self.stderr_limit)
+            .field("model_capabilities", &self.model_capabilities)
             .finish()
     }
 }
@@ -268,6 +278,7 @@ impl CodexCliRuntime {
             interrupt_grace: config.interrupt_grace,
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
+            model_capabilities: config.model_capabilities,
         })
     }
 
@@ -276,18 +287,7 @@ impl CodexCliRuntime {
         operation: ModelOperation<C>,
     ) -> PreparationOutcome<C, CodexCliPreparedRequest<C>> {
         let correlation = operation.correlation;
-        if operation.credential_reference != self.credential_reference {
-            return PreparationOutcome::Failed {
-                correlation,
-                failure: PreparationFailure::CredentialUnavailable {
-                    error: signalbox_model_runtime::CredentialAccessError::new(
-                        operation.credential_reference,
-                        signalbox_model_runtime::CredentialAccessFailure::Unmapped,
-                    ),
-                },
-            };
-        }
-        let operation = ModelOperation {
+        let mut operation = ModelOperation {
             correlation: (),
             credential_reference: operation.credential_reference,
             requested_target: operation.requested_target,
@@ -300,6 +300,46 @@ impl CodexCliRuntime {
             output_contract: operation.output_contract,
             delivery: operation.delivery,
         };
+        let capabilities = match self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)
+        {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: error.to_string(),
+                    },
+                };
+            }
+        };
+        if let Some(capabilities) = capabilities {
+            operation.resolved_target = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .expect("validated fast mode has a declared target")
+                .clone();
+        }
+        let controls = match codex_controls(&operation.settings) {
+            Ok(controls) => controls,
+            Err(failure) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                };
+            }
+        };
+        if operation.credential_reference != self.credential_reference {
+            return PreparationOutcome::Failed {
+                correlation,
+                failure: PreparationFailure::CredentialUnavailable {
+                    error: signalbox_model_runtime::CredentialAccessError::new(
+                        operation.credential_reference,
+                        signalbox_model_runtime::CredentialAccessFailure::Unmapped,
+                    ),
+                },
+            };
+        }
         let mut translated = match translate(&operation) {
             Ok(translated) => translated,
             Err(TranslationError::Failure(failure)) => {
@@ -372,8 +412,53 @@ impl CodexCliRuntime {
             interrupt_grace: self.interrupt_grace,
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
+            controls,
         })
     }
+}
+
+fn codex_controls(settings: &ModelSettings) -> Result<CodexControls, PreparationFailure> {
+    let reasoning_effort = settings.reasoning_level.map(|level| match level {
+        ReasoningLevel::None => "none",
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh => "xhigh",
+        ReasoningLevel::Max => "max",
+        ReasoningLevel::Ultra => "ultra",
+    });
+    let service_tier = match (settings.fast_mode, settings.service_tier) {
+        (FastMode::Disabled, None) => None,
+        (FastMode::Disabled, Some(ServiceTier::CodexCli(CodexCliServiceTier::Default))) => {
+            Some("default")
+        }
+        (FastMode::Disabled, Some(ServiceTier::CodexCli(CodexCliServiceTier::Flex))) => {
+            Some("flex")
+        }
+        (FastMode::Enabled, None)
+        | (FastMode::Enabled, Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority))) => {
+            Some("priority")
+        }
+        (FastMode::Disabled, Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority)))
+        | (FastMode::Enabled, Some(ServiceTier::CodexCli(CodexCliServiceTier::Default)))
+        | (FastMode::Enabled, Some(ServiceTier::CodexCli(CodexCliServiceTier::Flex))) => {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "Codex fast mode and service tier select incompatible serving modes"
+                    .to_string(),
+            });
+        }
+        (_, Some(_)) => {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "Codex cannot enforce another provider's service tier".to_string(),
+            });
+        }
+    };
+    Ok(CodexControls {
+        reasoning_effort,
+        enable_tier_control: settings.fast_mode == FastMode::Enabled || service_tier.is_some(),
+        service_tier,
+    })
 }
 
 impl<C: Clone + Send + Sync> ModelRuntime<C> for CodexCliRuntime {
@@ -426,6 +511,19 @@ async fn execute_process<C: Clone + Send + Sync>(
     for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
         command.arg("--disable").arg(feature);
     }
+    if prepared.controls.enable_tier_control {
+        command.arg("--enable").arg("fast_mode");
+    }
+    if let Some(effort) = prepared.controls.reasoning_effort {
+        command
+            .arg("--config")
+            .arg(format!("model_reasoning_effort=\"{effort}\""));
+    }
+    if let Some(tier) = prepared.controls.service_tier {
+        command
+            .arg("--config")
+            .arg(format!("service_tier=\"{tier}\""));
+    }
     command
         .arg("--config")
         .arg("agents.enabled=false")
@@ -462,6 +560,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CODEX_ENVIRONMENT,
+        environment_overrides: Vec::new(),
     };
     let _output_schema = prepared.output_schema;
     execute_cli_process(request, sink, cancellation).await
@@ -470,8 +569,9 @@ async fn execute_process<C: Clone + Send + Sync>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CODEX_CREDENTIAL_HOME, CODEX_ENVIRONMENT, CliEnvironmentVariable,
-        FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT,
+        CODEX_CREDENTIAL_HOME, CODEX_ENVIRONMENT, CliEnvironmentVariable, CodexCliServiceTier,
+        FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT, FastMode, ModelSettings, ReasoningLevel,
+        ServiceTier, codex_controls,
     };
 
     /// INV-035: the CLI receives only a reference to its ambient login store;
@@ -493,5 +593,27 @@ mod tests {
                 .iter()
                 .any(|variable| variable.name() == FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT)
         );
+    }
+
+    #[test]
+    fn codex_controls_map_the_closed_signalbox_ladder_and_fast_tier() {
+        let mut settings = ModelSettings::new(64);
+        settings.reasoning_level = Some(ReasoningLevel::Ultra);
+        settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
+
+        let controls = codex_controls(&settings).expect("supported controls map");
+
+        assert_eq!(controls.reasoning_effort, Some("ultra"));
+        assert!(controls.enable_tier_control);
+        assert_eq!(controls.service_tier, Some("priority"));
+    }
+
+    #[test]
+    fn codex_controls_reject_priority_without_fast_mode() {
+        let mut settings = ModelSettings::new(64);
+        settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
+
+        assert!(codex_controls(&settings).is_err());
     }
 }

@@ -100,6 +100,13 @@ pub struct ModelCapabilityCatalog {
 }
 
 impl ModelCapabilityCatalog {
+    /// Constructs an empty catalog for callers that use provider defaults.
+    pub fn empty() -> Self {
+        Self {
+            definitions: Box::new([]),
+        }
+    }
+
     /// Constructs a catalog and rejects a repeated exact target.
     pub fn try_from_definitions(
         definitions: impl IntoIterator<Item = ModelCapabilityDefinition>,
@@ -153,9 +160,31 @@ impl ModelCapabilityCatalog {
         Ok(capabilities)
     }
 
+    /// Validates catalog-governed controls when the operation sets one.
+    ///
+    /// Operations carrying only provider defaults need no catalog entry;
+    /// every explicit provider control requires the exact target record.
+    pub fn validate_explicit(
+        &self,
+        target: &ResolvedTarget,
+        settings: &ModelSettings,
+    ) -> Result<Option<&ModelCapabilities>, ModelCapabilityError> {
+        if settings.has_explicit_provider_controls() {
+            self.validate(target, settings).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Iterates in canonical target-spelling order.
     pub fn iter(&self) -> impl Iterator<Item = &ModelCapabilityDefinition> {
         self.definitions.iter()
+    }
+}
+
+impl Default for ModelCapabilityCatalog {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -183,7 +212,16 @@ pub enum ModelCapabilityError {
 
 impl std::fmt::Display for ModelCapabilityError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("model settings are incompatible with the exact runtime target")
+        formatter.write_str(match self {
+            Self::UnknownTarget { .. } => "the exact runtime target has no model-capability record",
+            Self::UnsupportedReasoningLevel { .. } => {
+                "the explicit reasoning level is unsupported by the exact runtime target"
+            }
+            Self::UnsupportedFastMode => "fast mode is unsupported by the exact runtime target",
+            Self::UnsupportedServiceTier { .. } => {
+                "the explicit service tier is unsupported by the exact runtime target"
+            }
+        })
     }
 }
 

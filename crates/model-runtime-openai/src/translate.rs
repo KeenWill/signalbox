@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
-    ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
-    PreparationFailure, ToolChoice,
+    ConversationMessage, ConversationRole, DeliveryMode, FastMode, MessagePart, ModelOperation,
+    OpenAiServiceTier, PreparationFailure, ReasoningLevel, ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
@@ -82,10 +82,18 @@ pub(crate) fn build_request<C>(
     }
     validate_tool_history(&operation.messages)?;
     let streamed = operation.delivery == DeliveryMode::Streamed;
+    let reasoning_effort = operation
+        .settings
+        .reasoning_level
+        .map(openai_reasoning_effort)
+        .transpose()?;
+    let service_tier = openai_service_tier(operation)?;
     Ok(ChatRequest {
         model: operation.resolved_target.as_str().to_string(),
         messages,
         max_completion_tokens: operation.settings.max_output_tokens,
+        reasoning_effort,
+        service_tier,
         temperature: operation.settings.temperature,
         top_p: operation.settings.top_p,
         stop: operation.settings.stop_sequences.clone(),
@@ -97,6 +105,47 @@ pub(crate) fn build_request<C>(
             include_usage: true,
         }),
     })
+}
+
+fn openai_reasoning_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFailure> {
+    match level {
+        ReasoningLevel::None => Ok("none"),
+        ReasoningLevel::Minimal => Ok("minimal"),
+        ReasoningLevel::Low => Ok("low"),
+        ReasoningLevel::Medium => Ok("medium"),
+        ReasoningLevel::High => Ok("high"),
+        ReasoningLevel::XHigh => Ok("xhigh"),
+        ReasoningLevel::Max => Ok("max"),
+        ReasoningLevel::Ultra => Err(PreparationFailure::UnsupportedOperation {
+            detail: "OpenAI Chat Completions cannot enforce ultra reasoning".to_string(),
+        }),
+    }
+}
+
+fn openai_service_tier<C>(
+    operation: &ModelOperation<C>,
+) -> Result<Option<&'static str>, PreparationFailure> {
+    let tier = match operation.settings.service_tier {
+        Some(ServiceTier::OpenAi(OpenAiServiceTier::Auto)) => Some("auto"),
+        Some(ServiceTier::OpenAi(OpenAiServiceTier::Default)) => Some("default"),
+        Some(ServiceTier::OpenAi(OpenAiServiceTier::Flex)) => Some("flex"),
+        Some(ServiceTier::OpenAi(OpenAiServiceTier::Scale)) => Some("scale"),
+        Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority)) => Some("priority"),
+        Some(ServiceTier::OpenAi(OpenAiServiceTier::Fast)) => Some("fast"),
+        Some(_) => {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "OpenAI cannot enforce another provider's service tier".to_string(),
+            });
+        }
+        None => None,
+    };
+    match (operation.settings.fast_mode, tier) {
+        (FastMode::Enabled, None | Some("fast")) => Ok(Some("fast")),
+        (FastMode::Enabled, Some(_)) => Err(PreparationFailure::UnsupportedOperation {
+            detail: "OpenAI fast mode is incompatible with a non-fast service tier".to_string(),
+        }),
+        (FastMode::Disabled, _) => Ok(tier),
+    }
 }
 
 fn validate_function_names<C>(operation: &ModelOperation<C>) -> Result<(), PreparationFailure> {
@@ -452,10 +501,10 @@ mod tests {
     use expect_test::expect;
     use signalbox_model_runtime::CredentialReference;
     use signalbox_model_runtime::{
-        ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
-        ModelSettings, PreparationFailure, RequestedTarget, ResolvedTarget,
-        StructuredOutputContract, ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition,
-        ToolName, ToolResultRecord,
+        ConversationMessage, ConversationRole, DeliveryMode, FastMode, MessagePart, ModelOperation,
+        ModelSettings, OpenAiServiceTier, PreparationFailure, ReasoningLevel, RequestedTarget,
+        ResolvedTarget, ServiceTier, StructuredOutputContract, ToolCallId, ToolCallProposal,
+        ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
     use super::build_request;
@@ -471,6 +520,32 @@ mod tests {
             vec![ConversationMessage::user_text("hello")],
             ModelSettings::new(64),
         )
+    }
+
+    #[test]
+    fn reasoning_and_fast_mode_use_openai_wire_controls() {
+        let mut operation = operation("call-settings");
+        operation.settings.reasoning_level = Some(ReasoningLevel::Minimal);
+        operation.settings.fast_mode = FastMode::Enabled;
+        operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Fast));
+
+        let request = build_request(&operation).expect("supported controls translate");
+        let value = serde_json::to_value(request).expect("wire request serializes");
+
+        assert_eq!(value["reasoning_effort"], "minimal");
+        assert_eq!(value["service_tier"], "fast");
+    }
+
+    #[test]
+    fn fast_mode_rejects_openai_flex_tier_before_send() {
+        let mut operation = operation("call-incompatible-settings");
+        operation.settings.fast_mode = FastMode::Enabled;
+        operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Flex));
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[track_caller]

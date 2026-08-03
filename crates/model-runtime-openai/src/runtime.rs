@@ -24,6 +24,7 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
+use signalbox_model_runtime::ModelCapabilityCatalog;
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
 
 use crate::config::OpenAiConfig;
@@ -44,6 +45,7 @@ pub struct OpenAiRuntime<A> {
     completions_url: Url,
     credentials: A,
     sse_record_limit: usize,
+    model_capabilities: ModelCapabilityCatalog,
 }
 
 /// An opaque, one-shot OpenAI request capability prepared per
@@ -79,6 +81,7 @@ impl<A> std::fmt::Debug for OpenAiRuntime<A> {
             .field("completions_url", &self.completions_url)
             .field("credentials", &"[redacted]")
             .field("sse_record_limit", &self.sse_record_limit)
+            .field("model_capabilities", &self.model_capabilities)
             .finish()
     }
 }
@@ -248,15 +251,36 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             completions_url,
             credentials,
             sse_record_limit: config.sse_record_limit,
+            model_capabilities: config.model_capabilities,
         })
     }
 
     async fn prepare_request<C: Clone + Send + Sync>(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, OpenAiPreparedRequest<C>> {
         let correlation = operation.correlation.clone();
+        let capabilities = match self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)
+        {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: error.to_string(),
+                    },
+                };
+            }
+        };
+        if let Some(capabilities) = capabilities {
+            operation.resolved_target = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .expect("validated fast mode has a declared target")
+                .clone();
+        }
         let wire_request = match build_request(&operation) {
             Ok(request) => request,
             Err(failure) => {

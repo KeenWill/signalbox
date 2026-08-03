@@ -3,11 +3,13 @@
 use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
-    ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
-    PreparationFailure, ToolChoice,
+    AnthropicServiceTier, ConversationMessage, ConversationRole, DeliveryMode, FastMode,
+    MessagePart, ModelOperation, PreparationFailure, ReasoningLevel, ServiceTier, ToolChoice,
 };
 
-use crate::wire::{MessagesRequest, WireMessage, WireRequestBlock, WireTool, WireToolChoice};
+use crate::wire::{
+    MessagesRequest, OutputConfig, WireMessage, WireRequestBlock, WireTool, WireToolChoice,
+};
 
 /// Builds the wire request for one operation.
 ///
@@ -61,6 +63,12 @@ pub(crate) fn build_request<C>(
     validate_tool_names(operation)?;
     validate_tool_history(&operation.messages)?;
     let (tools, tool_choice) = tools_and_choice(operation)?;
+    let effort = operation
+        .settings
+        .reasoning_level
+        .map(anthropic_effort)
+        .transpose()?;
+    let service_tier = anthropic_service_tier(operation)?;
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
@@ -73,10 +81,56 @@ pub(crate) fn build_request<C>(
         stop_sequences: operation.settings.stop_sequences.clone(),
         temperature: operation.settings.temperature,
         top_p: operation.settings.top_p,
+        output_config: effort.map(|effort| OutputConfig { effort }),
+        service_tier,
+        speed: (operation.settings.fast_mode == FastMode::Enabled).then_some("fast"),
         tools,
         tool_choice,
         stream: operation.delivery == DeliveryMode::Streamed,
     })
+}
+
+fn anthropic_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFailure> {
+    match level {
+        ReasoningLevel::Low => Ok("low"),
+        ReasoningLevel::Medium => Ok("medium"),
+        ReasoningLevel::High => Ok("high"),
+        ReasoningLevel::XHigh => Ok("xhigh"),
+        ReasoningLevel::Max => Ok("max"),
+        ReasoningLevel::None | ReasoningLevel::Minimal | ReasoningLevel::Ultra => {
+            Err(PreparationFailure::UnsupportedOperation {
+                detail: "Anthropic cannot enforce the requested reasoning level".to_string(),
+            })
+        }
+    }
+}
+
+fn anthropic_service_tier<C>(
+    operation: &ModelOperation<C>,
+) -> Result<Option<&'static str>, PreparationFailure> {
+    match (
+        operation.settings.fast_mode,
+        operation.settings.service_tier,
+    ) {
+        (FastMode::Enabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto))) => {
+            Err(PreparationFailure::UnsupportedOperation {
+                detail: "Anthropic fast mode is incompatible with the auto service tier"
+                    .to_string(),
+            })
+        }
+        (FastMode::Enabled, None)
+        | (FastMode::Enabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
+            Ok(Some("standard_only"))
+        }
+        (_, Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto))) => Ok(Some("auto")),
+        (_, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
+            Ok(Some("standard_only"))
+        }
+        (_, None) => Ok(None),
+        (_, Some(_)) => Err(PreparationFailure::UnsupportedOperation {
+            detail: "Anthropic cannot enforce another provider's service tier".to_string(),
+        }),
+    }
 }
 
 fn validate_tool_names<C>(operation: &ModelOperation<C>) -> Result<(), PreparationFailure> {
@@ -340,10 +394,10 @@ mod tests {
     use expect_test::expect;
     use signalbox_model_runtime::CredentialReference;
     use signalbox_model_runtime::{
-        ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
-        ModelSettings, PreparationFailure, RequestedTarget, ResolvedTarget,
-        StructuredOutputContract, ToolCallId, ToolCallProposal, ToolChoice, ToolDefinition,
-        ToolName, ToolResultRecord,
+        AnthropicServiceTier, ConversationMessage, ConversationRole, DeliveryMode, FastMode,
+        MessagePart, ModelOperation, ModelSettings, PreparationFailure, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, ServiceTier, StructuredOutputContract, ToolCallId,
+        ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
     use super::build_request;
@@ -570,6 +624,34 @@ mod tests {
               "stream": false
             }"#]]
         .assert_eq(&request_json(&operation("call-4")));
+    }
+
+    #[test]
+    fn reasoning_fast_mode_and_tier_use_the_anthropic_wire_controls() {
+        let mut operation = operation("call-settings");
+        operation.settings.reasoning_level = Some(ReasoningLevel::XHigh);
+        operation.settings.fast_mode = FastMode::Enabled;
+        operation.settings.service_tier =
+            Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly));
+
+        let request = build_request(&operation).expect("supported controls translate");
+        let value = serde_json::to_value(request).expect("wire request serializes");
+
+        assert_eq!(value["output_config"]["effort"], "xhigh");
+        assert_eq!(value["speed"], "fast");
+        assert_eq!(value["service_tier"], "standard_only");
+    }
+
+    #[test]
+    fn fast_mode_rejects_anthropic_auto_tier_before_send() {
+        let mut operation = operation("call-incompatible-settings");
+        operation.settings.fast_mode = FastMode::Enabled;
+        operation.settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto));
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]

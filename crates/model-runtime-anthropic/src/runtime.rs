@@ -23,6 +23,7 @@ use signalbox_model_runtime::{
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
+use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
@@ -44,6 +45,7 @@ pub struct AnthropicRuntime<A> {
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
+    model_capabilities: ModelCapabilityCatalog,
 }
 
 /// An opaque, one-shot Anthropic request capability prepared per
@@ -82,6 +84,7 @@ impl<A> std::fmt::Debug for AnthropicRuntime<A> {
             .field("credentials", &"[redacted]")
             .field("version_header", &"[sensitive]")
             .field("sse_record_limit", &self.sse_record_limit)
+            .field("model_capabilities", &self.model_capabilities)
             .finish()
     }
 }
@@ -273,15 +276,36 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
+            model_capabilities: config.model_capabilities,
         })
     }
 
     async fn prepare_request<C: Clone + Send + Sync>(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, AnthropicPreparedRequest<C>> {
         let correlation = operation.correlation.clone();
+        let capabilities = match self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)
+        {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: error.to_string(),
+                    },
+                };
+            }
+        };
+        if let Some(capabilities) = capabilities {
+            operation.resolved_target = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+                .expect("validated fast mode has a declared target")
+                .clone();
+        }
         let wire_request = match build_request(&operation) {
             Ok(request) => request,
             Err(failure) => {
@@ -328,14 +352,17 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         };
         let delivery = operation.delivery;
         let stop_sequences = operation.settings.stop_sequences.clone();
-        let request = match build_http_request(
-            self.client
-                .post(self.messages_url.clone())
-                .header("x-api-key", api_key_header)
-                .header("anthropic-version", self.version_header.clone())
-                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                .body(body),
-        ) {
+        let mut builder = self
+            .client
+            .post(self.messages_url.clone())
+            .header("x-api-key", api_key_header)
+            .header("anthropic-version", self.version_header.clone())
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(body);
+        if operation.settings.fast_mode == FastMode::Enabled {
+            builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
+        }
+        let request = match build_http_request(builder) {
             Ok(request) => request,
             Err(defect) => {
                 return PreparationOutcome::Defect {

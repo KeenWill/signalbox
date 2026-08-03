@@ -29,10 +29,21 @@ pub(crate) struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
     pub stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct OutputConfig {
+    pub effort: &'static str,
 }
 
 #[derive(Debug, Serialize)]
