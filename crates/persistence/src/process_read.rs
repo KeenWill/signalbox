@@ -1553,7 +1553,7 @@ impl ProcessReadRepository {
                 transcript_approval.decision_kind AS transcript_decision_kind,
                 transcript_approval.decision_source AS transcript_decision_source,
                 transcript_approval.denial_reason AS transcript_denial_reason,
-                transcript_approval.owner_command_id AS transcript_owner_command_id,
+                transcript_approval.owner_command_id AS transcript_user_command_id,
                 transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
                 transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
                 transcript_approval.rationale AS transcript_decision_rationale
@@ -2943,7 +2943,7 @@ async fn open_transcript_entry_cursor(
             transcript_approval.decision_kind AS transcript_decision_kind,
             transcript_approval.decision_source AS transcript_decision_source,
             transcript_approval.denial_reason AS transcript_denial_reason,
-            transcript_approval.owner_command_id AS transcript_owner_command_id,
+            transcript_approval.owner_command_id AS transcript_user_command_id,
             transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
             transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
             transcript_approval.rationale AS transcript_decision_rationale
@@ -3562,14 +3562,14 @@ fn decode_process_tool_approval(
     let decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let source: Option<String> = row.try_get("transcript_decision_source")?;
     let denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
-    let owner_command: Option<Uuid> = row.try_get("transcript_owner_command_id")?;
+    let user_command: Option<Uuid> = row.try_get("transcript_user_command_id")?;
     let delegate_model: Option<Uuid> = row.try_get("transcript_delegate_model_selection_id")?;
     let delegate_call: Option<Uuid> = row.try_get("transcript_delegate_model_call_id")?;
     let rationale: Option<String> = row.try_get("transcript_decision_rationale")?;
     let Some(source) = source else {
         if decision_kind.is_some()
             || denial_reason.is_some()
-            || owner_command.is_some()
+            || user_command.is_some()
             || delegate_model.is_some()
             || delegate_call.is_some()
             || rationale.is_some()
@@ -3595,7 +3595,7 @@ fn decode_process_tool_approval(
     };
     match (
         source.as_str(),
-        owner_command,
+        user_command,
         delegate_model,
         delegate_call,
         rationale,
