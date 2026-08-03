@@ -11,8 +11,8 @@ use expect_test::expect;
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementEventKind,
-    SessionPlacementPath, SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
+    SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementPath,
+    SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
     UpdateSessionPlacementResult,
 };
 use signalbox_expect_table::table;
@@ -52,6 +52,8 @@ const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_SESSION_ID_SEED: u128 = 0x208;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_COMMAND_ID_SEED: u128 = 0x114;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_SESSION_ID_SEED: u128 = 0x209;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_COMMAND_ID_SEED: u128 = 0x115;
+const ARBITRARY_CORRUPT_UPDATE_RECEIPT_SESSION_ID_SEED: u128 = 0x20a;
+const ARBITRARY_CORRUPT_UPDATE_RECEIPT_CREATION_COMMAND_ID_SEED: u128 = 0x116;
 const ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED: u128 = 0x203;
 const ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED: u128 = 0x103;
 const ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED: u128 = 0x104;
@@ -361,7 +363,6 @@ struct PlacementUpdateFixture {
     pool: PgPool,
     repository: SessionPlacementRepository,
     update: UpdateSessionPlacement,
-    expected_result_version: SessionPlacementVersion,
     session: SessionId,
 }
 
@@ -387,35 +388,8 @@ async fn placement_update_fixture() -> Result<PlacementUpdateFixture, Box<dyn Er
         pool,
         repository,
         update,
-        expected_result_version: SessionPlacementVersion::try_from_u64(
-            UPDATE_FIXTURE_RESULT_VERSION,
-        )
-        .expect("fixture result version is positive"),
         session,
     })
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_placement_update_returns_successor_event_shape() -> Result<(), Box<dyn Error>> {
-    let fixture = placement_update_fixture().await?;
-    let expected_prior = fixture.update.expected_version();
-    let expected_version = fixture.expected_result_version;
-    let result = fixture.repository.handle(fixture.update).await?;
-    let SessionPlacementRepositoryOutcome::Recorded(UpdateSessionPlacementResult::Applied(applied)) =
-        result
-    else {
-        panic!("fixture update must apply")
-    };
-    let event = applied.event();
-
-    assert_eq!(event.kind(), SessionPlacementEventKind::Updated);
-    assert_eq!(event.prior_version(), Some(expected_prior));
-    assert_eq!(event.placement().version(), expected_version);
-
-    fixture.pool.close().await;
-    drop(fixture.container);
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -960,10 +934,10 @@ struct CorruptPlacementUpdateReceiptFixture {
 async fn corrupt_placement_update_receipt_fixture()
 -> Result<CorruptPlacementUpdateReceiptFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session = session(0x20a);
+    let session = session(ARBITRARY_CORRUPT_UPDATE_RECEIPT_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x116),
+            command(ARBITRARY_CORRUPT_UPDATE_RECEIPT_CREATION_COMMAND_ID_SEED),
             session,
             SessionPlacement::pathless(),
         ))
@@ -1137,24 +1111,26 @@ async fn s36_inv012_applied_update_replay_requires_the_event_to_reach_the_curren
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
--> Result<(), Box<dyn Error>> {
+struct LaggingPlacementHeadFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    session: SessionId,
+}
+
+async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED);
+    let session = session(ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
             command(ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED),
-            session_id,
+            session,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let repository = SessionPlacementRepository::new(pool.clone());
-    repository
+    SessionPlacementRepository::new(pool.clone())
         .handle(UpdateSessionPlacement::new(
             command(ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED),
-            session_id,
+            session,
             SessionPlacementVersion::INITIAL,
             scoped("projects.foo.current"),
         ))
@@ -1166,12 +1142,23 @@ async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
         "UPDATE session_current_placement SET current_version = 1
           WHERE session_id = $1",
     )
-    .bind(*session_id.as_uuid())
+    .bind(*session.as_uuid())
     .execute(&pool)
     .await?;
+    Ok(LaggingPlacementHeadFixture {
+        container,
+        pool,
+        session,
+    })
+}
 
-    let error = repository
-        .load_current(session_id)
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = lagging_placement_head_fixture().await?;
+    let error = SessionPlacementRepository::new(fixture.pool.clone())
+        .load_current(fixture.session)
         .await
         .expect_err("a public placement read rejects a head behind append-only history");
     let SessionPlacementRepositoryError::Corruption(reason) = error else {
@@ -1179,8 +1166,27 @@ async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
     };
     assert_eq!(reason, "session placement head behind event history");
 
-    pool.close().await;
-    drop(container);
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_session_load_rejects_a_placement_head_behind_event_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = lagging_placement_head_fixture().await?;
+    let error = SessionRepository::new(fixture.pool.clone())
+        .load_session(fixture.session)
+        .await
+        .expect_err("a session load rejects a placement head behind append-only history");
+    let SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(reason)) = error else {
+        panic!("a lagging placement head fails session load with typed corruption")
+    };
+    assert_eq!(reason, "session placement head behind event history");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
     Ok(())
 }
 

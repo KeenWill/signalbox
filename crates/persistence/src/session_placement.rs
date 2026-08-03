@@ -451,13 +451,13 @@ pub(crate) async fn load_authenticated_version(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PlacementHistoryHeadState {
+pub(crate) enum PlacementHistoryHeadState {
     MatchesLatestEvent,
     BehindLaterEvent,
 }
 
 impl PlacementHistoryHeadState {
-    fn from_later_event_exists(later_event_exists: bool) -> Self {
+    pub(crate) fn from_later_event_exists(later_event_exists: bool) -> Self {
         if later_event_exists {
             Self::BehindLaterEvent
         } else {
@@ -466,7 +466,7 @@ impl PlacementHistoryHeadState {
     }
 }
 
-async fn authenticate_loaded_current(
+pub(crate) async fn authenticate_loaded_current(
     connection: &mut PgConnection,
     session: SessionId,
     current: VersionedSessionPlacement,
