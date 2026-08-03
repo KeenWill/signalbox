@@ -3157,13 +3157,6 @@ extension Decoder {
   }
 }
 
-extension SignalboxProcessProtocol {
-  public static let maximumPlanTextUnicodeScalars = 4_096
-  public static let maximumPlanReadEntries = 100
-  public static let maximumPlanDependenciesPerEntry = 32
-  public static let maximumPlanHistoryEvents = 100
-}
-
 final class SignalboxDuplicateAwareJSONDecoder: JSONDecoder, @unchecked Sendable {
   override func decode<Value: Decodable>(
     _ type: Value.Type,

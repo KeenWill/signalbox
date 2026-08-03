@@ -1996,10 +1996,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
+      retainUnrecognizedNestedLiveEvent(followed)
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
       }
-      retainUnrecognizedNestedLiveEvent(followed)
       if modelCallStateBlocksMutation(state) {
         if mutationBlocksByTurnID[turnID] != .unknownTurnState {
           mutationBlocksByTurnID[turnID] = .unknownNestedState
@@ -2011,10 +2011,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       applyModelCallState(state, for: turnID)
     case .toolBatchTransition(let turnID, _, let state):
+      retainUnrecognizedNestedLiveEvent(followed)
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
       }
-      retainUnrecognizedNestedLiveEvent(followed)
       switch state {
       case .proposed:
         if mutationBlocksByTurnID[turnID] == .unknownNestedState {
@@ -2209,11 +2209,49 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       normalizedItems.map { ($0.id, $0) },
       uniquingKeysWith: { first, _ in first }
     )
-    for item in normalizedItems {
-      if normalizedTimelineItemIDs.insert(item.id).inserted {
-        timelinePresentationOrder.append(.normalized(item.id))
+    let normalizedKeys = normalizedItems.map { TimelinePresentationKey.normalized($0.id) }
+    let currentNormalizedIDs = Set(normalizedItems.map(\.id))
+    let retainedNormalizedIDs = normalizedTimelineItemIDs.intersection(currentNormalizedIDs)
+    let retainedKeys = normalizedKeys.filter { key in
+      guard case .normalized(let id) = key else {
+        return false
+      }
+      return retainedNormalizedIDs.contains(id)
+    }
+    var additionsBeforeRetainedID: [String: [TimelinePresentationKey]] = [:]
+    var pendingAdditions: [TimelinePresentationKey] = []
+    for key in normalizedKeys {
+      guard case .normalized(let id) = key else {
+        continue
+      }
+      if retainedNormalizedIDs.contains(id) {
+        additionsBeforeRetainedID[id] = pendingAdditions
+        pendingAdditions = []
+      } else {
+        pendingAdditions.append(key)
       }
     }
+    var nextRetainedIndex = 0
+    var refreshedPresentationOrder: [TimelinePresentationKey] = []
+    for key in timelinePresentationOrder {
+      switch key {
+      case .normalized:
+        guard nextRetainedIndex < retainedKeys.count else {
+          continue
+        }
+        let retainedKey = retainedKeys[nextRetainedIndex]
+        if case .normalized(let id) = retainedKey {
+          refreshedPresentationOrder.append(contentsOf: additionsBeforeRetainedID[id] ?? [])
+        }
+        refreshedPresentationOrder.append(retainedKey)
+        nextRetainedIndex += 1
+      case .unrecognized, .unrecognizedHistoryBoundary:
+        refreshedPresentationOrder.append(key)
+      }
+    }
+    refreshedPresentationOrder.append(contentsOf: pendingAdditions)
+    timelinePresentationOrder = refreshedPresentationOrder
+    normalizedTimelineItemIDs = currentNormalizedIDs
     timeline = timelinePresentationOrder.compactMap { key in
       switch key {
       case .normalized(let id):

@@ -4,6 +4,8 @@ set -euo pipefail
 NATIVE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOSITORY_ROOT="$(cd "$NATIVE_ROOT/../.." && pwd)"
 
+python3 "$NATIVE_ROOT/scripts/generate-plan-contract.py" --check
+
 if ! command -v initdb >/dev/null 2>&1; then
 	POSTGRES_INITDB="$REPOSITORY_ROOT/.devenv/profile/bin/initdb"
 	if [[ -x "$POSTGRES_INITDB" ]]; then

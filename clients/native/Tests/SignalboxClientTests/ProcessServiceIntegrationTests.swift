@@ -574,6 +574,25 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  @MainActor
+  func testAuthoritativeRefreshPublishesEarlierInsertedUsageInSnapshotOrder() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithLaterModelUsageOnly())
+    )
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithEarlierModelUsageInserted())
+    )
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.modelCallUsageIDs(in: viewModel.timeline),
+      ProcessProjectionFixture.orderedModelCallUsageIDs
+    )
+  }
+
   func testAnchoredUsageAndAdjacentTurnStateKeepDistinctTimelineRows() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithAdjacentUsageAndUnknownTurnState()
     var projector = SignalboxProcessTranscriptProjector()
@@ -1550,7 +1569,46 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
     XCTAssertTrue(viewModel.canStopAndSend)
-    XCTAssertTrue(viewModel.timeline.isEmpty)
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: viewModel.timeline),
+      [ProcessProjectionFixture.unknownNestedStateKind]
+    )
+  }
+
+  @MainActor
+  func testNewerRecognizedSideSnapshotRetainsBufferedUnknownToolTransition() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) {
+      ImmediateAcceptingProcessService()
+    }
+    await viewModel.connect()
+    viewModel.apply(.phase(ProcessProjectionFixture.steadyPhase))
+    let trigger = try ProcessProjectionFixture.activatedEvent()
+    viewModel.apply(.event(trigger))
+    viewModel.apply(
+      .sideSnapshot(
+        snapshot: try ProcessProjectionFixture.snapshotWithKnownActiveTurn(
+          cursor: ProcessProjectionFixture.sideSnapshotCursor
+        ),
+        trigger: trigger
+      )
+    )
+
+    viewModel.apply(
+      .event(
+        try ProcessProjectionFixture.unknownToolBatchEvent(
+          cursor: ProcessProjectionFixture.bufferedTransitionCursor
+        )
+      )
+    )
+
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.runningActivity)
+    XCTAssertTrue(viewModel.canStopAndSend)
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: viewModel.timeline),
+      [ProcessProjectionFixture.unknownToolBatchTimelineKind]
+    )
   }
 
   @MainActor
@@ -5860,6 +5918,8 @@ private enum ProcessProjectionFixture {
   static let unknownSpeakerWrapperLabel = "Unknown speaker (fixture_future_speaker_wrapper)"
   static let unknownAttestedSpeakerLabel = "Unrecognized speaker (fixture_future_speaker)"
   static let unknownToolBatchState = "fixture_future_tool_batch_state"
+  static let unknownToolBatchTimelineKind =
+    "tool_batch_transition.state.\(unknownToolBatchState)"
   static let unknownToolBatchDiagnostic =
     "Preserved an unrecognized tool-batch state: \(unknownToolBatchState)."
   static let remoteErrorMessage = "Fixture remote error."
@@ -8811,7 +8871,8 @@ private enum ProcessProjectionFixture {
   }
 
   static func unknownToolBatchEvent(
-    kind: String = unknownToolBatchState
+    kind: String = unknownToolBatchState,
+    cursor: UInt64 = 1
   ) throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -8821,7 +8882,8 @@ private enum ProcessProjectionFixture {
         "model_call_id":"\(ProcessDriverFixture.modelCall)",
         "state":{"type":"\(kind)"}
       }
-      """
+      """,
+      cursor: cursor
     )
   }
 
