@@ -3616,16 +3616,6 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     assert_eq!(prepared.request().id(), request);
     repository.authorize(&prepared).await?;
     let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
-    let collision = repository
-        .complete(
-            &prepared,
-            DelegateApprovalRecommendation::Approve,
-            rationale.clone(),
-            ProviderReportedTokenUsage::unreported().with_input_tokens(Some(13)),
-            fixture.attempt,
-        )
-        .await
-        .expect_err("a taken continuation identity is retriable");
     let outcome = repository
         .complete(
             &prepared,
@@ -3654,10 +3644,6 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(
-        collision.operator_failure_class(),
-        OperatorFailureClass::IdentityCollision
-    );
     assert_eq!(outcome, CompleteApprovalJudgeOutcome::Decided);
     assert_eq!(stored.judge_state, "terminal");
     assert_eq!(stored.recommendation, APPROVAL_RECOMMENDATION);
@@ -3669,6 +3655,64 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     assert_eq!(stored.delegate_model_call_id, prepared.call().into_uuid());
     assert_eq!(stored.rationale, APPROVAL_JUDGE_RATIONALE);
     assert_eq!(stored.active_phase, "running");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_completion_identity_collision_rolls_back_for_retry()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ef0;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+    repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+
+    let collision = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            fixture.attempt,
+        )
+        .await
+        .expect_err("a taken continuation identity rolls back the completion");
+    let retry = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
+
+    assert_eq!(
+        collision.operator_failure_class(),
+        OperatorFailureClass::IdentityCollision
+    );
+    assert_eq!(retry, CompleteApprovalJudgeOutcome::Decided);
 
     pool.close().await;
     drop(container);
