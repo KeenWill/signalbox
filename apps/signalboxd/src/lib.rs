@@ -1024,6 +1024,12 @@ async fn execute_approval_judge(
         }
     };
     let usage = provider_reported_usage(result.usage);
+    if result.call != prepared.call() {
+        repository
+            .fail(&prepared, FailedApprovalJudgeDisposition::Ambiguous, usage)
+            .await?;
+        return Ok(ApprovalJudgeLoopOutcome::Parked);
+    }
     if crate::usage_limits::approval_judge_usage_exceeds_configured_limits(
         configuration,
         prepared.target(),
