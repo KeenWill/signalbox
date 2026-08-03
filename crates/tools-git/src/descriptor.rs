@@ -14,9 +14,10 @@ use rustix::{
     fs::{AtFlags, FileType, Mode, OFlags, openat, statat, unlinkat},
     io::dup,
 };
+use sha2::{Digest, Sha256};
 
 use crate::failure::LocalGitFailure;
-use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_WORKTREE_INSPECTIONS};
+use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_TREE_BLOB_BYTES, MAX_WORKTREE_INSPECTIONS};
 
 pub(super) const MAX_QUARANTINE_DEPTH: usize = 128;
 
@@ -77,10 +78,26 @@ enum QuarantineSnapshotEntry {
     Other {
         identity: FileSnapshotIdentity,
         mode: u32,
+        digest: Option<[u8; 32]>,
     },
 }
 
 impl QuarantineSnapshot {
+    pub(super) fn capture(directory: &OwnedFd) -> Result<Self, LocalGitFailure> {
+        let mut entries = BTreeMap::new();
+        let mut inspections = 0_usize;
+        let mut content_bytes = 0_usize;
+        snapshot_pinned_directory_bounded(
+            directory,
+            Path::new(""),
+            0,
+            &mut inspections,
+            &mut content_bytes,
+            &mut entries,
+        )?;
+        Ok(Self { entries })
+    }
+
     pub(super) fn without_subtree(&self, path: &Path) -> Self {
         Self {
             entries: self
@@ -97,6 +114,30 @@ impl QuarantineSnapshot {
             QuarantineSnapshotEntry::Directory { identity, .. } => Some(*identity),
             QuarantineSnapshotEntry::Other { identity, .. } => Some(identity.file),
         }
+    }
+
+    pub(super) fn subtree(&self, path: &Path) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(entry, _)| entry.as_path() == path || entry.starts_with(path))
+                .map(|(path, entry)| (path.clone(), *entry))
+                .collect(),
+        }
+    }
+
+    pub(super) fn nested_under(&self, path: &Path, identity: FileIdentity, mode: u32) -> Self {
+        let mut entries = self
+            .entries
+            .iter()
+            .map(|(entry, snapshot)| (path.join(entry), *snapshot))
+            .collect::<BTreeMap<_, _>>();
+        entries.insert(
+            path.to_owned(),
+            QuarantineSnapshotEntry::Directory { identity, mode },
+        );
+        Self { entries }
     }
 }
 
@@ -186,16 +227,7 @@ impl QuarantineDirectory {
     }
 
     pub(super) fn snapshot(&self) -> Result<QuarantineSnapshot, LocalGitFailure> {
-        let mut entries = BTreeMap::new();
-        let mut inspections = 0_usize;
-        snapshot_pinned_directory_bounded(
-            &self.directory,
-            Path::new(""),
-            0,
-            &mut inspections,
-            &mut entries,
-        )?;
-        Ok(QuarantineSnapshot { entries })
+        QuarantineSnapshot::capture(&self.directory)
     }
 
     pub(super) fn clear_if_unchanged(
@@ -241,6 +273,7 @@ fn snapshot_pinned_directory_bounded(
     prefix: &Path,
     depth: usize,
     inspections: &mut usize,
+    content_bytes: &mut usize,
     entries: &mut BTreeMap<PathBuf, QuarantineSnapshotEntry>,
 ) -> Result<(), LocalGitFailure> {
     if depth > MAX_QUARANTINE_DEPTH {
@@ -274,7 +307,14 @@ fn snapshot_pinned_directory_bounded(
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Operation)?;
-            snapshot_pinned_directory_bounded(&child, &path, depth + 1, inspections, entries)?;
+            snapshot_pinned_directory_bounded(
+                &child,
+                &path,
+                depth + 1,
+                inspections,
+                content_bytes,
+                entries,
+            )?;
         } else {
             #[allow(clippy::unnecessary_cast)]
             let identity = FileSnapshotIdentity {
@@ -285,7 +325,47 @@ fn snapshot_pinned_directory_bounded(
                 changed_seconds: status.st_ctime as i64,
                 changed_nanoseconds: status.st_ctime_nsec as i64,
             };
-            entries.insert(path, QuarantineSnapshotEntry::Other { identity, mode });
+            let digest = if FileType::from_raw_mode(status.st_mode) == FileType::RegularFile {
+                let mut file = fs::File::from(
+                    openat(
+                        directory,
+                        &name,
+                        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|_| LocalGitFailure::Operation)?,
+                );
+                let metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+                if !metadata.is_file() || file_snapshot_identity(&metadata) != identity {
+                    return Err(LocalGitFailure::Operation);
+                }
+                let length =
+                    usize::try_from(metadata.len()).map_err(|_| LocalGitFailure::Operation)?;
+                *content_bytes = content_bytes
+                    .checked_add(length)
+                    .filter(|bytes| *bytes <= MAX_TREE_BLOB_BYTES)
+                    .ok_or(LocalGitFailure::Operation)?;
+                let mut bytes = Vec::with_capacity(length);
+                Read::by_ref(&mut file)
+                    .take((length + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| LocalGitFailure::Operation)?;
+                let final_metadata = file.metadata().map_err(|_| LocalGitFailure::Operation)?;
+                if bytes.len() != length || file_snapshot_identity(&final_metadata) != identity {
+                    return Err(LocalGitFailure::Operation);
+                }
+                Some(Sha256::digest(&bytes).into())
+            } else {
+                None
+            };
+            entries.insert(
+                path,
+                QuarantineSnapshotEntry::Other {
+                    identity,
+                    mode,
+                    digest,
+                },
+            );
         }
     }
     Ok(())
@@ -347,6 +427,7 @@ fn clear_snapshot_entries_bounded(
             QuarantineSnapshotEntry::Other {
                 identity,
                 mode: expected_mode,
+                ..
             } => {
                 #[allow(clippy::unnecessary_cast)]
                 let current = FileSnapshotIdentity {

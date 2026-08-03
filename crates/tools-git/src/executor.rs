@@ -12,7 +12,7 @@ use git2::{
     CheckoutNotificationType, Index, IndexEntry, IndexTime, Mempack, Odb, Repository,
     build::CheckoutBuilder,
 };
-use rustix::fs::{AtFlags, RenameFlags, renameat_with, statat};
+use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, openat, renameat_with, statat};
 use rustix::io::dup;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::ToolExecutionErrorDetail;
@@ -868,15 +868,29 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     open_worktree_parent(target_snapshot.descriptor(), &path)?;
                 statat(&target_parent, &target_leaf, AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(|_| LocalGitFailure::Operation)?;
-                let current = statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
-                    .map(|status| FileIdentity {
-                        device: status.st_dev,
-                        inode: status.st_ino,
-                    })
+                let source = openat(
+                    &parent,
+                    &leaf,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| LocalGitFailure::Operation)?;
+                let source_snapshot = QuarantineSnapshot::capture(&source)?;
+                let current_status = statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
                     .map_err(|_| LocalGitFailure::Operation)?;
+                let current = FileIdentity {
+                    device: current_status.st_dev,
+                    inode: current_status.st_ino,
+                };
                 if current != expected {
                     return Err(LocalGitFailure::Operation);
                 }
+                #[allow(clippy::unnecessary_cast)]
+                let quarantine_snapshot = source_snapshot.nested_under(
+                    Path::new("entry"),
+                    current,
+                    current_status.st_mode as u32,
+                );
                 renameat_with(
                     &parent,
                     &leaf,
@@ -887,22 +901,20 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 .map_err(|_| LocalGitFailure::Operation)?;
                 quarantine.keep();
                 before_snapshot();
-                let quarantine_snapshot = match quarantine.snapshot() {
-                    Ok(snapshot) => snapshot,
-                    Err(failure) => {
-                        let restoration = renameat_with(
-                            quarantine.descriptor(),
-                            quarantined_name,
-                            &parent,
-                            &leaf,
-                            RenameFlags::NOREPLACE,
-                        )
-                        .map_err(|_| LocalGitFailure::Operation);
-                        let cleanup =
-                            restoration.and_then(|()| quarantine.remove_if_empty_and_current());
-                        return Err(cleanup.err().unwrap_or(failure));
-                    }
-                };
+                if quarantine.snapshot().as_ref() != Ok(&quarantine_snapshot) {
+                    let failure = LocalGitFailure::Operation;
+                    let restoration = renameat_with(
+                        quarantine.descriptor(),
+                        quarantined_name,
+                        &parent,
+                        &leaf,
+                        RenameFlags::NOREPLACE,
+                    )
+                    .map_err(|_| LocalGitFailure::Operation);
+                    let cleanup =
+                        restoration.and_then(|()| quarantine.remove_if_empty_and_current());
+                    return Err(cleanup.err().unwrap_or(failure));
+                }
                 Ok(QuarantinedCheckoutDirectory {
                     quarantine,
                     quarantine_snapshot,
@@ -949,6 +961,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 open_worktree_parent(transition.target.descriptor(), &transition.path)?;
             let target_status = statat(&target_parent, &target_leaf, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|_| LocalGitFailure::Operation)?;
+            let expected_target = transition.target_snapshot.subtree(&transition.path);
+            if transition.target.snapshot()?.subtree(&transition.path) != expected_target {
+                transition.target.keep();
+                return Err(LocalGitFailure::Operation);
+            }
             let expected_target_identity = transition
                 .target_snapshot
                 .entry_identity(&transition.path)

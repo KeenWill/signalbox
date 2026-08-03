@@ -11,7 +11,7 @@ use crate::arguments::{GitBranchSwitchArguments, LocalOperation};
 use crate::descriptor::MAX_QUARANTINE_DEPTH;
 use crate::executor::clone_index_entry;
 use crate::failure::LocalGitFailure;
-use crate::limits::{INDEX_ASSUME_VALID, INDEX_SKIP_WORKTREE};
+use crate::limits::{GITLINK_MODE, INDEX_ASSUME_VALID, INDEX_SKIP_WORKTREE};
 use crate::tests::planting::{
     aggregate_blob_tree_commit, over_budget_tree_commit, plant_over_budget_index,
 };
@@ -47,6 +47,13 @@ fn cleanup_file(root: &Path, relative: &Path) -> PathBuf {
         .map(|path| path.join(relative))
         .find(|path| path.is_file())
         .expect("cleanup file exists")
+}
+
+fn source_quarantine(root: &Path) -> PathBuf {
+    cleanup_directories(root)
+        .into_iter()
+        .find(|path| path.join("entry/main.txt").is_file())
+        .expect("source quarantine exists")
 }
 
 #[test]
@@ -455,6 +462,60 @@ fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
 }
 
 #[test]
+fn branch_switch_preserves_a_prepared_target_rewritten_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists")
+        .tree()
+        .expect("fixture initial tree opens");
+    let target_content = b"target file\n";
+    let foreign_content = b"other bytes\n";
+    let target_blob = repository
+        .blob(target_content)
+        .expect("target fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&initial_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", target_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    fs::create_dir(fixture.root().join("src")).expect("current fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), b"nested\n")
+        .expect("current nested fixture writes");
+    commit_all(&repository, "nested source");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_target_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let prepared_target = cleanup_file(fixture.root(), Path::new("src"));
+                fs::write(prepared_target, foreign_content).expect("foreign target bytes write");
+            },
+        )
+        .expect_err("in-place prepared target rewrite rejects publication");
+    let retained_foreign = cleanup_file(fixture.root(), Path::new("src"));
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(retained_foreign).expect("foreign prepared target reads"),
+        foreign_content
+    );
+}
+
+#[test]
 fn branch_switch_preserves_an_untracked_file_inside_a_replaced_directory() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
@@ -669,6 +730,67 @@ fn failed_branch_switch_preserves_a_foreign_entry_in_a_restored_quarantine() {
     );
     assert_eq!(
         fs::read(retained_foreign).expect("foreign quarantine entry reads"),
+        foreign_content
+    );
+}
+
+#[test]
+fn branch_switch_excludes_a_foreign_entry_from_source_quarantine_ownership() {
+    let fixture = Fixture::new();
+    let original_content = b"original directory\n";
+    let foreign_content = b"foreign quarantine entry\n";
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::create_dir(fixture.root().join("src")).expect("source fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), original_content)
+        .expect("source fixture file writes");
+    let current = commit_all(&repository, "directory source");
+    let current_tree = repository
+        .find_commit(current)
+        .expect("current fixture commit exists")
+        .tree()
+        .expect("current fixture tree opens");
+    let target_blob = repository
+        .blob(b"target file\n")
+        .expect("target fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&current_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", target_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, current);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_quarantine_snapshot_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::write(
+                    source_quarantine(fixture.root()).join("foreign.txt"),
+                    foreign_content,
+                )
+                .expect("foreign source quarantine entry writes");
+            },
+        )
+        .expect_err("foreign source quarantine addition rejects ownership");
+    let retained_foreign = cleanup_file(fixture.root(), Path::new("foreign.txt"));
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join("src/main.txt")).expect("restored source fixture reads"),
+        original_content
+    );
+    assert_eq!(
+        fs::read(retained_foreign).expect("foreign fixture entry reads"),
         foreign_content
     );
 }
@@ -932,6 +1054,47 @@ fn branch_switch_rejects_a_target_symlink_before_checkout() {
     assert_eq!(
         fs::read(fixture.root().join(TRACKED_PATH)).expect("original content reads"),
         INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_target_gitlink_before_checkout() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let mut builder = repository
+        .treebuilder(None)
+        .expect("target tree builder opens");
+    builder
+        .insert("submodule", fixture.initial, GITLINK_MODE as i32)
+        .expect("gitlink inserts");
+    let tree = builder.write().expect("target tree writes");
+    let target = raw_commit_with_tree(&repository, tree, fixture.initial);
+    let target = repository
+        .find_commit(target)
+        .expect("target commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target branch creates");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch(
+            &executor
+                .repository_authority
+                .repository()
+                .expect("pinned fixture repository opens"),
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+        )
+        .expect_err("target gitlink rejects before checkout");
+    let index = repository.index().expect("fixture index opens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(index.get_path(Path::new("submodule"), 0).is_none());
+    assert_eq!(
+        repository.head().expect("head exists").target(),
+        Some(fixture.initial)
     );
 }
 

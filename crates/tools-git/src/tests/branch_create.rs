@@ -323,3 +323,28 @@ fn branch_create_rejects_a_replaced_lock_without_touching_it() {
     fs::remove_file(lock_path).expect("replacement branch lock removes");
     fs::remove_file(retired_lock).expect("retired branch lock removes");
 }
+
+#[test]
+fn branch_create_rejects_an_in_place_rewritten_lock_without_removing_it() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let lock_path = fixture.root().join(".git/refs/heads/race.lock");
+    let foreign_content = b"foreign reference\n";
+
+    let failure = create_loose_branch_reference_with_hook(
+        &executor.repository_authority,
+        "race",
+        fixture.initial,
+        || {
+            fs::write(&lock_path, foreign_content).expect("foreign branch lock bytes write");
+        },
+    )
+    .expect_err("in-place branch lock rewrite rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(&lock_path).expect("foreign branch lock reads"),
+        foreign_content
+    );
+    assert!(!fixture.root().join(".git/refs/heads/race").exists());
+}
