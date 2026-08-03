@@ -287,6 +287,22 @@ public enum SignalboxMetadataActor: Codable, Equatable, Sendable {
   }
 }
 
+private struct SignalboxInheritedModelSettingsOverlay: Encodable {
+  let reasoningLevel = SignalboxInheritedSettingOverlay()
+  let fastMode = SignalboxInheritedSettingOverlay()
+  let serviceTier = SignalboxInheritedSettingOverlay()
+
+  private enum CodingKeys: String, CodingKey {
+    case reasoningLevel = "reasoning_level"
+    case fastMode = "fast_mode"
+    case serviceTier = "service_tier"
+  }
+}
+
+private struct SignalboxInheritedSettingOverlay: Encodable {
+  let kind = "inherit"
+}
+
 public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
   case createSession(
     commandID: SignalboxCommandID,
@@ -357,6 +373,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode("create_session", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
       try container.encode(selection, forKey: "initial_model_selection")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
       try container.encode(systemPrompt, forKey: "system_prompt")
     case .listSessions:
       try container.encode("list_sessions", forKey: "type")
@@ -366,6 +383,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(sessionID, forKey: "session_id")
       try container.encode(content, forKey: "content")
       try container.encode(expectedVersion, forKey: "expected_defaults_version")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
     case .readTranscript(let sessionID):
       try container.encode("read_transcript", forKey: "type")
       try container.encode(sessionID, forKey: "session_id")
@@ -407,6 +425,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(throughPosition, forKey: "through_position")
       try container.encode(relationship, forKey: "relationship")
       try container.encode(selection, forKey: "initial_model_selection")
+      try container.encode(SignalboxInheritedModelSettingsOverlay(), forKey: "model_settings")
     case .stopTurn(
       let commandID,
       let sessionID,
@@ -884,7 +903,7 @@ public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
     try tagged.rejectUnadmittedFields(
       [
         "type", "session_id", "defaults_version", "model_selection",
-        "dangerous_tool_auto_approval", "system_prompt",
+        "model_settings", "dangerous_tool_auto_approval", "system_prompt",
       ],
       decoder: decoder
     )
