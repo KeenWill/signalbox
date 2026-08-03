@@ -551,7 +551,8 @@ impl SubmitInputRepository {
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
-                | CommandKind::Goal,
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement,
             ) => Err(Self::wrong_kind(command_id)),
         }
     }
@@ -639,7 +640,8 @@ where
             | CommandKind::ReviewWorkflow
             | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession
-            | CommandKind::Goal,
+            | CommandKind::Goal
+            | CommandKind::UpdateSessionPlacement,
         ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
@@ -677,7 +679,8 @@ where
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
-                | CommandKind::Goal,
+                | CommandKind::Goal
+                | CommandKind::UpdateSessionPlacement,
             ) => Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             )),
@@ -3715,6 +3718,7 @@ async fn load_active_acceptance_tail(
             origin_turn_id,
             consuming_model_call_id,
             delivery_kind,
+            descendant_scope,
             expected_active_turn_id,
             expected_defaults_version,
             model_override_kind,
@@ -3747,6 +3751,7 @@ async fn load_active_acceptance_tail(
         let expected_active_turn: Option<Uuid> = row.try_get("expected_active_turn_id")?;
         let delivery = decode_delivery(
             required(&row, "delivery_kind")?,
+            row.try_get("descendant_scope")?,
             expected_active_turn,
             row.try_get("expected_defaults_version")?,
             row.try_get("model_override_kind")?,
@@ -3884,7 +3889,8 @@ async fn insert_prepared(
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
              content_kind, content_text,
-             delivery_kind, expected_active_turn_id, expected_defaults_version,
+             delivery_kind, descendant_scope,
+             expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              result_kind, rejection_kind, result_session_id,
@@ -3897,7 +3903,7 @@ async fn insert_prepared(
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
              $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-             $26, $27, $28, $29)",
+             $26, $27, $28, $29, $30)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -3909,6 +3915,7 @@ async fn insert_prepared(
     .bind("text")
     .bind(command.content().text().as_str())
     .bind(delivery.kind)
+    .bind(delivery.descendant_scope)
     .bind(delivery.expected_active_turn)
     .bind(delivery.expected_defaults_version)
     .bind(delivery.model_override_kind)
@@ -3950,13 +3957,14 @@ async fn insert_prepared(
             "INSERT INTO accepted_input
                 (accepted_input_id, accepting_command_id, session_id,
                  content_kind, content_text, delivery_kind,
+                 descendant_scope,
                  expected_active_turn_id, expected_defaults_version,
                  model_override_kind, replacement_model_kind,
                  replacement_direct_model_selection_id, replacement_model_alias_id,
                  acceptance_position, disposition_kind, origin_turn_id)
              VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15)",
+                 $14, $15, $16)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
@@ -3964,6 +3972,7 @@ async fn insert_prepared(
         .bind("text")
         .bind(command.content().text().as_str())
         .bind(delivery.kind)
+        .bind(delivery.descendant_scope)
         .bind(delivery.expected_active_turn)
         .bind(delivery.expected_defaults_version)
         .bind(delivery.model_override_kind)
@@ -4048,12 +4057,13 @@ async fn insert_prepared(
             "INSERT INTO accepted_input
                 (accepted_input_id, accepting_command_id, session_id,
                  content_kind, content_text, delivery_kind,
+                 descendant_scope,
                  expected_active_turn_id, expected_defaults_version,
                  model_override_kind, replacement_model_kind,
                  replacement_direct_model_selection_id, replacement_model_alias_id,
                  acceptance_position, disposition_kind, origin_turn_id)
              VALUES
-                ($1, $2, $3, 'text', $4, 'next_safe_point',
+                ($1, $2, $3, 'text', $4, 'next_safe_point', NULL,
                  $5, NULL, NULL, NULL, NULL, NULL, $6, 'pending_steering', NULL)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
@@ -4160,6 +4170,7 @@ fn encode_frozen_model(model: &FrozenModelSelection) -> EncodedFrozenModel {
 #[derive(Clone, Copy)]
 struct EncodedDelivery {
     kind: &'static str,
+    descendant_scope: Option<&'static str>,
     expected_active_turn: Option<Uuid>,
     expected_defaults_version: Option<Decimal>,
     model_override_kind: Option<&'static str>,
@@ -4173,17 +4184,22 @@ fn encode_delivery(delivery: DeliveryRequest) -> EncodedDelivery {
         }
         DeliveryRequest::Interrupt {
             expected_active_turn,
+            descendant_scope,
             configuration,
-            ..
-        } => encode_configured_delivery(
-            "interrupt",
-            Some(expected_active_turn.into_uuid()),
-            configuration,
-        ),
+        } => {
+            let mut encoded = encode_configured_delivery(
+                "interrupt",
+                Some(expected_active_turn.into_uuid()),
+                configuration,
+            );
+            encoded.descendant_scope = Some(descendant_scope_to_str(descendant_scope));
+            encoded
+        }
         DeliveryRequest::NextSafePoint {
             expected_active_turn,
         } => EncodedDelivery {
             kind: "next_safe_point",
+            descendant_scope: None,
             expected_active_turn: Some(expected_active_turn.into_uuid()),
             expected_defaults_version: None,
             model_override_kind: None,
@@ -4215,6 +4231,7 @@ fn encode_configured_delivery(
     };
     EncodedDelivery {
         kind,
+        descendant_scope: None,
         expected_active_turn,
         expected_defaults_version: Some(defaults_version_to_numeric(
             configuration.expected_session_defaults_version(),
@@ -4499,6 +4516,7 @@ async fn load_complete_rows(
             typed.content_kind AS command_content_kind,
             typed.content_text AS command_content_text,
             typed.delivery_kind AS command_delivery_kind,
+            typed.descendant_scope AS command_descendant_scope,
             typed.expected_active_turn_id AS command_expected_active_turn_id,
             typed.expected_defaults_version AS command_expected_defaults_version,
             typed.model_override_kind AS command_model_override_kind,
@@ -4524,6 +4542,7 @@ async fn load_complete_rows(
             accepted.content_kind AS accepted_content_kind,
             accepted.content_text AS accepted_content_text,
             accepted.delivery_kind AS accepted_delivery_kind,
+            accepted.descendant_scope AS accepted_descendant_scope,
             accepted.expected_active_turn_id AS accepted_expected_active_turn_id,
             accepted.expected_defaults_version AS accepted_expected_defaults_version,
             accepted.model_override_kind AS accepted_model_override_kind,
@@ -5410,6 +5429,7 @@ fn decode_complete(
         )?,
         decode_delivery(
             required(&row, "command_delivery_kind")?,
+            row.try_get("command_descendant_scope")?,
             row.try_get("command_expected_active_turn_id")?,
             row.try_get("command_expected_defaults_version")?,
             row.try_get("command_model_override_kind")?,
@@ -5561,6 +5581,7 @@ fn decode_applied_turn_origin(
     )?;
     let accepted_delivery = decode_delivery(
         required(row, "accepted_delivery_kind")?,
+        row.try_get("accepted_descendant_scope")?,
         row.try_get("accepted_expected_active_turn_id")?,
         row.try_get("accepted_expected_defaults_version")?,
         row.try_get("accepted_model_override_kind")?,
@@ -5680,6 +5701,7 @@ fn decode_applied_pending_steering(
     )?;
     let accepted_delivery = decode_delivery(
         required(row, "accepted_delivery_kind")?,
+        row.try_get("accepted_descendant_scope")?,
         row.try_get("accepted_expected_active_turn_id")?,
         row.try_get("accepted_expected_defaults_version")?,
         row.try_get("accepted_model_override_kind")?,
@@ -6186,6 +6208,7 @@ fn decode_content(
 #[allow(clippy::too_many_arguments)]
 fn decode_delivery(
     kind: String,
+    descendant_scope: Option<String>,
     expected_active_turn: Option<Uuid>,
     expected_defaults_version: Option<Decimal>,
     model_override_kind: Option<String>,
@@ -6194,6 +6217,9 @@ fn decode_delivery(
     replacement_alias: Option<Uuid>,
     field: &'static str,
 ) -> Result<DeliveryRequest, SubmitInputRepositoryError> {
+    if kind != "interrupt" && descendant_scope.is_some() {
+        return Err(SubmitInputCorruption::Inconsistent(field).into());
+    }
     match kind.as_str() {
         "start_when_no_active_turn" => {
             if expected_active_turn.is_some() {
@@ -6226,7 +6252,11 @@ fn decode_delivery(
             if kind == "interrupt" {
                 Ok(DeliveryRequest::Interrupt {
                     expected_active_turn: turn,
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    descendant_scope: descendant_scope_from_str(
+                        descendant_scope
+                            .as_deref()
+                            .ok_or(SubmitInputCorruption::Missing("descendant_scope"))?,
+                    )?,
                     configuration,
                 })
             } else {
@@ -6253,6 +6283,27 @@ fn decode_delivery(
             })
         }
         _ => Err(SubmitInputCorruption::Unsupported { field, value: kind }.into()),
+    }
+}
+
+const fn descendant_scope_to_str(value: DescendantTerminationScope) -> &'static str {
+    match value {
+        DescendantTerminationScope::ParentAlone => "parent_alone",
+        DescendantTerminationScope::ParentAndDescendants => "parent_and_descendants",
+    }
+}
+
+fn descendant_scope_from_str(
+    value: &str,
+) -> Result<DescendantTerminationScope, SubmitInputRepositoryError> {
+    match value {
+        "parent_alone" => Ok(DescendantTerminationScope::ParentAlone),
+        "parent_and_descendants" => Ok(DescendantTerminationScope::ParentAndDescendants),
+        value => Err(SubmitInputCorruption::Unsupported {
+            field: "descendant_scope",
+            value: value.to_owned(),
+        }
+        .into()),
     }
 }
 

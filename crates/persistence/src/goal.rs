@@ -983,6 +983,14 @@ async fn insert_command(
             None
         }
     };
+    let descendant_scope = match command.action() {
+        GoalUserAction::Stop { descendant_scope } => {
+            Some(descendant_scope_to_str(*descendant_scope))
+        }
+        GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_) => {
+            None
+        }
+    };
     let (result_kind, rejection_kind, result_ordinal) = match result {
         GoalCommandResult::Applied(event) => {
             ("applied", None, Some(Decimal::from(event.ordinal().get())))
@@ -996,9 +1004,9 @@ async fn insert_command(
     sqlx::query(
         "INSERT INTO goal_command
             (command_id, command_kind, storage_version, session_id,
-             operation_kind, statement, guidance, result_kind,
+             operation_kind, statement, guidance, descendant_scope, result_kind,
              rejection_kind, result_event_ordinal)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(GOAL_KIND)
@@ -1007,6 +1015,7 @@ async fn insert_command(
     .bind(operation)
     .bind(statement)
     .bind(guidance)
+    .bind(descendant_scope)
     .bind(result_kind)
     .bind(rejection_kind)
     .bind(result_ordinal)
@@ -1258,7 +1267,7 @@ async fn load_command_from_connection(
     command_id: DurableCommandId,
 ) -> Result<Option<ReconstitutedGoalCommand>, GoalRepositoryError> {
     let row = sqlx::query(
-        "SELECT session_id, operation_kind, statement, guidance,
+        "SELECT session_id, operation_kind, statement, guidance, descendant_scope,
                 result_kind, rejection_kind, result_event_ordinal
            FROM goal_command
           WHERE command_id = $1",
@@ -1274,7 +1283,8 @@ async fn load_command_from_connection(
     let operation: String = column(&row, "operation_kind")?;
     let statement: Option<String> = column(&row, "statement")?;
     let guidance: Option<String> = column(&row, "guidance")?;
-    let action = action_from_stored(&operation, statement, guidance)?;
+    let descendant_scope: Option<String> = column(&row, "descendant_scope")?;
+    let action = action_from_stored(&operation, statement, guidance, descendant_scope)?;
     let command = GoalUserCommand::new(command_id, session, action);
     let result_kind: String = column(&row, "result_kind")?;
     let rejection: Option<String> = column(&row, "rejection_kind")?;
@@ -1344,6 +1354,7 @@ fn action_from_stored(
     operation: &str,
     statement: Option<String>,
     guidance: Option<String>,
+    descendant_scope: Option<String>,
 ) -> Result<GoalUserAction, GoalCorruption> {
     let operation =
         goal_operation_from_str(operation).ok_or_else(|| GoalCorruption::Unsupported {
@@ -1359,12 +1370,33 @@ fn action_from_stored(
             guidance.map(goal_guidance).transpose()?,
         )),
         GoalOperationKind::Stop => Ok(GoalUserAction::Stop {
-            descendant_scope: DescendantTerminationScope::ParentAlone,
+            descendant_scope: descendant_scope_from_str(&required(
+                descendant_scope,
+                "stop descendant scope",
+            )?)?,
         }),
         GoalOperationKind::Supersede => Ok(GoalUserAction::Supersede(goal_statement(required(
             statement,
             "supersede statement",
         )?)?)),
+    }
+}
+
+const fn descendant_scope_to_str(value: DescendantTerminationScope) -> &'static str {
+    match value {
+        DescendantTerminationScope::ParentAlone => "parent_alone",
+        DescendantTerminationScope::ParentAndDescendants => "parent_and_descendants",
+    }
+}
+
+fn descendant_scope_from_str(value: &str) -> Result<DescendantTerminationScope, GoalCorruption> {
+    match value {
+        "parent_alone" => Ok(DescendantTerminationScope::ParentAlone),
+        "parent_and_descendants" => Ok(DescendantTerminationScope::ParentAndDescendants),
+        value => Err(GoalCorruption::Unsupported {
+            field: "stop descendant scope",
+            value: value.to_owned(),
+        }),
     }
 }
 

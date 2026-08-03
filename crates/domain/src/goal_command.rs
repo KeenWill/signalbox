@@ -20,6 +20,43 @@ pub enum GoalUserAction {
     Supersede(GoalStatement),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{GoalUserAction, GoalUserCommand};
+    use crate::{DescendantTerminationScope, DurableCommandId, SessionId};
+
+    /// INV-012: stop-command replay comparison binds descendant scope.
+    #[test]
+    fn inv012_stop_command_identity_includes_descendant_scope() {
+        let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(1));
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(2));
+        let parent_alone = GoalUserCommand::new(
+            command_id,
+            session,
+            GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        );
+        let equal_replay = GoalUserCommand::new(
+            command_id,
+            session,
+            GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        );
+        let conflicting_replay = GoalUserCommand::new(
+            command_id,
+            session,
+            GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        );
+
+        assert_eq!(parent_alone, equal_replay);
+        assert_ne!(parent_alone, conflicting_replay);
+    }
+}
+
 /// A user-global durable command for one goal operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GoalUserCommand {
@@ -55,35 +92,6 @@ impl GoalUserCommand {
     /// Borrows the exact requested action.
     pub const fn action(&self) -> &GoalUserAction {
         &self.action
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{GoalUserAction, GoalUserCommand};
-    use crate::{DescendantTerminationScope, DurableCommandId, SessionId};
-
-    /// INV-012: stop-command replay comparison binds descendant scope.
-    #[test]
-    fn inv012_stop_command_identity_includes_descendant_scope() {
-        let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(1));
-        let session = SessionId::from_uuid(uuid::Uuid::from_u128(2));
-        let command = |descendant_scope| {
-            GoalUserCommand::new(
-                command_id,
-                session,
-                GoalUserAction::Stop { descendant_scope },
-            )
-        };
-
-        assert_eq!(
-            command(DescendantTerminationScope::ParentAlone),
-            command(DescendantTerminationScope::ParentAlone),
-        );
-        assert_ne!(
-            command(DescendantTerminationScope::ParentAlone),
-            command(DescendantTerminationScope::ParentAndDescendants),
-        );
     }
 }
 

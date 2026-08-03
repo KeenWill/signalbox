@@ -1073,11 +1073,12 @@ async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<
     Ok(())
 }
 
-/// INV-048: stopping before activation leaves no runnable goal work and the
-/// immutable stale turn cannot block a later explicit commission.
+/// INV-012 / INV-048: stopping before activation retains the exact descendant
+/// scope for replay, leaves no runnable goal work, and cannot block a later
+/// explicit commission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_stop_retires_queued_work_without_blocking_reattach() -> Result<(), Box<dyn Error>> {
+async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -1094,19 +1095,19 @@ async fn inv048_stop_retires_queued_work_without_blocking_reattach() -> Result<(
             |_| None,
         )
         .await?;
-    repository
-        .handle_user_command(
-            GoalUserCommand::new(
-                command(STOP_COMMAND),
-                session(SESSION),
-                GoalUserAction::Stop {
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                },
-            ),
-            None,
-            |_| None,
-        )
+    let stop = GoalUserCommand::new(
+        command(STOP_COMMAND),
+        session(SESSION),
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+    );
+    let stopped = repository
+        .handle_user_command(stop.clone(), None, |_| None)
         .await?;
+    let replayed = repository.handle_user_command(stop, None, |_| None).await?;
+
+    assert_eq!(replayed, stopped);
 
     assert_eq!(
         StartEligibleTurnRepository::new(pool.clone())
@@ -1442,8 +1443,8 @@ async fn inv048_goal_command_operation_matches_the_applied_event_kind() -> Resul
     sqlx::query(
         "INSERT INTO goal_command
             (command_id, command_kind, storage_version, session_id,
-             operation_kind, result_kind, result_event_ordinal)
-         VALUES ($1, 'goal', 1, $2, 'stop', 'applied', 1)",
+             operation_kind, descendant_scope, result_kind, result_event_ordinal)
+         VALUES ($1, 'goal', 1, $2, 'stop', 'parent_alone', 'applied', 1)",
     )
     .bind(mismatched.into_uuid())
     .bind(Uuid::from_u128(SESSION))
@@ -2551,8 +2552,9 @@ async fn inv048_goal_command_rejection_matches_its_operation() -> Result<(), Box
     let error = sqlx::query(
         "INSERT INTO goal_command
             (command_id, command_kind, storage_version, session_id,
-             operation_kind, result_kind, rejection_kind)
-         VALUES ($1, 'goal', 1, $2, 'stop', 'rejected', 'unknown_model_alias')",
+             operation_kind, descendant_scope, result_kind, rejection_kind)
+         VALUES ($1, 'goal', 1, $2, 'stop', 'parent_alone',
+                 'rejected', 'unknown_model_alias')",
     )
     .bind(impossible.into_uuid())
     .bind(Uuid::from_u128(SESSION))

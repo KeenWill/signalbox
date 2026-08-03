@@ -16,9 +16,11 @@ prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 input-delivery surface and its user-reachable steering boundary were verified
 through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
 provenance and creation mode were verified through PR #311
-(`agent/session-templates-spec`). The append-only context-compaction record and
-projection were verified through PR #312 (`agent/context-compaction-core`); the
-command path and canonical visible-range selection were verified through PR #314
+(`agent/session-templates-spec`). Delegated creation provenance and its durable
+mapping were verified through PR #431 (`agent/delegation-creation-provenance`).
+The append-only context-compaction record and projection were verified through
+PR #312 (`agent/context-compaction-core`); the command path and canonical
+visible-range selection were verified through PR #314
 (`agent/context-compaction-protocol`). The runner placement-entry paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. The imported-conversation record
@@ -26,6 +28,10 @@ and converter are owned by [conversation-import](conversation-import.md). Where
 a law is cited as `INV-NNN`, the generated
 [invariant test index](../invariants.md) resolves it; where mechanics owned by
 another contract are summarized, the owning sibling page is linked inline.
+
+The path-scoped session-placement paragraphs are the foundation proposal at the
+bottom of their implementing stack and become verified only with its
+read-introspection and process-surface child pull request.
 
 ## Session identity and creation provenance
 
@@ -70,15 +76,15 @@ INV-039).
 ## Session creation
 
 `CreateSession` carries the durable command identity, the provenance pair, one
-complete unversioned initial defaults value, and one optional complete session
-runner placement, plus its explicit or template-derived creation mode.
-Structural equality excludes the command identifier. Explicit mode compares
-provenance, the complete defaults, and the placement; template-derived mode
-compares provenance, the placement, and the caller-supplied template name while
-excluding the copied defaults and content digest. The two modes are never equal
-(INV-012, INV-047). Three topics are owned by
-[identity-and-commands](identity-and-commands.md): durable-command storage, the
-structural-equality doctrine, and identity generation, supply, and encoding.
+complete unversioned initial defaults value, one path-scoped placement decision,
+and one optional complete session runner placement, plus its explicit or
+template-derived creation mode. Structural equality excludes the command
+identifier. Explicit mode compares provenance, the complete defaults, and the
+placement; template-derived mode compares provenance, the placement, and the
+caller-supplied template name while excluding the copied defaults and content
+digest. The two modes are never equal (INV-012, INV-047). Three topics are owned
+by [identity-and-commands](identity-and-commands.md): durable-command storage,
+the structural-equality doctrine, and identity generation, supply, and encoding.
 
 The placement is absent for a daemon-only session. When present it is the
 complete immutable request — runner selector, working-directory selection,
@@ -140,11 +146,41 @@ resolution follow the shared durable-command contract owned by
 equal replay returns the recorded receipt, which may name a different session
 than the freshly minted candidate; the unused candidate is simply discarded.
 
-Why (append-only, one exception): provenance, defaults versions, command
-receipts, and scheduler registration are historical facts; in-place mutation
-would rewrite recorded intent and the context that later work consumed. The
-current-defaults pointer alone is mutable because "current" is a present choice,
-not a historical fact.
+### Path-scoped session placement
+
+Path placement is opt-in. `Pathless` is the compatibility value and preserves
+today's cross-session read behavior exactly. A placed session carries one
+validated dotted path whose nonempty ASCII label segments admit letters, digits,
+hyphen, and underscore; each segment is at most 64 bytes and a path is at most
+64 segments. The initial value is pinned by creation. Only the explicit
+`UpdateSessionPlacement` durable command changes it, appending a versioned
+`Updated` event that names its predecessor and command identity; creation itself
+appends version-one `Created`, so no update rewrites history.
+
+A placed requester's readable scope is its parent directory's subtree. The
+decision computes the requesting path's parent prefix once and performs one
+prefix comparison against the target placement: siblings and descendants are
+allowed; ancestors, pathless targets, and disjoint subtrees are refused. A
+refusal is typed evidence containing that requesting directory and the closed
+reason `OutsideRequestingDirectorySubtree`, never an empty successful result.
+The child pull request enforces this decision where the conversation
+introspection adapter opens a selected native transcript. Conversation-list
+inventory is discovery rather than a selected transcript read, and imported
+conversations are not sessions; neither surface is filtered by this rule.
+
+A one-segment placement sits in the root directory and therefore has global
+conversation read, including pathless sessions. It is legal only through the
+loud `SessionPlacement::root_global_read` constructor, which requires
+`RootPlacementGlobalReadIntent::Acknowledged`. The creation command, typed
+record, and version-one event all preserve both its path and the explicit
+global-read-intent bit. Ordinary scoped construction rejects a root path.
+
+Why (append-only, two pointer exceptions): provenance, defaults versions,
+placement events, command receipts, and scheduler registration are historical
+facts; in-place mutation would rewrite recorded intent and the context that
+later work consumed. The current-defaults pointer and
+`session_current_placement` head are mutable because each selects a present
+choice without rewriting history.
 
 ### Create from an imported frontier
 
@@ -492,11 +528,11 @@ current defaults version — alongside imported-conversation headers, in one
 bounded keyset page of its own. It adds no session state and changes none of the
 rules above.
 
-Because both `UserInitiated` and `Delegated` creation lack actor attribution,
-and neither cause grants or implies visibility, the implemented default view is
-exactly all non-archived sessions. No visibility taxonomy, creation-time
-override, or inference from creation provenance or missing attribution is
-stored. The dependency for future creation-derived visibility is recorded in
+Because `UserInitiated` is the only constructible creation cause and every
+current session-creation boundary lacks actor attribution, the implemented
+default view is exactly all non-archived sessions. No visibility taxonomy,
+creation-time override, or inference from missing attribution is stored. The
+dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
 ## The session aggregate
@@ -896,32 +932,52 @@ this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
+The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
+referencing the exact spawning request and its parent session and turn. It is
+model/tool-authored delegation work, not accepted input and not `Actor::User`;
+the child's first turn has a distinct delegation-task origin and starts from
+that entry. Reconstitution resolves the request and requires its checked task
+bytes, parent, turn, child relationship, and entry to agree before the task
+becomes model-visible.
+
 Each spawning request creates at most one immutable parent/child relationship.
-The relationship records the exact parent session and turn, child session, and
-one parent-chosen policy:
+The public domain surface accepts neither a caller-supplied relationship count
+nor an unsealed relationship slice as evidence of that uniqueness. Aggregate
+construction remains sealed in the foundation slice; the persistence slice in
+this stack admits a spawn only from the complete parent relationship inventory
+held under the spawn transaction's lock, together with the child-session
+uniqueness check. The relationship records the exact parent session and turn,
+child session and delegated-task turn, and one parent-chosen policy:
 
 - `Background` never derives a child stop or cancellation from a parent state;
 - `Bound` states separate `on_parent_stopped` and `on_parent_cancelled` actions,
   each exactly `KeepRunning`, `Stop`, or `Cancel`.
 
-The `SessionDelegation` aggregate admits creation only from a sealed
-`DelegatedSpawnRequest` and records that request's parent, bounded task, policy,
-child, and spawn provenance as the first event in one contiguous history. Typed
-await and message requests may act only on their exact relationship; consuming
-transition failures return the unchanged aggregate and attempted input. Message
-delivery remains available after a terminal outcome. Outcome authority is
-checked against the relationship before recording: an equal
-authority-and-outcome replay is idempotent, `ContinueRunning` preserves the
-active lifecycle, and every other outcome terminalizes it.
+The `SessionDelegation` aggregate records an admitted sealed
+`DelegatedSpawnRequest`'s parent, bounded task, policy, child, and spawn
+provenance as the first event in one contiguous history. Typed await and message
+requests may act only on their exact relationship and only under sealed
+in-flight dispatch authority carrying that complete immutable request; matching
+identities cannot substitute a different producing call, ordinal, tool name,
+arguments, or approval posture. Consuming transition failures return the
+unchanged aggregate and attempted input. Message delivery remains available
+after a terminal outcome. Outcome authority is checked against the relationship
+before recording, including an exact match to this spawn's delegated-task turn:
+an equal authority-and-outcome replay is idempotent, `ContinueRunning` preserves
+the active lifecycle, and every other outcome terminalizes it.
 
 A user termination command also carries `ParentAlone` or `ParentAndDescendants`.
 `ParentAlone` does not evaluate descendants. The descendant form walks the
 durable relationship tree: background edges and bound `KeepRunning` edges
 produce explicit continue-running dispositions, while bound stop/cancel actions
-produce the corresponding typed outcome. Every evaluated relationship records an
-outcome with the parent event, exact spawn request, and user command provenance.
-No path deletes the child or its history, and neither a continued child nor a
-terminated child can become a silent orphan or silent kill.
+produce the corresponding typed outcome. If the child already has its unique
+terminal result, the edge instead records `AlreadyTerminal` with the new parent
+command provenance and an exact check of that prior result; it creates no second
+terminal result. Traversal still visits that child's outgoing relationships.
+Every evaluated relationship therefore records an outcome with the parent event,
+exact spawn request, and user command provenance. No path deletes the child or
+its history, and neither a continued child nor a terminated child can become a
+silent orphan or silent kill.
 
 Delegation messages are immutable, bounded, nonempty content records with a
 distinct `DelegationMessageId`, the spawning relationship, exact sender and
@@ -929,10 +985,13 @@ recipient, per-relationship ordinal, and sending `ToolRequestId`. Parent and
 child may each send to the other before or after either session stops, cancels,
 or completes. `DelegationMessage` semantic entries refer to those records; they
 do not reclassify model-authored content as input from the user. Undelivered
-messages remain FIFO. An active recipient consumes them at the next model-call
-safe point in ordinal order. An idle recipient gets one delegation-origin queued
-turn, and further messages coalesce into its starting frontier in the same order
-until activation.
+messages and background results share one positive, gap-free `delivery_sequence`
+allocated under the recipient session lock. An active recipient consumes pending
+items at the next model-call safe point in that recipient-wide order. An idle
+recipient gets one delegation-origin queued turn, and further items coalesce
+into its starting frontier in the same order until activation. Per-relationship
+message ordinals remain provenance and do not serve as a cross-relationship
+tie-break.
 
 A child result is delivered content, never transcript access. Its immutable
 record targets the exact spawning request and carries either the returned
@@ -947,17 +1006,22 @@ functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or
 semantic entries. A parent-policy stop or cancellation instead carries opaque
-authority from the exact applied parent termination result, exposing its parent
-session, turn, durable user command, command kind, and descendant scope. Raw
-identities cannot construct that authority, `parent_alone` authority cannot
-produce a child disposition, and the recorded outcome reason must match its
-command kind and scope. `ChildStopped` is produced only by a parent-policy stop;
-the existing child scheduling projection proves cancellation but does not
-fabricate a distinct stopped outcome from that evidence. Delivery appends a
-`DelegationResult` semantic entry only to the target parent and is idempotent by
-the spawning request. A detached child may return after the parent has stopped
-or cancelled; the result remains durable and independently inspectable even when
-no parent turn can consume it.
+authority from the exact applied parent termination result. Every authority
+exposes its parent session, durable user command, command kind, and descendant
+scope; a turn interrupt additionally names its exact turn, while a goal stop
+names the exact goal generation and carries no turn. Raw identities cannot
+construct that authority, `parent_alone` authority cannot produce a child
+disposition, and the recorded outcome reason must match its command kind and
+scope. `ChildStopped` is produced only by a parent-policy stop; the existing
+proof-bearing failed, refused, and cancelled model-call turn candidates can name
+any turn origin, including the delegated-task origin, but do not fabricate a
+distinct stopped outcome from that evidence. Delivery appends a
+`DelegationResult` semantic entry only to the target parent, names the exact
+awaiting request that receives the result, and is idempotent by that awaiting
+request. The immutable child result remains keyed by the spawning request. A
+detached child may return after the parent has stopped or cancelled; the result
+remains durable and independently inspectable even when no parent turn can
+consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or

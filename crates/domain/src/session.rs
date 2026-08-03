@@ -12,8 +12,9 @@
 
 use crate::{
     ContextFrontierId, DurableCommandId, ImportedConversationId, ImportedTranscriptFrontier,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId, SessionPlacement,
+    SessionPlacementVersion, SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
+    VersionedSessionPlacement,
 };
 
 #[derive(Clone, Debug)]
@@ -246,6 +247,7 @@ pub struct CreateSession {
     command_id: DurableCommandId,
     provenance: SessionCreationProvenance,
     creation_defaults: SessionCreationDefaults,
+    placement: SessionPlacement,
 }
 
 impl CreateSession {
@@ -260,6 +262,22 @@ impl CreateSession {
             command_id,
             provenance,
             creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
+            placement: SessionPlacement::pathless(),
+        }
+    }
+
+    /// Creates an explicitly placed session.
+    pub const fn new_with_placement(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
+    ) -> Self {
+        Self {
+            command_id,
+            provenance,
+            creation_defaults: SessionCreationDefaults::Explicit(initial_configuration_defaults),
+            placement,
         }
     }
 
@@ -278,6 +296,26 @@ impl CreateSession {
                 provenance: template_provenance,
                 resolved: resolved_configuration_defaults,
             },
+            placement: SessionPlacement::pathless(),
+        }
+    }
+
+    /// Creates a template-sourced session with an explicit placement.
+    pub const fn new_from_template_with_placement(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        template_provenance: SessionTemplateProvenance,
+        resolved_configuration_defaults: SessionConfigurationDefaults,
+        placement: SessionPlacement,
+    ) -> Self {
+        Self {
+            command_id,
+            provenance,
+            creation_defaults: SessionCreationDefaults::Template {
+                provenance: template_provenance,
+                resolved: resolved_configuration_defaults,
+            },
+            placement,
         }
     }
 
@@ -308,6 +346,11 @@ impl CreateSession {
             SessionCreationDefaults::Explicit(_) => None,
             SessionCreationDefaults::Template { provenance, .. } => Some(provenance),
         }
+    }
+
+    /// Borrows the placement pinned by this creation record.
+    pub const fn placement(&self) -> &SessionPlacement {
+        &self.placement
     }
 
     /// Establishes the first immutable defaults version this creation
@@ -351,6 +394,7 @@ impl CreateSession {
 impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
+            && self.placement == other.placement
             && match (&self.creation_defaults, &other.creation_defaults) {
                 (
                     SessionCreationDefaults::Explicit(left),
@@ -374,6 +418,7 @@ impl Eq for CreateSession {}
 impl std::hash::Hash for CreateSession {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.provenance.hash(state);
+        self.placement.hash(state);
         match &self.creation_defaults {
             SessionCreationDefaults::Explicit(defaults) => {
                 0_u8.hash(state);
@@ -516,6 +561,7 @@ pub struct InitialSession {
     provenance: SessionCreationProvenance,
     template_provenance: Option<SessionTemplateProvenance>,
     configuration_defaults: VersionedSessionConfigurationDefaults,
+    placement: VersionedSessionPlacement,
 }
 
 impl InitialSession {
@@ -529,6 +575,7 @@ impl InitialSession {
             provenance,
             template_provenance: None,
             configuration_defaults,
+            placement: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         }
     }
 
@@ -550,6 +597,11 @@ impl InitialSession {
     /// Returns defaults version one established by creation.
     pub const fn configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
         &self.configuration_defaults
+    }
+
+    /// Borrows placement event one established by creation.
+    pub const fn placement(&self) -> &VersionedSessionPlacement {
+        &self.placement
     }
 }
 
@@ -603,6 +655,7 @@ pub struct Session {
     creation_provenance: SessionCreationProvenance,
     template_provenance: Option<SessionTemplateProvenance>,
     current_configuration_defaults: VersionedSessionConfigurationDefaults,
+    current_placement: VersionedSessionPlacement,
 }
 
 impl Session {
@@ -610,12 +663,14 @@ impl Session {
         id: SessionId,
         creation_provenance: SessionCreationProvenance,
         current_configuration_defaults: VersionedSessionConfigurationDefaults,
+        current_placement: VersionedSessionPlacement,
     ) -> Self {
         Self {
             id,
             creation_provenance,
             template_provenance: None,
             current_configuration_defaults,
+            current_placement,
         }
     }
 
@@ -639,6 +694,24 @@ impl Session {
     pub const fn current_configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
         &self.current_configuration_defaults
     }
+
+    /// Borrows the complete placement event selected as current.
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement {
+        &self.current_placement
+    }
+}
+
+/// Labeled, independently stored placement facts for current-session reconstitution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionPlacementReconstitutionFacts {
+    /// Session identity owning the mutable current-placement pointer.
+    pub current_pointer_session: SessionId,
+    /// Placement version selected by the current-placement pointer.
+    pub current_pointer_version: SessionPlacementVersion,
+    /// Session identity owning the selected immutable placement event.
+    pub selected_event_session: SessionId,
+    /// Complete selected immutable placement event.
+    pub selected_event: VersionedSessionPlacement,
 }
 
 /// Complete checked inputs for reconstituting one current [`Session`].
@@ -658,13 +731,17 @@ pub struct SessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    current_placement_session: SessionId,
+    current_placement_version: SessionPlacementVersion,
+    placement_session: SessionId,
+    current_placement: VersionedSessionPlacement,
 }
 
 impl SessionReconstitutionInput {
-    /// Supplies the complete typed facts required by the current-session
+    /// Supplies every independently stored fact required by the current-session
     /// reconstitution seam.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new(
+    pub fn new(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -673,8 +750,9 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
-        Self::new_with_template_provenance(
+        Self::new_with_template_and_placement(
             requested_session,
             stored_session,
             provenance,
@@ -684,12 +762,14 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            placement,
         )
     }
 
-    /// Supplies complete typed facts including optional template provenance.
+    /// Supplies every independently stored fact, including optional template
+    /// provenance, required by the current-session reconstitution seam.
     #[allow(clippy::too_many_arguments)]
-    pub const fn new_with_template_provenance(
+    pub fn new_with_template_provenance(
         requested_session: SessionId,
         stored_session: SessionId,
         provenance: SessionCreationProvenance,
@@ -699,7 +779,42 @@ impl SessionReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
     ) -> Self {
+        Self::new_with_template_and_placement(
+            requested_session,
+            stored_session,
+            provenance,
+            template_provenance,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+            placement,
+        )
+    }
+
+    /// Supplies complete stored facts including current placement history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_template_and_placement(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+    ) -> Self {
+        let SessionPlacementReconstitutionFacts {
+            current_pointer_session,
+            current_pointer_version,
+            selected_event_session,
+            selected_event,
+        } = placement;
         Self {
             requested_session,
             stored_session,
@@ -710,6 +825,10 @@ impl SessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            current_placement_session: current_pointer_session,
+            current_placement_version: current_pointer_version,
+            placement_session: selected_event_session,
+            current_placement: selected_event,
         }
     }
 
@@ -758,6 +877,26 @@ impl SessionReconstitutionInput {
         &self.defaults
     }
 
+    /// Returns the session identity owning the current-placement pointer.
+    pub const fn current_placement_session(&self) -> SessionId {
+        self.current_placement_session
+    }
+
+    /// Returns the version selected by the current-placement pointer.
+    pub const fn current_placement_version(&self) -> SessionPlacementVersion {
+        self.current_placement_version
+    }
+
+    /// Returns the session identity owning the selected placement event.
+    pub const fn placement_session(&self) -> SessionId {
+        self.placement_session
+    }
+
+    /// Borrows the current placement event supplied for reconstitution.
+    pub const fn current_placement(&self) -> &VersionedSessionPlacement {
+        &self.current_placement
+    }
+
     /// Reconstructs one complete current session without performing I/O,
     /// replay, identity generation, or lifecycle effects.
     pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError> {
@@ -769,6 +908,12 @@ impl SessionReconstitutionInput {
             Some(SessionReconstitutionFailure::DefaultsSessionMismatch)
         } else if self.current_defaults_version != self.defaults_version {
             Some(SessionReconstitutionFailure::CurrentDefaultsVersionMismatch)
+        } else if self.current_placement_session != self.stored_session {
+            Some(SessionReconstitutionFailure::CurrentPlacementSessionMismatch)
+        } else if self.placement_session != self.stored_session {
+            Some(SessionReconstitutionFailure::PlacementSessionMismatch)
+        } else if self.current_placement_version != self.current_placement.version() {
+            Some(SessionReconstitutionFailure::CurrentPlacementVersionMismatch)
         } else {
             session_provenance_failure(self.provenance)
         };
@@ -787,6 +932,7 @@ impl SessionReconstitutionInput {
                 self.defaults_version,
                 self.defaults,
             ),
+            current_placement: self.current_placement,
         })
     }
 }
@@ -822,6 +968,12 @@ pub enum SessionReconstitutionFailure {
     DefaultsSessionMismatch,
     /// The pointer and selected defaults record name different versions.
     CurrentDefaultsVersionMismatch,
+    /// The current-placement pointer belongs to another session.
+    CurrentPlacementSessionMismatch,
+    /// The selected placement event belongs to another session.
+    PlacementSessionMismatch,
+    /// The pointer and selected placement event name different versions.
+    CurrentPlacementVersionMismatch,
     /// Imported ancestry requires the separate exact-prefix seed
     /// reconstitution seam.
     ImportedSessionSeedUnavailable,
@@ -996,6 +1148,7 @@ impl CreateSession {
             provenance: self.provenance,
             template_provenance: self.template_provenance().cloned(),
             configuration_defaults: self.establish_initial_defaults(),
+            placement: VersionedSessionPlacement::initial(self.placement.clone()),
         };
         Ok(PreparedCreateSession {
             command: self,
@@ -1021,6 +1174,7 @@ pub struct CreateSessionReconstitutionInput {
     defaults_session: SessionId,
     defaults_version: crate::SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
+    placement: VersionedSessionPlacement,
 }
 
 impl CreateSessionReconstitutionInput {
@@ -1035,7 +1189,7 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
-        Self::new_with_template_provenance(
+        Self::new_with_template_and_placement(
             command,
             result_session,
             session,
@@ -1044,6 +1198,7 @@ impl CreateSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
         )
     }
 
@@ -1059,6 +1214,32 @@ impl CreateSessionReconstitutionInput {
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
+        Self::new_with_template_and_placement(
+            command,
+            result_session,
+            session,
+            provenance,
+            template_provenance,
+            defaults_session,
+            defaults_version,
+            defaults,
+            VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+        )
+    }
+
+    /// Supplies complete creation facts including placement event one.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new_with_template_and_placement(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
+        defaults_session: SessionId,
+        defaults_version: crate::SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: VersionedSessionPlacement,
+    ) -> Self {
         Self {
             command,
             result_session,
@@ -1068,6 +1249,7 @@ impl CreateSessionReconstitutionInput {
             defaults_session,
             defaults_version,
             defaults,
+            placement,
         }
     }
 
@@ -1111,6 +1293,11 @@ impl CreateSessionReconstitutionInput {
         &self.defaults
     }
 
+    /// Borrows placement event one stored with creation.
+    pub const fn placement(&self) -> &VersionedSessionPlacement {
+        &self.placement
+    }
+
     /// Reconstructs the complete canonical creation without replaying effects.
     pub fn reconstitute(
         self,
@@ -1141,6 +1328,14 @@ impl CreateSessionReconstitutionInput {
             return Err(fail(
                 self,
                 CreateSessionReconstitutionFailure::TemplateProvenanceMismatch,
+            ));
+        }
+        if self.placement.version() != crate::SessionPlacementVersion::INITIAL
+            || self.command.placement() != self.placement.placement()
+        {
+            return Err(fail(
+                self,
+                CreateSessionReconstitutionFailure::PlacementMismatch,
             ));
         }
         if self.defaults_session != self.session {
@@ -1190,6 +1385,7 @@ impl CreateSessionReconstitutionInput {
                 configuration_defaults: VersionedSessionConfigurationDefaults::establish(
                     self.defaults,
                 ),
+                placement: self.placement,
             },
             applied_result: CreateSessionAppliedResult {
                 session: self.result_session,
@@ -1207,6 +1403,8 @@ pub enum CreateSessionReconstitutionFailure {
     ProvenanceMismatch,
     /// The session's template name/digest differs from the canonical command.
     TemplateProvenanceMismatch,
+    /// Placement event one differs from the canonical creation payload.
+    PlacementMismatch,
     /// The stored initial defaults row belongs to a different session.
     DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.
@@ -1302,8 +1500,9 @@ mod tests {
     };
     use crate::{
         ImportedTranscriptPosition, ModelSelectionRequest, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionTemplateContentDigest, SessionTemplateName,
-        SessionTemplateProvenance, VersionedSessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionPlacement, SessionPlacementVersion,
+        SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
+        VersionedSessionConfigurationDefaults, VersionedSessionPlacement,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -1346,7 +1545,20 @@ mod tests {
         defaults: SessionConfigurationDefaults,
     ) -> SessionReconstitutionInput {
         SessionReconstitutionInput::new(
-            session, session, provenance, session, version, session, version, defaults,
+            session,
+            session,
+            provenance,
+            session,
+            version,
+            session,
+            version,
+            defaults,
+            crate::SessionPlacementReconstitutionFacts {
+                current_pointer_session: session,
+                current_pointer_version: SessionPlacementVersion::INITIAL,
+                selected_event_session: session,
+                selected_event: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
+            },
         )
     }
 
@@ -1601,6 +1813,10 @@ mod tests {
         defaults_session: crate::SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        current_placement_session: crate::SessionId,
+        current_placement_version: SessionPlacementVersion,
+        placement_session: crate::SessionId,
+        placement: VersionedSessionPlacement,
     }
 
     impl CurrentSessionFacts {
@@ -1616,19 +1832,30 @@ mod tests {
                 defaults_session: session,
                 defaults_version: SessionConfigurationDefaultsVersion::first(),
                 defaults: defaults(3),
+                current_placement_session: session,
+                current_placement_version: SessionPlacementVersion::INITIAL,
+                placement_session: session,
+                placement: VersionedSessionPlacement::initial(SessionPlacement::pathless()),
             }
         }
 
         fn input(self) -> SessionReconstitutionInput {
-            SessionReconstitutionInput::new(
+            SessionReconstitutionInput::new_with_template_and_placement(
                 self.requested_session,
                 self.stored_session,
                 self.provenance,
+                None,
                 self.current_defaults_session,
                 self.current_defaults_version,
                 self.defaults_session,
                 self.defaults_version,
                 self.defaults,
+                crate::SessionPlacementReconstitutionFacts {
+                    current_pointer_session: self.current_placement_session,
+                    current_pointer_version: self.current_placement_version,
+                    selected_event_session: self.placement_session,
+                    selected_event: self.placement,
+                },
             )
         }
     }
@@ -1713,8 +1940,9 @@ mod tests {
         );
     }
 
-    /// S01 / INV-002 / INV-008: every requested/stored identity, pointer
-    /// owner, defaults owner, or selected-version mismatch fails closed and
+    /// S01 / INV-002 / INV-008: every requested/stored identity, defaults
+    /// pointer/record identity, placement pointer/event identity, or
+    /// selected-version mismatch fails closed and
     /// returns the complete unchanged typed projection.
     #[test]
     fn s01_inv002_inv008_current_session_rejects_cross_wired_facts() {
@@ -1722,6 +1950,9 @@ mod tests {
         let second_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version two exists");
+        let second_placement_version = SessionPlacementVersion::INITIAL
+            .next()
+            .expect("placement version two exists");
 
         let requested_other_session = current_session_reconstitution_failure(CurrentSessionFacts {
             requested_session: session_id(2),
@@ -1759,6 +1990,36 @@ mod tests {
         assert_eq!(
             pointer_and_record_versions_torn,
             SessionReconstitutionFailure::CurrentDefaultsVersionMismatch
+        );
+
+        let placement_pointer_owned_elsewhere =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                current_placement_session: session_id(2),
+                ..matching.clone()
+            });
+        assert_eq!(
+            placement_pointer_owned_elsewhere,
+            SessionReconstitutionFailure::CurrentPlacementSessionMismatch
+        );
+
+        let placement_event_owned_elsewhere =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                placement_session: session_id(2),
+                ..matching.clone()
+            });
+        assert_eq!(
+            placement_event_owned_elsewhere,
+            SessionReconstitutionFailure::PlacementSessionMismatch
+        );
+
+        let placement_pointer_and_event_versions_torn =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                current_placement_version: second_placement_version,
+                ..matching.clone()
+            });
+        assert_eq!(
+            placement_pointer_and_event_versions_torn,
+            SessionReconstitutionFailure::CurrentPlacementVersionMismatch
         );
 
         expect![[r#"
@@ -2094,6 +2355,26 @@ mod tests {
             failure,
             CreateSessionPreparationFailure::TranscriptAncestryUnavailable
         );
+    }
+
+    /// S18 / INV-003: ordinary CreateSession cannot forge the delegated
+    /// creation family owned by the spawning-request transaction.
+    #[test]
+    fn s18_inv003_create_session_rejects_delegated_creation() {
+        let provenance = SessionCreationProvenance::delegated(delegated_spawning_request());
+        let create = CreateSession::new(command_id(3), provenance, defaults(4));
+
+        let error = create
+            .prepare(session_id(5))
+            .expect_err("ordinary creation cannot claim delegated provenance");
+
+        assert_eq!(
+            error.failure(),
+            CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn
+        );
+        assert_eq!(error.session(), session_id(5));
+        assert_eq!(error.command().command_id(), command_id(3));
+        assert_eq!(error.command().provenance(), provenance);
     }
 
     /// S01 / INV-003 / INV-008 / INV-012: complete matching durable facts

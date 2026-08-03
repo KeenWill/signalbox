@@ -111,6 +111,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID> = []
     var latestActivity = SignalboxProcessActivity.unavailable
     var activeActivity: SignalboxProcessActivity?
+    var unknownTurnActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
 
@@ -118,6 +119,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       switch record {
       case .turn(let turn):
         latestActivity = activity(for: turn.state)
+        if case .unknown = turn.state {
+          unknownTurnActivity = latestActivity
+        } else if case .queued = turn.state {
+          // A queued successor does not prove that an unknown earlier turn is terminal.
+        } else {
+          unknownTurnActivity = nil
+        }
         if turnStateIsActive(turn.state) {
           activeActivity = latestActivity
         }
@@ -176,7 +184,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
-      activity: activeActivity ?? latestActivity,
+      activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
       materializedAcceptedInputIDs: materializedAcceptedInputIDs
     )
   }
@@ -190,15 +198,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     let role: SignalboxMessageRole
+    let unrecognizedKind: String?
     switch message.entry {
     case .user:
       role = .user
+      unrecognizedKind = nil
     case .assistant, .contextSummary:
       role = .assistant
+      unrecognizedKind = nil
     case .imported(_, _, let speaker):
-      role = importedRole(speaker)
-    case .unknown:
+      (role, unrecognizedKind) = importedPresentation(speaker)
+    case .unknown(let kind, _, _):
       role = .unknown
+      unrecognizedKind = SignalboxProcessPresentation.retainedLabel(kind)
     }
     let eventID = try claimPresentationID(
       .semantic(
@@ -210,7 +222,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return SignalboxStoredEvent(
       eventID: eventID,
       event: .processMessage(
-        SignalboxProcessMessageEvent(role: role, text: content)
+        SignalboxProcessMessageEvent(
+          role: role,
+          text: content,
+          unrecognizedKind: unrecognizedKind
+        )
       )
     )
   }
@@ -224,6 +240,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     switch message.entry {
+    case .modelIdentityChanged(let turnID, let defaultsVersion, let selectedModelID):
+      return try semanticRecord(
+        message,
+        event: .processConservative(
+          SignalboxProcessConservativeEvent(
+            kind: "model_identity_changed",
+            diagnostic:
+              "Turn \(turnID.rawValue) selected model \(selectedModelID.rawValue) at defaults version \(defaultsVersion.rawValue); source session \(message.sourceSessionID.rawValue), entry \(message.entryID.rawValue)."
+          )
+        )
+      )
     case .assistantToolUse(
       let turnID,
       let modelCallID,
@@ -283,7 +310,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message,
         event: .processConservative(
           SignalboxProcessConservativeEvent(
-            kind: "imported_\(contentKind.rawValue)",
+            kind: SignalboxProcessPresentation.retainedLabel(
+              "imported_\(contentKind.rawValue)"
+            ),
             diagnostic: "The process snapshot preserves this imported content conservatively."
           )
         )
@@ -305,7 +334,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message,
         event: .processConservative(
           SignalboxProcessConservativeEvent(
-            kind: kind,
+            kind: SignalboxProcessPresentation.retainedLabel(kind),
             diagnostic: diagnostic?.message ?? "The entry kind is not rendered by this client."
           )
         )
@@ -520,7 +549,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       requestID = request.rawValue
     case .assistantToolUse:
       return false
-    case .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
+    case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
     guard let context = toolContextsByRequestID[requestID],
@@ -570,7 +599,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
               .toolClosed(let requestID, _):
               return requestID.rawValue
-            case .assistantToolUse, .turnCompleted, .turnFailed, .turnCancelled, .imported,
+            case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+              .turnCancelled, .imported,
               .unknown:
               return nil
             }
@@ -644,17 +674,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
   }
 
-  private func importedRole(
+  private func importedPresentation(
     _ speaker: SignalboxImportedSourceSpeaker
-  ) -> SignalboxMessageRole {
-    guard case .attested(let importedSpeaker) = speaker else {
-      return .unknown
-    }
-    switch importedSpeaker {
-    case .user:
-      return .user
-    case .assistant:
-      return .assistant
+  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?) {
+    switch speaker {
+    case .attested(.user):
+      return (.user, nil)
+    case .attested(.assistant):
+      return (.assistant, nil)
+    case .attested(.unknown(let value)):
+      return (
+        .unknown,
+        SignalboxProcessPresentation.retainedLabel("Unrecognized speaker (\(value))")
+      )
+    case .unknown(let kind, _):
+      return (
+        .unknown,
+        SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
+      )
+    case .notAttested, .attestedAbsent:
+      return (.unknown, nil)
     }
   }
 
@@ -664,7 +703,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch state {
     case .queued:
       return .init(state: .queued, label: "Queued")
-    case .activeRunning:
+    case .activeRunning(_, let currentModelCall):
+      if let currentModelCall, case .unknown = currentModelCall.state {
+        return .init(state: .recoveryRequired, label: "Recovery required")
+      }
       return .init(state: .running, label: "Running")
     case .activeAwaitingToolApproval:
       return .init(state: .waitingForToolDecision, label: "Tool decision unavailable")
@@ -672,10 +714,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .reconciliationRequired, .toolReconciliationRequired:
       return .init(state: .recoveryRequired, label: "Recovery required")
     case .failed(_, _, let terminalModelCall):
+      if let terminalModelCall, case .unknown(let value) = terminalModelCall.disposition {
+        let label = SignalboxProcessPresentation.retainedLabel(
+          "Failed: unrecognized disposition (\(value))"
+        )
+        return .init(state: .failed, label: label)
+      }
       guard let cause = terminalModelCall?.cause else {
         return .init(state: .failed, label: "Failed")
       }
-      return .init(state: .failed, label: "Failed: \(providerFailureLabel(cause))")
+      let label = SignalboxProcessPresentation.retainedLabel(
+        "Failed: \(providerFailureLabel(cause))"
+      )
+      return .init(state: .failed, label: label)
     case .completed:
       return .init(state: .completed, label: "Completed")
     case .refused:
@@ -683,7 +734,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .cancelled:
       return .init(state: .cancelled, label: "Cancelled")
     case .unknown:
-      return .unavailable
+      return .init(state: .recoveryRequired, label: "Recovery required")
     }
   }
 
@@ -709,6 +760,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return "provider internal error"
     case .unrecognized:
       return "unrecognized provider error"
+    case .unknown(let value):
+      return "unrecognized provider error (\(value))"
     }
   }
 
