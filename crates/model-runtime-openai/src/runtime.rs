@@ -276,10 +276,19 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             }
         };
         if let Some(capabilities) = capabilities {
-            operation.resolved_target = capabilities
+            operation.resolved_target = match capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)
-                .expect("validated fast mode has a declared target")
-                .clone();
+            {
+                Ok(target) => target.clone(),
+                Err(error) => {
+                    return PreparationOutcome::Failed {
+                        correlation,
+                        failure: PreparationFailure::UnsupportedOperation {
+                            detail: error.to_string(),
+                        },
+                    };
+                }
+            };
         }
         let wire_request = match build_request(&operation) {
             Ok(request) => request,
