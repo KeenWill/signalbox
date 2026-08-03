@@ -1,11 +1,12 @@
 //! Dedicated model execution for delegated tool-approval decisions.
 
-use std::{error::Error, fmt, future::Future, pin::Pin};
+use std::{error::Error, fmt, future::Future, pin::Pin, sync::Arc};
 
 use serde_json::{Map, Value, value::RawValue};
+use signalbox_application::ApprovalJudgeAuthorization;
 use signalbox_domain::{
     DelegateApprovalRecommendation, DirectModelSelection, ModelCallId, ResolvedProviderTarget,
-    SessionId, ToolDecisionRationale,
+    ToolDecisionRationale, ToolRequest,
 };
 use signalbox_model_runtime::{
     CancellationSignal, CompletionFinish, ConversationMessage, CredentialReference, DeliveryMode,
@@ -35,10 +36,10 @@ const OUTPUT_SCHEMA: &str = r#"{
 /// Exact inputs to one dedicated approval-judge model call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeModelRequest {
+    /// Exact parked request being judged.
+    pub request: ToolRequest,
     /// Durable physical call identity.
     pub call: ModelCallId,
-    /// Session whose parked tool request is judged.
-    pub session: SessionId,
     /// Direct model selection frozen for this call.
     pub selection: DirectModelSelection,
     /// Exact resolved provider target.
@@ -54,6 +55,8 @@ pub struct ApprovalJudgeModelRequest {
 /// Exact successful result of one dedicated approval-judge call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeModelResult {
+    /// Durable physical call identity returned with the decision.
+    pub call: ModelCallId,
     /// Closed recommendation emitted by the judge.
     pub recommendation: DelegateApprovalRecommendation,
     /// Checked nonempty rationale emitted with the recommendation.
@@ -87,27 +90,58 @@ type ApprovalJudgeExecutionFuture = Pin<
 
 /// One prepared, non-cloneable approval-judge provider capability.
 pub struct PreparedApprovalJudgeModelCall {
+    binding: PreparedApprovalJudgeBinding,
     execute: Box<dyn FnOnce() -> ApprovalJudgeExecutionFuture + Send>,
 }
 
 impl PreparedApprovalJudgeModelCall {
-    fn new(execute: impl FnOnce() -> ApprovalJudgeExecutionFuture + Send + 'static) -> Self {
+    fn new(
+        binding: PreparedApprovalJudgeBinding,
+        execute: impl FnOnce() -> ApprovalJudgeExecutionFuture + Send + 'static,
+    ) -> Self {
         Self {
+            binding,
             execute: Box::new(execute),
         }
     }
 
-    /// Consumes the durably authorized capability exactly once.
-    pub fn execute(
+    /// Consumes this capability and its exact durable authorization once.
+    pub fn execute<Authorization>(
         self,
+        authorization: Authorization,
     ) -> Pin<
         Box<
             dyn Future<Output = Result<ApprovalJudgeModelResult, ApprovalJudgeModelError>>
                 + Send
                 + 'static,
         >,
-    > {
+    >
+    where
+        Authorization: ApprovalJudgeAuthorization,
+    {
+        if !self.binding.matches(&authorization) {
+            return Box::pin(async { Err(ApprovalJudgeModelError::AuthorizationMismatch) });
+        }
         (self.execute)()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreparedApprovalJudgeBinding {
+    request: ToolRequest,
+    call: ModelCallId,
+    selection: DirectModelSelection,
+    target: ResolvedProviderTarget,
+    credential_reference: String,
+}
+
+impl PreparedApprovalJudgeBinding {
+    fn matches(&self, authorization: &impl ApprovalJudgeAuthorization) -> bool {
+        &self.request == authorization.request()
+            && self.call == authorization.call()
+            && self.selection == authorization.selection()
+            && self.target == authorization.target()
+            && self.credential_reference == authorization.credential_reference()
     }
 }
 
@@ -138,20 +172,23 @@ where
 /// Layer-1 runtime adapter for dedicated approval-judge calls.
 #[derive(Clone, Debug)]
 pub struct RuntimeApprovalJudgeModel<R> {
-    runtime: R,
+    runtime: Arc<R>,
     models: RuntimeModelCatalog,
 }
 
 impl<R> RuntimeApprovalJudgeModel<R> {
     /// Supplies the runtime and immutable target mapping.
-    pub const fn new(runtime: R, models: RuntimeModelCatalog) -> Self {
-        Self { runtime, models }
+    pub fn new(runtime: R, models: RuntimeModelCatalog) -> Self {
+        Self {
+            runtime: Arc::new(runtime),
+            models,
+        }
     }
 }
 
 impl<R> ApprovalJudgeModel for RuntimeApprovalJudgeModel<R>
 where
-    R: ModelRuntime<ModelCallId> + Clone + fmt::Debug + Send + Sync + 'static,
+    R: ModelRuntime<ModelCallId> + fmt::Debug + Send + Sync + 'static,
     R::Prepared: Send + 'static,
 {
     fn prepare<'a>(
@@ -171,6 +208,13 @@ where
                 .ok_or(ApprovalJudgeModelError::UnconfiguredTarget)?;
             let resolved = ResolvedTarget::new(definition.provider_model().to_owned());
             let contract = output_contract()?;
+            let binding = PreparedApprovalJudgeBinding {
+                request: request.request,
+                call: request.call,
+                selection: request.selection,
+                target: request.target,
+                credential_reference: request.credential_reference.clone(),
+            };
             let mut operation = ModelOperation::new(
                 request.call,
                 CredentialReference::new(request.credential_reference),
@@ -199,9 +243,9 @@ where
                     return Err(ApprovalJudgeModelError::PreparationDefect);
                 }
             };
-            let runtime = self.runtime.clone();
+            let runtime = Arc::clone(&self.runtime);
             let call = request.call;
-            Ok(PreparedApprovalJudgeModelCall::new(move || {
+            Ok(PreparedApprovalJudgeModelCall::new(binding, move || {
                 Box::pin(execute_prepared(
                     runtime, prepared, resolved, contract, call,
                 ))
@@ -211,7 +255,7 @@ where
 }
 
 async fn execute_prepared<R>(
-    runtime: R,
+    runtime: Arc<R>,
     prepared: R::Prepared,
     resolved: ResolvedTarget,
     contract: StructuredOutputContract,
@@ -281,6 +325,7 @@ where
     let (recommendation, rationale) = decode_decision(decoded)
         .map_err(|_| ApprovalJudgeModelError::InvalidDecision(completed.usage))?;
     Ok(ApprovalJudgeModelResult {
+        call,
         recommendation,
         rationale,
         usage: completed.usage,
@@ -411,6 +456,8 @@ pub enum ApprovalJudgeModelError {
     PreparationFailed,
     /// Adapter request construction was defective.
     PreparationDefect,
+    /// Durable authorization did not match the prepared one-shot request.
+    AuthorizationMismatch,
     /// Runtime preparation returned another operation's correlation before send.
     PreparationCorrelationMismatch,
     /// Runtime correlation differed from the durable call.
@@ -449,6 +496,7 @@ impl ApprovalJudgeModelError {
             | Self::CancelledBeforeSend
             | Self::PreparationFailed
             | Self::PreparationDefect
+            | Self::AuthorizationMismatch
             | Self::PreparationCorrelationMismatch
             | Self::CancellationConfirmed
             | Self::ProvenUnsent => TokenUsage {
@@ -478,6 +526,9 @@ impl fmt::Display for ApprovalJudgeModelError {
             }
             Self::PreparationDefect => {
                 formatter.write_str("approval judge model call preparation was defective")
+            }
+            Self::AuthorizationMismatch => {
+                formatter.write_str("approval judge model authorization did not match preparation")
             }
             Self::PreparationCorrelationMismatch => formatter
                 .write_str("approval judge model call preparation returned another correlation"),
@@ -523,9 +574,11 @@ impl Error for ApprovalJudgeModelError {}
 
 #[cfg(test)]
 mod tests {
+    use signalbox_application::ApprovalJudgeAuthorization;
     use signalbox_domain::{
-        DelegateApprovalRecommendation, DirectModelSelection, ModelCallId, ProviderModelIdentity,
-        ResolvedProviderTarget, SessionId,
+        DelegateApprovalRecommendation, DirectModelSelection, ModelCallId, NormalizedToolArguments,
+        ProviderModelIdentity, ResolvedProviderTarget, SessionId, ToolRequest, ToolRequestId,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
     };
     use signalbox_model_runtime::{
         AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, Observation,
@@ -563,8 +616,19 @@ mod tests {
 
     fn request() -> ApprovalJudgeModelRequest {
         ApprovalJudgeModelRequest {
+            request: ToolRequestReconstitutionInput::new(
+                ToolRequestId::from_uuid(Uuid::from_u128(4)),
+                SessionId::from_uuid(Uuid::from_u128(2)),
+                TurnId::from_uuid(Uuid::from_u128(5)),
+                ModelCallId::from_uuid(Uuid::from_u128(6)),
+                ToolRequestOrdinal::from_u32(0),
+                signalbox_domain::ToolName::try_new(String::from("echo"))
+                    .expect("the fixture tool name is valid"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("the fixture arguments are canonical"),
+            )
+            .into_request(),
             call: ModelCallId::from_uuid(Uuid::from_u128(1)),
-            session: SessionId::from_uuid(Uuid::from_u128(2)),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(3)),
             target: target(),
             credential_reference: String::from("fixture-judge-credential"),
@@ -614,7 +678,51 @@ mod tests {
     async fn execute(
         model: &impl ApprovalJudgeModel,
     ) -> Result<super::ApprovalJudgeModelResult, ApprovalJudgeModelError> {
-        model.prepare(request()).await?.execute().await
+        let request = request();
+        let authorization = TestAuthorization::from_request(&request);
+        model.prepare(request).await?.execute(authorization).await
+    }
+
+    struct TestAuthorization {
+        request: ToolRequest,
+        call: ModelCallId,
+        selection: DirectModelSelection,
+        target: ResolvedProviderTarget,
+        credential_reference: String,
+    }
+
+    impl TestAuthorization {
+        fn from_request(request: &ApprovalJudgeModelRequest) -> Self {
+            Self {
+                request: request.request.clone(),
+                call: request.call,
+                selection: request.selection,
+                target: request.target,
+                credential_reference: request.credential_reference.clone(),
+            }
+        }
+    }
+
+    impl ApprovalJudgeAuthorization for TestAuthorization {
+        fn request(&self) -> &ToolRequest {
+            &self.request
+        }
+
+        fn call(&self) -> ModelCallId {
+            self.call
+        }
+
+        fn selection(&self) -> DirectModelSelection {
+            self.selection
+        }
+
+        fn target(&self) -> ResolvedProviderTarget {
+            self.target
+        }
+
+        fn credential_reference(&self) -> &str {
+            &self.credential_reference
+        }
     }
 
     #[tokio::test]
@@ -628,6 +736,7 @@ mod tests {
             .await
             .expect("the typed decision is admitted");
 
+        assert_eq!(result.call, request().call);
         assert_eq!(
             result.recommendation,
             DelegateApprovalRecommendation::Approve
@@ -639,6 +748,27 @@ mod tests {
             result.usage.cache_read_input_tokens,
             Some(CACHE_READ_INPUT_TOKENS)
         );
+    }
+
+    #[tokio::test]
+    async fn prepared_capability_rejects_another_authorized_judge_call() {
+        let model = RuntimeApprovalJudgeModel::new(
+            ScriptedModel::<ModelCallId>::single(approval_completion()),
+            catalog(),
+        );
+        let request = request();
+        let mut authorization = TestAuthorization::from_request(&request);
+        authorization.call = ModelCallId::from_uuid(Uuid::from_u128(99));
+
+        let error = model
+            .prepare(request)
+            .await
+            .expect("the provider capability prepares locally")
+            .execute(authorization)
+            .await
+            .expect_err("another call's authorization cannot enter the provider");
+
+        assert_eq!(error, ApprovalJudgeModelError::AuthorizationMismatch);
     }
 
     #[tokio::test]

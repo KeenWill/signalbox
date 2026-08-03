@@ -65,7 +65,8 @@ use signalbox_domain::{
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
     approval_judge::{
-        CompleteApprovalJudgeOutcome, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+        AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
+        PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
@@ -150,6 +151,15 @@ fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprova
         PrepareApprovalJudgeOutcome::NoWork
         | PrepareApprovalJudgeOutcome::InFlightAfterRestart(_) => {
             panic!("the delegated fixture prepares a fresh judge call")
+        }
+    }
+}
+
+fn authorized_approval_judge(outcome: AuthorizeApprovalJudgeOutcome) -> AuthorizedApprovalJudge {
+    match outcome {
+        AuthorizeApprovalJudgeOutcome::Authorized(authorization) => authorization,
+        AuthorizeApprovalJudgeOutcome::NoSend => {
+            panic!("the fresh judge authorization permits one send")
         }
     }
 }
@@ -3608,6 +3618,41 @@ async fn approval_judge_repository_defaults_to_durable_producing_model_after_cat
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_repeated_authorization_returns_no_send() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ed0;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+
+    let authorization = authorized_approval_judge(repository.authorize(&prepared).await?);
+    drop(authorization);
+    let retry = repository.authorize(&prepared).await?;
+
+    assert_eq!(retry, AuthorizeApprovalJudgeOutcome::NoSend);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_judge_repository_atomically_applies_provenanced_approval()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
@@ -3670,6 +3715,67 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
     assert_eq!(stored.delegate_model_call_id, prepared.call().into_uuid());
     assert_eq!(stored.rationale, APPROVAL_JUDGE_RATIONALE);
     assert_eq!(stored.active_phase, "running");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_completion_replay_rejects_another_continuation_identity()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ee8;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let persisted_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    let conflicting_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe2));
+
+    drop(authorized_approval_judge(
+        repository.authorize(&prepared).await?,
+    ));
+    repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            persisted_attempt,
+        )
+        .await?;
+    let error = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            conflicting_attempt,
+        )
+        .await
+        .expect_err("a replay cannot substitute another continuation identity");
+
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption
+    );
 
     pool.close().await;
     drop(container);
