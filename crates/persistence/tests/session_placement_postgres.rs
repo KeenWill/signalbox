@@ -38,6 +38,8 @@ const DATABASE_NAME: &str = "signalbox_placement";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RESULT_SHAPE_CONSTRAINT: &str = "update_session_placement_command_result_shape";
+const ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED: u128 = 0x230;
+const ARBITRARY_RESERVED_IDENTITY_CREATION_COMMAND_ID_SEED: u128 = 0x130;
 const ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED: u128 = 0x203;
 const ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED: u128 = 0x103;
 const ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED: u128 = 0x104;
@@ -237,10 +239,10 @@ async fn install_reserved_command_claim_guard(
 async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_claim()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x230);
+    let session_id = session(ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x130),
+            command(ARBITRARY_RESERVED_IDENTITY_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
@@ -1024,7 +1026,7 @@ async fn s36_placement_update_authenticates_the_current_placement_receipt()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_rejected_update_replay_authenticates_the_reported_current_version()
+async fn s36_inv012_rejected_update_replay_authenticates_the_reported_current_version()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session = session(0x224);
