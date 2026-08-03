@@ -4960,15 +4960,11 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
                 (Some(prior), Some(installed)) if prior != installed
             );
             let model_changed = prior_model != installed_model || validation_changed;
-            let copied_precedence = if model_changed {
-                ModelSettingsPrecedence {
-                    per_call: prior_settings.precedence.per_call,
-                    session: prior_settings.precedence.session,
-                    profile: installed_settings.precedence.profile,
-                    global_default: installed_settings.precedence.global_default,
-                }
-            } else {
-                prior_settings.precedence
+            let copied_precedence = ModelSettingsPrecedence {
+                per_call: prior_settings.precedence.per_call,
+                session: prior_settings.precedence.session,
+                profile: installed_settings.precedence.profile,
+                global_default: installed_settings.precedence.global_default,
             };
             let unadjusted_precedence = ModelSettingsPrecedence {
                 session: overlay_inheriting_from(
@@ -4987,6 +4983,7 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
                 || !snapshot_matches_model(installed_model, installed_settings)
                 || !provenance_matches
                 || (!adjustments.is_empty() && !model_changed)
+                || adjustments_target_explicit_overlay(*caller_override, adjustments)
             {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
@@ -5037,6 +5034,22 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
         | SessionEvent::TurnToolReconciliationRequired { .. } => {}
     }
     Ok(())
+}
+
+fn adjustments_target_explicit_overlay(
+    overlay: ModelSettingsOverlay,
+    adjustments: &[ModelChangeAdjustment],
+) -> bool {
+    adjustments.iter().any(|adjustment| match adjustment {
+        ModelChangeAdjustment::ReasoningLevelClamped { .. }
+        | ModelChangeAdjustment::ReasoningLevelCleared { .. } => {
+            overlay.reasoning_level != SettingOverlay::Inherit
+        }
+        ModelChangeAdjustment::FastModeDisabled {} => overlay.fast_mode != FastModeOverlay::Inherit,
+        ModelChangeAdjustment::ServiceTierCleared { .. } => {
+            overlay.service_tier != SettingOverlay::Inherit
+        }
+    })
 }
 
 fn validate_adjustments(adjustments: &[ModelChangeAdjustment]) -> Result<(), FrameValidationError> {
@@ -11576,6 +11589,53 @@ mod tests {
             },
         )
         .expect_err("an all-inherit caller cannot install an unrelated session layer");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: an automatic model-change adjustment cannot rewrite a value
+    /// explicitly supplied by the caller of that same defaults replacement.
+    #[test]
+    fn inv033_settings_change_rejects_adjustment_to_caller_explicit_value() {
+        let prior_settings = provider_default_settings_snapshot_fixture();
+        let mut installed_settings = provider_default_settings_snapshot_fixture();
+        installed_settings.precedence.session.reasoning_level =
+            SettingOverlay::Value(ReasoningLevel::Low);
+        installed_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
+        installed_settings.reasoning_source = Some(ModelSettingSource::Session);
+        installed_settings.validated_for_selection_id = Some(uuid(4));
+        let caller_override = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        };
+
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: command(2).expect("fixture command identity is admitted"),
+                    prior_defaults_version: CanonicalU64::new(1),
+                    installed_defaults_version: CanonicalU64::new(2),
+                    prior_model: ModelSelection::Direct {
+                        selection_id: uuid(3),
+                    },
+                    installed_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    prior_settings,
+                    installed_settings,
+                    caller_override,
+                    adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                        from: ReasoningLevel::High,
+                        to: ReasoningLevel::Low,
+                    }],
+                },
+            },
+        )
+        .expect_err("caller-owned settings cannot be adjusted automatically");
 
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
