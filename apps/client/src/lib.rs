@@ -3153,6 +3153,7 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
         | TurnState::QueuedDelegated { .. }
         | TurnState::ActiveRunning { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
+        | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
         | TurnState::Failed { .. }
         | TurnState::Refused { .. }
@@ -3215,7 +3216,8 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
             TurnState::Queued { .. }
             | TurnState::QueuedDelegated { .. }
             | TurnState::ActiveRunning { .. }
-            | TurnState::ActiveAwaitingToolApproval { .. },
+            | TurnState::ActiveAwaitingToolApproval { .. }
+            | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
         Some(
             TurnState::ActiveAwaitingModelCallRecovery { .. }

@@ -998,7 +998,13 @@ Initial task work is one delegated-task origin row plus its semantic entry and
 first queued turn. The origin references the spawning request and repeats no
 independent actor claim; deferred checks resolve that request's checked task,
 parent session and turn, child relationship, semantic entry, and turn starting
-frontier as one closed shape. No accepted-input row is inserted.
+frontier as one closed shape. No accepted-input row is inserted. The ordinary
+eligibility pass recognizes that typed origin directly, activates it without
+fabricating an accepted input, and starts model execution from the existing
+delegated-task semantic entry as the child's one-member initial frontier. The
+same typed path activates an idle recipient's delivery-range wake after its
+exact terminal predecessor, appending the contiguous checked message or
+background-result entries to that predecessor frontier.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
@@ -1060,10 +1066,13 @@ do not invert the session/outbox lock order or omit an edge that committed while
 the cascade waited. The command and every evaluated edge commit together; a
 crash can leave all prior durable state or the complete typed evaluation, never
 an unrecorded partial cascade. Parent-alone takes no descendant authority.
-Background and bound-keep-running edges still receive a continue-running event
-when evaluated. An already-terminal edge receives its typed already-terminal
-event and traversal continues through that child's outgoing relationships, so a
-terminal intermediate session cannot hide live descendants.
+Deferred reverse constraints also reject an applied descendant-scoped root
+command that lacks its exact cascade row, so an omitted cascade writer fails
+closed instead of silently degrading to parent-alone. Background and
+bound-keep-running edges still receive a continue-running event when evaluated.
+An already-terminal edge receives its typed already-terminal event and traversal
+continues through that child's outgoing relationships, so a terminal
+intermediate session cannot hide live descendants.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Result/message

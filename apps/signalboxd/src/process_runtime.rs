@@ -10110,6 +10110,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                 tool_request_id: wire_uuid(request.into_uuid()),
             }
         }
+        ProcessTurnState::ActiveAwaitingChild {
+            awaiting_request,
+            spawning_request,
+            child,
+        } => TurnState::ActiveAwaitingChild {
+            await_request_id: wire_uuid(awaiting_request.into_uuid()),
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            child_session_id: wire_uuid(child.into_uuid()),
+        },
         ProcessTurnState::ActiveAwaitingToolRecovery {
             ended_attempt,
             recovery_attempt,

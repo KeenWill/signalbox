@@ -1585,6 +1585,10 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
   case activeAwaitingModelCallRecovery(
     endedAttemptID: SignalboxCanonicalUUID, recoveryModelCallID: SignalboxCanonicalUUID)
   case activeAwaitingToolApproval(toolRequestID: SignalboxCanonicalUUID)
+  case activeAwaitingChild(
+    awaitRequestID: SignalboxCanonicalUUID,
+    spawningRequestID: SignalboxCanonicalUUID,
+    childSessionID: SignalboxCanonicalUUID)
   case activeAwaitingToolRecovery(
     endedAttemptID: SignalboxCanonicalUUID, recoveryToolAttemptID: SignalboxCanonicalUUID)
   case failed(
@@ -1668,6 +1672,16 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .activeAwaitingToolApproval(toolRequestID: try decoder.decode("tool_request_id"))
+      case "active_awaiting_child":
+        try tagged.rejectUnadmittedFields(
+          ["type", "await_request_id", "spawning_request_id", "child_session_id"],
+          decoder: decoder
+        )
+        self = .activeAwaitingChild(
+          awaitRequestID: try decoder.decode("await_request_id"),
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id")
+        )
       case "active_awaiting_tool_recovery":
         try tagged.rejectUnadmittedFields(
           ["type", "ended_attempt_id", "recovery_tool_attempt_id"],
@@ -2048,11 +2062,20 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           "delivery_sequence")
         let outcome: SignalboxDelegationOutcome = try decoder.decode("outcome")
         let content: String? = try decoder.decodeIfPresent("content")
+        let childSessionID: SignalboxCanonicalUUID = try decoder.decode("child_session_id")
+        let reason: SignalboxDelegationReason = try decoder.decode("reason")
+        let provenance: SignalboxDelegationProvenance = try decoder.decode("provenance")
         guard
           (mode == .foreground && deliverySequence == nil)
             || (mode == .background && (deliverySequence?.rawValue ?? 0) > 0),
           (outcome == .returned && content != nil)
-            || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil)
+            || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil),
+          Self.delegationResultShapeIsValid(
+            childSessionID: childSessionID,
+            outcome: outcome,
+            content: content,
+            reason: reason,
+            provenance: provenance)
         else {
           throw DecodingError.dataCorrupted(
             .init(
@@ -2064,13 +2087,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         self = .delegationResult(
           awaitRequestID: try decoder.decode("await_request_id"),
           spawningRequestID: try decoder.decode("spawning_request_id"),
-          childSessionID: try decoder.decode("child_session_id"),
+          childSessionID: childSessionID,
           mode: mode,
           deliverySequence: deliverySequence,
           outcome: outcome,
           content: content,
-          reason: try decoder.decode("reason"),
-          provenance: try decoder.decode("provenance"))
+          reason: reason,
+          provenance: provenance)
       case "model_identity_changed":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "defaults_version", "selected_model_id"],
@@ -2160,6 +2183,36 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         payload: tagged.payload,
         decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
       )
+    }
+  }
+
+  private static func delegationResultShapeIsValid(
+    childSessionID: SignalboxCanonicalUUID,
+    outcome: SignalboxDelegationOutcome,
+    content: String?,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance
+  ) -> Bool {
+    switch (outcome, reason, provenance, content) {
+    case (.returned, .childCompleted, .childTurn(let provenanceChild, _), .some):
+      return provenanceChild == childSessionID
+    case (.failed, .childExecutionFailed, .childTurn(let provenanceChild, _), .none),
+      (.failed, .childResultUnavailable, .childTurn(let provenanceChild, _), .none),
+      (.cancelled, .childCancelled, .childTurn(let provenanceChild, _), .none):
+      return provenanceChild == childSessionID
+    case (.stopped, .parentStopped, let provenance, .none),
+      (.stopped, .parentCancelled, let provenance, .none),
+      (.cancelled, .parentStopped, let provenance, .none),
+      (.cancelled, .parentCancelled, let provenance, .none):
+      switch provenance {
+      case .parentTurnCommand(_, _, _, .parentAndDescendants),
+        .parentGoalCommand(_, _, _, .parentAndDescendants):
+        return true
+      case .childTurn, .parentTurnCommand, .parentGoalCommand:
+        return false
+      }
+    default:
+      return false
     }
   }
 }

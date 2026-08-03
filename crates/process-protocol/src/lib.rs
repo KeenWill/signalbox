@@ -3740,6 +3740,15 @@ pub enum TurnState {
         /// Earliest undecided tool request.
         tool_request_id: CanonicalUuid,
     },
+    /// The turn is parked on a foreground delegated-child result.
+    ActiveAwaitingChild {
+        /// Tool request that issued the await.
+        await_request_id: CanonicalUuid,
+        /// Spawn request naming the relationship.
+        spawning_request_id: CanonicalUuid,
+        /// Exact child whose result releases the turn.
+        child_session_id: CanonicalUuid,
+    },
     /// The turn is parked on an ambiguous tool attempt.
     ActiveAwaitingToolRecovery {
         /// Ended turn attempt that issued the tool effect.
@@ -3829,6 +3838,11 @@ enum RawTurnState {
     ActiveAwaitingToolApproval {
         tool_request_id: CanonicalUuid,
     },
+    ActiveAwaitingChild {
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+    },
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_tool_attempt_id: CanonicalUuid,
@@ -3909,6 +3923,15 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
                 Self::ActiveAwaitingToolApproval { tool_request_id }
             }
+            RawTurnState::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            } => Self::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            },
             RawTurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
@@ -6876,6 +6899,30 @@ mod tests {
             message,
             r#"{"type":"transcript_entry","entry_index":"3","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000003","entry":{"type":"delegation_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000005","child_session_id":"00000000-0000-0000-0000-000000000002","mode":"background","delivery_sequence":"7","outcome":"returned","content":"wake result","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000002","child_turn_id":"00000000-0000-0000-0000-000000000006"}}}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn awaiting_child_turn_state_round_trips_exact_wait_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingChild {
+            await_request_id: uuid(4),
+            spawning_request_id: uuid(5),
+            child_session_id: uuid(2),
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_child",
+                "await_request_id": "00000000-0000-0000-0000-000000000004",
+                "spawning_request_id": "00000000-0000-0000-0000-000000000005",
+                "child_session_id": "00000000-0000-0000-0000-000000000002"
+            })
+        );
         Ok(())
     }
 

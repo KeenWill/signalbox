@@ -890,7 +890,7 @@ async fn activate_turn(
     pool: &PgPool,
     session: CanonicalUuid,
     expected_turn: TurnId,
-) -> SmokeResult<Box<signalbox_domain::ActivatedAcceptedInputTurn>> {
+) -> SmokeResult<Box<signalbox_domain::ActivatedTurn>> {
     let mut service = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),

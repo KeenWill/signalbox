@@ -14,7 +14,10 @@
 //! external evidence; stop-requested and recovery phases require their complete
 //! correlated model-call and applied-interrupt facts.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 use crate::context_frontier::ContextFrontierEntryValidationCache;
 use crate::{
@@ -22,9 +25,9 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ContextFrontierId,
-    CurrentTurnAttempt, DeliveryRequest, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
-    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    ReconstitutedImportedSession, ReconstitutedModelCall,
+    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest, EndedTurnAttempt,
+    InitialSemanticTranscriptEntryPayload, ModelCallDisposition, NonEmptyIssuedOperationRefs,
+    OriginConfiguration, ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
@@ -2192,7 +2195,7 @@ impl AcceptedInputSchedulingProjection {
             .active_model_call_recovery
             .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
         crate::model_execution::apply_interrupt_to_recovery_wait(
-            active_turn,
+            active_turn.into(),
             recovery.call,
             recovery.attempt,
             recovery.source_snapshot,
@@ -2233,7 +2236,7 @@ impl AcceptedInputSchedulingProjection {
             .active_turn_execution()
             .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
         crate::model_execution::apply_interrupt_to_executing_tool_batch(
-            active_turn,
+            active_turn.into(),
             batch,
             result_entries,
             result_frontier,
@@ -2259,7 +2262,7 @@ impl AcceptedInputSchedulingProjection {
             .active_tool_recovery_attempt
             .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
         crate::model_execution::apply_interrupt_to_tool_recovery_wait(
-            active_turn,
+            active_turn.into(),
             wait,
             tool_attempt,
             attempt,
@@ -2535,6 +2538,469 @@ impl ActivatedAcceptedInputTurn {
             phase: self.phase.clone(),
             pending_steering: Box::new([]),
             consumed_steering,
+        }
+    }
+}
+
+/// Checked active turn whose immutable origin is a delegated task rather than
+/// an accepted input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActivatedDelegatedTurn {
+    session: SessionId,
+    turn: TurnId,
+    origin: ActivatedDelegatedTurnOrigin,
+    configuration: OriginConfiguration,
+    start: AcceptedInputTurnStart,
+    phase: ActiveTurnPhase,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ActivatedDelegatedTurnOrigin {
+    InitialTask {
+        spawning_request: ToolRequestId,
+        task: DelegationContent,
+    },
+    PendingDeliveries {
+        first: NonZeroU64,
+        through: NonZeroU64,
+    },
+}
+
+impl ActivatedDelegatedTurn {
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub const fn spawning_request(&self) -> Option<ToolRequestId> {
+        match &self.origin {
+            ActivatedDelegatedTurnOrigin::InitialTask {
+                spawning_request, ..
+            } => Some(*spawning_request),
+            ActivatedDelegatedTurnOrigin::PendingDeliveries { .. } => None,
+        }
+    }
+
+    pub const fn task(&self) -> Option<&DelegationContent> {
+        match &self.origin {
+            ActivatedDelegatedTurnOrigin::InitialTask { task, .. } => Some(task),
+            ActivatedDelegatedTurnOrigin::PendingDeliveries { .. } => None,
+        }
+    }
+
+    pub const fn delivery_range(&self) -> Option<(NonZeroU64, NonZeroU64)> {
+        match &self.origin {
+            ActivatedDelegatedTurnOrigin::InitialTask { .. } => None,
+            ActivatedDelegatedTurnOrigin::PendingDeliveries { first, through } => {
+                Some((*first, *through))
+            }
+        }
+    }
+
+    pub const fn configuration(&self) -> &OriginConfiguration {
+        &self.configuration
+    }
+
+    pub const fn start(&self) -> AcceptedInputTurnStart {
+        self.start
+    }
+
+    pub const fn phase(&self) -> &ActiveTurnPhase {
+        &self.phase
+    }
+}
+
+/// Origin-agnostic active turn consumed by model execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActivatedTurn {
+    Accepted(ActivatedAcceptedInputTurn),
+    Delegated(ActivatedDelegatedTurn),
+}
+
+impl From<ActivatedAcceptedInputTurn> for ActivatedTurn {
+    fn from(value: ActivatedAcceptedInputTurn) -> Self {
+        Self::Accepted(value)
+    }
+}
+
+impl From<ActivatedDelegatedTurn> for ActivatedTurn {
+    fn from(value: ActivatedDelegatedTurn) -> Self {
+        Self::Delegated(value)
+    }
+}
+
+impl ActivatedTurn {
+    /// Borrows the accepted-input origin when this is an accepted-input turn.
+    pub const fn accepted_input(&self) -> Option<&AcceptedInputLifecycle> {
+        match self {
+            Self::Accepted(turn) => Some(turn.accepted_input()),
+            Self::Delegated(_) => None,
+        }
+    }
+
+    /// Borrows the delegated origin when this is a delegated turn.
+    pub const fn delegated(&self) -> Option<&ActivatedDelegatedTurn> {
+        match self {
+            Self::Accepted(_) => None,
+            Self::Delegated(turn) => Some(turn),
+        }
+    }
+
+    /// Seals stored semantic entries for this active turn's model frontier.
+    pub fn reconstitute_frontier_entries(
+        &self,
+        entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Option<Vec<SemanticTranscriptEntry>> {
+        entries
+            .into_iter()
+            .map(|entry| {
+                (entry.source_session() == self.session()).then(|| {
+                    SemanticTranscriptEntry::from_validated_parts(
+                        entry.identity(),
+                        entry.source_session(),
+                        entry.payload().clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub const fn session(&self) -> SessionId {
+        match self {
+            Self::Accepted(turn) => turn.session(),
+            Self::Delegated(turn) => turn.session(),
+        }
+    }
+
+    pub const fn turn(&self) -> TurnId {
+        match self {
+            Self::Accepted(turn) => turn.turn(),
+            Self::Delegated(turn) => turn.turn(),
+        }
+    }
+
+    pub const fn configuration(&self) -> &OriginConfiguration {
+        match self {
+            Self::Accepted(turn) => turn.configuration(),
+            Self::Delegated(turn) => turn.configuration(),
+        }
+    }
+
+    pub fn configuration_provenance(&self) -> TurnConfigurationProvenance {
+        match self {
+            Self::Accepted(turn) => turn.configuration_provenance().clone(),
+            Self::Delegated(turn) => {
+                TurnConfigurationProvenance::ExplicitOrigin(turn.configuration().clone())
+            }
+        }
+    }
+
+    pub const fn start(&self) -> AcceptedInputTurnStart {
+        match self {
+            Self::Accepted(turn) => turn.start(),
+            Self::Delegated(turn) => turn.start(),
+        }
+    }
+
+    pub const fn phase(&self) -> &ActiveTurnPhase {
+        match self {
+            Self::Accepted(turn) => turn.phase(),
+            Self::Delegated(turn) => turn.phase(),
+        }
+    }
+
+    pub fn pending_steering(&self) -> &[PendingSteeringInput] {
+        match self {
+            Self::Accepted(turn) => turn.pending_steering(),
+            Self::Delegated(_) => &[],
+        }
+    }
+
+    pub fn consumed_steering(&self) -> &[ConsumedSteeringInput] {
+        match self {
+            Self::Accepted(turn) => turn.consumed_steering(),
+            Self::Delegated(_) => &[],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_phase_for_test(&self, phase: ActiveTurnPhase) -> Self {
+        match self {
+            Self::Accepted(turn) => Self::Accepted(turn.with_phase_for_test(phase)),
+            Self::Delegated(turn) => {
+                let mut turn = turn.clone();
+                turn.phase = phase;
+                Self::Delegated(turn)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_start_for_test(&self, start: AcceptedInputTurnStart) -> Self {
+        match self {
+            Self::Accepted(turn) => Self::Accepted(turn.with_start_for_test(start)),
+            Self::Delegated(turn) => {
+                let mut turn = turn.clone();
+                turn.start = start;
+                Self::Delegated(turn)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pending_steering_for_test(
+        &self,
+        pending: Box<[(AcceptedInputId, SessionInputPosition)]>,
+    ) -> Self {
+        match self {
+            Self::Accepted(turn) => Self::Accepted(turn.with_pending_steering_for_test(pending)),
+            Self::Delegated(_) => panic!("delegated turns do not carry pending accepted input"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_consumed_steering_for_test(
+        &self,
+        consumed: Box<[(AcceptedInputId, SessionInputPosition, crate::ModelCallId)]>,
+    ) -> Self {
+        match self {
+            Self::Accepted(turn) => Self::Accepted(turn.with_consumed_steering_for_test(consumed)),
+            Self::Delegated(_) => panic!("delegated turns do not carry consumed accepted input"),
+        }
+    }
+}
+
+/// Complete durable facts for preparing one delegated initial-task activation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedTurnActivationInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub spawning_request: ToolRequestId,
+    pub task: DelegationContent,
+    pub task_entry: SemanticTranscriptEntryReconstitutionInput,
+    pub configuration: OriginConfiguration,
+    pub starting_frontier: ContextFrontierId,
+    pub initial_attempt: TurnAttemptId,
+}
+
+/// Complete durable facts for preparing one idle delegation-delivery wake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedWakeTurnActivationInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub first_delivery_sequence: NonZeroU64,
+    pub through_delivery_sequence: NonZeroU64,
+    pub deliveries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    pub predecessor: TurnId,
+    pub predecessor_snapshot: ResolvedContextFrontierSnapshot,
+    pub configuration: OriginConfiguration,
+    pub starting_frontier: ContextFrontierId,
+    pub initial_attempt: TurnAttemptId,
+}
+
+/// Sealed delegated activation candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedDelegatedTurnActivation {
+    turn: ActivatedDelegatedTurn,
+    starting_entries: Vec<SemanticTranscriptEntry>,
+    starting_snapshot: ResolvedContextFrontierSnapshot,
+}
+
+impl PreparedDelegatedTurnActivation {
+    pub fn prepare(input: DelegatedTurnActivationInput) -> Option<Self> {
+        if input.task_entry.source_session() != input.session
+            || !matches!(
+                input.task_entry.payload(),
+                SemanticTranscriptEntryPayload::DelegatedTask {
+                    spawning_request,
+                    content,
+                    ..
+                } if *spawning_request == input.spawning_request && content == &input.task
+            )
+        {
+            return None;
+        }
+        let task_entry = SemanticTranscriptEntry::from_validated_parts(
+            input.task_entry.identity(),
+            input.task_entry.source_session(),
+            input.task_entry.payload().clone(),
+        );
+        let starting_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            input.session,
+            input.starting_frontier,
+            vec![task_entry.reference()],
+        )
+        .ok()?;
+        let start = AcceptedInputTurnStart::from_validated_eligibility(
+            AcceptedInputStartingLineage::FirstInSession,
+            starting_snapshot.frontier(),
+        );
+        let phase = ActiveTurnPhase::Running {
+            current_attempt: CurrentTurnAttempt::prepared(input.initial_attempt),
+        };
+        Some(Self {
+            turn: ActivatedDelegatedTurn {
+                session: input.session,
+                turn: input.turn,
+                origin: ActivatedDelegatedTurnOrigin::InitialTask {
+                    spawning_request: input.spawning_request,
+                    task: input.task,
+                },
+                configuration: input.configuration,
+                start,
+                phase,
+            },
+            starting_entries: vec![task_entry],
+            starting_snapshot,
+        })
+    }
+
+    pub fn prepare_wake(input: DelegatedWakeTurnActivationInput) -> Option<Self> {
+        let expected_count = input
+            .through_delivery_sequence
+            .get()
+            .checked_sub(input.first_delivery_sequence.get())?
+            .checked_add(1)?;
+        if usize::try_from(expected_count).ok()? != input.deliveries.len()
+            || input.predecessor_snapshot.frontier().owning_session() != input.session
+        {
+            return None;
+        }
+        let mut entries = Vec::with_capacity(input.deliveries.len());
+        for (offset, delivery) in input.deliveries.into_iter().enumerate() {
+            let expected_sequence = input
+                .first_delivery_sequence
+                .get()
+                .checked_add(u64::try_from(offset).ok()?)?;
+            if delivery.source_session() != input.session
+                || delegation_delivery_sequence(delivery.payload())?.get() != expected_sequence
+            {
+                return None;
+            }
+            entries.push(SemanticTranscriptEntry::from_validated_parts(
+                delivery.identity(),
+                delivery.source_session(),
+                delivery.payload().clone(),
+            ));
+        }
+        let starting_snapshot = input
+            .predecessor_snapshot
+            .derive_appending_candidate(
+                input.starting_frontier,
+                entries
+                    .iter()
+                    .map(SemanticTranscriptEntry::reference)
+                    .collect(),
+            )
+            .ok()?;
+        let start = AcceptedInputTurnStart::from_validated_eligibility(
+            AcceptedInputStartingLineage::After {
+                immediate_predecessor: input.predecessor,
+            },
+            starting_snapshot.frontier(),
+        );
+        Some(Self {
+            turn: ActivatedDelegatedTurn {
+                session: input.session,
+                turn: input.turn,
+                origin: ActivatedDelegatedTurnOrigin::PendingDeliveries {
+                    first: input.first_delivery_sequence,
+                    through: input.through_delivery_sequence,
+                },
+                configuration: input.configuration,
+                start,
+                phase: ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::prepared(input.initial_attempt),
+                },
+            },
+            starting_entries: entries,
+            starting_snapshot,
+        })
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ActivatedDelegatedTurn,
+        Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    ) {
+        (self.turn, self.starting_entries, self.starting_snapshot)
+    }
+
+    /// Reconstitutes the same delegated origin under its exact stored live
+    /// phase after the initial activation transaction.
+    pub fn with_reconstituted_phase(
+        mut self,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+    ) -> Option<(
+        ActivatedDelegatedTurn,
+        Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    )> {
+        if phase.owning_turn() != self.turn.turn {
+            return None;
+        }
+        self.turn.phase = phase.canonical_evidence_free_phase()?;
+        Some((self.turn, self.starting_entries, self.starting_snapshot))
+    }
+}
+
+fn delegation_delivery_sequence(payload: &SemanticTranscriptEntryPayload) -> Option<NonZeroU64> {
+    match payload {
+        SemanticTranscriptEntryPayload::DelegationMessage {
+            delivery_sequence, ..
+        } => Some(*delivery_sequence),
+        SemanticTranscriptEntryPayload::DelegationResult {
+            mode: DelegationWaitMode::Background,
+            delivery_sequence: Some(delivery_sequence),
+            ..
+        } => Some(*delivery_sequence),
+        _ => None,
+    }
+}
+
+/// Origin-agnostic sealed candidate for an atomic turn activation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PreparedTurnActivation {
+    Accepted(Box<PreparedAcceptedInputTurnActivation>),
+    Delegated(Box<PreparedDelegatedTurnActivation>),
+}
+
+impl From<PreparedAcceptedInputTurnActivation> for PreparedTurnActivation {
+    fn from(value: PreparedAcceptedInputTurnActivation) -> Self {
+        Self::Accepted(Box::new(value))
+    }
+}
+
+impl From<PreparedDelegatedTurnActivation> for PreparedTurnActivation {
+    fn from(value: PreparedDelegatedTurnActivation) -> Self {
+        Self::Delegated(Box::new(value))
+    }
+}
+
+impl PreparedTurnActivation {
+    pub fn turn(&self) -> ActivatedTurn {
+        match self {
+            Self::Accepted(prepared) => prepared.turn().clone().into(),
+            Self::Delegated(prepared) => prepared.turn.clone().into(),
+        }
+    }
+
+    pub fn starting_entries(&self) -> &[SemanticTranscriptEntry] {
+        match self {
+            Self::Accepted(prepared) => prepared.starting_entries(),
+            Self::Delegated(prepared) => &prepared.starting_entries,
+        }
+    }
+
+    pub const fn starting_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        match self {
+            Self::Accepted(prepared) => prepared.starting_snapshot(),
+            Self::Delegated(prepared) => &prepared.starting_snapshot,
         }
     }
 }
@@ -6803,10 +7269,10 @@ mod tests {
         ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         ToolResultContent, ToolResultText, VersionedSessionPlacement,
         test_support::{
-            accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
-            imported_transcript_entry_id, model_call_id, provider_model_identity,
-            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
-            transcript_frontier, turn_attempt_id, turn_id,
+            accepted_input_id, command_id, context_frontier_id, delegation_message_id, direct,
+            imported_conversation_id, imported_transcript_entry_id, model_call_id,
+            provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
+            tool_request_id, transcript_frontier, turn_attempt_id, turn_id,
         },
     };
 
@@ -6981,6 +7447,128 @@ mod tests {
             .expect("the test request names the current defaults");
         OriginConfiguration::freeze(checked, |_| None)
             .expect("a direct model selection does not consult aliases")
+    }
+
+    #[test]
+    fn delegated_activation_preserves_task_origin_and_first_session_lineage() {
+        let child = current_session();
+        let spawning_request = tool_request_id(401);
+        let child_turn = turn_id(402);
+        let task = DelegationContent::try_new(String::from("inspect delegated work"))
+            .expect("fixture task is valid");
+        let task_entry = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_transcript_entry_id(403),
+            child.id(),
+            SemanticTranscriptEntryPayload::DelegatedTask {
+                spawning_request,
+                parent_session: session_id(404),
+                parent_turn: turn_id(405),
+                content: task.clone(),
+            },
+        );
+        let prepared = PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
+            session: child.id(),
+            turn: child_turn,
+            spawning_request,
+            task: task.clone(),
+            task_entry,
+            configuration: configuration(&child),
+            starting_frontier: context_frontier_id(406),
+            initial_attempt: turn_attempt_id(407),
+        })
+        .expect("exact delegated task facts prepare activation");
+        let (active, origin, snapshot) = prepared.into_parts();
+
+        assert_eq!(active.session(), child.id());
+        assert_eq!(active.turn(), child_turn);
+        assert_eq!(active.spawning_request(), Some(spawning_request));
+        assert_eq!(active.task(), Some(&task));
+        assert_eq!(
+            active.start().lineage(),
+            AcceptedInputStartingLineage::FirstInSession
+        );
+        assert_eq!(snapshot.entry_count(), 1);
+        assert_eq!(origin.len(), 1);
+        assert_eq!(
+            origin.first().unwrap().reference(),
+            snapshot.ordered_entries().next().unwrap()
+        );
+    }
+
+    #[test]
+    fn delegated_wake_activation_preserves_delivery_range_and_predecessor_lineage() {
+        let recipient = current_session();
+        let predecessor = turn_id(411);
+        let predecessor_entry = SemanticTranscriptEntryRef::from_source(
+            recipient.id(),
+            semantic_transcript_entry_id(412),
+        );
+        let predecessor_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            recipient.id(),
+            context_frontier_id(413),
+            vec![predecessor_entry],
+        )
+        .expect("fixture predecessor snapshot is valid");
+        let first_sequence = NonZeroU64::new(1).unwrap();
+        let through_sequence = NonZeroU64::new(2).unwrap();
+        let first_delivery = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_transcript_entry_id(414),
+            recipient.id(),
+            SemanticTranscriptEntryPayload::DelegationMessage {
+                spawning_request: tool_request_id(415),
+                message: delegation_message_id(416),
+                sender: session_id(417),
+                recipient: recipient.id(),
+                delivery_sequence: first_sequence,
+                content: DelegationContent::try_new(String::from("first wake message")).unwrap(),
+            },
+        );
+        let through_delivery = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_transcript_entry_id(418),
+            recipient.id(),
+            SemanticTranscriptEntryPayload::DelegationMessage {
+                spawning_request: tool_request_id(415),
+                message: delegation_message_id(419),
+                sender: session_id(417),
+                recipient: recipient.id(),
+                delivery_sequence: through_sequence,
+                content: DelegationContent::try_new(String::from("second wake message")).unwrap(),
+            },
+        );
+        let prepared =
+            PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
+                session: recipient.id(),
+                turn: turn_id(420),
+                first_delivery_sequence: first_sequence,
+                through_delivery_sequence: through_sequence,
+                deliveries: vec![first_delivery, through_delivery],
+                predecessor,
+                predecessor_snapshot,
+                configuration: configuration(&recipient),
+                starting_frontier: context_frontier_id(421),
+                initial_attempt: turn_attempt_id(422),
+            })
+            .expect("contiguous checked deliveries prepare a wake activation");
+        let (active, entries, snapshot) = prepared.into_parts();
+
+        assert_eq!(active.spawning_request(), None);
+        assert_eq!(active.task(), None);
+        assert_eq!(
+            active.delivery_range(),
+            Some((first_sequence, through_sequence))
+        );
+        assert_eq!(
+            active.start().lineage(),
+            AcceptedInputStartingLineage::After {
+                immediate_predecessor: predecessor
+            }
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(snapshot.entry_count(), 3);
+        assert_eq!(
+            snapshot.immediate_semantic_prefix().unwrap().snapshot(),
+            context_frontier_id(413)
+        );
     }
 
     fn default_origin_delivery() -> DeliveryRequest {

@@ -1225,7 +1225,12 @@ async fn activate_earliest_queued_turn(
     else {
         panic!("the earliest queued origin must activate through the production service");
     };
-    Ok(activated)
+    match *activated {
+        signalbox_domain::ActivatedTurn::Accepted(activated) => Ok(Box::new(activated)),
+        signalbox_domain::ActivatedTurn::Delegated(_) => {
+            panic!("accepted-input fixture activated a delegated turn")
+        }
+    }
 }
 
 async fn run_mixed_occupied_acceptances(
@@ -7249,6 +7254,35 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .fetch_one(&pool)
     .await?;
     assert_eq!(cascade_chain_trigger_count, 1);
+    let reverse_cascade_trigger_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_trigger
+          WHERE tgname IN (
+                'applied_goal_command_requires_delegation_cascade',
+                'applied_turn_command_requires_delegation_cascade'
+          )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reverse_cascade_trigger_count, 2);
+    let reverse_goal_cascade: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_applied_goal_command_delegation_cascade()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let reverse_turn_cascade: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_applied_turn_command_delegation_cascade()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(reverse_goal_cascade.contains("parent_and_descendants"));
+    assert!(reverse_goal_cascade.contains("session_delegation_termination_cascade"));
+    assert!(reverse_turn_cascade.contains("parent_and_descendants"));
+    assert!(reverse_turn_cascade.contains("session_delegation_termination_cascade"));
 
     let event_semantics: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef(
@@ -11659,7 +11693,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
     );
     assert_eq!(
         activated.configuration_provenance(),
-        &TurnConfigurationProvenance::InheritedForReclassifiedSteering(
+        TurnConfigurationProvenance::InheritedForReclassifiedSteering(
             signalbox_domain::SteeringBinding::new(source_turn),
         )
     );
@@ -14945,7 +14979,10 @@ async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
     };
     assert_eq!(activated.session(), session);
     assert_eq!(activated.turn(), turn);
-    assert_eq!(activated.accepted_input().id(), accepted_input);
+    assert_eq!(
+        activated.accepted_input().expect("accepted origin").id(),
+        accepted_input
+    );
     assert_eq!(
         activated.start().lineage(),
         AcceptedInputStartingLineage::FirstInSession
@@ -15033,6 +15070,154 @@ async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
 
     drop(restarted_service);
     restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xd401, 0xd402, direct(0xd403)))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xd404, 0xd405, direct(0xd403)))
+        .await?;
+    let parent = Uuid::from_u128(0xd402);
+    let child = Uuid::from_u128(0xd405);
+    let parent_turn = Uuid::from_u128(0xd406);
+    let child_turn = Uuid::from_u128(0xd407);
+    let spawning_request = Uuid::from_u128(0xd408);
+    let task_entry = Uuid::from_u128(0xd409);
+    let task_content = "inspect the delegated activation";
+    let selection = Uuid::from_u128(0xd403);
+    let mut fixture = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request)
+    .bind(parent)
+    .bind(parent_turn)
+    .bind(child)
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ($1, $2, 'delegation', NULL, 1, 'queued')",
+    )
+    .bind(child_turn)
+    .bind(child)
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, $5, $6)",
+    )
+    .bind(spawning_request)
+    .bind(child)
+    .bind(child_turn)
+    .bind(task_entry)
+    .bind(selection)
+    .bind(task_content)
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(child)
+    .bind(task_entry)
+    .bind(spawning_request)
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *fixture)
+    .await?;
+    fixture.commit().await?;
+
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xd40a));
+    let initial_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xd40b));
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            SessionId::from_uuid(child),
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd40c)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd40d)),
+                starting_frontier,
+                initial_attempt,
+            ),
+        )
+        .await?
+        .expect("the delegated child task has one exact activation preview");
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xd40e));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(selection),
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one delegated fixture target forms a catalog");
+    let model_calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let operation = model_calls
+        .preview_activation_operation(
+            preview.prepared(),
+            ModelCallId::from_uuid(Uuid::from_u128(0xd40f)),
+        )
+        .await?
+        .render(Box::new([]))?;
+    let frontier_entries = operation
+        .request()
+        .frontier_entries()
+        .map(signalbox_domain::SemanticTranscriptEntry::identity)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        frontier_entries,
+        [SemanticTranscriptEntryId::from_uuid(task_entry)]
+    );
+    let CommitActivationPreviewOutcome::Activated(activated) =
+        activation.commit_preview(preview).await?
+    else {
+        panic!("the unchanged delegated child activation must commit");
+    };
+    let delegated = activated
+        .delegated()
+        .expect("activation preserves its delegated origin family");
+    assert_eq!(delegated.turn(), TurnId::from_uuid(child_turn));
+    assert_eq!(
+        delegated.spawning_request().map(ToolRequestId::into_uuid),
+        Some(spawning_request)
+    );
+    assert_eq!(
+        delegated
+            .task()
+            .map(signalbox_domain::DelegationContent::as_str),
+        Some(task_content)
+    );
+    assert_eq!(delegated.start().frontier().snapshot(), starting_frontier);
+    assert_eq!(activated.accepted_input(), None);
+
+    pool.close().await;
     drop(container);
     Ok(())
 }
@@ -15446,7 +15631,10 @@ async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_de
         panic!("the raced eligibility pass must activate the queued origin");
     };
     assert_eq!(activated.turn(), queued_turn);
-    assert_eq!(activated.accepted_input().id(), queued_input);
+    assert_eq!(
+        activated.accepted_input().expect("accepted origin").id(),
+        queued_input
+    );
 
     let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
         SubmitInputRejectedResult::ActiveTurnPresent {
@@ -15604,7 +15792,10 @@ async fn inv007_inv008_inv009_inv012_submit_queued_ahead_of_activation_interleav
         panic!("the raced eligibility pass must activate the queued origin");
     };
     assert_eq!(activated.turn(), queued_turn);
-    assert_eq!(activated.accepted_input().id(), queued_input);
+    assert_eq!(
+        activated.accepted_input().expect("accepted origin").id(),
+        queued_input
+    );
 
     let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(applied),
@@ -17089,7 +17280,10 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
     };
     assert_eq!(activated.session(), session);
     assert_eq!(activated.turn(), origin.turn());
-    assert_eq!(activated.accepted_input().id(), origin.accepted_input());
+    assert_eq!(
+        activated.accepted_input().expect("accepted origin").id(),
+        origin.accepted_input()
+    );
     assert_eq!(
         activated.start().lineage(),
         AcceptedInputStartingLineage::FirstInSession

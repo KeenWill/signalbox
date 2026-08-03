@@ -2614,6 +2614,106 @@ mod aggregate_tests {
             .expect("cancelled terminal evidence seals its outcome")
     }
 
+    #[test]
+    fn delegation_outcome_reconstitution_round_trips_child_evidence() {
+        let returned = returned_outcome("checked result");
+        let reconstituted_returned = DelegationOutcome::reconstitute(
+            returned.kind(),
+            returned.content().cloned(),
+            returned.reason(),
+            returned.reconstitution_provenance(),
+        );
+        let cancelled = cancelled_outcome(session_id(3));
+        let reconstituted_cancelled = DelegationOutcome::reconstitute(
+            cancelled.kind(),
+            cancelled.content().cloned(),
+            cancelled.reason(),
+            cancelled.reconstitution_provenance(),
+        );
+        assert_eq!(reconstituted_returned, Some(returned));
+        assert_eq!(reconstituted_cancelled, Some(cancelled));
+    }
+
+    #[test]
+    fn delegation_outcome_reconstitution_round_trips_parent_command_evidence() {
+        let stopped_authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let stopped =
+            DelegationOutcome::from_parent_policy(stopped_authority, BoundChildAction::KeepRunning)
+                .expect("descendant-scoped stopped authority evaluates policy");
+        let cancelled_authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Cancelled,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let cancelled =
+            DelegationOutcome::from_parent_policy(cancelled_authority, BoundChildAction::Cancel)
+                .expect("descendant-scoped cancelled authority evaluates policy");
+        assert_eq!(
+            DelegationOutcome::reconstitute(
+                stopped.kind(),
+                stopped.content().cloned(),
+                stopped.reason(),
+                stopped.reconstitution_provenance(),
+            ),
+            Some(stopped)
+        );
+        assert_eq!(
+            DelegationOutcome::reconstitute(
+                cancelled.kind(),
+                cancelled.content().cloned(),
+                cancelled.reason(),
+                cancelled.reconstitution_provenance(),
+            ),
+            Some(cancelled)
+        );
+    }
+
+    #[test]
+    fn delegation_outcome_reconstitution_rejects_cross_wired_shapes() {
+        let child = DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: session_id(3),
+            turn: turn_id(7),
+        };
+        let parent = DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+            session: session_id(2),
+            turn: turn_id(5),
+            command: command_id(6),
+        };
+        assert_eq!(
+            DelegationOutcome::reconstitute(
+                DelegationOutcomeKind::ResultReturned,
+                Some(content("result")),
+                DelegationOutcomeReason::ChildCompleted,
+                parent,
+            ),
+            None
+        );
+        assert_eq!(
+            DelegationOutcome::reconstitute(
+                DelegationOutcomeKind::ChildStopped,
+                None,
+                DelegationOutcomeReason::ParentStopped {
+                    scope: DescendantTerminationScope::ParentAlone,
+                },
+                parent,
+            ),
+            None
+        );
+        assert_eq!(
+            DelegationOutcome::reconstitute(
+                DelegationOutcomeKind::ChildFailed,
+                None,
+                DelegationOutcomeReason::ChildCancelled,
+                child,
+            ),
+            None
+        );
+    }
+
     #[track_caller]
     fn rejected_spawn(
         error: DelegationTransitionError,

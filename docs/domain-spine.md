@@ -2777,6 +2777,84 @@ impl ActivatedAcceptedInputTurn {
     // configuration_provenance(), start(), phase(), pending_steering(), consumed_steering()
 }
 
+pub struct ActivatedDelegatedTurn { /* private */ }
+// sealed: PreparedDelegatedTurnActivation
+impl ActivatedDelegatedTurn {
+    // accessors: session(), turn(), spawning_request(), task(), configuration(),
+    // delivery_range(), start(), phase()
+}
+
+pub enum ActivatedTurn {
+    Accepted(ActivatedAcceptedInputTurn),
+    Delegated(ActivatedDelegatedTurn),
+}
+impl ActivatedTurn {
+    pub const fn accepted_input(&self) -> Option<&AcceptedInputLifecycle>;
+    pub const fn delegated(&self) -> Option<&ActivatedDelegatedTurn>;
+    pub fn reconstitute_frontier_entries(
+        &self,
+        entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Option<Vec<SemanticTranscriptEntry>>;
+    // accessors: session(), turn(), configuration(), configuration_provenance(),
+    // start(), phase(), pending_steering(), consumed_steering()
+}
+
+pub struct DelegatedTurnActivationInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub spawning_request: ToolRequestId,
+    pub task: DelegationContent,
+    pub task_entry: SemanticTranscriptEntryReconstitutionInput,
+    pub configuration: OriginConfiguration,
+    pub starting_frontier: ContextFrontierId,
+    pub initial_attempt: TurnAttemptId,
+}
+
+pub struct DelegatedWakeTurnActivationInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub first_delivery_sequence: NonZeroU64,
+    pub through_delivery_sequence: NonZeroU64,
+    pub deliveries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    pub predecessor: TurnId,
+    pub predecessor_snapshot: ResolvedContextFrontierSnapshot,
+    pub configuration: OriginConfiguration,
+    pub starting_frontier: ContextFrontierId,
+    pub initial_attempt: TurnAttemptId,
+}
+
+pub struct PreparedDelegatedTurnActivation { /* private */ }
+// sealed: PreparedDelegatedTurnActivation::prepare
+impl PreparedDelegatedTurnActivation {
+    pub fn prepare(input: DelegatedTurnActivationInput) -> Option<Self>;
+    pub fn prepare_wake(input: DelegatedWakeTurnActivationInput) -> Option<Self>;
+    pub fn into_parts(
+        self,
+    ) -> (
+        ActivatedDelegatedTurn,
+        Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    );
+    pub fn with_reconstituted_phase(
+        self,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+    ) -> Option<(
+        ActivatedDelegatedTurn,
+        Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    )>;
+}
+
+pub enum PreparedTurnActivation {
+    Accepted(Box<PreparedAcceptedInputTurnActivation>),
+    Delegated(Box<PreparedDelegatedTurnActivation>),
+}
+impl PreparedTurnActivation {
+    pub fn turn(&self) -> ActivatedTurn;
+    pub fn starting_entries(&self) -> &[SemanticTranscriptEntry];
+    pub const fn starting_snapshot(&self) -> &ResolvedContextFrontierSnapshot;
+}
+
 pub struct PreparedAcceptedInputTurnActivation { /* private */ }
 // sealed: AcceptedInputSchedulingProjection::prepare_earliest_queued_activation
 impl PreparedAcceptedInputTurnActivation {
@@ -3088,7 +3166,7 @@ impl ModelCallOriginContent {
 pub struct ModelCallExecutionReconstitutionInput { /* private */ }
 impl ModelCallExecutionReconstitutionInput {
     pub fn new(
-        active_turn: ActivatedAcceptedInputTurn,
+        active_turn: impl Into<ActivatedTurn>,
         targets: ModelTargetCatalog,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         frontier_entries: Vec<SemanticTranscriptEntry>,
@@ -6463,7 +6541,7 @@ pub struct UuidV7StartEligibleTurnIdGenerator;
 
 pub enum StartEligibleTurnOutcome {
     NoEligibleTurn,
-    Activated(Box<ActivatedAcceptedInputTurn>),
+    Activated(Box<ActivatedTurn>),
 }
 
 pub trait StartEligibleTurnTransaction {
@@ -8853,7 +8931,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: queue_order                                | 5 (+1 free fn)       |
 | domain: repo_watch                                 | 47                   |
 | domain: turn_lifecycle                             | 10                   |
-| domain: turn_eligibility                           | 29                   |
+| domain: turn_eligibility                           | 35                   |
 | domain: turn_attempt                               | 13                   |
 | domain: model_call                                 | 12                   |
 | domain: context_compaction                         | 12                   |
@@ -8872,7 +8950,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **711 (+7 free fn)** |
+| **signalbox-domain total**                         | **717 (+7 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)    |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |

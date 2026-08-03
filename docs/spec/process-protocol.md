@@ -1349,6 +1349,9 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
+- `active_awaiting_child { await_request_id, spawning_request_id, child_session_id }`,
+  which names the exact foreground wait and delegated relationship retaining the
+  parent turn's progressing slot;
 - `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
   where `terminal_attempt_id` is null only for an evidence-free recovery
   failure, and `terminal_model_call` is null when that failure or physical
@@ -1830,6 +1833,10 @@ nonterminal wait that `send` keeps waiting through; `decide_tool_request` is its
 resolving writer, issued from a second connection while the waiting client's
 transcript names the pending request and its proposing tool. A client disconnect
 never cancels model or tool work.
+
+An `active_awaiting_child` turn is likewise a nonterminal wait. Its three
+identifiers are required together, and clients keep waiting until the delivered
+foreground delegation result resumes or terminalizes that exact parent turn.
 
 The client rereads after each `tool_batch_transition { proposed }` and
 `tool_batch_transition { results_projected }`; the client rereads after every

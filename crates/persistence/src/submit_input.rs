@@ -1288,6 +1288,7 @@ pub(crate) async fn load_scheduling_projection(
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
+                AND origin_kind = 'accepted_input'
                 AND goal_turn_is_runtime_relevant(
                     session_id, turn_id
                 )) AS lifecycle_count",
@@ -3058,39 +3059,48 @@ pub(crate) async fn load_scheduling_projection(
          LEFT JOIN session_delegation_initial_task AS delegated_task
            ON delegated_task.spawning_tool_request_id =
                   entry.delegated_task_spawning_tool_request_id
+          AND entry.payload_kind = 'delegated_task'
           AND delegated_task.child_session_id = entry.source_session_id
           AND delegated_task.semantic_entry_id = entry.semantic_entry_id
          LEFT JOIN session_delegation AS task_relation
            ON task_relation.spawning_tool_request_id =
                   delegated_task.spawning_tool_request_id
+          AND entry.payload_kind = 'delegated_task'
          LEFT JOIN session_message_delivery AS message_delivery
            ON message_delivery.message_id = entry.delegation_message_id
+          AND entry.payload_kind = 'delegation_message'
           AND message_delivery.recipient_session_id = entry.source_session_id
          LEFT JOIN session_message AS delegated_message
            ON delegated_message.message_id = message_delivery.message_id
+          AND entry.payload_kind = 'delegation_message'
           AND delegated_message.spawning_tool_request_id =
                   message_delivery.spawning_tool_request_id
          LEFT JOIN session_delegation AS message_relation
            ON message_relation.spawning_tool_request_id =
                   delegated_message.spawning_tool_request_id
+          AND entry.payload_kind = 'delegation_message'
          LEFT JOIN session_child_result_delivery AS result_delivery
            ON result_delivery.awaiting_tool_request_id =
                   entry.delegation_result_awaiting_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
           AND result_delivery.spawning_tool_request_id =
                   entry.delegation_result_spawning_tool_request_id
           AND result_delivery.parent_session_id = entry.source_session_id
          LEFT JOIN session_delegation_wait AS delegated_wait
            ON delegated_wait.awaiting_tool_request_id =
                   result_delivery.awaiting_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
           AND delegated_wait.spawning_tool_request_id =
                   result_delivery.spawning_tool_request_id
           AND delegated_wait.parent_session_id = result_delivery.parent_session_id
          LEFT JOIN session_child_result AS delegated_result
            ON delegated_result.spawning_tool_request_id =
                   result_delivery.spawning_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
          LEFT JOIN session_delegation_event AS result_event
            ON result_event.spawning_tool_request_id =
                   delegated_result.spawning_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
           AND result_event.event_ordinal = delegated_result.event_ordinal
           AND result_event.event_kind = delegated_result.event_kind
         WHERE entry.payload_kind <> 'imported_entry'
@@ -4062,7 +4072,7 @@ fn accepted_origin_source_turn(delivery: DeliveryRequest) -> Option<TurnId> {
     }
 }
 
-fn decode_goal_origin_configuration(
+pub(crate) fn decode_goal_origin_configuration(
     row: &PgRow,
     expected_session: SessionId,
 ) -> Result<OriginConfiguration, SubmitInputRepositoryError> {

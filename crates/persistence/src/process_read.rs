@@ -397,6 +397,15 @@ pub enum ProcessTurnState {
         /// Earliest undecided tool request.
         request: ToolRequestId,
     },
+    /// The yielded foreground await is parked on one exact delegated child.
+    ActiveAwaitingChild {
+        /// Tool request that issued the foreground await.
+        awaiting_request: ToolRequestId,
+        /// Spawn request naming the relationship.
+        spawning_request: ToolRequestId,
+        /// Exact child whose terminal result releases this turn.
+        child: SessionId,
+    },
     /// The yielded tool batch is parked on an ambiguous external effect.
     ActiveAwaitingToolRecovery {
         /// Ended turn attempt that issued the tool effect.
@@ -2319,6 +2328,7 @@ async fn load_next_transcript_turn(
             turn.starting_frontier_id,
             turn.terminal_frontier_id,
             turn.active_phase_kind,
+            turn.child_wait_request_id,
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
             turn.recovery_model_call_id,
@@ -2340,6 +2350,8 @@ async fn load_next_transcript_turn(
             task.task_content AS delegated_task_content,
             relation.parent_session_id AS delegated_parent_session_id,
             relation.parent_turn_id AS delegated_parent_turn_id,
+            child_wait.spawning_tool_request_id AS child_wait_spawning_request_id,
+            child_wait.child_session_id AS child_wait_child_session_id,
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
@@ -2355,6 +2367,11 @@ async fn load_next_transcript_turn(
            LEFT JOIN session_delegation AS relation
              ON relation.spawning_tool_request_id = task.spawning_tool_request_id
             AND relation.child_session_id = task.child_session_id
+           LEFT JOIN session_delegation_wait AS child_wait
+             ON child_wait.awaiting_tool_request_id = turn.child_wait_request_id
+            AND child_wait.parent_turn_id = turn.turn_id
+            AND child_wait.parent_session_id = turn.session_id
+            AND child_wait.wait_mode = 'foreground'
            LEFT JOIN model_call AS current_call
              ON current_call.turn_attempt_id = turn.current_attempt_id
             AND current_call.turn_id = turn.turn_id
@@ -2556,6 +2573,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
     let active_phase: Option<String> = row.try_get("active_phase_kind")?;
     let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
+    let child_wait_request: Option<Uuid> = row.try_get("child_wait_request_id")?;
+    let child_wait_spawning_request: Option<Uuid> =
+        row.try_get("child_wait_spawning_request_id")?;
+    let child_wait_child: Option<Uuid> = row.try_get("child_wait_child_session_id")?;
     let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
     let recovery_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
     let active_tool_round_call: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
@@ -2597,6 +2618,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             "running"
                 | "awaiting_model_call_recovery"
                 | "awaiting_tool_approval"
+                | "awaiting_child"
                 | "awaiting_tool_recovery"
         )
     {
@@ -2660,6 +2682,60 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     };
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
+
+    if matches!(active_phase.as_deref(), Some("awaiting_child")) {
+        let (
+            Some(starting_frontier),
+            Some(awaiting_request),
+            Some(spawning_request),
+            Some(child),
+            Some(_producing_call),
+            Some(tool_frontier),
+        ) = (
+            starting_frontier,
+            child_wait_request,
+            child_wait_spawning_request,
+            child_wait_child,
+            active_tool_round_call,
+            active_tool_round_frontier,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("child wait shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || current_attempt.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("child wait shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("child wait frontier").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ActiveAwaitingChild {
+                    awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+                    spawning_request: ToolRequestId::from_uuid(spawning_request),
+                    child: SessionId::from_uuid(child),
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(latest_frontier),
+        });
+    }
 
     if matches!(active_phase.as_deref(), Some("awaiting_tool_approval")) {
         let (Some(starting_frontier), Some(_producing_call), Some(request), Some(tool_frontier)) = (

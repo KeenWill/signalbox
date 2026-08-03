@@ -1386,6 +1386,92 @@ AFTER INSERT ON session_delegation_parent_termination
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_delegation_parent_termination_chain();
 
+-- The forward cascade-to-command constraint above is intentionally paired
+-- with these reverse command-to-cascade constraints. An applied
+-- parent-and-descendants command may never commit as an implicit
+-- parent-alone command merely because its scheduling writer omitted the
+-- typed cascade proof.
+CREATE FUNCTION require_applied_goal_command_delegation_cascade()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    applied_generation numeric(20, 0);
+BEGIN
+    IF NEW.operation_kind <> 'stop'
+       OR NEW.result_kind <> 'applied'
+       OR NEW.descendant_scope <> 'parent_and_descendants' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation AS relation
+         WHERE relation.parent_session_id = NEW.session_id
+    ) THEN
+        RETURN NULL;
+    END IF;
+    SELECT event.generation INTO applied_generation
+      FROM goal_event AS event
+     WHERE event.session_id = NEW.session_id
+       AND event.event_ordinal = NEW.result_event_ordinal
+       AND event.event_kind = 'user_stopped';
+    IF applied_generation IS NULL OR NOT EXISTS (
+        SELECT 1 FROM session_delegation_termination_cascade AS cascade
+         WHERE cascade.root_command_id = NEW.command_id
+           AND cascade.root_session_id = NEW.session_id
+           AND cascade.root_source_kind = 'goal_command'
+           AND cascade.root_turn_id IS NULL
+           AND cascade.root_goal_generation = applied_generation
+           AND cascade.termination_kind = 'stopped'
+           AND cascade.descendant_scope = NEW.descendant_scope
+    ) THEN
+        RAISE EXCEPTION 'applied descendant-scoped goal command lacks its cascade proof'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'goal_command_delegation_cascade';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION require_applied_turn_command_delegation_cascade()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.delivery_kind <> 'interrupt'
+       OR NEW.result_kind <> 'applied'
+       OR NEW.descendant_scope <> 'parent_and_descendants' THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation AS relation
+         WHERE relation.parent_session_id = NEW.session_id
+    ) THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation_termination_cascade AS cascade
+         WHERE cascade.root_command_id = NEW.command_id
+           AND cascade.root_session_id = NEW.session_id
+           AND cascade.root_source_kind = 'turn_command'
+           AND cascade.root_turn_id = NEW.expected_active_turn_id
+           AND cascade.root_goal_generation IS NULL
+           AND cascade.termination_kind = 'cancelled'
+           AND cascade.descendant_scope = NEW.descendant_scope
+    ) THEN
+        RAISE EXCEPTION 'applied descendant-scoped turn command lacks its cascade proof'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'submit_input_command_delegation_cascade';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER applied_goal_command_requires_delegation_cascade
+AFTER INSERT OR UPDATE ON goal_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_applied_goal_command_delegation_cascade();
+
+CREATE CONSTRAINT TRIGGER applied_turn_command_requires_delegation_cascade
+AFTER INSERT OR UPDATE ON submit_input_command
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_applied_turn_command_delegation_cascade();
+
 CREATE FUNCTION delegation_cascade_expected_frontier(
     checked_root_session uuid,
     checked_root_kind text

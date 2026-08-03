@@ -1765,6 +1765,16 @@ impl<'a> Output<'a> {
                 "turn={turn_id} position={position} state=active_awaiting_tool_approval \
                  request={tool_request_id}"
             ),
+            TurnState::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_child \
+                 request={await_request_id} spawning_request={spawning_request_id} \
+                 child={child_session_id}"
+            ),
             TurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
@@ -2154,6 +2164,14 @@ impl SnapshotSelection {
                     results.insert(*tool_request_id);
                     trailing_results.insert(*tool_request_id);
                 }
+                SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                    await_request_id,
+                    mode: DelegationWaitMode::Foreground,
+                    ..
+                }) => {
+                    results.insert(*await_request_id);
+                    trailing_results.insert(*await_request_id);
+                }
                 _ if self.includes_terminal_marker(&entry) => {
                     anchor_found = true;
                     terminal_results.clone_from(&trailing_results);
@@ -2255,6 +2273,17 @@ impl SnapshotSelection {
                     },
                 ),
             ) => context.requests.contains(tool_request_id),
+            (
+                Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. },
+                SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                    await_request_id,
+                    mode: DelegationWaitMode::Foreground,
+                    ..
+                }),
+            ) => context.requests.contains(await_request_id),
             (
                 Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(_),

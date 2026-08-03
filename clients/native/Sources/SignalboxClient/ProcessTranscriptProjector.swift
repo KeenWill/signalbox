@@ -601,9 +601,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .toolDenied(let request, _),
       .toolClosed(let request, _):
       requestID = request.rawValue
+    case .delegationResult(let request, _, _, .foreground, _, _, _, _, _):
+      requestID = request.rawValue
     case .assistantToolUse:
       return false
-    case .delegatedTask, .delegationMessage, .delegationResult, .modelIdentityChanged,
+    case .delegatedTask, .delegationMessage,
+      .delegationResult(_, _, _, .background, _, _, _, _, _), .modelIdentityChanged,
       .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
@@ -654,7 +657,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
               .toolClosed(let requestID, _):
               return requestID.rawValue
-            case .delegatedTask, .delegationMessage, .delegationResult, .modelIdentityChanged,
+            case .delegationResult(let requestID, _, _, .foreground, _, _, _, _, _):
+              return requestID.rawValue
+            case .delegatedTask, .delegationMessage,
+              .delegationResult(_, _, _, .background, _, _, _, _, _), .modelIdentityChanged,
               .assistantToolUse, .turnCompleted, .turnFailed, .turnCancelled, .imported,
               .unknown:
               return nil

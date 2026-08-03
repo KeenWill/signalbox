@@ -457,7 +457,7 @@ mod tests {
     };
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{ActivatedAcceptedInputTurn, TurnId};
+    use signalbox_domain::{ActivatedTurn, TurnId};
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
         start_eligible_turn::StartEligibleTurnRepositoryError,
@@ -497,7 +497,7 @@ mod tests {
 
         fn execute(
             &self,
-            _activated: Box<ActivatedAcceptedInputTurn>,
+            _activated: Box<ActivatedTurn>,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }

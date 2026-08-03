@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
+    num::NonZeroU64,
 };
 
 use rust_decimal::Decimal;
@@ -21,10 +22,11 @@ use signalbox_application::{
     RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
-    AcceptedInputDisposition, AcceptedInputId, ActiveTurnPhase, AmbiguousModelCallTurn,
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurn,
-    CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
-    CorrelatedModelCallTerminalObservation, DirectModelSelection, DurableCommandId,
+    AcceptedInputDisposition, AcceptedInputId, ActiveTurnPhase,
+    ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
+    AssistantText, AuthorizedModelCall, CancelledModelCallTurn, CancelledToolRoundModelCallTurn,
+    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, DirectModelSelection, DurableCommandId,
     FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
     FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
     ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
@@ -32,13 +34,16 @@ use signalbox_domain::{
     ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition,
     PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
-    PreparedModelCallRequest, PreparedToolResultProjection, ProviderModelCallFailureCause,
-    ProviderModelIdentity, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
-    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
-    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
-    StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
-    ToolRequest, ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId, UserContent,
+    PreparedDelegatedTurnActivation, PreparedModelCallRequest, PreparedToolResultProjection,
+    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
+    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
+    ReconciliationRequiredToolTurn, RefusedModelCallTurn,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
+    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
+    ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
+    ToolRoundModelCallTurn, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -46,14 +51,14 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        session_id_from_uuid, session_id_to_uuid, tool_approval_posture_to_str,
-        tool_request_id_to_uuid, turn_id_to_uuid,
+        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_posture_to_str, tool_request_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
-        SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection,
-        require_recorded_batch,
+        SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
+        load_scheduling_projection, require_recorded_batch,
     },
 };
 
@@ -342,7 +347,7 @@ impl PostgresModelCallRepository {
     /// Reconstitutes the exact first-call operation for one read-only activation preview.
     pub async fn preview_activation_operation(
         &self,
-        preview: &signalbox_domain::PreparedAcceptedInputTurnActivation,
+        preview: &signalbox_domain::PreparedTurnActivation,
         call: ModelCallId,
     ) -> Result<ProspectiveModelCall, ModelCallRepositoryError> {
         let session_id = preview.turn().session();
@@ -384,7 +389,7 @@ impl PostgresModelCallRepository {
         let tool_denial_correlations =
             load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
         let execution = ModelCallExecutionReconstitutionInput::new(
-            preview.turn().clone(),
+            preview.turn(),
             self.targets.clone(),
             preview.starting_snapshot().clone(),
             frontier_entries,
@@ -2472,19 +2477,35 @@ fn pending_reclassification_candidates(
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
-    pending_reclassification_candidates_for_active(execution.active_turn(), next_turn)
+    pending_reclassification_candidates_from_parts(
+        execution.active_turn().turn(),
+        execution.active_turn().pending_steering(),
+        next_turn,
+    )
 }
 
 fn pending_reclassification_candidates_for_active(
     active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
+    pending_reclassification_candidates_from_parts(
+        active_turn.turn(),
+        active_turn.pending_steering(),
+        next_turn,
+    )
+}
+
+fn pending_reclassification_candidates_from_parts(
+    source_turn: TurnId,
+    pending_steering: &[signalbox_domain::PendingSteeringInput],
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
     let mut proposed_turns = BTreeSet::new();
     let mut reclassifications = Vec::new();
-    for pending in active_turn.pending_steering() {
+    for pending in pending_steering {
         let accepted_input = pending.accepted_input();
         let proposed_turn = next_turn(accepted_input);
-        record_reclassified_turn_candidate(active_turn.turn(), proposed_turn, &mut proposed_turns)?;
+        record_reclassified_turn_candidate(source_turn, proposed_turn, &mut proposed_turns)?;
         reclassifications.push(PendingSteeringReclassificationIdentity::new(
             accepted_input,
             proposed_turn,
@@ -2705,19 +2726,26 @@ async fn require_live_execution_with_targets(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
-    let active_turn = scheduling
-        .active_turn_execution()
-        .ok_or(ModelCallRepositoryError::NoLiveExecution)?;
+    let delegated = load_delegated_live_turn(connection, requested_session, &scheduling).await?;
+    let (active_turn, starting_snapshot) = match delegated {
+        Some(value) => value,
+        None => {
+            let active = scheduling
+                .active_turn_execution()
+                .ok_or(ModelCallRepositoryError::NoLiveExecution)?;
+            let starting = scheduling
+                .resolved_snapshot(active.start().frontier().snapshot())
+                .cloned()
+                .ok_or(ModelCallCorruption::Missing("starting snapshot"))?;
+            (active.into(), starting)
+        }
+    };
     if !matches!(
         active_turn.phase(),
         signalbox_domain::ActiveTurnPhase::Running { .. }
     ) {
         return Err(ModelCallRepositoryError::NoLiveExecution);
     }
-    let starting_snapshot = scheduling
-        .resolved_snapshot(active_turn.start().frontier().snapshot())
-        .cloned()
-        .ok_or(ModelCallCorruption::Missing("starting snapshot"))?;
     let (pinned_target, calls) =
         load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
     let call_snapshot = match calls
@@ -2805,6 +2833,294 @@ async fn require_live_execution_with_targets(
         let (_, failure) = error.into_parts();
         ModelCallCorruption::Execution(failure).into()
     })
+}
+
+async fn load_delegated_live_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+) -> Result<
+    Option<(
+        signalbox_domain::ActivatedTurn,
+        ResolvedContextFrontierSnapshot,
+    )>,
+    ModelCallRepositoryError,
+> {
+    let row = sqlx::query(
+        "SELECT
+            task.spawning_tool_request_id,
+            task.turn_id,
+            task.semantic_entry_id,
+            task.task_content,
+            relation.parent_session_id,
+            relation.parent_turn_id,
+            lifecycle.starting_frontier_id,
+            lifecycle.current_attempt_id,
+            attempt.state_kind AS attempt_state_kind,
+            defaults.session_id AS goal_defaults_session_id,
+            task.defaults_version AS queued_defaults_version,
+            defaults.version AS goal_defaults_version,
+            defaults.model_selection_kind AS goal_defaults_model_kind,
+            defaults.direct_model_selection_id AS goal_defaults_direct_id,
+            defaults.model_alias_id AS goal_defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_selection_kind AS requested_model_kind,
+            defaults.direct_model_selection_id AS requested_direct_model_selection_id,
+            defaults.model_alias_id AS requested_model_alias_id,
+            'direct'::text AS frozen_model_kind,
+            task.frozen_direct_model_selection_id,
+            NULL::uuid AS frozen_model_alias_id,
+            NULL::uuid AS frozen_alias_selected_direct_id
+         FROM turn_lifecycle AS lifecycle
+         JOIN session_delegation_initial_task AS task
+           ON task.turn_id = lifecycle.turn_id
+          AND task.child_session_id = lifecycle.session_id
+          AND task.admission_position = lifecycle.acceptance_position
+         JOIN session_delegation AS relation
+           ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+          AND relation.child_session_id = task.child_session_id
+         JOIN turn_attempt AS attempt
+           ON attempt.turn_attempt_id = lifecycle.current_attempt_id
+          AND attempt.turn_id = lifecycle.turn_id
+          AND attempt.session_id = lifecycle.session_id
+         JOIN session_defaults_version AS defaults
+           ON defaults.session_id = task.child_session_id
+          AND defaults.version = task.defaults_version
+        WHERE lifecycle.session_id = $1
+          AND lifecycle.origin_kind = 'delegation'
+          AND lifecycle.state_kind = 'active'
+          AND lifecycle.active_phase_kind = 'running'",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return load_delegated_live_wake_turn(connection, session, scheduling).await;
+    };
+    let turn = TurnId::from_uuid(required(&row, "turn_id")?);
+    let spawning_request =
+        signalbox_domain::ToolRequestId::from_uuid(required(&row, "spawning_tool_request_id")?);
+    let task = DelegationContent::try_new(required(&row, "task_content")?)
+        .map_err(|_| ModelCallCorruption::Inconsistent("delegated task content"))?;
+    let configuration =
+        decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
+    let starting_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
+    let initial_attempt =
+        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "current_attempt_id")?);
+    let task_entry = SemanticTranscriptEntryReconstitutionInput::new(
+        SemanticTranscriptEntryId::from_uuid(required(&row, "semantic_entry_id")?),
+        session,
+        SemanticTranscriptEntryPayload::DelegatedTask {
+            spawning_request,
+            parent_session: SessionId::from_uuid(required(&row, "parent_session_id")?),
+            parent_turn: TurnId::from_uuid(required(&row, "parent_turn_id")?),
+            content: task.clone(),
+        },
+    );
+    let prepared = PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
+        session,
+        turn,
+        spawning_request,
+        task,
+        task_entry,
+        configuration,
+        starting_frontier,
+        initial_attempt,
+    })
+    .ok_or(ModelCallCorruption::Inconsistent(
+        "delegated live-turn projection",
+    ))?;
+    let phase = match required::<String>(&row, "attempt_state_kind")?.as_str() {
+        "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(turn, initial_attempt),
+        "running" => ActiveTurnSchedulingReconstitutionInput::running(turn, initial_attempt),
+        value => {
+            return Err(ModelCallCorruption::Unsupported {
+                field: "delegated turn attempt state",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
+    let (active, _, prepared_snapshot) =
+        prepared
+            .with_reconstituted_phase(phase)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated live-turn phase",
+            ))?;
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated starting snapshot",
+        ))?;
+    if stored_snapshot != prepared_snapshot {
+        return Err(ModelCallCorruption::Inconsistent("delegated starting snapshot").into());
+    }
+    Ok(Some((active.into(), stored_snapshot)))
+}
+
+async fn load_delegated_live_wake_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+) -> Result<
+    Option<(
+        signalbox_domain::ActivatedTurn,
+        ResolvedContextFrontierSnapshot,
+    )>,
+    ModelCallRepositoryError,
+> {
+    let row = sqlx::query(
+        "SELECT
+            wake.turn_id,
+            wake.first_delivery_sequence,
+            wake.through_delivery_sequence,
+            predecessor.turn_id AS predecessor_turn_id,
+            predecessor.terminal_frontier_id AS predecessor_frontier_id,
+            lifecycle.starting_frontier_id,
+            lifecycle.current_attempt_id,
+            attempt.state_kind AS attempt_state_kind,
+            defaults.session_id AS goal_defaults_session_id,
+            wake.defaults_version AS queued_defaults_version,
+            defaults.version AS goal_defaults_version,
+            defaults.model_selection_kind AS goal_defaults_model_kind,
+            defaults.direct_model_selection_id AS goal_defaults_direct_id,
+            defaults.model_alias_id AS goal_defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_selection_kind AS requested_model_kind,
+            defaults.direct_model_selection_id AS requested_direct_model_selection_id,
+            defaults.model_alias_id AS requested_model_alias_id,
+            'direct'::text AS frozen_model_kind,
+            wake.frozen_direct_model_selection_id,
+            NULL::uuid AS frozen_model_alias_id,
+            NULL::uuid AS frozen_alias_selected_direct_id
+         FROM session_delegation_wake_turn_origin AS wake
+         JOIN turn_lifecycle AS lifecycle
+           ON lifecycle.turn_id = wake.turn_id
+          AND lifecycle.session_id = wake.recipient_session_id
+          AND lifecycle.acceptance_position = wake.admission_position
+          AND lifecycle.origin_kind = 'delegation'
+          AND lifecycle.state_kind = 'active'
+          AND lifecycle.active_phase_kind = 'running'
+         JOIN turn_lifecycle AS predecessor
+           ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
+          AND predecessor.session_id = lifecycle.session_id
+          AND predecessor.state_kind IN ('completed', 'failed', 'cancelled')
+         JOIN turn_attempt AS attempt
+           ON attempt.turn_attempt_id = lifecycle.current_attempt_id
+          AND attempt.turn_id = lifecycle.turn_id
+          AND attempt.session_id = lifecycle.session_id
+         JOIN session_defaults_version AS defaults
+           ON defaults.session_id = wake.recipient_session_id
+          AND defaults.version = wake.defaults_version
+        WHERE wake.recipient_session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let first_numeric: Decimal = required(&row, "first_delivery_sequence")?;
+    let through_numeric: Decimal = required(&row, "through_delivery_sequence")?;
+    let first = NonZeroU64::new(
+        positive_u64_from_numeric(first_numeric)
+            .map_err(|_| ModelCallCorruption::Inconsistent("wake delivery range"))?,
+    )
+    .ok_or(ModelCallCorruption::Inconsistent("wake delivery range"))?;
+    let through = NonZeroU64::new(
+        positive_u64_from_numeric(through_numeric)
+            .map_err(|_| ModelCallCorruption::Inconsistent("wake delivery range"))?,
+    )
+    .ok_or(ModelCallCorruption::Inconsistent("wake delivery range"))?;
+    let delivery_rows = sqlx::query_as::<_, (Decimal, Uuid)>(
+        "SELECT pending.delivery_sequence,
+                delegation_delivery_semantic_entry(
+                    pending.recipient_session_id, pending.delivery_sequence
+                )
+           FROM session_pending_delivery AS pending
+          WHERE pending.recipient_session_id = $1
+            AND pending.delivery_sequence BETWEEN $2 AND $3
+          ORDER BY pending.delivery_sequence",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(first_numeric)
+    .bind(through_numeric)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut deliveries = Vec::with_capacity(delivery_rows.len());
+    for (_, entry) in delivery_rows {
+        let reference = SemanticTranscriptEntryRef::from_source(
+            session,
+            SemanticTranscriptEntryId::from_uuid(entry),
+        );
+        let semantic = scheduling
+            .semantic_entry(reference)
+            .ok_or(ModelCallCorruption::Missing("wake semantic entry"))?;
+        deliveries.push(SemanticTranscriptEntryReconstitutionInput::new(
+            semantic.identity(),
+            semantic.source_session(),
+            semantic.payload().clone(),
+        ));
+    }
+    let turn = TurnId::from_uuid(required(&row, "turn_id")?);
+    let predecessor = TurnId::from_uuid(required(&row, "predecessor_turn_id")?);
+    let predecessor_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "predecessor_frontier_id")?);
+    let predecessor_snapshot = scheduling
+        .resolved_snapshot(predecessor_frontier)
+        .cloned()
+        .ok_or(ModelCallCorruption::Missing("wake predecessor snapshot"))?;
+    let configuration =
+        decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
+    let starting_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
+    let initial_attempt =
+        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "current_attempt_id")?);
+    let prepared =
+        PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
+            session,
+            turn,
+            first_delivery_sequence: first,
+            through_delivery_sequence: through,
+            deliveries,
+            predecessor,
+            predecessor_snapshot,
+            configuration,
+            starting_frontier,
+            initial_attempt,
+        })
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake live-turn projection",
+        ))?;
+    let phase = match required::<String>(&row, "attempt_state_kind")?.as_str() {
+        "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(turn, initial_attempt),
+        "running" => ActiveTurnSchedulingReconstitutionInput::running(turn, initial_attempt),
+        value => {
+            return Err(ModelCallCorruption::Unsupported {
+                field: "delegated wake turn attempt state",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
+    let (active, _, prepared_snapshot) =
+        prepared
+            .with_reconstituted_phase(phase)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated wake live-turn phase",
+            ))?;
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake starting snapshot",
+        ))?;
+    if stored_snapshot != prepared_snapshot {
+        return Err(ModelCallCorruption::Inconsistent("delegated wake starting snapshot").into());
+    }
+    Ok(Some((active.into(), stored_snapshot)))
 }
 
 async fn load_tool_denial_correlations(

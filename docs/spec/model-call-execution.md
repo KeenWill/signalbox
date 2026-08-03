@@ -45,7 +45,7 @@ preparation machinery, configured prompt, and provider-native input-counting
 implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
 automatic machinery. Session-delegation semantic rendering and its
-provider-neutral bridge were verified through PR #416 (`agent/delegation`). The
+provider-neutral bridge were verified against this PR (`agent/delegation`). The
 runner-placement rendering and executable session-tool snapshot paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. Invariant tags cite

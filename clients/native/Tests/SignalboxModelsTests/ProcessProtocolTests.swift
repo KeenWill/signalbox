@@ -509,8 +509,10 @@ final class ProcessProtocolTests: XCTestCase {
         senderSessionID: try SignalboxCanonicalUUID(
           validating: ProcessProtocolFixture.parentSessionID),
         recipientSessionID: try SignalboxCanonicalUUID(validating: sessionID),
-        ordinal: SignalboxCanonicalUInt64(rawValue: 1),
-        deliverySequence: SignalboxCanonicalUInt64(rawValue: 2),
+        ordinal: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.delegationMessageOrdinal),
+        deliverySequence: SignalboxCanonicalUInt64(
+          rawValue: ProcessProtocolFixture.delegationMessageDeliverySequence),
         content: ProcessProtocolFixture.delegationMessageContent
       )
     )
@@ -582,6 +584,20 @@ final class ProcessProtocolTests: XCTestCase {
         )
       )
     )
+  }
+
+  func testDelegationResultRejectsContradictoryOutcomeReasonTuple() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null",
+        reason: "child_cancelled"
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
   }
 
   func testFutureProviderFailureCauseRemainsClassifiable() throws {
@@ -906,6 +922,8 @@ private enum ProcessProtocolFixture {
   static let parentTurnID = "12121212-1212-4212-8212-121212121212"
   static let delegatedTaskContent = "fixture delegated task"
   static let delegationMessageContent = "fixture delegation message"
+  static let delegationMessageOrdinal: UInt64 = 1
+  static let delegationMessageDeliverySequence: UInt64 = 2
   static let delegationResultContent = "fixture delegation result"
   static let messageID = "55555555-5555-4555-8555-555555555555"
   static let awaitRequestID = "66666666-6666-4666-8666-666666666666"
@@ -1034,8 +1052,8 @@ private enum ProcessProtocolFixture {
             "message_id":"\(messageID)",
             "sender_session_id":"\(parentSessionID)",
             "recipient_session_id":"\(sessionID)",
-            "ordinal":"1",
-            "delivery_sequence":"2",
+            "ordinal":"\(delegationMessageOrdinal)",
+            "delivery_sequence":"\(delegationMessageDeliverySequence)",
             "content":"\(delegationMessageContent)"
           }
         }
@@ -1047,7 +1065,8 @@ private enum ProcessProtocolFixture {
   static func delegationResultEntryFrame(
     sessionID: String,
     mode: String,
-    deliverySequence: String
+    deliverySequence: String,
+    reason: String = "child_completed"
   ) -> Data {
     Data(
       """
@@ -1068,7 +1087,7 @@ private enum ProcessProtocolFixture {
             "delivery_sequence":\(deliverySequence),
             "outcome":"returned",
             "content":"\(delegationResultContent)",
-            "reason":"child_completed",
+            "reason":"\(reason)",
             "provenance":{
               "type":"child_turn",
               "child_session_id":"\(childSessionID)",

@@ -24,14 +24,14 @@ use signalbox_application::{
     UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
-    ActivatedAcceptedInputTurn, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
-    PerInputConfigurationChoices, ProviderModelIdentity, ResolvedProviderTarget,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision,
-    ToolApprovalPosture, ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
+    ActivatedTurn, DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestResult,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult,
+    SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision, ToolApprovalPosture,
+    ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
@@ -236,7 +236,7 @@ struct ToolLoopFixture {
     pool: PgPool,
     session: SessionId,
     turn: TurnId,
-    activated: ActivatedAcceptedInputTurn,
+    activated: ActivatedTurn,
     selection: DirectModelSelection,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
