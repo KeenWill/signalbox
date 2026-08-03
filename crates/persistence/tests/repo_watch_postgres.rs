@@ -7,14 +7,15 @@
 use std::{error::Error, num::NonZeroU16};
 
 use signalbox_application::{
-    RepoWatchEventIdGenerator, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, derive_repo_watch_events,
+    RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchEventIdGenerator, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    BranchName, CommitSha, MergeableState, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin,
-    RepoWatchEventId, RepositorySlug,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId,
+    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchEventId, RepositorySlug,
 };
 use signalbox_persistence::{
     local_test_connection_options, migrate,
@@ -48,7 +49,11 @@ const LABEL: &str = "watch-me";
 const U64_MAX_NUMERIC: &str = "18446744073709551615";
 const U64_OVERFLOW_NUMERIC: &str = "18446744073709551616";
 const OVERLONG_LABEL: &str = "123456789012345678901234567890123456789012345678901";
+const CHECK_COMPLETION_GENERATION: &str = "2026-08-02T12:00:00Z";
+const CHECK_RUN_NAME: &str = "required";
 const PULL_REQUEST: u64 = 41;
+const CHECK_SUITE_ID: u64 = 51;
+const CHECK_RUN_ID: u64 = 52;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -114,8 +119,21 @@ fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>>
             }),
             lifecycle: RepoWatchPullRequestLifecycle::Open,
             mergeable_state: MergeableState::Mergeable,
-            completed_check_suites: Vec::new(),
-            completed_check_runs: Vec::new(),
+            completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
+                GitHubObjectId::new(CHECK_SUITE_ID.try_into()?),
+                RepoWatchCheckCompletionGeneration::try_new(String::from(
+                    CHECK_COMPLETION_GENERATION,
+                ))?,
+                ChecksOutcome::Success,
+            )],
+            completed_check_runs: vec![RepoWatchCheckRunObservation::new(
+                GitHubObjectId::new(CHECK_RUN_ID.try_into()?),
+                RepoWatchCheckCompletionGeneration::try_new(String::from(
+                    CHECK_COMPLETION_GENERATION,
+                ))?,
+                CheckRunName::try_new(String::from(CHECK_RUN_NAME))?,
+                CheckConclusion::Success,
+            )],
             reviews: Vec::new(),
             threads: Vec::new(),
             reactions: Vec::new(),
@@ -239,6 +257,21 @@ async fn cursor_commits_advance_one_generation_at_a_time() -> Result<(), Box<dyn
         fixture.second_generation.get(),
         next_generation_value(fixture.first_generation)
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+
+    let loaded = fixture
+        .store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor is present");
+
+    assert_eq!(loaded.candidate(), &fixture.second_candidate);
     Ok(())
 }
 
