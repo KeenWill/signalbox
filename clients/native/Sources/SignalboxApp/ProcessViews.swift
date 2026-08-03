@@ -2212,12 +2212,6 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     let normalizedKeys = normalizedItems.map { TimelinePresentationKey.normalized($0.id) }
     let currentNormalizedIDs = Set(normalizedItems.map(\.id))
     let retainedNormalizedIDs = normalizedTimelineItemIDs.intersection(currentNormalizedIDs)
-    let retainedKeys = normalizedKeys.filter { key in
-      guard case .normalized(let id) = key else {
-        return false
-      }
-      return retainedNormalizedIDs.contains(id)
-    }
     var additionsBeforeRetainedID: [String: [TimelinePresentationKey]] = [:]
     var pendingAdditions: [TimelinePresentationKey] = []
     for key in normalizedKeys {
@@ -2231,20 +2225,15 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         pendingAdditions.append(key)
       }
     }
-    var nextRetainedIndex = 0
     var refreshedPresentationOrder: [TimelinePresentationKey] = []
     for key in timelinePresentationOrder {
       switch key {
-      case .normalized:
-        guard nextRetainedIndex < retainedKeys.count else {
+      case .normalized(let id):
+        guard retainedNormalizedIDs.contains(id) else {
           continue
         }
-        let retainedKey = retainedKeys[nextRetainedIndex]
-        if case .normalized(let id) = retainedKey {
-          refreshedPresentationOrder.append(contentsOf: additionsBeforeRetainedID[id] ?? [])
-        }
-        refreshedPresentationOrder.append(retainedKey)
-        nextRetainedIndex += 1
+        refreshedPresentationOrder.append(contentsOf: additionsBeforeRetainedID[id] ?? [])
+        refreshedPresentationOrder.append(key)
       case .unrecognized, .unrecognizedHistoryBoundary:
         refreshedPresentationOrder.append(key)
       }

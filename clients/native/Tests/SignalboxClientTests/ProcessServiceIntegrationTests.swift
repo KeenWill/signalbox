@@ -593,6 +593,35 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  @MainActor
+  func testAuthoritativeRefreshDoesNotMoveRetainedRowsAcrossLiveUnknownEvent() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithEarlierModelUsageOnly())
+    )
+    viewModel.apply(.event(try ProcessProjectionFixture.unknownFollowedEvent()))
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithEarlierModelUsageInserted())
+    )
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: viewModel.timeline),
+      ProcessProjectionFixture.retainedRowTimelineKindsBeforeRemoval
+    )
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithLaterModelUsageOnly())
+    )
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: viewModel.timeline),
+      ProcessProjectionFixture.retainedRowTimelineKindsAfterRemoval
+    )
+  }
+
   func testAnchoredUsageAndAdjacentTurnStateKeepDistinctTimelineRows() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithAdjacentUsageAndUnknownTurnState()
     var projector = SignalboxProcessTranscriptProjector()
@@ -7195,6 +7224,15 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithEarlierModelUsageOnly() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try modelUsageSnapshot(
+      evidence: [modelUsageMessage(index: 0, modelCallID: earlierModelCall)],
+      terminalModelCallID: earlierModelCall
+    )
+  }
+
   static func snapshotWithEarlierModelUsageInserted() throws
     -> SignalboxSynchronizationSnapshot
   {
@@ -7638,7 +7676,8 @@ private enum ProcessProjectionFixture {
   }
 
   private static func modelUsageSnapshot(
-    evidence: [String]
+    evidence: [String],
+    terminalModelCallID: String = ProcessDriverFixture.modelCall
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7658,7 +7697,7 @@ private enum ProcessProjectionFixture {
             "type":"completed",
             "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
             "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
-            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+            "terminal_model_call_id":"\(terminalModelCallID)"
           }
         }
         """,
@@ -9666,6 +9705,12 @@ extension ProcessProjectionFixture {
     "model_call_transition.state.\(unknownModelCallState)"
   static let unknownEventSideSnapshotTimelineKinds: [ProcessTimelineFixtureKind] = [
     .message, .unknown, .tool,
+  ]
+  static let retainedRowTimelineKindsBeforeRemoval: [ProcessTimelineFixtureKind] = [
+    .processEvidence, .unknown, .processEvidence,
+  ]
+  static let retainedRowTimelineKindsAfterRemoval: [ProcessTimelineFixtureKind] = [
+    .unknown, .processEvidence,
   ]
 
   static func snapshotWithFormerUsageIdentityCollision() throws
