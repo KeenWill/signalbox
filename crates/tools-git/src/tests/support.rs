@@ -30,6 +30,8 @@ pub(super) const INITIAL_CONTENT: &str = "before\n";
 
 pub(super) const CHANGED_CONTENT: &str = "after\n";
 
+pub(super) const MODIFIED_WORKTREE_STATUS: &str = "modified";
+
 pub(super) const MODEL_MESSAGE: &str = "subject\n\nmodel data: $(not interpreted)\n";
 
 pub(super) const CONFLICT_OURS_CONTENT: &str = "ours\n";

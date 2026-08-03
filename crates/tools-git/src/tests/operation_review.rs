@@ -39,9 +39,9 @@ use crate::rollback::{
 use crate::status_reference::StatusHeadSnapshot;
 use crate::tests::support::{
     ADMINISTRATION_INDEX_PATH, CHANGED_CONTENT, DEFAULT_BRANCH, FIX_BRANCH, Fixture,
-    INITIAL_CONTENT, MODEL_MESSAGE, Sha256Fixture, TRACKED_PATH, commit_all, execute, identity,
-    install_deleted_conflict, real_git_sha256_pack_checksum, real_git_sha256_pack_index,
-    real_git_sha256_pack_object_ids,
+    INITIAL_CONTENT, MODEL_MESSAGE, MODIFIED_WORKTREE_STATUS, Sha256Fixture, TRACKED_PATH,
+    commit_all, execute, identity, install_deleted_conflict, real_git_sha256_pack_checksum,
+    real_git_sha256_pack_index, real_git_sha256_pack_object_ids,
 };
 
 #[test]
@@ -236,6 +236,29 @@ fn branch_create_rejects_a_name_outside_git_reference_grammar() {
             .join(".git/refs/heads/topic..escape")
             .exists()
     );
+}
+
+#[test]
+fn status_reports_an_executable_bit_change_as_modified() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.filemode", true)
+        .expect("fixture filemode enables");
+    let tracked_path = fixture.root().join(TRACKED_PATH);
+    let mut permissions = fs::metadata(&tracked_path)
+        .expect("tracked fixture metadata reads")
+        .permissions();
+    permissions.set_mode(permissions.mode() | 0o100);
+    fs::set_permissions(tracked_path, permissions).expect("executable fixture mode writes");
+    let executor = fixture.executor();
+
+    let status = execute(&executor, LocalOperation::Status);
+
+    assert_eq!(status["entries"][0]["path"], TRACKED_PATH);
+    assert_eq!(status["entries"][0]["worktree"], MODIFIED_WORKTREE_STATUS);
 }
 
 #[test]

@@ -127,11 +127,11 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
                 };
                 if *mode == 0o120000 {
                     set_worktree_status(&mut raw, path, "type_changed");
-                } else if read.truncated || blob_oid(&read.bytes, authority.object_format)? != *oid
+                } else if read.truncated
+                    || blob_oid(&read.bytes, authority.object_format)? != *oid
+                    || (filemode && observed_mode != *mode)
                 {
                     set_worktree_status(&mut raw, path, "modified");
-                } else if filemode && observed_mode != *mode {
-                    set_worktree_status(&mut raw, path, "type_changed");
                 }
             }
             Err(WorkspaceResolveError::Io { source, .. })

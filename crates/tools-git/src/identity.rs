@@ -44,9 +44,8 @@ impl GitIdentity {
 pub(super) fn invalid_identity_part(value: &str) -> bool {
     value.is_empty()
         || value.len() > MAX_IDENTITY_BYTES
-        || value.contains('\0')
-        || value.contains('\n')
-        || value.contains('\r')
+        || value.trim() != value
+        || value.chars().any(char::is_control)
         || value.contains('<')
         || value.contains('>')
 }
