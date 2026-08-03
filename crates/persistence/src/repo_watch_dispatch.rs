@@ -191,8 +191,7 @@ impl PostgresRepoWatchDispatchStore {
               WHERE event.repository = $1
                 AND delivery.dispatch_id IS NULL
               ORDER BY action.recorded_at, action.dispatch_id, action.action_ordinal
-              LIMIT 1
-              FOR UPDATE OF action",
+              LIMIT 1",
         )
         .bind(repository.as_str())
         .fetch_optional(&mut *transaction)
