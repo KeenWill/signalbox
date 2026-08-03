@@ -11759,10 +11759,10 @@ mod tests {
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
         AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        FastModeOverlay, FastModeSupport, FrozenModelSelection, Goal, GoalStatement,
-        GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelCapabilities,
-        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+        FastModeOverlay, FastModeSupport, FrozenAliasDefinition, FrozenModelSelection, Goal,
+        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
+        ModelCapabilities, ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
         ModelSettingsPrecedence, ReasoningLevel, ReviewPass, ReviewPassAcceptedInputEvidence,
         ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
         ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
@@ -14161,6 +14161,7 @@ context_window_tokens = 200000
     fn turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
         let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
         let turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let requested_alias = ModelAlias::from_uuid(Uuid::from_u128(3));
         let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
         let installed_version = SessionConfigurationDefaultsVersion::first();
         let caller_override = ModelSettingsOverlay::inherit_all();
@@ -14186,7 +14187,10 @@ context_window_tokens = 200000
             accepted_input,
             turn,
             installed_version,
-            FrozenModelSelection::Direct(installed_selection),
+            FrozenModelSelection::FrozenAlias {
+                alias: requested_alias,
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
             caller_override,
             settings,
             vec![ModelChangeAdjustment::ReasoningLevelCleared {
@@ -14206,8 +14210,8 @@ context_window_tokens = 200000
                 accepted_input_id: CanonicalUuid::from_uuid(accepted_input.into_uuid()),
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 defaults_version: CanonicalU64::new(installed_version.as_u64()),
-                requested_model: signalbox_process_protocol::ModelSelection::Direct {
-                    selection_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
+                requested_model: signalbox_process_protocol::ModelSelection::Alias {
+                    alias_id: CanonicalUuid::from_uuid(requested_alias.into_uuid()),
                 },
                 selected_direct_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
                 per_call_override: wire_model_settings_overlay(caller_override),
