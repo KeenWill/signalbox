@@ -459,7 +459,8 @@ in
       # directory, not the process-scoped HOME the exec below sets. Brave uses
       # a devenv-state placeholder unless the developer supplies an override.
       key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
-      search_key_file="''${SIGNALBOX_DEV_BRAVE_API_KEY_FILE:-${daemonBraveApiKeyFile}}"
+      search_key_file_default=${shellArg daemonBraveApiKeyFile}
+      search_key_file="''${SIGNALBOX_DEV_BRAVE_API_KEY_FILE:-$search_key_file_default}"
       token_file="''${SIGNALBOX_DEV_GITHUB_TOKEN_FILE:-$HOME/.config/signalbox/github-token}"
 
       exec env ${scrub} \

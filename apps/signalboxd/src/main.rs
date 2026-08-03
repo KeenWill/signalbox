@@ -46,16 +46,17 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE,
-    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
-    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
-    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
-    HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, BaseDaemonCredentialInputs,
+    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
+    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
+    HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1031,8 +1032,11 @@ async fn run_hub(
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
             pool.clone(),
-            code_host_credentials,
-            web_search_credentials,
+            MappedDaemonCredentialInputs {
+                web_search: web_search_credentials,
+                code_host: code_host_credentials.clone(),
+                github: code_host_credentials,
+            },
             code_host_transport,
             tool_configuration.github_egress_policy(),
             tool_configuration.workspace_root(),
@@ -1041,8 +1045,10 @@ async fn run_hub(
         None => DaemonTools::try_new_without_tool_mappings(
             SystemCurrentTimeClock,
             pool.clone(),
-            code_host_credentials,
-            web_search_credentials,
+            BaseDaemonCredentialInputs {
+                web_search: web_search_credentials,
+                code_host: code_host_credentials,
+            },
             code_host_transport,
             model_configuration.web_fetch_egress_policy(),
         ),

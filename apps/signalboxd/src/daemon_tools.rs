@@ -150,6 +150,24 @@ struct ComposedToolFamilies<
     goal: Option<GoalDeclarationTool>,
 }
 
+/// Credential channels required by the daemon's base tool composition.
+pub struct BaseDaemonCredentialInputs<Credentials> {
+    /// Credential access for authenticated web search.
+    pub web_search: Credentials,
+    /// Credential access shared by the base code-host tools.
+    pub code_host: Credentials,
+}
+
+/// Credential channels required when every mapped daemon family is composed.
+pub struct MappedDaemonCredentialInputs<Credentials> {
+    /// Credential access for authenticated web search.
+    pub web_search: Credentials,
+    /// Credential access for code-host tools.
+    pub code_host: Credentials,
+    /// Credential access for the mapped GitHub family.
+    pub github: Credentials,
+}
+
 /// The complete daemon-local declarations and their matching dispatch executor.
 pub struct DaemonTools<
     Clock,
@@ -197,25 +215,29 @@ impl<Clock>
     pub fn try_new_production(
         clock: Clock,
         pool: PgPool,
-        credentials: FileCredentialAccess,
-        web_search_credentials: FileCredentialAccess,
+        credentials: MappedDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
         github_egress_policy: GitHubEgressPolicy,
         workspace_root: &Path,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
+        let MappedDaemonCredentialInputs {
+            web_search,
+            code_host,
+            github,
+        } = credentials;
         let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let web_search = WebSearchTool::try_new_production(
-            web_search_credentials,
+            web_search,
             WebSearchConfiguration::new(WebSearchProvider::Brave),
         )
         .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
         let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let code_host = CodeHostTools::try_new(credentials.clone(), code_host_transport)
+        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
-        let github = GitHubTools::try_new_production(credentials, github_egress_policy)
+        let github = GitHubTools::try_new_production(github, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace = PinnedWorkspaceFileSystem::try_new(workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
@@ -252,15 +274,18 @@ impl<Clock>
     pub fn try_new_without_tool_mappings(
         clock: Clock,
         pool: PgPool,
-        credentials: FileCredentialAccess,
-        web_search_credentials: FileCredentialAccess,
+        credentials: BaseDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
+        let BaseDaemonCredentialInputs {
+            web_search,
+            code_host,
+        } = credentials;
         let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let web_search = WebSearchTool::try_new_production(
-            web_search_credentials,
+            web_search,
             WebSearchConfiguration::new(WebSearchProvider::Brave),
         )
         .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
@@ -268,7 +293,7 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
         let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
-        let code_host = CodeHostTools::try_new(credentials, code_host_transport)
+        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
@@ -322,12 +347,10 @@ where
     pub fn try_new(
         clock: Clock,
         transport: Transport,
-        web_search_credentials: Credentials,
+        credentials: MappedDaemonCredentialInputs<Credentials>,
         web_search_transport: SearchTransport,
         writer: Writer,
-        code_host_credentials: Credentials,
         code_host_transport: HostTransport,
-        github_credentials: Credentials,
         github_transport: GitHubTransportType,
         github_egress_policy: GitHubEgressPolicy,
         filesystem: FileSystem,
@@ -336,21 +359,25 @@ where
         plan_port: PlanPort,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
+        let MappedDaemonCredentialInputs {
+            web_search,
+            code_host,
+            github,
+        } = credentials;
         let web_fetch = WebFetchTool::try_new(transport, web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
         let web_search = WebSearchTool::try_new(
-            web_search_credentials,
+            web_search,
             web_search_transport,
             WebSearchConfiguration::new(WebSearchProvider::Brave),
         )
         .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
         let status = SessionStatusTool::try_new(writer)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let code_host = CodeHostTools::try_new(code_host_credentials, code_host_transport)
+        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
-        let github =
-            GitHubTools::try_new(github_credentials, github_transport, github_egress_policy)
-                .map_err(|_| DaemonToolsConstructionError::GitHub)?;
+        let github = GitHubTools::try_new(github, github_transport, github_egress_policy)
+            .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace_read = WorkspaceReadTools::try_new(filesystem.clone(), workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
         let workspace_mutation = WorkspaceMutationTools::try_new(filesystem, workspace_root)
@@ -1378,12 +1405,14 @@ mod tests {
         let (catalog, _executor) = DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
-            OfflineCredentials,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
             OfflineSearchTransport,
             OfflineWriter,
-            OfflineCredentials,
             OfflineCodeHostTransport,
-            OfflineCredentials,
             OfflineGitHubTransport,
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,

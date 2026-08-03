@@ -55,8 +55,9 @@ use signalboxd::{
     CHANGE_REQUEST_THREAD_REPLY_NAME, CHANGE_REQUEST_THREAD_RESOLVE_NAME,
     CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools, EDIT_FILE_NAME, FileCredentialAccess,
     GitHubCodeHostTransport, HubModelConfiguration, LIST_DIRECTORY_NAME, LocalProcessListener,
-    PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME, ProcessRuntime, READ_FILE_NAME,
-    SEARCH_FILES_NAME, SessionTemplateConfiguration, SystemCurrentTimeClock, WRITE_FILE_NAME,
+    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    ProcessRuntime, READ_FILE_NAME, SEARCH_FILES_NAME, SessionTemplateConfiguration,
+    SystemCurrentTimeClock, WRITE_FILE_NAME,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -248,8 +249,11 @@ async fn run_live_smoke() -> SmokeResult {
     let tools = DaemonTools::try_new_production(
         SystemCurrentTimeClock,
         pool.clone(),
-        credentials,
-        web_search_credentials,
+        MappedDaemonCredentialInputs {
+            web_search: web_search_credentials,
+            code_host: credentials.clone(),
+            github: credentials,
+        },
         GitHubCodeHostTransport::try_new()?,
         github_egress_policy,
         &configured_workspace,
