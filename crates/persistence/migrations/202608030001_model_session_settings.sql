@@ -105,10 +105,21 @@ CREATE TABLE turn_model_settings_resolved (
             )
         ),
     CONSTRAINT turn_model_settings_resolved_input_fk
-        FOREIGN KEY (accepted_input_id)
-        REFERENCES accepted_input (accepted_input_id)
+        FOREIGN KEY (accepted_input_id, session_id, turn_id)
+        REFERENCES accepted_input (
+            accepted_input_id,
+            session_id,
+            origin_turn_id
+        )
         ON UPDATE RESTRICT
-        ON DELETE RESTRICT,
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_model_settings_resolved_turn_fk
+        FOREIGN KEY (turn_id, session_id)
+        REFERENCES turn_lifecycle (turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT turn_model_settings_resolved_defaults_fk
         FOREIGN KEY (session_id, defaults_version)
         REFERENCES session_defaults_version (session_id, version)
