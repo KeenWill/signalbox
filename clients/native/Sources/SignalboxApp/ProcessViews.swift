@@ -1345,6 +1345,12 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     let utf8Bytes: UInt
   }
 
+  private struct RetainedToolApprovalDecision {
+    let decision: SignalboxToolApprovalEventDecision
+    let decider: SignalboxToolApprovalEventDecider
+    let rationale: String?
+  }
+
   private var mutationBlocksByTurnID: [SignalboxCanonicalUUID: MutationBlockReason] = [:]
   private var sideSnapshotCursorsByTurnID: [SignalboxCanonicalUUID: UInt64] = [:]
   private var normalizedTimelineItemIDs: Set<String> = []
@@ -1352,6 +1358,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   private var unrecognizedLiveTimelineItemsByCursor:
     [UInt64: RetainedUnrecognizedTimelineItem] = [:]
   private var unrecognizedLiveTimelineUTF8Bytes: UInt = 0
+  private var toolApprovalDecisionsByRequestID:
+    [String: RetainedToolApprovalDecision] = [:]
   private var hasUnrecognizedLiveTimelineHistoryBoundary = false
   private var nextUnrecognizedLiveEventID = -1
   private var projector = SignalboxProcessTranscriptProjector()
@@ -1938,6 +1946,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     timelinePresentationOrder = []
     unrecognizedLiveTimelineItemsByCursor = [:]
     unrecognizedLiveTimelineUTF8Bytes = 0
+    toolApprovalDecisionsByRequestID = [:]
     hasUnrecognizedLiveTimelineHistoryBoundary = false
     nextUnrecognizedLiveEventID = -1
     phase = .stopped
@@ -2039,6 +2048,13 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         )
         presentDiagnostic("Preserved an unrecognized tool-batch state: \(kind).")
       }
+    case .toolApprovalDecided(_, let toolRequestID, let decision, let decider, let rationale):
+      toolApprovalDecisionsByRequestID[toolRequestID.rawValue] = RetainedToolApprovalDecision(
+        decision: decision,
+        decider: decider,
+        rationale: rationale
+      )
+      refreshTimeline()
     case .turnCompleted(let turnID, _, _, _):
       applyTerminalTurn(
         turnID: turnID,
@@ -2186,7 +2202,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
   )
 
   private func refreshTimeline() {
-    let normalizedItems = normalizer.timelineItems
+    let normalizedItems = normalizer.timelineItems.map(applyingToolApprovalDecision)
     let normalizedItemsByID = Dictionary(
       normalizedItems.map { ($0.id, $0) },
       uniquingKeysWith: { first, _ in first }
@@ -2206,6 +2222,55 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         return Self.unrecognizedLiveTimelineHistoryBoundary
       }
     }
+  }
+
+  private func applyingToolApprovalDecision(
+    to item: SignalboxTimelineItem
+  ) -> SignalboxTimelineItem {
+    guard case .tool(let tool) = item,
+      let approval = toolApprovalDecisionsByRequestID[tool.invocationID.rawValue]
+    else {
+      return item
+    }
+    let status: SignalboxToolCardStatus
+    let reason: String?
+    let decisionLabel: String
+    switch approval.decision {
+    case .approve:
+      status = tool.status == .waitingForApproval || tool.status == .proposed
+        ? .approved : tool.status
+      reason = tool.decisionReason
+      decisionLabel = "Approved"
+    case .deny(let denialReason):
+      status = .denied
+      reason = denialReason ?? tool.decisionReason
+      decisionLabel = "Denied"
+    }
+    let deciderLabel: String
+    switch approval.decider {
+    case .user(let commandID):
+      deciderLabel = "\(decisionLabel) by user; command \(commandID.rawValue)"
+    case .delegate(let modelSelectionID, let modelCallID):
+      deciderLabel =
+        "\(decisionLabel) by delegate; model selection \(modelSelectionID.rawValue); "
+        + "call \(modelCallID.rawValue)"
+    }
+    return .tool(
+      SignalboxToolCard(
+        eventID: tool.eventID,
+        invocationID: tool.invocationID,
+        toolName: tool.toolName,
+        status: status,
+        arguments: tool.arguments,
+        output: tool.output,
+        statusUpdates: tool.statusUpdates,
+        decisionReason: reason,
+        approvalDecider: deciderLabel,
+        approvalRationale: approval.rationale,
+        childSessionID: tool.childSessionID,
+        decisionAvailable: false
+      )
+    )
   }
 
   private func admitsStateTransition(

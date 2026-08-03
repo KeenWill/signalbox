@@ -469,6 +469,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .turnActivated(let turnID, _),
       .modelCallTransition(let turnID, _, _),
       .toolBatchTransition(let turnID, _, _),
+      .toolApprovalDecided(let turnID, _, _, _, _),
       .turnCompleted(let turnID, _, _, _),
       .turnFailed(let turnID, _, _),
       .turnRefused(let turnID, _, _),
@@ -531,7 +532,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
+      .toolApprovalDecided, .contextCompacted, .turnRefused,
+      .turnReconciliationRequired, .unknown:
       return false
     }
   }
@@ -668,8 +670,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryAttemptID == toolAttemptID && context.turnID == turnID
       }
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolApprovalDecided, .turnRefused, .turnReconciliationRequired, .unknown:
       return true
     }
   }

@@ -787,6 +787,14 @@ struct AutomaticApprovalEventState {
 }
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
+struct ApprovalDecisionEventBackfillState {
+    request_id: Uuid,
+    turn_id: Uuid,
+    session_id: Uuid,
+    event_kind: String,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
 struct AppliedApprovalJudgeProjection {
     judge_state: String,
     recommendation: String,
@@ -988,6 +996,23 @@ async fn postgres_before_approval_migration()
     for migration in MIGRATOR
         .iter()
         .take_while(|migration| migration.version < 202608020015)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+async fn postgres_before_approval_event_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608030001)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
@@ -4282,6 +4307,92 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
     .await?;
     assert!(state.decision_exists);
     assert!(!state.decided_event_exists);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = postgres_before_approval_event_migration().await?;
+    let (fixture, _repository, _observation, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        &[
+            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+        ],
+        InitialToolApproval::Human,
+    )
+    .await?;
+    let [decided_request, next_request] = requests.as_slice() else {
+        panic!("the migration fixture returns two requests")
+    };
+    let command = Uuid::from_u128(APPROVAL_COMMAND_SEED);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(decided_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, owner_command_id)
+         VALUES ($1, 'approve', 'owner_command', $2)",
+    )
+    .bind(decided_request.into_uuid())
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET approval_tool_request_id = $1
+          WHERE turn_id = $2
+            AND session_id = $3
+            AND approval_tool_request_id = $4",
+    )
+    .bind(next_request.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(decided_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    migrate(&pool).await?;
+    let state: ApprovalDecisionEventBackfillState = sqlx::query_as(
+        "SELECT event.request_id, event.turn_id, event.session_id,
+                header.event_kind
+           FROM tool_approval_decided_outbox_event AS event
+           JOIN outbox_event AS header
+             ON header.event_sequence = event.event_sequence
+          WHERE event.request_id = $1",
+    )
+    .bind(decided_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state.request_id, decided_request.into_uuid());
+    assert_eq!(state.turn_id, fixture.turn.into_uuid());
+    assert_eq!(state.session_id, fixture.session.into_uuid());
+    assert_eq!(state.event_kind, "tool_approval_decided");
 
     pool.close().await;
     drop(container);

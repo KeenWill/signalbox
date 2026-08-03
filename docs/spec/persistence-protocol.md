@@ -205,8 +205,9 @@ Implemented table families (across the forward-only migrations):
   correlates delegate decisions to their completed call, selection,
   recommendation, and rationale;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
-  family and requires each explicit approval decision to install exactly one
-  ordered lifecycle effect and outbox event atomically; and
+  family, appends one migration-boundary event for each explicit decision that
+  already exists, and requires every later explicit decision to install exactly
+  one ordered lifecycle effect and outbox event atomically; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:

@@ -6754,6 +6754,25 @@ private enum ProcessDriverUpdateRecorderError: Error {
 
 extension ProcessServiceIntegrationTests {
   @MainActor
+  func testToolApprovalDecisionPresentsDelegateProvenanceAndRationale() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithProposedTool())
+    )
+
+    viewModel.apply(.event(try ProcessProjectionFixture.delegateDenialEvent()))
+
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
+    XCTAssertEqual(tool.status, .denied)
+    XCTAssertEqual(tool.decisionReason, nil)
+    XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
+    XCTAssertEqual(tool.approvalRationale, ProcessProjectionFixture.delegateRationale)
+    XCTAssertFalse(tool.decisionAvailable)
+  }
+
+  @MainActor
   func testUnknownLiveSessionEventAddsStableBoundedTimelineCard() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -6806,6 +6825,11 @@ extension ProcessServiceIntegrationTests {
 }
 
 extension ProcessProjectionFixture {
+  static let delegateModelSelection = "dddddddd-4444-4444-8444-444444444444"
+  static let delegateModelCall = "eeeeeeee-4444-4444-8444-444444444444"
+  static let delegateRationale = "The requested effect exceeds the delegated scope."
+  static let delegateDenialLabel =
+    "Denied by delegate; model selection \(delegateModelSelection); call \(delegateModelCall)"
   static let futureSessionEventKind = "fixture_future_session_event"
   static let unknownHistoryKind = "unrecognized_session_event_history_truncated"
   static let unknownHistoryDiagnostic =
@@ -6832,6 +6856,25 @@ extension ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func delegateDenialEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(proposedToolRequest)",
+        "decision":{"type":"deny","reason":null},
+        "decider":{
+          "type":"delegate",
+          "model_selection_id":"\(delegateModelSelection)",
+          "model_call_id":"\(delegateModelCall)"
+        },
+        "rationale":"\(delegateRationale)"
+      }
+      """
     )
   }
 

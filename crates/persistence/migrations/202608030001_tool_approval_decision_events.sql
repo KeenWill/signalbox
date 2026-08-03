@@ -160,3 +160,38 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+-- Decisions committed before this event family existed already installed their
+-- lifecycle effect. Append their typed history at the migration boundary so
+-- every explicit decision remains visible to event consumers after upgrade.
+DO $$
+DECLARE
+    prior_decision record;
+BEGIN
+    FOR prior_decision IN
+        SELECT request.request_id, request.turn_id, request.session_id
+          FROM tool_approval_decision AS decision
+          JOIN tool_request AS request
+            ON request.request_id = decision.request_id
+         WHERE decision.decision_source NOT IN (
+                   'policy_auto', 'session_blanket'
+               )
+         ORDER BY request.request_id
+    LOOP
+        WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES (
+                'tool_approval_decided', 1, prior_decision.session_id
+            )
+            RETURNING event_sequence, event_kind, storage_version, session_id
+        )
+        INSERT INTO tool_approval_decided_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, request_id)
+        SELECT event_sequence, event_kind, storage_version, session_id,
+               prior_decision.turn_id, prior_decision.request_id
+          FROM header;
+    END LOOP;
+END;
+$$;

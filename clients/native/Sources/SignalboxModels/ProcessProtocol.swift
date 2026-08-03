@@ -478,6 +478,64 @@ public enum SignalboxProcessToolDecision: Codable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxToolApprovalEventDecision: Decodable, Equatable, Sendable {
+  case approve
+  case deny(reason: String?)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "approve":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .approve
+    case "deny":
+      try tagged.rejectUnadmittedFields(["type", "reason"], decoder: decoder)
+      let reason: String? = try decoder.decode("reason")
+      self = .deny(reason: reason)
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown tool-approval event decision type."
+        )
+      )
+    }
+  }
+}
+
+public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
+  case user(commandID: SignalboxCanonicalUUID)
+  case delegate(
+    modelSelectionID: SignalboxCanonicalUUID,
+    modelCallID: SignalboxCanonicalUUID
+  )
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "user":
+      try tagged.rejectUnadmittedFields(["type", "command_id"], decoder: decoder)
+      self = .user(commandID: try decoder.decode("command_id"))
+    case "delegate":
+      try tagged.rejectUnadmittedFields(
+        ["type", "model_selection_id", "model_call_id"],
+        decoder: decoder
+      )
+      self = .delegate(
+        modelSelectionID: try decoder.decode("model_selection_id"),
+        modelCallID: try decoder.decode("model_call_id")
+      )
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown tool-approval event decider type."
+        )
+      )
+    }
+  }
+}
+
 public enum SignalboxConversationOriginFilter: String, Codable, Equatable, Sendable {
   case native
   case imported
@@ -2201,6 +2259,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case toolBatchTransition(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     state: SignalboxToolBatchState)
+  case toolApprovalDecided(
+    turnID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxToolApprovalEventDecision,
+    decider: SignalboxToolApprovalEventDecider,
+    rationale: String?
+  )
   case contextCompacted(
     contextCompactionID: SignalboxCanonicalUUID,
     modelCallID: SignalboxCanonicalUUID,
@@ -2275,6 +2340,27 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           state: try decoder.decode("state")
+        )
+      case "tool_approval_decided":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "tool_request_id", "decision", "decider", "rationale"],
+          decoder: decoder
+        )
+        let decision: SignalboxToolApprovalEventDecision = try decoder.decode("decision")
+        let decider: SignalboxToolApprovalEventDecider = try decoder.decode("decider")
+        let rationale: String? = try decoder.decode("rationale")
+        try Self.validateToolApprovalDecision(
+          decision: decision,
+          decider: decider,
+          rationale: rationale,
+          decoder: decoder
+        )
+        self = .toolApprovalDecided(
+          turnID: try decoder.decode("turn_id"),
+          toolRequestID: try decoder.decode("tool_request_id"),
+          decision: decision,
+          decider: decider,
+          rationale: rationale
         )
       case "context_compacted":
         try tagged.rejectUnadmittedFields(
@@ -2362,6 +2448,51 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
       )
     }
+  }
+
+  private static func validateToolApprovalDecision(
+    decision: SignalboxToolApprovalEventDecision,
+    decider: SignalboxToolApprovalEventDecider,
+    rationale: String?,
+    decoder: Decoder
+  ) throws {
+    let shapeMatches: Bool
+    switch decider {
+    case .user:
+      switch decision {
+      case .approve:
+        shapeMatches = rationale == nil
+      case .deny(let reason):
+        shapeMatches = rationale == nil && (reason.map(validDenialReason) ?? true)
+      }
+    case .delegate:
+      switch decision {
+      case .approve:
+        shapeMatches = rationale.map(validRationale) ?? false
+      case .deny(let reason):
+        shapeMatches = reason == nil && (rationale.map(validRationale) ?? false)
+      }
+    }
+    guard shapeMatches else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Tool-approval event carries inconsistent decision provenance."
+        )
+      )
+    }
+  }
+
+  private static func validDenialReason(_ reason: String) -> Bool {
+    !reason.isEmpty
+      && reason.utf8.count <= 1_024
+      && reason.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+      && reason.first.map { !$0.isWhitespace } == true
+      && reason.last.map { !$0.isWhitespace } == true
+  }
+
+  private static func validRationale(_ rationale: String) -> Bool {
+    !rationale.isEmpty && rationale.utf8.count <= 4_096
   }
 }
 

@@ -265,6 +265,60 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testToolApprovalDecisionDecodesTypedDelegateProvenance() throws {
+    let requestID = "44444444-4444-4444-8444-444444444444"
+    let selectionID = "55555555-5555-4555-8555-555555555555"
+    let callID = "66666666-6666-4666-8666-666666666666"
+    let rationale = "The requested effect exceeds the delegated scope."
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"\(requestID)",
+            "decision":{"type":"deny","reason":null},
+            "decider":{
+              "type":"delegate",
+              "model_selection_id":"\(selectionID)",
+              "model_call_id":"\(callID)"
+            },
+            "rationale":"\(rationale)"
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 13),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .toolApprovalDecided(
+            turnID: try SignalboxCanonicalUUID(validating: turnID),
+            toolRequestID: try SignalboxCanonicalUUID(validating: requestID),
+            decision: .deny(reason: nil),
+            decider: .delegate(
+              modelSelectionID: try SignalboxCanonicalUUID(validating: selectionID),
+              modelCallID: try SignalboxCanonicalUUID(validating: callID)
+            ),
+            rationale: rationale
+          )
+        )
+      )
+    )
+  }
+
   func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
     let contextCompactionID = "33333333-3333-4333-8333-333333333333"
     let modelCallID = "44444444-4444-4444-8444-444444444444"
