@@ -14,7 +14,7 @@ these capabilities directionally — accepted records decide them — and severa
 [open decisions](docs/open-questions.md).
 
 > **Status:** early implementation phase; APIs, protocols, and storage details
-> are not yet stable. 
+> are not yet stable.
 
 ```text
  Terminal       Web       macOS / iOS
