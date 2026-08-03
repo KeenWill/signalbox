@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
     io::Read,
@@ -6,7 +7,7 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
         unix::fs::MetadataExt,
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use rustix::{
@@ -60,6 +61,36 @@ pub(super) struct QuarantineDirectory {
     identity: FileIdentity,
     directory: OwnedFd,
     clear_on_drop: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct QuarantineSnapshot {
+    entries: BTreeMap<PathBuf, QuarantineSnapshotEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuarantineSnapshotEntry {
+    Directory {
+        identity: FileIdentity,
+        mode: u32,
+    },
+    Other {
+        identity: FileSnapshotIdentity,
+        mode: u32,
+    },
+}
+
+impl QuarantineSnapshot {
+    pub(super) fn without_subtree(&self, path: &Path) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .filter(|(entry, _)| entry.as_path() != path && !entry.starts_with(path))
+                .map(|(path, entry)| (path.clone(), *entry))
+                .collect(),
+        }
+    }
 }
 
 impl QuarantineDirectory {
@@ -146,6 +177,80 @@ impl QuarantineDirectory {
     pub(super) fn remove_if_empty_and_current(&self) -> Result<(), LocalGitFailure> {
         remove_quarantine_directory_if_identity(&self.parent, &self.name, self.identity)
     }
+
+    pub(super) fn snapshot(&self) -> Result<QuarantineSnapshot, LocalGitFailure> {
+        let mut entries = BTreeMap::new();
+        let mut inspections = 0_usize;
+        snapshot_pinned_directory_bounded(
+            &self.directory,
+            Path::new(""),
+            0,
+            &mut inspections,
+            &mut entries,
+        )?;
+        Ok(QuarantineSnapshot { entries })
+    }
+
+    pub(super) fn clear_on_drop_only_if_unchanged(&mut self, expected: &QuarantineSnapshot) {
+        if self.snapshot().as_ref() != Ok(expected) {
+            self.keep();
+        }
+    }
+}
+
+fn snapshot_pinned_directory_bounded(
+    directory: &OwnedFd,
+    prefix: &Path,
+    depth: usize,
+    inspections: &mut usize,
+    entries: &mut BTreeMap<PathBuf, QuarantineSnapshotEntry>,
+) -> Result<(), LocalGitFailure> {
+    if depth > MAX_QUARANTINE_DEPTH {
+        return Err(LocalGitFailure::Operation);
+    }
+    let children =
+        fs::read_dir(descriptor_path_from_fd(directory)).map_err(|_| LocalGitFailure::Operation)?;
+    for child in children {
+        *inspections = inspections
+            .checked_add(1)
+            .filter(|count| *count <= MAX_WORKTREE_INSPECTIONS)
+            .ok_or(LocalGitFailure::Operation)?;
+        let name = child.map_err(|_| LocalGitFailure::Operation)?.file_name();
+        let path = prefix.join(&name);
+        let status = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        #[allow(clippy::unnecessary_cast)]
+        let mode = status.st_mode as u32;
+        if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
+            entries.insert(
+                path.clone(),
+                QuarantineSnapshotEntry::Directory {
+                    identity: stat_file_identity(&status),
+                    mode,
+                },
+            );
+            let child = openat(
+                directory,
+                &name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| LocalGitFailure::Operation)?;
+            snapshot_pinned_directory_bounded(&child, &path, depth + 1, inspections, entries)?;
+        } else {
+            #[allow(clippy::unnecessary_cast)]
+            let identity = FileSnapshotIdentity {
+                file: stat_file_identity(&status),
+                length: status.st_size as u64,
+                modified_seconds: status.st_mtime as i64,
+                modified_nanoseconds: status.st_mtime_nsec as i64,
+                changed_seconds: status.st_ctime as i64,
+                changed_nanoseconds: status.st_ctime_nsec as i64,
+            };
+            entries.insert(path, QuarantineSnapshotEntry::Other { identity, mode });
+        }
+    }
+    Ok(())
 }
 
 fn clear_pinned_directory(directory: &OwnedFd) -> Result<(), LocalGitFailure> {

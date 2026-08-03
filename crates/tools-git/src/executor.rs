@@ -33,8 +33,8 @@ use crate::bounded::{
 use crate::branch::branch_create;
 use crate::commit::{RepositoryOperationState, commit, publish_symbolic_head};
 use crate::descriptor::{
-    FileIdentity, QuarantineDirectory, RepositoryIdentity, descriptor_entry_exists,
-    descriptor_path, descriptor_path_from_fd,
+    FileIdentity, QuarantineDirectory, QuarantineSnapshot, RepositoryIdentity,
+    descriptor_entry_exists, descriptor_path, descriptor_path_from_fd,
 };
 use crate::diff::diff;
 use crate::failure::LocalGitFailure;
@@ -77,7 +77,10 @@ pub struct LocalGitExecutor<FileSystem> {
 
 struct QuarantinedCheckoutDirectory {
     quarantine: QuarantineDirectory,
+    quarantine_snapshot: QuarantineSnapshot,
     target: QuarantineDirectory,
+    target_snapshot: QuarantineSnapshot,
+    target_published: bool,
     path: PathBuf,
 }
 
@@ -852,6 +855,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &BTreeSet::from([path.clone()]),
                     &descriptor_path_from_fd(target_snapshot.descriptor()),
                 )?;
+                let target_snapshot_identity = target_snapshot.snapshot()?;
                 let quarantine = QuarantineDirectory::create(&root)?;
                 let quarantined_name = OsStr::new("entry");
                 let (parent, leaf) = open_worktree_parent(&self.repository_authority.root, &path)?;
@@ -876,9 +880,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     RenameFlags::NOREPLACE,
                 )
                 .map_err(|_| LocalGitFailure::Operation)?;
+                let quarantine_snapshot = quarantine.snapshot()?;
                 Ok(QuarantinedCheckoutDirectory {
                     quarantine,
+                    quarantine_snapshot,
                     target: target_snapshot,
+                    target_snapshot: target_snapshot_identity,
+                    target_published: false,
                     path,
                 })
             })();
@@ -939,8 +947,32 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             updated_identities
                 .borrow_mut()
                 .insert(transition.path.clone(), Some(target_identity));
+            transition.target_published = true;
         }
         Ok(())
+    }
+
+    fn preserve_changed_target_quarantines(quarantined: &mut [QuarantinedCheckoutDirectory]) {
+        for transition in quarantined {
+            let expected = if transition.target_published {
+                transition.target_snapshot.without_subtree(&transition.path)
+            } else {
+                transition.target_snapshot.clone()
+            };
+            transition.target.clear_on_drop_only_if_unchanged(&expected);
+        }
+    }
+
+    fn cleanup_published_quarantines(quarantined: &mut [QuarantinedCheckoutDirectory]) {
+        for transition in quarantined {
+            transition
+                .quarantine
+                .clear_on_drop_only_if_unchanged(&transition.quarantine_snapshot);
+            let target_remainder = transition.target_snapshot.without_subtree(&transition.path);
+            transition
+                .target
+                .clear_on_drop_only_if_unchanged(&target_remainder);
+        }
     }
 
     fn restore_unmodified_quarantined_directories(
@@ -1400,6 +1432,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             },
         );
         if let Err(failure) = checkout_result {
+            Self::preserve_changed_target_quarantines(&mut quarantined_directories);
             self.restore_unmodified_quarantined_directories(
                 &mut quarantined_directories,
                 &updated_paths.borrow(),
@@ -1412,6 +1445,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &updated_identities,
         );
         if let Err(failure) = target_publication {
+            Self::preserve_changed_target_quarantines(&mut quarantined_directories);
             rollback_checkout_atomically(
                 repository,
                 current_tree.as_ref(),
@@ -1430,6 +1464,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             )?;
             return Err(failure);
         }
+        Self::cleanup_published_quarantines(&mut quarantined_directories);
         drop(quarantined_directories);
         let before_checkout_capture = checkout_paths
             .iter()
