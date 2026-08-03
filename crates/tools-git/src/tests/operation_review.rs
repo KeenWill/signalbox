@@ -1,0 +1,1399 @@
+//! Review regressions for operation authority and Git-format parity.
+
+use std::{
+    cell::RefCell,
+    collections::BTreeSet,
+    fs,
+    io::Write,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
+};
+
+use git2::{
+    BranchType, IndexEntry, IndexTime, ObjectFormat, Odb, Repository, RepositoryInitOptions,
+    Signature,
+};
+use sha1::{Digest, Sha1};
+
+use crate::LocalGitExecutor;
+use crate::arguments::{
+    GitBranchCreateArguments, GitBranchSwitchArguments, GitCommitArguments, GitDiffArguments,
+    GitLogArguments, GitStageArguments, LocalOperation,
+};
+use crate::bounded::RevisionSnapshot;
+use crate::branch::branch_create;
+use crate::descriptor::file_identity;
+use crate::failure::LocalGitFailure;
+use crate::limits::{
+    GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
+    MAX_REVISION_BYTES, MAX_STAGE_PATHS,
+};
+use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
+use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
+use crate::reflog::ReferenceLogLock;
+use crate::rollback::{
+    CheckoutRollbackContext, WorktreeRollbackIdentities, atomic_restore_checkout_path,
+    capture_rollback_identities, capture_rollback_identity, capture_worktree_rollback_state,
+    checkout_tree_with_rollback,
+};
+use crate::status_reference::StatusHeadSnapshot;
+use crate::tests::support::{
+    ADMINISTRATION_INDEX_PATH, CHANGED_CONTENT, DEFAULT_BRANCH, FIX_BRANCH, Fixture,
+    INITIAL_CONTENT, MODEL_MESSAGE, MODIFIED_WORKTREE_STATUS, Sha256Fixture, TRACKED_PATH,
+    commit_all, execute, identity, install_deleted_conflict, real_git_sha256_pack_checksum,
+    real_git_sha256_pack_index, real_git_sha256_pack_object_ids,
+};
+
+#[test]
+fn commit_arguments_reject_an_empty_message_during_decode() {
+    let result = serde_json::from_value::<GitCommitArguments>(serde_json::json!({"message": ""}));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn commit_arguments_reject_a_nul_message_during_decode() {
+    let result = serde_json::from_value::<GitCommitArguments>(
+        serde_json::json!({"message": "subject\u{0000}body"}),
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn commit_arguments_reject_an_over_byte_budget_message_during_decode() {
+    let message = "x".repeat(MAX_COMMIT_MESSAGE_BYTES + 1);
+    let result = serde_json::from_value::<GitCommitArguments>(serde_json::json!({
+        "message": message,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn log_arguments_reject_zero_entries_during_decode() {
+    let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
+        "max_entries": 0,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn log_arguments_reject_entries_above_the_bound_during_decode() {
+    let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
+        "max_entries": MAX_LOG_ENTRIES + 1,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn stage_arguments_reject_an_empty_path_list_during_decode() {
+    let result = serde_json::from_value::<GitStageArguments>(serde_json::json!({
+        "paths": [],
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn stage_arguments_reject_a_path_list_above_the_bound_during_decode() {
+    let paths = vec![TRACKED_PATH; MAX_STAGE_PATHS + 1];
+    let result = serde_json::from_value::<GitStageArguments>(serde_json::json!({
+        "paths": paths,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn branch_arguments_reject_a_name_above_the_byte_bound_during_decode() {
+    let name = "a".repeat(MAX_BRANCH_BYTES + 1);
+    let result = serde_json::from_value::<GitBranchSwitchArguments>(serde_json::json!({
+        "name": name,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn revision_arguments_reject_a_value_above_the_byte_bound_during_decode() {
+    let revision = "a".repeat(MAX_REVISION_BYTES + 1);
+    let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
+        "revision": revision,
+    }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn stage_rejects_a_nested_repository_administration_path() {
+    let fixture = Fixture::new();
+    let nested_administration_path = "vendor/repository/.git/config";
+    fs::create_dir_all(fixture.root().join("vendor/repository/.git"))
+        .expect("nested administration directory creates");
+    fs::write(
+        fixture.root().join(nested_administration_path),
+        INITIAL_CONTENT,
+    )
+    .expect("nested administration fixture writes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Stage(GitStageArguments {
+            paths: vec![nested_administration_path.to_owned()],
+        }))
+        .expect_err("nested administration path rejects");
+
+    assert_eq!(failure, LocalGitFailure::Path);
+}
+
+#[test]
+fn status_rejects_an_administration_path_decoded_from_the_index() {
+    let fixture = Fixture::new();
+    plant_administration_index_path(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Status)
+        .expect_err("administration index path rejects status");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn worktree_diff_rejects_an_administration_path_decoded_from_the_index() {
+    let fixture = Fixture::new();
+    plant_administration_index_path(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree))
+        .expect_err("administration index path rejects worktree diff");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn branch_switch_rejects_an_administration_path_decoded_from_the_index() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    plant_administration_index_path(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }))
+        .expect_err("administration index path rejects branch switch");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok(DEFAULT_BRANCH)
+    );
+}
+
+fn plant_administration_index_path(fixture: &Fixture) {
+    let index_path = fixture.root().join(".git/index");
+    let mut bytes = fs::read(&index_path).expect("fixture index reads");
+    let entry_path = bytes
+        .windows(TRACKED_PATH.len())
+        .position(|window| window == TRACKED_PATH.as_bytes())
+        .expect("tracked fixture entry exists");
+    bytes[entry_path..entry_path + TRACKED_PATH.len()]
+        .copy_from_slice(ADMINISTRATION_INDEX_PATH.as_bytes());
+    let checksum_offset = bytes.len() - 20;
+    let checksum = Sha1::digest(&bytes[..checksum_offset]);
+    bytes[checksum_offset..].copy_from_slice(&checksum);
+    fs::write(index_path, bytes).expect("crafted checksum-valid index writes");
+}
+
+#[test]
+fn branch_create_rejects_a_name_outside_git_reference_grammar() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchCreate(GitBranchCreateArguments {
+            name: "topic..escape".to_owned(),
+            start: fixture.initial.to_string(),
+        }))
+        .expect_err("invalid branch name rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(
+        !fixture
+            .root()
+            .join(".git/refs/heads/topic..escape")
+            .exists()
+    );
+}
+
+#[test]
+fn status_reports_an_executable_bit_change_as_modified() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.filemode", true)
+        .expect("fixture filemode enables");
+    let tracked_path = fixture.root().join(TRACKED_PATH);
+    let mut permissions = fs::metadata(&tracked_path)
+        .expect("tracked fixture metadata reads")
+        .permissions();
+    permissions.set_mode(permissions.mode() | 0o100);
+    fs::set_permissions(tracked_path, permissions).expect("executable fixture mode writes");
+    let executor = fixture.executor();
+
+    let status = execute(&executor, LocalOperation::Status);
+
+    assert_eq!(status["entries"][0]["path"], TRACKED_PATH);
+    assert_eq!(status["entries"][0]["worktree"], MODIFIED_WORKTREE_STATUS);
+}
+
+#[test]
+fn branch_create_rejects_a_start_reference_changed_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+    let pinned_objects =
+        PinnedObjectDatabase::capture(&executor.repository_authority).expect("objects capture");
+    let object_database = Odb::new_ext(executor.repository_authority.object_format)
+        .expect("private object database constructs");
+    pinned_objects
+        .add_to(&object_database)
+        .expect("captured objects install");
+    repository
+        .set_odb(&object_database)
+        .expect("captured objects bind");
+
+    let failure = branch_create(
+        &repository,
+        &executor.repository_authority,
+        &object_database,
+        &pinned_objects,
+        GitBranchCreateArguments {
+            name: FIX_BRANCH.to_owned(),
+            start: "refs/heads/main".to_owned(),
+        },
+        || {
+            fs::write(
+                fixture.root().join(".git/refs/heads/main"),
+                format!("{}\n", fixture.initial),
+            )
+            .expect("racing branch tip writes");
+            Ok(())
+        },
+    )
+    .expect_err("changed start reference rejects branch publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert!(
+        !fixture
+            .root()
+            .join(".git/refs/heads")
+            .join(FIX_BRANCH)
+            .exists()
+    );
+}
+
+#[test]
+fn object_publication_remains_bound_to_the_captured_pack_directory() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let pinned_objects = PinnedObjectDatabase::capture(&executor.repository_authority)
+        .expect("fixture object database pins");
+    let objects = fixture.root().join(".git/objects");
+    let captured_objects = fixture.root().join(".git/captured-objects");
+    let replacement_pack = objects.join("pack");
+    fs::rename(&objects, &captured_objects).expect("captured objects retire");
+    fs::create_dir(&objects).expect("replacement objects construct");
+    fs::create_dir(&replacement_pack).expect("replacement pack constructs");
+
+    let publication = ObjectPublicationLock::acquire(&pinned_objects)
+        .expect("captured pack publication lock acquires");
+
+    assert!(
+        !replacement_pack.join(OBJECT_PUBLICATION_LOCK).exists(),
+        "replacement object database must not receive the publication lock"
+    );
+    assert!(
+        captured_objects
+            .join("pack")
+            .join(OBJECT_PUBLICATION_LOCK)
+            .exists(),
+        "publication remains bound to the captured pack directory"
+    );
+    assert_eq!(
+        pinned_objects.validate_live(&executor.repository_authority),
+        Err(LocalGitFailure::Repository)
+    );
+    drop(publication);
+    assert!(
+        !captured_objects
+            .join("pack")
+            .join(OBJECT_PUBLICATION_LOCK)
+            .exists()
+    );
+}
+
+#[test]
+fn branch_switch_checks_out_root_level_changes_inside_the_injected_root() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("root-level fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    execute(
+        &executor,
+        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }),
+    );
+    let status = execute(&executor, LocalOperation::Status);
+
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("switched content reads"),
+        INITIAL_CONTENT.as_bytes()
+    );
+    assert_eq!(
+        repository.head().expect("switched HEAD exists").shorthand(),
+        Ok(FIX_BRANCH)
+    );
+    assert_eq!(status["branch"], FIX_BRANCH);
+}
+
+#[test]
+fn branch_switch_rejects_merge_state_from_the_injected_git_directory() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(
+        fixture.root().join(".git/MERGE_HEAD"),
+        format!("{}\n", fixture.initial),
+    )
+    .expect("merge state writes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }))
+        .expect_err("merge state blocks branch switching");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        repository
+            .head()
+            .expect("original HEAD remains")
+            .shorthand(),
+        Ok("main")
+    );
+}
+
+#[test]
+fn branch_switch_rejects_operation_state_created_before_head_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_head_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::write(
+                    fixture.root().join(".git/MERGE_HEAD"),
+                    format!("{}\n", fixture.initial),
+                )
+                .expect("racing merge state writes");
+            },
+        )
+        .expect_err("changed operation state rejects HEAD publication");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_target_branch_changed_before_head_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    let foreign_target = commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_head_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::write(
+                    fixture.root().join(".git/refs/heads").join(FIX_BRANCH),
+                    format!("{foreign_target}\n"),
+                )
+                .expect("foreign target branch update writes");
+            },
+        )
+        .expect_err("changed target branch rejects HEAD publication");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root().join(".git/refs/heads").join(FIX_BRANCH))
+            .expect("foreign target branch remains"),
+        format!("{foreign_target}\n")
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("original worktree content reads"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_preserves_an_index_replaced_before_head_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let index_path = fixture.root().join(".git/index");
+    let actor_index = fs::read(&index_path).expect("actor index fixture reads");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_head_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let replacement_path = fixture.root().join(".git/actor-index");
+                fs::write(&replacement_path, &actor_index).expect("actor index writes");
+                fs::rename(&replacement_path, &index_path).expect("actor index publishes");
+            },
+        )
+        .expect_err("replaced index rejects HEAD publication");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read(&index_path).expect("actor index remains"),
+        actor_index
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("original worktree content reads"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn checkout_rollback_preserves_a_same_content_foreign_replacement() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let tracked_path = Path::new(TRACKED_PATH);
+    fs::write(fixture.root().join(tracked_path), CHANGED_CONTENT)
+        .expect("checked-out fixture content writes");
+    let checkout_paths = BTreeSet::from([tracked_path.to_path_buf()]);
+    let expected =
+        capture_worktree_rollback_state(&executor.filesystem, &executor.root, &checkout_paths)
+            .expect("checked-out state captures");
+    let expected_identities = capture_rollback_identities(
+        &executor.repository_authority.root,
+        Path::new(""),
+        &expected,
+    )
+    .expect("checked-out identities capture");
+    let original_prefix = Path::new(".rollback-original");
+    fs::create_dir(fixture.root().join(original_prefix))
+        .expect("rollback original directory creates");
+    fs::write(
+        fixture.root().join(original_prefix).join(tracked_path),
+        INITIAL_CONTENT,
+    )
+    .expect("rollback original content writes");
+    let replacement_path = fixture.root().join("foreign-replacement");
+    fs::write(&replacement_path, CHANGED_CONTENT).expect("foreign replacement writes");
+    fs::rename(&replacement_path, fixture.root().join(tracked_path))
+        .expect("foreign replacement publishes");
+
+    atomic_restore_checkout_path(
+        &executor.filesystem,
+        &executor.root,
+        &executor.repository_authority,
+        original_prefix,
+        tracked_path,
+        &expected,
+        Some(&expected_identities),
+    )
+    .expect("foreign replacement is preserved");
+
+    assert_eq!(
+        fs::read(fixture.root().join(tracked_path)).expect("foreign replacement reads"),
+        CHANGED_CONTENT.as_bytes()
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(original_prefix).join(tracked_path))
+            .expect("rollback original reads"),
+        INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_same_content_replacement_during_checkout_capture() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let replacement = fixture.root().join("foreign-replacement");
+                fs::write(&replacement, INITIAL_CONTENT).expect("foreign content writes");
+                fs::rename(&replacement, fixture.root().join(TRACKED_PATH))
+                    .expect("foreign content publishes");
+            },
+        )
+        .expect_err("checkout identity transition rejects");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("foreign content reads"),
+        INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn branch_switch_rolls_back_owned_paths_when_checkout_capture_rejects_a_symlink() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::remove_file(fixture.root().join(TRACKED_PATH))
+                    .expect("checked-out file removes");
+                symlink("foreign-target", fixture.root().join(TRACKED_PATH))
+                    .expect("foreign symlink publishes");
+            },
+        )
+        .expect_err("symlinked checkout capture rejects");
+    let observed = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Path);
+    assert_eq!(
+        observed.head().expect("original HEAD remains").shorthand(),
+        Ok("main")
+    );
+    assert_eq!(
+        fs::read_link(fixture.root().join(TRACKED_PATH)).expect("foreign symlink remains"),
+        Path::new("foreign-target")
+    );
+}
+
+#[test]
+fn failed_checkout_preserves_a_same_content_replacement_after_notification() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("target worktree content writes");
+    let target = commit_all(&repository, MODEL_MESSAGE);
+    let current_commit = repository
+        .find_commit(fixture.initial)
+        .expect("current fixture commit opens");
+    let current_tree = current_commit.tree().expect("current fixture tree opens");
+    let target_commit = repository
+        .find_commit(target)
+        .expect("target fixture commit opens");
+    let target_tree = target_commit.tree().expect("target fixture tree opens");
+    let executor = fixture.executor();
+    let tracked_path = Path::new(TRACKED_PATH).to_path_buf();
+    let updated_paths = RefCell::new(BTreeSet::from([tracked_path.clone()]));
+    let checked_out_identity =
+        capture_rollback_identity(&executor.repository_authority.root, Path::new(TRACKED_PATH))
+            .expect("checked-out identity captures");
+    let updated_identities = RefCell::new(WorktreeRollbackIdentities::from([(
+        tracked_path,
+        checked_out_identity,
+    )]));
+    let replacement = fixture.root().join("foreign-replacement");
+    fs::write(&replacement, CHANGED_CONTENT).expect("foreign content writes");
+
+    let failure = checkout_tree_with_rollback(
+        &repository,
+        Some(&current_tree),
+        &target_tree,
+        &updated_paths,
+        &updated_identities,
+        CheckoutRollbackContext {
+            filesystem: &executor.filesystem,
+            root: &executor.root,
+            authority: &executor.repository_authority,
+        },
+        || {
+            fs::rename(&replacement, fixture.root().join(TRACKED_PATH))
+                .expect("foreign content publishes");
+            Err(LocalGitFailure::Operation)
+        },
+    )
+    .expect_err("failed checkout reports failure");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("foreign content remains"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn read_operation_rejects_the_live_object_directory_changed_before_return() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let objects = fixture.root().join(".git/objects");
+    let retired_objects = fixture.root().join(".git/objects-retired");
+
+    let failure = executor
+        .execute_read_with_return_hook(LocalOperation::Status, || {
+            fs::rename(&objects, &retired_objects).expect("captured objects retire");
+            fs::create_dir(&objects).expect("foreign objects directory creates");
+        })
+        .expect_err("changed live objects reject read return");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert!(objects.is_dir());
+    assert!(retired_objects.is_dir());
+}
+
+#[test]
+fn commit_rejects_an_index_replaced_before_reference_publication() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+    let index = fixture.root().join(".git/index");
+    let replacement = fixture.root().join(".git/actor-index");
+    fs::copy(&index, &replacement).expect("actor index copies");
+    let replacement_identity =
+        file_identity(&fs::metadata(&replacement).expect("actor index metadata reads"));
+
+    let failure = executor
+        .execute_commit_with_publish_hook(
+            LocalOperation::Commit(GitCommitArguments {
+                message: MODEL_MESSAGE.to_owned(),
+            }),
+            || fs::rename(&replacement, &index).expect("actor index publishes"),
+        )
+        .expect_err("replaced index rejects commit publication");
+    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
+    let live_identity = file_identity(&fs::metadata(&index).expect("live index metadata reads"));
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(live_identity, replacement_identity);
+    assert_eq!(
+        repository.head().expect("original HEAD remains").target(),
+        Some(fixture.initial)
+    );
+}
+
+#[test]
+fn commit_rejects_merge_state_created_before_reference_publication() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT)
+        .expect("fixture worktree change writes");
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+    let merge_head = fixture.root().join(".git/MERGE_HEAD");
+
+    let failure = executor
+        .execute_commit_with_publish_hook(
+            LocalOperation::Commit(GitCommitArguments {
+                message: MODEL_MESSAGE.to_owned(),
+            }),
+            || {
+                fs::write(&merge_head, format!("{}\n", fixture.initial))
+                    .expect("racing merge state writes");
+            },
+        )
+        .expect_err("changed merge state rejects commit publication");
+    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        repository.head().expect("original HEAD remains").target(),
+        Some(fixture.initial)
+    );
+    assert_eq!(
+        fs::read_to_string(merge_head).expect("foreign merge state remains"),
+        format!("{}\n", fixture.initial)
+    );
+}
+
+#[test]
+fn reflog_publication_rejects_a_live_leaf_changed_after_snapshot() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let reflog_path = fixture.root().join(".git/logs/HEAD");
+    let foreign_record = b"foreign reflog record\n";
+    let mut expected_live = fs::read(&reflog_path).expect("original reflog reads");
+    expected_live.extend_from_slice(foreign_record);
+    let mut lock = ReferenceLogLock::acquire(&executor.repository_authority, "HEAD")
+        .expect("reflog lock acquires");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&reflog_path)
+        .expect("live reflog opens for append")
+        .write_all(foreign_record)
+        .expect("foreign reflog record appends");
+
+    let failure = lock
+        .publish()
+        .expect_err("changed live reflog rejects publication");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(&reflog_path).expect("foreign live reflog reads"),
+        expected_live
+    );
+}
+
+#[test]
+fn branch_switch_rejects_a_skip_worktree_index_entry() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists");
+    repository
+        .branch(FIX_BRANCH, &initial, false)
+        .expect("fixture branch creates");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+    let mut index = repository.index().expect("fixture index opens");
+    let mut entry = index
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("tracked entry exists");
+    entry.flags_extended |= INDEX_SKIP_WORKTREE;
+    index.add(&entry).expect("skip-worktree entry replaces");
+    index.write().expect("skip-worktree index publishes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }))
+        .expect_err("skip-worktree index rejects branch switching");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("worktree content remains"),
+        CHANGED_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn status_rejects_an_unsupported_gitlink_worktree() {
+    let fixture = Fixture::new();
+    install_gitlink_index_entry(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Status)
+        .expect_err("gitlink worktree status rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn worktree_diff_rejects_an_unsupported_gitlink_worktree() {
+    let fixture = Fixture::new();
+    install_gitlink_index_entry(&fixture);
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Diff(GitDiffArguments::Worktree))
+        .expect_err("gitlink worktree diff rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn status_head_snapshot_rejects_a_branch_tip_changed_during_the_operation() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let snapshot = StatusHeadSnapshot::capture(&executor.repository_authority)
+        .expect("status HEAD snapshot captures");
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+
+    let failure = snapshot
+        .validate(&executor.repository_authority)
+        .expect_err("changed branch tip rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn revision_snapshot_rejects_a_branch_tip_changed_during_the_operation() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let snapshot = RevisionSnapshot::capture(&executor.repository_authority, "refs/heads/main")
+        .expect("revision snapshot captures");
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    commit_all(&repository, MODEL_MESSAGE);
+
+    let failure = snapshot
+        .validate(&executor.repository_authority)
+        .expect_err("changed revision rejects");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+}
+
+#[test]
+fn commit_consumes_real_git_merge_state_and_preserves_both_parents() {
+    let fixture = Fixture::new();
+    install_deleted_conflict(&fixture);
+    let executor = fixture.executor();
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+
+    let result = execute(
+        &executor,
+        LocalOperation::Commit(GitCommitArguments {
+            message: MODEL_MESSAGE.to_owned(),
+        }),
+    );
+    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
+    let commit = repository
+        .find_commit(
+            git2::Oid::from_str(result["commit"].as_str().expect("commit id is text"))
+                .expect("commit id parses"),
+        )
+        .expect("merge commit exists");
+
+    assert_eq!(commit.parent_count(), 2);
+    assert_eq!(repository.state(), git2::RepositoryState::Clean);
+    assert_eq!(result["state_cleaned"], true);
+}
+
+#[test]
+fn sha256_status_recognizes_an_unchanged_worktree_blob() {
+    let fixture = Sha256Fixture::new();
+    let executor = fixture.executor();
+
+    let status = execute(&executor, LocalOperation::Status);
+
+    assert_eq!(status["entries"], serde_json::json!([]));
+}
+
+#[test]
+fn real_git_sha256_pack_index_matches_the_bounded_parser() {
+    let index = real_git_sha256_pack_index();
+    let checksum = real_git_sha256_pack_checksum();
+    let expected = real_git_sha256_pack_object_ids();
+
+    let parsed = parse_pack_index(&index, checksum, ObjectFormat::Sha256)
+        .expect("real Git SHA-256 pack index parses");
+
+    assert_eq!(parsed, expected);
+}
+
+#[test]
+fn sha256_branch_create_uses_a_matching_temporary_object_database() {
+    let fixture = Sha256Fixture::new();
+    let executor = fixture.executor();
+
+    execute(
+        &executor,
+        LocalOperation::BranchCreate(GitBranchCreateArguments {
+            name: FIX_BRANCH.to_owned(),
+            start: fixture.initial.to_string(),
+        }),
+    );
+    let repository = Repository::open(fixture.root()).expect("SHA-256 repository reopens");
+
+    assert_eq!(
+        repository
+            .find_branch(FIX_BRANCH, BranchType::Local)
+            .expect("created SHA-256 branch exists")
+            .get()
+            .target(),
+        Some(fixture.initial)
+    );
+}
+
+#[test]
+fn sha256_initial_commit_records_the_matching_zero_object_id() {
+    let directory = tempfile::tempdir().expect("temporary SHA-256 repository root constructs");
+    let mut options = RepositoryInitOptions::new();
+    options
+        .external_template(false)
+        .initial_head("main")
+        .object_format(ObjectFormat::Sha256);
+    Repository::init_opts(directory.path(), &options).expect("SHA-256 repository initializes");
+    fs::write(directory.path().join(TRACKED_PATH), INITIAL_CONTENT)
+        .expect("SHA-256 worktree file writes");
+    let executor = LocalGitExecutor::for_test(directory.path(), identity());
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+
+    let result = execute(
+        &executor,
+        LocalOperation::Commit(GitCommitArguments {
+            message: MODEL_MESSAGE.to_owned(),
+        }),
+    );
+    let reflog = fs::read_to_string(directory.path().join(".git/logs/refs/heads/main"))
+        .expect("SHA-256 branch reflog reads");
+    let old = reflog
+        .split_ascii_whitespace()
+        .next()
+        .expect("SHA-256 reflog old id exists");
+
+    assert_eq!(old, git2::Oid::ZERO_SHA256.to_string());
+    assert_eq!(
+        result["commit"]
+            .as_str()
+            .expect("SHA-256 commit id is text")
+            .len(),
+        git2::Oid::ZERO_SHA256.to_string().len()
+    );
+}
+
+#[test]
+fn sha256_unborn_branch_switch_records_the_matching_zero_object_id() {
+    let directory = tempfile::tempdir().expect("temporary SHA-256 repository root constructs");
+    let mut options = RepositoryInitOptions::new();
+    options
+        .external_template(false)
+        .initial_head("main")
+        .object_format(ObjectFormat::Sha256);
+    let repository =
+        Repository::init_opts(directory.path(), &options).expect("SHA-256 repository initializes");
+    repository
+        .index()
+        .expect("empty SHA-256 index opens")
+        .write()
+        .expect("empty SHA-256 index writes");
+    let blob = repository
+        .blob(INITIAL_CONTENT.as_bytes())
+        .expect("SHA-256 target blob writes");
+    let mut builder = repository
+        .treebuilder(None)
+        .expect("SHA-256 target tree builder opens");
+    builder
+        .insert(TRACKED_PATH, blob, 0o100644)
+        .expect("SHA-256 target path inserts");
+    let tree = repository
+        .find_tree(builder.write().expect("SHA-256 target tree writes"))
+        .expect("SHA-256 target tree opens");
+    let signature = Signature::now("Fixture", "fixture@example.test")
+        .expect("SHA-256 fixture signature constructs");
+    let target = repository
+        .commit(None, &signature, &signature, "target", &tree, &[])
+        .expect("SHA-256 target commit writes");
+    repository
+        .reference("refs/heads/agent/fix", target, false, "fixture target")
+        .expect("SHA-256 target branch writes");
+    drop(tree);
+    drop(builder);
+    drop(repository);
+    let executor = LocalGitExecutor::for_test(directory.path(), identity());
+
+    execute(
+        &executor,
+        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }),
+    );
+    let reflog = fs::read_to_string(directory.path().join(".git/logs/HEAD"))
+        .expect("SHA-256 HEAD reflog reads");
+    let old = reflog
+        .split_ascii_whitespace()
+        .next()
+        .expect("SHA-256 reflog old id exists");
+
+    assert_eq!(old, git2::Oid::ZERO_SHA256.to_string());
+    assert_eq!(
+        fs::read(directory.path().join(TRACKED_PATH)).expect("switched SHA-256 content reads"),
+        INITIAL_CONTENT.as_bytes()
+    );
+}
+
+#[test]
+fn commit_rejects_an_ordinary_no_op_before_writing_a_commit() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+
+    let failure = executor
+        .execute_operation(LocalOperation::Commit(GitCommitArguments {
+            message: MODEL_MESSAGE.to_owned(),
+        }))
+        .expect_err("ordinary no-op commit rejects");
+    let repository = Repository::open(fixture.root()).expect("fixture repository reopens");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        repository.head().expect("HEAD remains").target(),
+        Some(fixture.initial)
+    );
+}
+
+#[test]
+fn worktree_diff_does_not_preserve_a_symlink_mode_for_a_regular_file() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("regular fixture file removes");
+    symlink(INITIAL_CONTENT, fixture.root().join(TRACKED_PATH)).expect("fixture symlink creates");
+    commit_all(&repository, "symlink");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.filemode", false)
+        .expect("fixture filemode disables");
+    fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("fixture symlink removes");
+    fs::write(fixture.root().join(TRACKED_PATH), INITIAL_CONTENT)
+        .expect("replacement regular file writes");
+    fs::set_permissions(
+        fixture.root().join(TRACKED_PATH),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("replacement regular mode sets");
+    let executor = fixture.executor();
+
+    let diff = execute(&executor, LocalOperation::Diff(GitDiffArguments::Worktree));
+
+    assert!(
+        diff["patch"]
+            .as_str()
+            .expect("worktree patch is text")
+            .contains("old mode 120000\nnew mode 100644\n")
+    );
+}
+
+#[test]
+fn stage_does_not_preserve_a_symlink_mode_for_a_regular_file() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("regular fixture file removes");
+    symlink(INITIAL_CONTENT, fixture.root().join(TRACKED_PATH)).expect("fixture symlink creates");
+    commit_all(&repository, "symlink");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.filemode", false)
+        .expect("fixture filemode disables");
+    fs::remove_file(fixture.root().join(TRACKED_PATH)).expect("fixture symlink removes");
+    fs::write(fixture.root().join(TRACKED_PATH), INITIAL_CONTENT)
+        .expect("replacement regular file writes");
+    fs::set_permissions(
+        fixture.root().join(TRACKED_PATH),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("replacement regular mode sets");
+    let executor = fixture.executor();
+
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![TRACKED_PATH.to_owned()],
+        }),
+    );
+    let staged_repository = Repository::open(fixture.root()).expect("staged repository reopens");
+    let index = staged_repository.index().expect("staged index reopens");
+    let entry = index
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("staged path exists");
+
+    assert_eq!(entry.mode, 0o100644);
+}
+
+#[test]
+fn stage_defaults_a_new_file_to_non_executable_when_filemode_is_disabled() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.filemode", false)
+        .expect("fixture filemode disables");
+    let new_path = "new-script";
+    let new_content = b"#!/bin/sh\n";
+    fs::write(fixture.root().join(new_path), new_content).expect("fixture script writes");
+    fs::set_permissions(
+        fixture.root().join(new_path),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("fixture script mode sets");
+    let executor = fixture.executor();
+
+    execute(
+        &executor,
+        LocalOperation::Stage(GitStageArguments {
+            paths: vec![new_path.to_owned()],
+        }),
+    );
+    let staged_repository = Repository::open(fixture.root()).expect("staged repository reopens");
+    let index = staged_repository.index().expect("staged index reopens");
+    let entry = index
+        .get_path(Path::new(new_path), 0)
+        .expect("staged script exists");
+
+    assert_eq!(entry.mode, 0o100644);
+}
+
+#[test]
+fn status_does_not_treat_a_case_alias_as_untracked_when_ignorecase_is_enabled() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    repository
+        .config()
+        .expect("fixture config opens")
+        .set_bool("core.ignorecase", true)
+        .expect("fixture ignorecase enables");
+    let case_alias = TRACKED_PATH.to_ascii_uppercase();
+    fs::rename(
+        fixture.root().join(TRACKED_PATH),
+        fixture.root().join(&case_alias),
+    )
+    .expect("fixture case alias renames");
+    let executor = fixture.executor();
+
+    let status = execute(&executor, LocalOperation::Status);
+    let entries = status["entries"]
+        .as_array()
+        .expect("status entries are an array");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], TRACKED_PATH);
+    assert_eq!(entries[0]["worktree"], "deleted");
+}
+
+#[test]
+fn stage_rejects_when_a_captured_live_object_disappears_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial_blob = repository
+        .find_commit(fixture.initial)
+        .expect("initial commit opens")
+        .tree()
+        .expect("initial tree opens")
+        .get_name(TRACKED_PATH)
+        .expect("initial tree entry exists")
+        .id();
+    let initial_blob_text = initial_blob.to_string();
+    let initial_blob_path = fixture
+        .root()
+        .join(".git/objects")
+        .join(&initial_blob_text[..2])
+        .join(&initial_blob_text[2..]);
+    let original_index_id = repository
+        .index()
+        .expect("original index opens")
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("original index entry exists")
+        .id;
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .stage_with_pre_publish_hook(
+            &repository,
+            GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            },
+            || fs::remove_file(&initial_blob_path).expect("captured live blob removes"),
+        )
+        .expect_err("missing captured object rejects index publication");
+    let observed_index = Repository::open(fixture.root())
+        .expect("fixture repository reopens")
+        .index()
+        .expect("observed index opens");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        observed_index
+            .get_path(Path::new(TRACKED_PATH), 0)
+            .expect("observed index entry exists")
+            .id,
+        original_index_id
+    );
+}
+
+#[test]
+fn stage_rejects_when_its_new_object_pack_disappears_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let original_index_id = repository
+        .index()
+        .expect("original index opens")
+        .get_path(Path::new(TRACKED_PATH), 0)
+        .expect("original index entry exists")
+        .id;
+    fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .stage_with_pre_publish_hook(
+            &repository,
+            GitStageArguments {
+                paths: vec![TRACKED_PATH.to_owned()],
+            },
+            || remove_first_installed_pack(fixture.root()),
+        )
+        .expect_err("missing newly installed objects reject index publication");
+    let observed_index = Repository::open(fixture.root())
+        .expect("fixture repository reopens")
+        .index()
+        .expect("observed index opens");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+    assert_eq!(
+        observed_index
+            .get_path(Path::new(TRACKED_PATH), 0)
+            .expect("observed index entry exists")
+            .id,
+        original_index_id
+    );
+}
+
+fn remove_first_installed_pack(root: &Path) {
+    let pack = fs::read_dir(root.join(".git/objects/pack"))
+        .expect("pack directory reads")
+        .map(|entry| entry.expect("pack entry reads").path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "pack")
+        })
+        .expect("installed object pack exists");
+    fs::remove_file(pack).expect("installed object pack removes");
+}
+
+fn install_gitlink_index_entry(fixture: &Fixture) {
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let mut index = repository.index().expect("fixture index opens");
+    let entry = IndexEntry {
+        ctime: IndexTime::new(0, 0),
+        mtime: IndexTime::new(0, 0),
+        dev: 0,
+        ino: 0,
+        mode: GITLINK_MODE,
+        uid: 0,
+        gid: 0,
+        file_size: 0,
+        id: fixture.initial,
+        flags: 0,
+        flags_extended: 0,
+        path: b"submodule".to_vec(),
+    };
+    index.add(&entry).expect("gitlink index entry adds");
+    index.write().expect("gitlink index publishes");
+    fs::create_dir(fixture.root().join("submodule")).expect("gitlink worktree directory creates");
+}
