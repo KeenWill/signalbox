@@ -1,7 +1,8 @@
 # Configuration and credentials
 
-The delegated tool-approval posture and judge-selection configuration is
-verified against this PR (`agent/approval-judge-config`).
+The delegated tool-approval posture, judge selection, and daemon composition are
+verified against the implementing stack through this PR
+(`agent/approval-judge-daemon`).
 
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
@@ -40,8 +41,9 @@ export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
 verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
 pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag. The runner
+#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
+are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
+lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
@@ -479,29 +481,22 @@ arguments cannot widen either admission rule.
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
 unknown posture values, and startup rejects a structurally valid name that is
-absent from the selected composition. That name check and the temporary
-`delegated` refusal run in the pre-database configuration pass. An absent table
-or omitted tool name preserves that declaration's legacy permission-default and
-session-blanket behavior exactly. Subject to the `AlwaysConfirm` human-only rule
-owned by
+absent from the selected composition. That name check runs in the pre-database
+configuration pass. An absent table or omitted tool name preserves that
+declaration's legacy permission-default and session-blanket behavior exactly.
+Subject to the `AlwaysConfirm` human-only rule owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
 an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
-blanket is enabled. Until judge wiring lands, daemon startup rejects a
-configured `delegated` override.
-
-Committed unimplemented functionality: `delegated` will park with delegated
-authority for the approval-judge wiring. That wiring must not expose a delegated
-request to the ordinary user-decision path before escalation.
+blanket is enabled. `delegated` parks the request, invokes the approval judge,
+and exposes the ordinary user-decision path only after escalation or a terminal
+judge failure.
 
 The optional `[approval_judge]` table has exactly one `selection_id`, and the
-configuration parser requires it to name a configured direct selection.
-
-Committed unimplemented functionality: no present runtime consumes the
-approval-judge selection or dispatches an approval-judge call. The implementing
-daemon-wiring slice must use the selected model through the ordinary adapter,
-credential-profile, and target-resolution machinery; when the table is absent,
-it must use the judged session call's direct selection unchanged, never a
+configuration parser requires it to name a configured direct selection. The
+daemon uses that selection through the ordinary adapter, credential-profile,
+target-resolution, and usage-limit machinery. When the table is absent, the
+judge call uses the request-producing call's direct selection unchanged, never a
 hardcoded lower tier.
 
 When no explicit posture is configured, composition preserves each compiled
@@ -525,10 +520,16 @@ immutable imported conversations. It exposes only persisted visible semantic
 content in tool results: source-attested imported text remains text, while
 unattested, non-text, thinking, redacted-thinking, document, and absent-content
 entries are content-silent typed markers. Native reads stream from the
-repeatable-read projection. Imported reads currently materialize the complete
-immutable aggregate, including its persisted raw source records, before the
-adapter projects normalized visible entries and enforces the tool page's entry
-and byte bounds; raw source records are never returned in the tool result.
+repeatable-read projection. A selected native read carries the trusted invoking
+session separately from the model-selected target. The adapter loads both
+current placement epochs before opening the transcript in that same snapshot; an
+out-of-directory target returns typed refusal evidence naming the requesting
+directory and `outside_requesting_directory_subtree`, never an empty page.
+Pathless requesters retain the pre-placement behavior and a loudly acknowledged
+root placement reads every target. Imported reads currently materialize the
+complete immutable aggregate, including its persisted raw source records, before
+the adapter projects normalized visible entries and enforces the tool page's
+entry and byte bounds; raw source records are never returned in the tool result.
 
 Each `[[models]]` entry defines one direct selection:
 

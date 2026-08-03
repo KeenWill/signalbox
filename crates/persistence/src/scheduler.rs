@@ -135,8 +135,28 @@ impl PostgresEligibilitySweep {
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
                  WHERE active.state_kind = 'active'
-                   AND active.active_phase_kind = 'running'
                    AND active.active_tool_round_call_id IS NOT NULL
+                   AND (
+                        active.active_phase_kind = 'running'
+                        OR (
+                            active.active_phase_kind = 'awaiting_tool_approval'
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM tool_request AS request
+                                 WHERE request.request_id =
+                                       active.approval_tool_request_id
+                                   AND request.session_id = active.session_id
+                                   AND request.turn_id = active.turn_id
+                                   AND request.approval_posture = 'delegated'
+                                   AND NOT EXISTS (
+                                        SELECT 1
+                                          FROM tool_approval_judge_model_call AS judge
+                                         WHERE judge.request_id = request.request_id
+                                           AND judge.state_kind = 'terminal'
+                                   )
+                            )
+                        )
+                   )
              ), bounded AS (
                 SELECT COALESCE(
                     $2::uuid,

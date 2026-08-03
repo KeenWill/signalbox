@@ -12,7 +12,8 @@ use signalbox_domain::{
     ImportedConversationId, ImportedSourceAttestation, ImportedTranscriptContent,
     ImportedTranscriptEntryId, ModelAlias, ModelCallId, ProviderModelIdentity,
     ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+    SessionReadScopeDecision, SessionReadScopeRefusal, ToolAttemptId, ToolRequestId, TurnAttemptId,
+    TurnId, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -38,11 +39,12 @@ pub enum ProcessModelSelection {
 }
 
 /// One current session summary read from a shared transaction snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSessionSummary {
     session: SessionId,
     defaults_version: u64,
     model_selection: ProcessModelSelection,
+    placement: signalbox_domain::VersionedSessionPlacement,
 }
 
 impl ProcessSessionSummary {
@@ -59,6 +61,11 @@ impl ProcessSessionSummary {
     /// Returns the current model-selection request.
     pub const fn model_selection(&self) -> ProcessModelSelection {
         self.model_selection
+    }
+
+    /// Borrows the current immutable placement epoch.
+    pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement {
+        &self.placement
     }
 }
 
@@ -97,6 +104,17 @@ pub enum ProcessSessionDefaultsRead {
     SessionNotFound,
     /// The session exists but the named epoch was never installed.
     VersionNotFound,
+}
+
+/// Typed outcome of the path-scoped native transcript-open boundary.
+#[derive(Debug)]
+pub enum ProcessScopedTranscriptRead {
+    /// The target exists and its transcript cursor is open in the checked snapshot.
+    Opened(Box<ProcessTranscriptReader>),
+    /// The selected target session does not exist in the checked snapshot.
+    TargetNotFound,
+    /// The requesting placement's parent directory does not contain the target.
+    Refused(SessionReadScopeRefusal),
 }
 
 fn decode_session_defaults_value(
@@ -185,7 +203,7 @@ impl ProcessSessionSummaryReader {
         let row = sqlx::query(
             "SELECT
                 session_row.session_id,
-                current_defaults.current_version,
+                current_defaults.current_version AS defaults_version,
                 selected_defaults.model_selection_kind,
                 selected_defaults.direct_model_selection_id,
                 selected_defaults.model_alias_id
@@ -204,7 +222,11 @@ impl ProcessSessionSummaryReader {
         .await?;
 
         if let Some(row) = row {
-            let summary = decode_session_summary(&row)?;
+            let session = session_id_from_uuid(required(&row, "session_id")?);
+            let placement = load_process_session_placement(transaction, session)
+                .await?
+                .ok_or(ProcessReadCorruption::Missing("session placement"))?;
+            let summary = decode_session_summary(&row, placement)?;
             self.next_session_after = Some(session_id_to_uuid(summary.session()));
             self.summary_count =
                 self.summary_count
@@ -1780,49 +1802,120 @@ impl ProcessReadRepository {
             return Ok(None);
         }
 
-        let stored_cursor: Option<Decimal> = sqlx::query_scalar(
-            "SELECT last_sequence
+        Ok(Some(
+            open_transcript_in_transaction(transaction, requested_session).await?,
+        ))
+    }
+
+    /// Checks one requester's parent-directory scope and opens the target
+    /// transcript within the same repeatable-read snapshot.
+    pub async fn open_scoped_transcript(
+        &self,
+        requesting_session: SessionId,
+        target_session: SessionId,
+    ) -> Result<ProcessScopedTranscriptRead, ProcessReadError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(REPEATABLE_READ_ONLY)
+            .execute(&mut *transaction)
+            .await?;
+        let Some(requesting_placement) =
+            load_process_session_placement(&mut transaction, requesting_session).await?
+        else {
+            return Err(ProcessReadCorruption::Missing("requesting session placement").into());
+        };
+        let Some(target_placement) =
+            load_process_session_placement(&mut transaction, target_session).await?
+        else {
+            transaction.commit().await?;
+            return Ok(ProcessScopedTranscriptRead::TargetNotFound);
+        };
+        match requesting_placement
+            .placement()
+            .decide_cross_session_read(target_placement.placement())
+        {
+            SessionReadScopeDecision::Allowed => Ok(ProcessScopedTranscriptRead::Opened(Box::new(
+                open_transcript_in_transaction(transaction, target_session).await?,
+            ))),
+            SessionReadScopeDecision::Refused(refusal) => {
+                transaction.commit().await?;
+                Ok(ProcessScopedTranscriptRead::Refused(refusal))
+            }
+        }
+    }
+}
+
+async fn load_process_session_placement(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<Option<VersionedSessionPlacement>, ProcessReadError> {
+    crate::session_placement::load_current(transaction, session)
+        .await
+        .map_err(map_session_placement_read_error)
+}
+
+fn map_session_placement_read_error(
+    error: crate::session_placement::SessionPlacementRepositoryError,
+) -> ProcessReadError {
+    use crate::session_placement::SessionPlacementRepositoryError;
+
+    match error {
+        SessionPlacementRepositoryError::Database(error)
+        | SessionPlacementRepositoryError::CommitAmbiguous(error) => {
+            ProcessReadError::Database(error)
+        }
+        SessionPlacementRepositoryError::InvalidCommandId
+        | SessionPlacementRepositoryError::Corruption(_) => {
+            ProcessReadCorruption::Inconsistent("session placement").into()
+        }
+    }
+}
+
+async fn open_transcript_in_transaction(
+    mut transaction: Transaction<'static, Postgres>,
+    requested_session: SessionId,
+) -> Result<ProcessTranscriptReader, ProcessReadError> {
+    let stored_cursor: Option<Decimal> = sqlx::query_scalar(
+        "SELECT last_sequence
                FROM outbox_sequence_state
               WHERE singleton",
-        )
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let cursor = decode_nonnegative(
-            stored_cursor.ok_or(ProcessReadCorruption::Missing("outbox sequence state"))?,
-            "outbox cursor",
-        )?;
-        let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
-        // INV-039 remains fail-closed on every transcript open: native lineage
-        // supersedes the seed as the rendered frontier, not as an integrity fact.
-        let imported_seed =
-            load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
-        let expected_turn_count =
-            load_transcript_turn_count(&mut transaction, requested_session).await?;
-        let expected_model_call_count =
-            load_terminal_model_call_count(&mut transaction, requested_session).await?;
-        Ok(Some(ProcessTranscriptReader {
-            transaction: Some(transaction),
-            session: requested_session,
-            cursor,
-            lineage_tip,
-            latest_frontier: if lineage_tip.is_none() {
-                imported_seed
-            } else {
-                None
-            },
-            expected_turn_count,
-            turn_count: 0,
-            next_turn_after: None,
-            turns_complete: false,
-            expected_model_call_count,
-            model_call_count: 0,
-            next_model_call_after: None,
-            model_calls_complete: false,
-            entry_count: None,
-            next_entry_index: 0,
-            summary: None,
-        }))
-    }
+    )
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let cursor = decode_nonnegative(
+        stored_cursor.ok_or(ProcessReadCorruption::Missing("outbox sequence state"))?,
+        "outbox cursor",
+    )?;
+    let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
+    // INV-039 remains fail-closed on every transcript open: native lineage
+    // supersedes the seed as the rendered frontier, not as an integrity fact.
+    let imported_seed =
+        load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
+    let expected_turn_count =
+        load_transcript_turn_count(&mut transaction, requested_session).await?;
+    let expected_model_call_count =
+        load_terminal_model_call_count(&mut transaction, requested_session).await?;
+    Ok(ProcessTranscriptReader {
+        transaction: Some(transaction),
+        session: requested_session,
+        cursor,
+        lineage_tip,
+        latest_frontier: if lineage_tip.is_none() {
+            imported_seed
+        } else {
+            None
+        },
+        expected_turn_count,
+        turn_count: 0,
+        next_turn_after: None,
+        turns_complete: false,
+        expected_model_call_count,
+        model_call_count: 0,
+        next_model_call_after: None,
+        model_calls_complete: false,
+        entry_count: None,
+        next_entry_index: 0,
+        summary: None,
+    })
 }
 
 fn decode_process_session_ancestry(
@@ -1887,10 +1980,13 @@ fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
     }
 }
 
-fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessReadError> {
+fn decode_session_summary(
+    row: &PgRow,
+    placement: VersionedSessionPlacement,
+) -> Result<ProcessSessionSummary, ProcessReadError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let defaults_version = decode_positive(
-        required(row, "current_version")?,
+        required(row, "defaults_version")?,
         "current defaults version",
     )?;
     let kind: String = required(row, "model_selection_kind")?;
@@ -1916,6 +2012,7 @@ fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessR
         session,
         defaults_version,
         model_selection,
+        placement,
     })
 }
 

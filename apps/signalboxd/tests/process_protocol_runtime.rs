@@ -76,9 +76,9 @@ use signalbox_process_protocol::{
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
     ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
     ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
-    ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-    encode_client_line,
+    ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SystemPromptMember,
+    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
+    decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -598,15 +598,27 @@ impl RunningRuntime {
 async fn create_alias_session(
     connection: &mut Connection,
 ) -> Result<CanonicalUuid, Box<dyn Error>> {
+    create_alias_session_with(
+        connection,
+        CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+        SessionPlacement::Pathless {},
+    )
+    .await
+}
+
+async fn create_alias_session_with(
+    connection: &mut Connection,
+    alias_id: CanonicalUuid,
+    placement: SessionPlacement,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
     connection
         .request(
             1,
             ClientRequest::CreateSession {
                 command_id: command()?,
-                initial_model_selection: ModelSelection::Alias {
-                    alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                },
+                initial_model_selection: ModelSelection::Alias { alias_id },
                 system_prompt: SystemPromptMember::present(None),
+                placement,
             },
         )
         .await?;
@@ -772,6 +784,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
                     selection_id: unknown_selection,
                 },
                 system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
@@ -2000,33 +2013,48 @@ async fn s28_selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>>
 async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let session_id = create_alias_session(&mut connection).await?;
     let alias_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let expected_placement = SessionPlacement::Pathless {};
+    let session_id =
+        create_alias_session_with(&mut connection, alias_id, expected_placement.clone()).await?;
 
     connection
         .request(2, ClientRequest::ListSessions {})
         .await?;
 
     let start = response_within(&mut connection).await?;
-    assert!(matches!(start.message(), ServerMessage::SessionsStart {}));
+    let ServerMessage::SessionsStart {} = start.message() else {
+        panic!("session listing starts explicitly")
+    };
     let summary = response_within(&mut connection).await?;
-    assert!(matches!(
-        summary.message(),
-        ServerMessage::SessionSummary {
-            session_id: listed,
-            defaults_version,
-            model_selection: ModelSelection::Alias {
-                alias_id: listed_alias
-            },
-        } if *listed == session_id
-            && defaults_version.value() == 1
-            && *listed_alias == alias_id
-    ));
+    let ServerMessage::SessionSummary {
+        session_id: listed,
+        defaults_version,
+        model_selection: ModelSelection::Alias {
+            alias_id: listed_alias,
+        },
+        placement_version,
+        placement: listed_placement,
+    } = summary.message()
+    else {
+        panic!("session listing carries one alias summary")
+    };
+    assert_eq!(*listed, session_id);
+    assert_eq!(
+        defaults_version.value(),
+        SessionConfigurationDefaultsVersion::first().as_u64()
+    );
+    assert_eq!(*listed_alias, alias_id);
+    assert_eq!(
+        placement_version.value(),
+        signalbox_domain::SessionPlacementVersion::INITIAL.as_u64()
+    );
+    assert_eq!(listed_placement, &expected_placement);
     let end = response_within(&mut connection).await?;
-    assert!(matches!(
-        end.message(),
-        ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
-    ));
+    let ServerMessage::SessionsEnd { session_count } = end.message() else {
+        panic!("session listing ends explicitly")
+    };
+    assert_eq!(session_count.value(), 1);
 
     drop(connection);
     runtime.stop().await
@@ -4985,6 +5013,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                     selection_id: selection,
                 },
                 system_prompt: SystemPromptMember::present(Some(prompt.clone())),
+                placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
@@ -6532,6 +6561,7 @@ impl ReviewRuntimeDriver {
                 ClientRequest::CreateSessionFromTemplate {
                     command_id: command()?,
                     template_name: String::from(template_name),
+                    placement: SessionPlacement::Pathless {},
                 },
             )
             .await?;

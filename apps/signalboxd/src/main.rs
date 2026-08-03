@@ -29,7 +29,8 @@ use signalbox_application::{
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_model_provider_runtime::{
-    ContextCompactionModel, RuntimeContextCompactionModel, RuntimeModelCallProvider,
+    ApprovalJudgeModel, ContextCompactionModel, RuntimeApprovalJudgeModel,
+    RuntimeContextCompactionModel, RuntimeModelCallProvider,
 };
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{
@@ -414,9 +415,6 @@ const fn configured_approval_posture_cause(error: &ConfiguredApprovalPostureErro
     match error {
         ConfiguredApprovalPostureError::UnknownTool { .. } => {
             "tool_approval_posture_names_unknown_tool"
-        }
-        ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { .. } => {
-            "delegated_tool_approval_requires_judge_wiring"
         }
     }
 }
@@ -1012,6 +1010,9 @@ async fn run_hub(
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );
+    let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
+        RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
+    );
     let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
@@ -1223,7 +1224,12 @@ async fn run_hub(
             InProcessAttemptDispatchGate::default(),
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
         )
-        .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor),
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
+        .with_approval_judge(
+            approval_judge_model,
+            model_configuration.configured_approval_judge_selection(),
+            model_configuration.clone(),
+        ),
     );
     // The connection runtime has no execution role, so it reaches the same
     // fatal recovery signal through this handle rather than ending an
