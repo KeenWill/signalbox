@@ -25,8 +25,9 @@ use signalbox_model_provider_runtime::{
 };
 use signalbox_model_runtime::TokenUsage;
 use signalbox_persistence::approval_judge::{
-    ApprovalJudgeRepositoryError, CompleteApprovalJudgeOutcome, FailedApprovalJudgeDisposition,
-    PostgresApprovalJudgeRepository, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+    ApprovalJudgeRepositoryError, AuthorizeApprovalJudgeOutcome, CompleteApprovalJudgeOutcome,
+    FailedApprovalJudgeDisposition, PostgresApprovalJudgeRepository, PrepareApprovalJudgeOutcome,
+    PreparedApprovalJudge,
 };
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
@@ -983,18 +984,35 @@ async fn execute_approval_judge(
             Err(error) => return Err(error),
         }
     };
-    repository.authorize(&prepared).await?;
-    let result = model
-        .execute(ApprovalJudgeModelRequest {
+    let capability = match model
+        .prepare(ApprovalJudgeModelRequest {
+            request: prepared.request().clone(),
             call: prepared.call(),
-            session,
             selection: prepared.selection(),
             target: prepared.target(),
             credential_reference: prepared.credential_reference().to_owned(),
             system_prompt: String::from(APPROVAL_JUDGE_SYSTEM_PROMPT),
             rendered_request: render_approval_judge_request(&prepared),
         })
-        .await;
+        .await
+    {
+        Ok(capability) => capability,
+        Err(error) => {
+            repository
+                .fail(
+                    &prepared,
+                    judge_failure_disposition(error),
+                    ProviderReportedTokenUsage::unreported(),
+                )
+                .await?;
+            return Ok(ApprovalJudgeLoopOutcome::Parked);
+        }
+    };
+    let authorization = match repository.authorize(&prepared).await? {
+        AuthorizeApprovalJudgeOutcome::NoSend => return Ok(ApprovalJudgeLoopOutcome::Parked),
+        AuthorizeApprovalJudgeOutcome::Authorized(authorization) => authorization,
+    };
+    let result = capability.execute(*authorization).await;
     let result = match result {
         Ok(result) => result,
         Err(error) => {
@@ -1069,7 +1087,9 @@ const fn judge_failure_disposition(
         }
         ApprovalJudgeModelError::UnconfiguredTarget
         | ApprovalJudgeModelError::InvalidContract
+        | ApprovalJudgeModelError::AuthorizationMismatch
         | ApprovalJudgeModelError::CancelledBeforeSend
+        | ApprovalJudgeModelError::PreparationCorrelationMismatch
         | ApprovalJudgeModelError::PreparationFailed
         | ApprovalJudgeModelError::PreparationDefect
         | ApprovalJudgeModelError::ProviderError(_)

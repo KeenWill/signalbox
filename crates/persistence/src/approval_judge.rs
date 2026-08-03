@@ -4,7 +4,8 @@ use std::{collections::HashSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, ModelCallCredentialReference, OperatorFailureClass,
+    ApprovalJudgeAuthorization, ClassifyOperatorFailure, ModelCallCredentialReference,
+    OperatorFailureClass,
 };
 use signalbox_domain::{
     ActiveTurnPhase, DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
@@ -68,6 +69,43 @@ impl PreparedApprovalJudge {
     pub const fn input_includes_cache_tokens(&self) -> bool {
         self.input_includes_cache_tokens
     }
+}
+
+/// Non-cloneable proof that one exact judge call committed `InFlight`.
+#[derive(Debug, Eq, PartialEq)]
+pub struct AuthorizedApprovalJudge {
+    prepared: PreparedApprovalJudge,
+}
+
+impl ApprovalJudgeAuthorization for AuthorizedApprovalJudge {
+    fn request(&self) -> &ToolRequest {
+        &self.prepared.request
+    }
+
+    fn call(&self) -> ModelCallId {
+        self.prepared.call
+    }
+
+    fn selection(&self) -> DirectModelSelection {
+        self.prepared.selection
+    }
+
+    fn target(&self) -> ResolvedProviderTarget {
+        self.prepared.target
+    }
+
+    fn credential_reference(&self) -> &str {
+        &self.prepared.credential_reference
+    }
+}
+
+/// Result of freshly rechecking one judge-call authorization hint.
+#[derive(Debug, Eq, PartialEq)]
+pub enum AuthorizeApprovalJudgeOutcome {
+    /// The call was already authorized or terminal; no provider send may begin.
+    NoSend,
+    /// This transaction committed the exact `Prepared -> InFlight` transition.
+    Authorized(Box<AuthorizedApprovalJudge>),
 }
 
 /// Result of reconciling the active delegated wait with its dedicated call.
@@ -182,23 +220,36 @@ impl PostgresApprovalJudgeRepository {
                 ApprovalJudgeStateStorageKind::Terminal => Ok(PrepareApprovalJudgeOutcome::NoWork),
             };
         }
-        let judged_selection =
-            load_producing_selection(&mut transaction, batch.producing_call()).await?;
-        let selection = configured_selection.unwrap_or(judged_selection);
-        let resolved = self
-            .targets
-            .resolve(FrozenModelSelection::Direct(selection))
-            .map_err(|_| ApprovalJudgeRepositoryError::TargetUnavailable)?;
-        let target = resolved.target();
-        let credential = resolve_session_credential(
-            &mut transaction,
-            session,
-            target,
-            &self.fallback_credential,
-            self.credential_families.as_ref(),
-        )
-        .await
-        .map_err(map_model_error)?;
+        let producing_model =
+            load_producing_model(&mut transaction, batch.producing_call()).await?;
+        let (selection, target) = match configured_selection {
+            Some(selection) => {
+                let resolved = self
+                    .targets
+                    .resolve(FrozenModelSelection::Direct(selection))
+                    .map_err(|_| ApprovalJudgeRepositoryError::TargetUnavailable)?;
+                (selection, resolved.target())
+            }
+            None => (producing_model.selection, producing_model.target),
+        };
+        let credential = if configured_selection.is_none()
+            && self
+                .credential_families
+                .as_ref()
+                .is_some_and(|families| families.family(target).is_none())
+        {
+            producing_model.credential
+        } else {
+            resolve_session_credential(
+                &mut transaction,
+                session,
+                target,
+                &self.fallback_credential,
+                self.credential_families.as_ref(),
+            )
+            .await
+            .map_err(map_model_error)?
+        };
         let input_includes_cache_tokens = self.cache_inclusive_input_targets.contains(&target);
         let inserted = sqlx::query(
             "INSERT INTO tool_approval_judge_model_call
@@ -243,15 +294,18 @@ impl PostgresApprovalJudgeRepository {
     pub async fn authorize(
         &self,
         prepared: &PreparedApprovalJudge,
-    ) -> Result<(), ApprovalJudgeRepositoryError> {
+    ) -> Result<AuthorizeApprovalJudgeOutcome, ApprovalJudgeRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_session(&mut transaction, prepared.request.session())
             .await
             .map_err(map_model_error)?;
         let state = require_exact_judge(&mut transaction, prepared).await?;
-        if state == ApprovalJudgeStateStorageKind::InFlight {
+        if matches!(
+            state,
+            ApprovalJudgeStateStorageKind::InFlight | ApprovalJudgeStateStorageKind::Terminal
+        ) {
             transaction.rollback().await?;
-            return Ok(());
+            return Ok(AuthorizeApprovalJudgeOutcome::NoSend);
         }
         if state != ApprovalJudgeStateStorageKind::Prepared {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge authorization state").into());
@@ -275,7 +329,12 @@ impl PostgresApprovalJudgeRepository {
         transaction
             .commit()
             .await
-            .map_err(ApprovalJudgeRepositoryError::commit)
+            .map_err(ApprovalJudgeRepositoryError::commit)?;
+        Ok(AuthorizeApprovalJudgeOutcome::Authorized(Box::new(
+            AuthorizedApprovalJudge {
+                prepared: prepared.clone(),
+            },
+        )))
     }
 
     /// Atomically records a completed recommendation and any decision effect.
@@ -299,6 +358,7 @@ impl PostgresApprovalJudgeRepository {
                 recommendation,
                 &rationale,
                 usage,
+                continuation_attempt,
             )
             .await?;
             transaction.rollback().await?;
@@ -594,21 +654,37 @@ fn decode_prepared(
     })
 }
 
-async fn load_producing_selection(
+struct ProducingModel {
+    selection: DirectModelSelection,
+    target: ResolvedProviderTarget,
+    credential: ModelCallCredentialReference,
+}
+
+async fn load_producing_model(
     connection: &mut PgConnection,
     call: ModelCallId,
-) -> Result<DirectModelSelection, ApprovalJudgeRepositoryError> {
-    let selection: Option<Uuid> = sqlx::query_scalar(
+) -> Result<ProducingModel, ApprovalJudgeRepositoryError> {
+    let row = sqlx::query(
         "SELECT COALESCE(direct_model_selection_id, frozen_alias_selected_direct_id)
+                    AS direct_model_selection_id,
+                resolved_provider_model_identity_id, credential_reference
            FROM model_call WHERE model_call_id = $1",
     )
     .bind(call.into_uuid())
     .fetch_optional(connection)
     .await?
-    .flatten();
-    selection
-        .map(DirectModelSelection::from_uuid)
-        .ok_or_else(|| ApprovalJudgeCorruption::Missing("producing direct selection").into())
+    .ok_or(ApprovalJudgeCorruption::Missing("producing model call"))?;
+    Ok(ProducingModel {
+        selection: DirectModelSelection::from_uuid(required(&row, "direct_model_selection_id")?),
+        target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
+            &row,
+            "resolved_provider_model_identity_id",
+        )?)),
+        credential: ModelCallCredentialReference::new(required::<String>(
+            &row,
+            "credential_reference",
+        )?),
+    })
 }
 
 async fn require_exact_judge(
@@ -653,6 +729,7 @@ async fn exact_completed(
     recommendation: DelegateApprovalRecommendation,
     rationale: &ToolDecisionRationale,
     usage: ProviderReportedTokenUsage,
+    continuation_attempt: TurnAttemptId,
 ) -> Result<Option<CompleteApprovalJudgeOutcome>, ApprovalJudgeRepositoryError> {
     let encoded = encode_usage(usage);
     let row = sqlx::query(
@@ -662,7 +739,7 @@ async fn exact_completed(
            FROM tool_approval_judge_model_call WHERE model_call_id = $1",
     )
     .bind(prepared.call.into_uuid())
-    .fetch_one(connection)
+    .fetch_one(&mut *connection)
     .await?;
     let terminal_disposition: String = required(&row, "terminal_disposition_kind")?;
     let stored_recommendation: String = required(&row, "recommendation_kind")?;
@@ -675,7 +752,12 @@ async fn exact_completed(
         && row.try_get::<Option<Decimal>, _>("cache_creation_input_tokens")?
             == encoded.cache_creation
         && row.try_get::<Option<Decimal>, _>("cache_read_input_tokens")? == encoded.cache_read;
-    Ok(exact.then_some(match recommendation {
+    if !exact {
+        return Ok(None);
+    }
+    let continuation_exact = recommendation == DelegateApprovalRecommendation::EscalateToHuman
+        || exact_completion_continuation(connection, prepared, continuation_attempt).await?;
+    Ok(continuation_exact.then_some(match recommendation {
         DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny => {
             CompleteApprovalJudgeOutcome::Decided
         }
@@ -683,6 +765,44 @@ async fn exact_completed(
             CompleteApprovalJudgeOutcome::EscalatedToHuman
         }
     }))
+}
+
+async fn exact_completion_continuation(
+    connection: &mut PgConnection,
+    prepared: &PreparedApprovalJudge,
+    continuation_attempt: TurnAttemptId,
+) -> Result<bool, ApprovalJudgeRepositoryError> {
+    let completion_was_nonfinal: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM tool_request AS later
+            LEFT JOIN tool_approval_decision AS decision
+              ON decision.request_id = later.request_id
+           WHERE later.producing_model_call_id = $1
+             AND later.request_ordinal > $2
+             AND (
+                 decision.request_id IS NULL
+                 OR decision.decision_source NOT IN ('policy_auto', 'session_blanket')
+             )
+        )",
+    )
+    .bind(prepared.request.producing_call().into_uuid())
+    .bind(Decimal::from(prepared.request.ordinal().as_u32()))
+    .fetch_one(&mut *connection)
+    .await?;
+    if completion_was_nonfinal {
+        return Ok(true);
+    }
+    let persisted_continuation: Option<Uuid> = sqlx::query_scalar(
+        "SELECT continuation.turn_attempt_id
+           FROM model_call AS producing
+           JOIN turn_attempt AS continuation
+             ON continuation.continued_from_attempt_id = producing.turn_attempt_id
+          WHERE producing.model_call_id = $1",
+    )
+    .bind(prepared.request.producing_call().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(persisted_continuation == Some(continuation_attempt.into_uuid()))
 }
 
 struct EncodedUsage {
@@ -798,7 +918,24 @@ pub enum ApprovalJudgeCorruption {
 
 impl fmt::Display for ApprovalJudgeCorruption {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("approval judge storage is inconsistent")
+        match self {
+            Self::Missing(relationship) => {
+                write!(
+                    formatter,
+                    "approval judge storage is missing {relationship}"
+                )
+            }
+            Self::Inconsistent(relationship) => {
+                write!(
+                    formatter,
+                    "approval judge storage has inconsistent {relationship}"
+                )
+            }
+            Self::UnsupportedState(discriminator) => write!(
+                formatter,
+                "approval judge storage has unsupported state {discriminator}"
+            ),
+        }
     }
 }
 
@@ -835,7 +972,26 @@ impl ApprovalJudgeRepositoryError {
 
 impl fmt::Display for ApprovalJudgeRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("approval judge persistence failed")
+        match self {
+            Self::Database {
+                commit_ambiguous: true,
+                ..
+            } => formatter.write_str("approval judge database commit outcome is ambiguous"),
+            Self::Database {
+                commit_ambiguous: false,
+                ..
+            } => formatter.write_str("approval judge database operation failed"),
+            Self::IdentityCollision => {
+                formatter.write_str("approval judge identity collided with durable state")
+            }
+            Self::TargetUnavailable => {
+                formatter.write_str("approval judge model target is unavailable")
+            }
+            Self::AuthorityExceeded => {
+                formatter.write_str("approval judge recommendation exceeded delegated authority")
+            }
+            Self::Corruption(error) => error.fmt(formatter),
+        }
     }
 }
 
@@ -878,5 +1034,26 @@ impl From<sqlx::Error> for ApprovalJudgeRepositoryError {
 impl From<ApprovalJudgeCorruption> for ApprovalJudgeRepositoryError {
     fn from(error: ApprovalJudgeCorruption) -> Self {
         Self::Corruption(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApprovalJudgeRepositoryError;
+
+    #[test]
+    fn repository_errors_display_distinct_failure_classes() {
+        assert_eq!(
+            ApprovalJudgeRepositoryError::IdentityCollision.to_string(),
+            "approval judge identity collided with durable state"
+        );
+        assert_eq!(
+            ApprovalJudgeRepositoryError::TargetUnavailable.to_string(),
+            "approval judge model target is unavailable"
+        );
+        assert_eq!(
+            ApprovalJudgeRepositoryError::AuthorityExceeded.to_string(),
+            "approval judge recommendation exceeded delegated authority"
+        );
     }
 }
