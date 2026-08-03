@@ -75,6 +75,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private static let presentationLaneStride = 4
+  private static let firstSemanticEventID = Int.min
+  private static let semanticEventIDLimit = Int.min / 2
   private static let firstTurnStateEventID = Int.max / 2 + 1
   private static let maximumAnchoredEntryIndex = UInt64(
     (firstTurnStateEventID - 3) / presentationLaneStride
@@ -85,6 +87,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private var presentationIDs: [PresentationIdentity: SignalboxEventID] = [:]
   private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
   private var toolContextsByRequestID: [String: ToolContext] = [:]
+  private var nextSemanticEventID = Self.firstSemanticEventID
   private var nextSyntheticEventID = Self.firstTurnStateEventID
   private var nextModelCallUsageEventID = Int.min / 4
 
@@ -577,15 +580,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         )
       )
     }
-    let eventID = try claimPresentationID(
-      .semantic(
-        sourceSessionID: message.sourceSessionID.rawValue,
-        entryID: message.entryID.rawValue
-      ),
-      entryIndex: message.entryIndex
+    let identity = PresentationIdentity.semantic(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      entryID: message.entryID.rawValue
     )
     return SignalboxStoredEvent(
-      eventID: eventID,
+      eventID: try claimSemanticEventID(identity),
+      presentationOrder: try semanticPresentationOrder(message.entryIndex),
       event: event
     )
   }
@@ -775,15 +776,40 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     event: SignalboxConversationEvent
   ) throws -> SignalboxStoredEvent {
-    SignalboxStoredEvent(
-      eventID: try claimPresentationID(
-        .semantic(
-          sourceSessionID: message.sourceSessionID.rawValue,
-          entryID: message.entryID.rawValue
-        ),
-        entryIndex: message.entryIndex
-      ),
+    let identity = PresentationIdentity.semantic(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      entryID: message.entryID.rawValue
+    )
+    return SignalboxStoredEvent(
+      eventID: try claimSemanticEventID(identity),
+      presentationOrder: try semanticPresentationOrder(message.entryIndex),
       event: event
+    )
+  }
+
+  private mutating func claimSemanticEventID(
+    _ identity: PresentationIdentity
+  ) throws -> SignalboxEventID {
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    guard nextSemanticEventID < Self.semanticEventIDLimit else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: nextSemanticEventID)
+    nextSemanticEventID += 1
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
+  private func semanticPresentationOrder(
+    _ entryIndex: SignalboxCanonicalUInt64
+  ) throws -> SignalboxEventID {
+    guard entryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    return SignalboxEventID(
+      rawValue: Int(entryIndex.rawValue) * Self.presentationLaneStride + 1
     )
   }
 
@@ -1079,10 +1105,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     nativeSourceSessionID: SignalboxCanonicalUUID,
     terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
   ) -> Bool {
-    if case .modelIdentityChanged = message.entry {
-      return false
-    }
     switch trigger {
+    case .turnActivated(let turnID, _):
+      guard case .modelIdentityChanged(let entryTurnID, _, _) = message.entry else {
+        return false
+      }
+      return entryTurnID == turnID
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -1121,7 +1149,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+    case .sessionCreated, .inputAccepted, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }

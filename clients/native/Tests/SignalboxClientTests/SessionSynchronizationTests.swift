@@ -2273,7 +2273,7 @@ final class SessionSynchronizationTests: XCTestCase {
     )
   }
 
-  func testTurnActivatedPublishesWithoutSideSnapshotRefresh() throws {
+  func testTurnActivatedRequestsSideSnapshotRefresh() throws {
     var transport = try SynchronizationFixture.synchronizedTransport(
       cursor: SynchronizationFixture.initialCursor
     )
@@ -2289,11 +2289,14 @@ final class SessionSynchronizationTests: XCTestCase {
 
     XCTAssertEqual(
       SynchronizationFixture.effectNames(effects),
-      ["publish_event"]
+      ["publish_event", "request_side_snapshot", "arm_deadline"]
     )
     XCTAssertEqual(
       transport.machine.phase,
-      SynchronizationFixture.steady(cursor: SynchronizationFixture.unknownCursor)
+      SynchronizationFixture.steady(
+        cursor: SynchronizationFixture.unknownCursor,
+        refreshID: SynchronizationFixture.firstRefreshID
+      )
     )
   }
 

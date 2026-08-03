@@ -486,7 +486,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let projection = try projector.projectAuthoritativeSnapshot(snapshot)
 
     XCTAssertEqual(
-      projection.records.map(\.eventID.rawValue),
+      ProcessProjectionFixture.presentationOrders(in: projection),
       ProcessProjectionFixture.orderedPresentationIDs
     )
     XCTAssertEqual(
@@ -546,6 +546,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
       ProcessProjectionFixture.contextCompactionNoticeTitles
+    )
+  }
+
+  func testContextCompactionSideProjectionKeepsExistingIndexZeroEntry() throws {
+    let initialSnapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
+    let sideSnapshot = try ProcessProjectionFixture.snapshotWithContextSummary()
+    let trigger = try ProcessProjectionFixture.contextCompactedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let initial = try projector.projectAuthoritativeSnapshot(initialSnapshot)
+    let side = try projector.projectSideSnapshot(sideSnapshot, attributableTo: trigger)
+    let initialRecord = try XCTUnwrap(initial.records.first)
+    let summaryRecord = try ProcessProjectionFixture.contextSummaryRecord(in: side)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: initial.records)
+    normalizer.upsert(contentsOf: side.records)
+
+    XCTAssertNotEqual(initialRecord.eventID, summaryRecord.eventID)
+    XCTAssertEqual(
+      normalizer.records.count,
+      initial.records.count + side.records.count
     )
   }
 
@@ -1187,6 +1207,22 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       tool.outputPreview,
       ProcessProjectionFixture.futurePlanEntryReferenceOutput
+    )
+  }
+
+  func testTurnActivationSideProjectionIncludesModelIdentityMarker() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
+    let trigger = try ProcessProjectionFixture.turnActivatedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let record = try XCTUnwrap(projection.records.first)
+    let event = try ProcessProjectionFixture.modelIdentityEvent(in: record)
+
+    XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
+    XCTAssertEqual(
+      event.defaultsVersion.rawValue,
+      ProcessProjectionFixture.activationModelIdentityDefaultsVersion
     )
   }
 
@@ -3013,6 +3049,11 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     viewModel.apply(.event(try ProcessProjectionFixture.acceptedEvent()))
     viewModel.apply(.event(completed))
 
+    XCTAssertEqual(
+      viewModel.acceptedInputsAwaitingTranscript,
+      try ProcessSubmissionFixture.livePendingInput()
+    )
+
     viewModel.apply(
       .sideSnapshot(
         snapshot: try ProcessProjectionFixture.snapshotWithTerminalResponseMissingUserEntry(),
@@ -3021,12 +3062,13 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
 
     XCTAssertEqual(
-      viewModel.transcriptRows.map(\.id).first,
-      ProcessProjectionFixture.acceptedTranscriptRowID
+      viewModel.acceptedInputsAwaitingTranscript,
+      try ProcessSubmissionFixture.livePendingInput()
     )
+
     XCTAssertEqual(
-      viewModel.transcriptRows.map(\.id).last,
-      ProcessProjectionFixture.completedAssistantTranscriptRowID
+      ProcessProjectionFixture.transcriptRowKinds(in: viewModel.transcriptRows),
+      ProcessProjectionFixture.acceptedThenTimelineRowKinds
     )
   }
 
@@ -6164,8 +6206,9 @@ private enum ProcessProjectionFixture {
     "Imported source event", modelUsageNoticeTitle, "Imported thinking",
   ]
   static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
-  static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
-  static let completedAssistantTranscriptRowID = "timeline-message-1"
+  static let acceptedThenTimelineRowKinds: [ProcessTranscriptRowFixtureKind] = [
+    .accepted, .timeline,
+  ]
   static let singleRecordCount = 1
   static let activationModelIdentityDefaultsVersion: UInt64 = 1
   static let unknownTextEntryKind = "fixture_future_text_entry"
@@ -6198,6 +6241,21 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.expectedUnknownEvent
     }
     return event
+  }
+
+  static func contextSummaryRecord(
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> SignalboxStoredEvent {
+    let records = projection.records.filter {
+      if case .processContextSummary = $0.event {
+        return true
+      }
+      return false
+    }
+    guard records.count == singleRecordCount, let record = records.first else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureMessage
+    }
+    return record
   }
 
   static func conservativeEvent(
@@ -9453,6 +9511,18 @@ private enum ProcessProjectionFixture {
     return event
   }
 
+  static func turnActivatedTrigger() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"turn_activated",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "current_attempt_id":"\(ProcessDriverFixture.attempt)"
+      }
+      """
+    )
+  }
+
   static func contextCompactedTrigger() throws -> SignalboxFollowedSessionEvent {
     try followedEvent(
       """
@@ -9837,6 +9907,14 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureMessage
     }
     return messages.map(\.role)
+  }
+
+  static func presentationOrders(
+    in projection: SignalboxProcessTranscriptProjection
+  ) -> [Int] {
+    projection.records.map {
+      ($0.presentationOrder ?? $0.eventID).rawValue
+    }
   }
 
   static func onlyTool(
@@ -10372,7 +10450,7 @@ extension ProcessServiceIntegrationTests {
 extension ProcessProjectionFixture {
   static let futureSessionEventKind = "fixture_future_session_event"
   static let formerUsageCollisionEntryIndex = UInt64(7)
-  static let disjointUsageAndSemanticPresentationIDs = [29, Int.min / 4]
+  static let disjointUsageAndSemanticPresentationIDs = [Int.min, Int.min / 4]
   static let disjointUsageAndSemanticEventKinds = [
     "process_conservative", "process_model_call_usage",
   ]
@@ -10401,7 +10479,7 @@ extension ProcessProjectionFixture {
   static let unknownNestedStateKind =
     "model_call_transition.state.\(unknownModelCallState)"
   static let unknownEventSideSnapshotTimelineKinds: [ProcessTimelineFixtureKind] = [
-    .message, .unknown, .tool,
+    .message, .unknown, .message, .tool,
   ]
   static let retainedRowTimelineKindsBeforeRemoval: [ProcessTimelineFixtureKind] = [
     .processEvidence, .unknown, .processEvidence,
@@ -10566,6 +10644,24 @@ extension ProcessProjectionFixture {
       }
     }
   }
+
+  static func transcriptRowKinds(
+    in rows: [ProcessSessionDetailViewModel.TranscriptRow]
+  ) -> [ProcessTranscriptRowFixtureKind] {
+    rows.map { row in
+      switch row {
+      case .accepted:
+        return .accepted
+      case .timeline:
+        return .timeline
+      }
+    }
+  }
+}
+
+private enum ProcessTranscriptRowFixtureKind: Equatable {
+  case accepted
+  case timeline
 }
 
 private enum ProcessTimelineFixtureKind: Equatable {
