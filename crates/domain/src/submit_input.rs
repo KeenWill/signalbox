@@ -3347,22 +3347,23 @@ mod tests {
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FastModeSupport,
-        FrozenAliasDefinition, FrozenModelSelection, InitialSemanticTranscriptEntryPayload,
-        IssuedOperationRef, ModelCallDisposition, ModelCallReconstitutionInput,
-        ModelCallReconstitutionState, ModelCapabilities, ModelCapabilityCatalog,
-        ModelCapabilityDefinition, ModelSelectionOverride, ModelSelectionRequest,
-        ModelSettingsOverlay, NonEmptyIssuedOperationRefs, NormalizedToolArguments,
-        OriginConfiguration, PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput,
-        ReasoningLevel, ReconciliationReason, ResolvedContextFrontierReconstitutionInput,
-        ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
-        SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
-        SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
-        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-        SessionCreationProvenance, SessionInputPosition, SessionReconstitutionInput,
-        SettingOverlay, SteeringBinding, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        TranscriptAncestry, TurnDisposition, UserContent,
+        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FastModeOverlay,
+        FastModeSupport, FrozenAliasDefinition, FrozenModelSelection,
+        InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelCallDisposition,
+        ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCapabilities,
+        ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
+        ModelSelectionRequest, ModelSettingsOverlay, NonEmptyIssuedOperationRefs,
+        NormalizedToolArguments, OriginConfiguration, PerInputConfigurationChoices,
+        PinnedProviderTargetReconstitutionInput, ReasoningLevel, ReconciliationReason,
+        ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+        ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
+        SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
+        SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionInputPosition, SessionReconstitutionInput, SettingOverlay, SteeringBinding,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
+        UserContent,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -4119,7 +4120,7 @@ mod tests {
         let selection = direct(2);
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
         let command = start_command_with_settings(1, "settings input", 1, per_call);

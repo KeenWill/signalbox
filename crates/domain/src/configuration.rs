@@ -1047,10 +1047,10 @@ mod tests {
     };
     use crate::test_support::{alias, direct, turn_id};
     use crate::{
-        DangerousToolAutoApproval, FastModeSupport, ModelCapabilities, ModelCapabilityCatalog,
-        ModelCapabilityDefinition, ModelChangeAdjustment, ModelSettingsOverlay,
-        ModelSettingsPrecedence, ReasoningLevel, SettingOverlay, SteeringBinding,
-        ValidatedModelSettings,
+        DangerousToolAutoApproval, FastModeOverlay, FastModeSupport, ModelCapabilities,
+        ModelCapabilityCatalog, ModelCapabilityDefinition, ModelChangeAdjustment,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ReasoningLevel, SettingOverlay,
+        SteeringBinding, ValidatedModelSettings,
     };
     use uuid::Uuid;
 
@@ -1165,7 +1165,7 @@ mod tests {
                     ModelSettingsOverlay::inherit_all(),
                     ModelSettingsOverlay::new(
                         SettingOverlay::Value(ReasoningLevel::High),
-                        SettingOverlay::Inherit,
+                        FastModeOverlay::Inherit,
                         SettingOverlay::Inherit,
                     ),
                     ModelSettingsOverlay::inherit_all(),
