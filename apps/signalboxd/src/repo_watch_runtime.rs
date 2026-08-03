@@ -127,32 +127,49 @@ impl RepositoryWatchRuntime {
     /// Runs every repository task until the daemon broadcasts shutdown.
     pub async fn run(
         self,
-        mut shutdown: watch::Receiver<bool>,
+        shutdown: watch::Receiver<bool>,
     ) -> Result<(), RepositoryWatchRuntimeError> {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
         let mut tasks = JoinSet::new();
         for task in self.tasks {
             tasks.spawn(task.run(shutdown.clone()));
         }
-        loop {
-            select! {
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
+        supervise_repository_tasks(tasks, shutdown).await
+    }
+}
+
+async fn supervise_repository_tasks(
+    mut tasks: JoinSet<()>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), RepositoryWatchRuntimeError> {
+    if *shutdown.borrow() {
+        while let Some(result) = tasks.join_next().await {
+            result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
+        }
+        return Ok(());
+    }
+    loop {
+        select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    while let Some(result) = tasks.join_next().await {
+                        result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
+                    }
+                    return Ok(());
+                }
+            }
+            completed = tasks.join_next() => {
+                return match completed {
+                    Some(Ok(())) if *shutdown.borrow() => {
                         while let Some(result) = tasks.join_next().await {
                             result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                         }
-                        return Ok(());
+                        Ok(())
                     }
-                }
-                completed = tasks.join_next() => {
-                    return match completed {
-                        Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
-                        Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
-                        None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
-                    };
-                }
+                    Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
+                    Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
+                    None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
+                };
             }
         }
     }
@@ -388,7 +405,15 @@ impl GitHubRepositoryPoller {
         }
         let mut pull_requests = Vec::with_capacity(pull_numbers.len());
         for number in pull_numbers {
-            pull_requests.push(self.fetch_pull_request(number).await?);
+            let previous_context = previous.and_then(|observation| {
+                observation
+                    .state()
+                    .pull_requests()
+                    .iter()
+                    .find(|pull_request| pull_request.context().number().get() == number)
+                    .map(RepoWatchPullRequestState::context)
+            });
+            pull_requests.push(self.fetch_pull_request(number, previous_context).await?);
         }
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
@@ -444,6 +469,7 @@ impl GitHubRepositoryPoller {
     async fn fetch_pull_request(
         &mut self,
         number: u64,
+        previous_context: Option<&PullRequestEventContext>,
     ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
         let number_text = number.to_string();
         let detail: PullResponse = self
@@ -459,7 +485,7 @@ impl GitHubRepositoryPoller {
         }
         let head_sha = CommitSha::try_new(detail.head.sha.clone())
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        let context = normalize_pull_request_context(&detail, head_sha.clone())?;
+        let context = normalize_pull_request_context(&detail, head_sha.clone(), previous_context)?;
         let completed_check_suites = self.fetch_check_suites(&head_sha).await?;
         let completed_check_runs = self.fetch_check_runs(&head_sha).await?;
         let reviews = self.fetch_reviews(number).await?;
@@ -865,31 +891,50 @@ impl GitHubRepositoryPoller {
         workflow: &WorkflowResponse,
     ) -> Result<Option<RepoWatchWorkflowRunObservation>, RepositoryWatchAttemptError> {
         let workflow_id = workflow.id.to_string();
-        let response: WorkflowRunsResponse = self
-            .conditional_json(
-                "workflow-runs",
-                Method::GET,
-                self.repository_url(
-                    &["actions", "workflows", &workflow_id, "runs"],
-                    &[
-                        ("branch", branch.branch().as_str().to_owned()),
-                        ("status", "completed".to_owned()),
-                        ("per_page", "1".to_owned()),
-                    ],
-                )?,
-                None,
-            )
-            .await?;
-        let Some(run) = response.workflow_runs.into_iter().next() else {
-            return Ok(None);
-        };
-        Ok(Some(RepoWatchWorkflowRunObservation::new(
-            object_id(run.id)?,
-            branch.branch().clone(),
-            WorkflowName::try_new(workflow.name.clone())
-                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
-            normalize_conclusion(run.conclusion.as_deref())?,
-        )))
+        let workflow_identity = object_id(workflow.id)?;
+        let workflow_name = WorkflowName::try_new(workflow.name.clone())
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let mut page = 1_u16;
+        loop {
+            let response: WorkflowRunsResponse = self
+                .conditional_json(
+                    "workflow-runs",
+                    Method::GET,
+                    self.repository_url(
+                        &["actions", "workflows", &workflow_id, "runs"],
+                        &[
+                            ("branch", branch.branch().as_str().to_owned()),
+                            ("status", "completed".to_owned()),
+                            ("per_page", PAGE_SIZE.to_string()),
+                            ("page", page.to_string()),
+                        ],
+                    )?,
+                    None,
+                )
+                .await?;
+            let has_next = response.workflow_runs.len() == PAGE_SIZE;
+            for run in response.workflow_runs {
+                let run_id = object_id(run.id)?;
+                let Some(head_repository) = run.head_repository else {
+                    continue;
+                };
+                let head_repository = RepositorySlug::try_new(head_repository.full_name)
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                if head_repository == self.repository {
+                    return Ok(Some(RepoWatchWorkflowRunObservation::new(
+                        run_id,
+                        workflow_identity,
+                        branch.branch().clone(),
+                        workflow_name,
+                        normalize_conclusion(run.conclusion.as_deref())?,
+                    )));
+                }
+            }
+            if !has_next {
+                return Ok(None);
+            }
+            page = next_page(page)?;
+        }
     }
 
     fn repository_url(
@@ -1216,6 +1261,7 @@ fn object_id(value: u64) -> Result<GitHubObjectId, RepositoryWatchAttemptError> 
 fn normalize_pull_request_context(
     response: &PullResponse,
     head_sha: CommitSha,
+    previous: Option<&PullRequestEventContext>,
 ) -> Result<PullRequestEventContext, RepositoryWatchAttemptError> {
     let labels = response
         .labels
@@ -1231,11 +1277,19 @@ fn normalize_pull_request_context(
         .map(|user| RepoWatchAuthorLogin::try_new(user.login.clone()))
         .transpose()
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+    let head_repository = response
+        .head
+        .repo
+        .as_ref()
+        .map(|repository| RepositorySlug::try_new(repository.full_name.clone()))
+        .transpose()
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)?
+        .or_else(|| previous.map(|context| context.head_repository().clone()))
+        .ok_or(RepositoryWatchAttemptError::Normalization)?;
     Ok(PullRequestEventContext::new(PullRequestEventContextInput {
         number: PullRequestNumber::new(positive(response.number)?),
         head_sha,
-        head_repository: RepositorySlug::try_new(response.head.repo.full_name.clone())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+        head_repository,
         base_branch: BranchName::try_new(response.base.reference.clone())
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
         head_branch: BranchName::try_new(response.head.reference.clone())
@@ -1338,7 +1392,7 @@ struct PullReferenceResponse {
     sha: String,
     #[serde(rename = "ref")]
     reference: String,
-    repo: RepositoryResponse,
+    repo: Option<RepositoryResponse>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1431,6 +1485,7 @@ struct WorkflowRunsResponse {
 struct WorkflowRunResponse {
     id: u64,
     conclusion: Option<String>,
+    head_repository: Option<RepositoryResponse>,
 }
 
 #[derive(Serialize)]
@@ -1498,23 +1553,26 @@ struct PageInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::Duration};
+    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
-        task::JoinHandle,
+        sync::{Notify, watch},
+        task::{JoinHandle, JoinSet},
     };
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, RepoWatchAuthorLogin,
-        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchThreadState, RepositorySlug,
+        MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchThreadState, RepositorySlug,
         RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError, ResourceKey,
-        ReviewState, Url, object_id,
+        ReviewState, Url, WorkflowResponse, normalize_pull_request_context, object_id,
+        supervise_repository_tasks,
     };
-    use signalbox_domain::ReactionSubject;
+    use signalbox_domain::{BranchName, CommitSha, ReactionSubject};
     use signalbox_model_runtime::CredentialReference;
 
     const WATCHED_REPOSITORY: &str = "namespace/project";
@@ -1542,8 +1600,9 @@ mod tests {
         "/repos/namespace/project/pulls/7/comments?per_page=100&page=1";
     const REVIEW_COMMENT_REACTIONS_TARGET: &str =
         "/repos/namespace/project/pulls/comments/51/reactions?per_page=100&page=1";
-    const MAIN_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=1";
-    const FEATURE_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=feature%2Fwatch&status=completed&per_page=1";
+    const MAIN_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=100&page=1";
+    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=100&page=2";
+    const FEATURE_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=feature%2Fwatch&status=completed&per_page=100&page=1";
     const EMPTY_LIST: &str = "[]";
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
@@ -1594,6 +1653,7 @@ mod tests {
     const BRANCHES: [&str; 2] = [BASE_BRANCH, HEAD_BRANCH];
     const WORKFLOW_ID: u64 = 61;
     const WORKFLOW_RUN_IDS: [u64; 2] = [71, 72];
+    const FOREIGN_WORKFLOW_RUN_ID: u64 = 73;
     const PROVIDER_HEAD_REPOSITORY: &str = "Fork/Repository";
     const PROVIDER_BASE_REPOSITORY: &str = "Namespace/Project";
     const PROVIDER_PULL_AUTHOR: &str = "Pull-Author";
@@ -1627,6 +1687,13 @@ mod tests {
             "user": { "login": PROVIDER_PULL_AUTHOR }
         })
         .to_string()
+    }
+
+    fn pull_detail_without_head_repository() -> String {
+        let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
+            .expect("fixture pull detail is JSON");
+        detail["head"]["repo"] = serde_json::Value::Null;
+        detail.to_string()
     }
 
     fn check_suites() -> String {
@@ -1761,16 +1828,70 @@ mod tests {
 
     fn main_workflow_run() -> String {
         serde_json::json!({
-            "workflow_runs": [{ "id": WORKFLOW_RUN_IDS[0], "conclusion": "success" }]
+            "workflow_runs": [{
+                "id": WORKFLOW_RUN_IDS[0],
+                "conclusion": "success",
+                "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+            }]
         })
         .to_string()
     }
 
     fn feature_workflow_run() -> String {
         serde_json::json!({
-            "workflow_runs": [{ "id": WORKFLOW_RUN_IDS[1], "conclusion": "failure" }]
+            "workflow_runs": [{
+                "id": WORKFLOW_RUN_IDS[1],
+                "conclusion": "failure",
+                "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+            }]
         })
         .to_string()
+    }
+
+    fn foreign_then_watched_workflow_runs() -> String {
+        serde_json::json!({
+            "workflow_runs": [
+                {
+                    "id": FOREIGN_WORKFLOW_RUN_ID,
+                    "conclusion": "failure",
+                    "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
+                },
+                {
+                    "id": WORKFLOW_RUN_IDS[0],
+                    "conclusion": "success",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    fn full_foreign_workflow_run_page() -> String {
+        let workflow_runs = (0..PAGE_SIZE)
+            .map(|offset| {
+                serde_json::json!({
+                    "id": FOREIGN_WORKFLOW_RUN_ID + u64::try_from(offset)
+                        .expect("fixture page offset fits u64"),
+                    "conclusion": "failure",
+                    "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({ "workflow_runs": workflow_runs }).to_string()
+    }
+
+    fn base_branch_head() -> RepoWatchBranchHead {
+        RepoWatchBranchHead::new(
+            BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is valid"),
+            CommitSha::try_new(String::from(BASE_SHA)).expect("fixture commit is valid"),
+        )
+    }
+
+    fn workflow_response() -> WorkflowResponse {
+        WorkflowResponse {
+            id: WORKFLOW_ID,
+            name: String::from(WORKFLOW_NAME),
+        }
     }
 
     fn full_workflow_page() -> String {
@@ -2009,6 +2130,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_wins_when_a_repository_task_exits_cleanly_at_the_same_time() {
+        let (sender, receiver) = watch::channel(false);
+        let exit = Arc::new(Notify::new());
+        let mut tasks = JoinSet::new();
+        tasks.spawn({
+            let exit = Arc::clone(&exit);
+            async move { exit.notified().await }
+        });
+        let trigger = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            sender
+                .send(true)
+                .expect("fixture supervisor still holds the shutdown receiver");
+            exit.notify_one();
+        });
+
+        let result = supervise_repository_tasks(tasks, receiver).await;
+        trigger.await.expect("fixture race trigger completes");
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
     async fn resource_level_not_modified_reuses_only_its_typed_accepted_state() {
         let server = ScriptedServer::start(
             complete_poll_responses()
@@ -2077,6 +2221,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn branch_projection_skips_a_fork_run_with_the_same_branch_name() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            MAIN_WORKFLOW_TARGET,
+            foreign_then_watched_workflow_runs(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let branch = base_branch_head();
+        let workflow = workflow_response();
+
+        let run = fixture
+            .poller
+            .fetch_workflow_run(&branch, &workflow)
+            .await
+            .expect("workflow-run response is valid")
+            .expect("watched-repository run remains in the response");
+        server.finish().await;
+
+        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
+    }
+
+    #[tokio::test]
+    async fn branch_projection_follows_a_full_page_of_fork_runs() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, full_foreign_workflow_run_page()),
+            ScriptedResponse::ok(SECOND_MAIN_WORKFLOW_PAGE_TARGET, main_workflow_run()),
+        ])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let branch = base_branch_head();
+        let workflow = workflow_response();
+
+        let run = fixture
+            .poller
+            .fetch_workflow_run(&branch, &workflow)
+            .await
+            .expect("workflow-run pages are valid")
+            .expect("watched-repository run is found on the next page");
+        server.finish().await;
+
+        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
+    }
+
+    #[tokio::test]
     async fn an_invalid_changed_response_invalidates_its_cached_resource_pair() {
         let responses = complete_poll_responses()
             .into_iter()
@@ -2130,6 +2318,30 @@ mod tests {
             context.author().expect("fixture has an author").as_str(),
             PULL_AUTHOR
         );
+    }
+
+    #[test]
+    fn deleted_head_fork_reuses_the_previous_canonical_repository() {
+        let previous_response = serde_json::from_str::<PullResponse>(&pull_detail())
+            .expect("fixture pull detail is valid");
+        let previous = normalize_pull_request_context(
+            &previous_response,
+            CommitSha::try_new(String::from(HEAD_SHA)).expect("fixture commit is valid"),
+            None,
+        )
+        .expect("fixture prior context is valid");
+        let current_response =
+            serde_json::from_str::<PullResponse>(&pull_detail_without_head_repository())
+                .expect("deleted-fork pull detail is valid");
+
+        let current = normalize_pull_request_context(
+            &current_response,
+            CommitSha::try_new(String::from(HEAD_SHA)).expect("fixture commit is valid"),
+            Some(&previous),
+        )
+        .expect("prior repository supplies the deleted-fork identity");
+
+        assert_eq!(current.head_repository(), previous.head_repository());
     }
 
     #[tokio::test]
@@ -2267,6 +2479,7 @@ mod tests {
 
         assert_eq!(state.workflow_runs().len(), WORKFLOW_RUN_IDS.len());
         assert_eq!(state.workflow_runs()[0].branch().as_str(), HEAD_BRANCH);
+        assert_eq!(state.workflow_runs()[0].workflow_id().get(), WORKFLOW_ID);
         assert_eq!(state.workflow_runs()[0].workflow().as_str(), WORKFLOW_NAME);
         assert_eq!(
             state.workflow_runs()[0].conclusion(),

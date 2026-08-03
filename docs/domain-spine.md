@@ -5771,11 +5771,12 @@ pub struct RepoWatchWorkflowRunObservation { /* private */ }
 impl RepoWatchWorkflowRunObservation {
     pub const fn new(
         id: GitHubObjectId,
+        workflow_id: GitHubObjectId,
         branch: BranchName,
         workflow: WorkflowName,
         conclusion: CheckConclusion,
     ) -> Self;
-    // accessors: id(), branch(), workflow(), conclusion()
+    // accessors: id(), workflow_id(), branch(), workflow(), conclusion()
 }
 
 pub struct RepoWatchBranchHead { /* private */ }
@@ -5813,7 +5814,7 @@ pub enum RepoWatchRepositoryStateError {
     DuplicateCheckRun(GitHubObjectId),
     DuplicateReview(GitHubObjectId),
     DuplicateThread(ReviewThreadId),
-    DuplicateWorkflow { branch: BranchName, workflow: WorkflowName },
+    DuplicateWorkflow { branch: BranchName, workflow_id: GitHubObjectId },
     DuplicateBranchHead(BranchName),
 }
 

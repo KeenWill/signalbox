@@ -17,9 +17,9 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and differ behavior below is verified against this PR
-(`agent/repo-watch-persistence`). Polling behavior is verified against its child
-PR (`agent/repo-watch-poller`). Rule dispatch becomes implemented only in the
-later child pull request named by its verification reference.
+(`agent/repo-watch-persistence`). Polling behavior is verified against PR #438
+(`agent/repo-watch-poller`). Rule dispatch becomes implemented only in the later
+child pull request named by its verification reference.
 
 ## Configuration and credential boundary
 
@@ -75,6 +75,11 @@ unparseable poll submits no persistence candidate. The next poll occurs after
 the per-repository interval; version one has no webhook fallback and no
 speculative second polling transport.
 
+**Implemented behavior.** Daemon shutdown wins a race with a repository task's
+clean exit. Once shutdown is observable, the supervisor drains every watch task
+and reports a clean stop; a task that exits cleanly before shutdown remains a
+runtime lifecycle defect.
+
 **Implemented behavior.** The versioned durable cursor retains only the complete
 normalized repository state and exact signal-reviewer set needed for comparison.
 It does not retain resource keys, ETags, accepted transport responses, raw
@@ -90,18 +95,24 @@ events is rejected.
 per-pull-request state, branch heads, and completed branch-workflow identities,
 producing only the closed version-one event vocabulary below in deterministic
 order. The cursor retains provider identities for completed check suites, check
-runs, reviews, threads, and branch-workflow runs, so a provider fact retained in
-the consecutive comparison baseline is not re-emitted. Rules receive only
-events: they cannot inspect normalized snapshots or rerun the differ. Why:
-transport independence requires both polling and a later authenticated webhook
-receiver to feed the same durable facts.
+runs, reviews, threads, and both the workflow definition and branch-workflow
+run, so workflows that share a display name remain distinct and renaming a
+workflow cannot re-emit its already-observed run. The display name remains the
+rule-visible event payload. A provider fact retained in the consecutive
+comparison baseline is not re-emitted. Rules receive only events: they cannot
+inspect normalized snapshots or rerun the differ. Why: transport independence
+requires both polling and a later authenticated webhook receiver to feed the
+same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
 the transport follows every result page needed to build that finite projection
 and retains its per-page validator only in the repository task's process-local
-cache.
+cache. A same-named branch on a fork does not enter this projection: the poller
+accepts a run only when its provider head-repository identity equals the
+configured watched repository and continues through bounded result pages past
+foreign or absent head repositories.
 
 ## Durable event vocabulary
 
@@ -118,6 +129,12 @@ transition contradicts that event's complete current pull-request context. A
 `HeadChanged` payload whose previous and current SHAs are equal is invalid.
 Label names admit up to 50 Unicode scalar values, including their full UTF-8
 representation.
+
+**Implemented behavior.** GitHub can return a null head repository after a
+tracked pull request's fork is deleted. For that same previously observed pull
+request, the poller retains the prior canonical head-repository identity while
+accepting the new lifecycle and other current fields; a new pull request with no
+current or prior head-repository identity still fails closed.
 
 **Implemented behavior.** Accepted events append in observation order as durable
 facts and are never updated, deleted, or truncated. The relational storage row

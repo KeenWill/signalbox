@@ -694,6 +694,7 @@ struct ReactionRecord {
 #[serde(deny_unknown_fields)]
 struct WorkflowRunRecord {
     id: u64,
+    workflow_id: u64,
     branch: String,
     workflow: String,
     conclusion: String,
@@ -737,6 +738,7 @@ fn repository_state_record(state: &RepoWatchRepositoryState) -> RepositoryStateR
             .iter()
             .map(|run| WorkflowRunRecord {
                 id: run.id().get(),
+                workflow_id: run.workflow_id().get(),
                 branch: run.branch().as_str().to_owned(),
                 workflow: run.workflow().as_str().to_owned(),
                 conclusion: repo_watch_check_conclusion_to_str(run.conclusion()).to_owned(),
@@ -861,6 +863,7 @@ fn decode_repository_state(
         .map(|run| {
             Ok(RepoWatchWorkflowRunObservation::new(
                 github_object_id(run.id, "workflow_run.id")?,
+                github_object_id(run.workflow_id, "workflow_run.workflow_id")?,
                 BranchName::try_new(run.branch)?,
                 WorkflowName::try_new(run.workflow)?,
                 repo_watch_check_conclusion_from_str(&run.conclusion).ok_or(
@@ -1665,7 +1668,18 @@ fn event_row_matches_encoded(row: &EventRow, encoded: &EncodedEvent) -> bool {
 mod tests {
     use std::{error::Error, num::NonZeroU16};
 
+    use signalbox_domain::CheckConclusion;
+
     use super::*;
+
+    const WORKFLOW_RUN_ID: u64 = 41;
+    const WORKFLOW_ID: u64 = 42;
+    const BRANCH: &str = "main";
+    const WORKFLOW: &str = "continuous-integration";
+
+    fn github_object_id(value: u64) -> GitHubObjectId {
+        GitHubObjectId::new(NonZeroU64::new(value).expect("fixture object identity is positive"))
+    }
 
     #[test]
     fn event_page_size_has_a_fixed_upper_bound() -> Result<(), Box<dyn Error>> {
@@ -1678,6 +1692,33 @@ mod tests {
 
         assert_eq!(admitted?.get(), 100);
         assert_eq!(rejected, Err(RepoWatchPageSizeError));
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_round_trip_retains_provider_workflow_identity() -> Result<(), Box<dyn Error>> {
+        let workflow_run = RepoWatchWorkflowRunObservation::new(
+            github_object_id(WORKFLOW_RUN_ID),
+            github_object_id(WORKFLOW_ID),
+            BranchName::try_new(String::from(BRANCH))?,
+            WorkflowName::try_new(String::from(WORKFLOW))?,
+            CheckConclusion::Success,
+        );
+        let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![workflow_run],
+            branch_heads: Vec::new(),
+        })?;
+        let candidate = RepoWatchCursorCandidate::new(RepoWatchObservation::new(Vec::new(), state));
+
+        let encoded = encode_cursor_candidate(&candidate)?;
+        let decoded = decode_cursor_candidate(encoded)?;
+
+        assert_eq!(decoded, candidate);
+        assert_eq!(
+            decoded.observation().state().workflow_runs()[0].workflow_id(),
+            github_object_id(WORKFLOW_ID)
+        );
         Ok(())
     }
 }
