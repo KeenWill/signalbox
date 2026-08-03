@@ -154,7 +154,7 @@ RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     PERFORM 1 FROM session
      WHERE session_id = NEW.parent_session_id
-     FOR UPDATE;
+     FOR NO KEY UPDATE;
     RETURN NEW;
 END;
 $$;
@@ -1154,7 +1154,7 @@ BEGIN
                 NEW.source_spawning_tool_request_id
            AND source_event.event_kind = 'outcome_recorded'
            AND source_event.outcome_kind IN (
-                'child_stopped', 'child_cancelled'
+                'child_stopped', 'child_cancelled', 'already_terminal'
            )
            AND source_event.provenance_kind = CASE cascade.root_source_kind
                 WHEN 'turn_command' THEN 'parent_turn_command'
@@ -1171,6 +1171,7 @@ BEGIN
            AND NEW.termination_kind = CASE source_event.outcome_kind
                 WHEN 'child_stopped' THEN 'stopped'
                 WHEN 'child_cancelled' THEN 'cancelled'
+                WHEN 'already_terminal' THEN source_authority.termination_kind
            END
     ) THEN
         RAISE EXCEPTION 'nested delegation termination lacks its immediate parent outcome'
@@ -1204,10 +1205,11 @@ RETURNS TABLE (
     source_spawning_tool_request_id uuid,
     expected_action text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 AS $$
-    WITH RECURSIVE frontier AS (
+BEGIN
+    RETURN QUERY WITH RECURSIVE frontier AS (
         SELECT
             relation.spawning_tool_request_id,
             relation.parent_session_id,
@@ -1229,23 +1231,35 @@ AS $$
             relation.spawning_tool_request_id,
             relation.parent_session_id,
             relation.child_session_id,
-            CASE parent.expected_action
-                WHEN 'stop' THEN 'stopped'
-                WHEN 'cancel' THEN 'cancelled'
+            CASE
+                WHEN parent_result.spawning_tool_request_id IS NOT NULL THEN
+                    parent.effective_parent_kind
+                WHEN parent.expected_action = 'stop' THEN 'stopped'
+                WHEN parent.expected_action = 'cancel' THEN 'cancelled'
             END AS effective_parent_kind,
             'parent_disposition'::text AS source_kind,
             parent.spawning_tool_request_id AS source_spawning_tool_request_id,
             CASE
                 WHEN relation.policy_kind = 'background' THEN 'keep_running'
+                WHEN parent_result.spawning_tool_request_id IS NOT NULL
+                    AND parent.effective_parent_kind = 'stopped'
+                    THEN relation.on_parent_stopped
+                WHEN parent_result.spawning_tool_request_id IS NOT NULL
+                    THEN relation.on_parent_cancelled
                 WHEN parent.expected_action = 'stop' THEN relation.on_parent_stopped
                 ELSE relation.on_parent_cancelled
             END AS expected_action
           FROM frontier AS parent
           JOIN session_delegation AS relation
             ON relation.parent_session_id = parent.child_session_id
+          LEFT JOIN session_child_result AS parent_result
+            ON parent_result.spawning_tool_request_id =
+                parent.spawning_tool_request_id
          WHERE parent.expected_action IN ('stop', 'cancel')
+            OR parent_result.spawning_tool_request_id IS NOT NULL
     )
-    SELECT * FROM frontier
+    SELECT * FROM frontier;
+END;
 $$;
 
 CREATE FUNCTION require_delegation_cascade_disposition_count()
@@ -1283,7 +1297,7 @@ BEGIN
           ) AS frontier
      )
      ORDER BY session_id
-     FOR UPDATE;
+     FOR NO KEY UPDATE;
     PERFORM 1
       FROM session_delegation
      WHERE spawning_tool_request_id IN (
@@ -1930,7 +1944,7 @@ RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE latest numeric(20, 0);
 BEGIN
     PERFORM 1 FROM session
-     WHERE session_id = NEW.recipient_session_id FOR UPDATE;
+     WHERE session_id = NEW.recipient_session_id FOR NO KEY UPDATE;
     SELECT max(delivery_sequence) INTO latest FROM session_pending_delivery
      WHERE recipient_session_id = NEW.recipient_session_id;
     IF (latest IS NULL AND NEW.delivery_sequence <> 1)
@@ -2004,7 +2018,8 @@ CREATE TABLE session_child_result_delivery (
     ),
     CONSTRAINT session_child_result_delivery_sequence_shape CHECK (
         (delivery_sequence IS NULL AND delivery_kind IS NULL)
-        OR (delivery_sequence IS NOT NULL AND delivery_kind = 'background_result')
+        OR (delivery_sequence IS NOT NULL AND delivery_kind IS NOT NULL
+            AND delivery_kind = 'background_result')
     ),
     FOREIGN KEY (
         awaiting_tool_request_id, spawning_tool_request_id, parent_session_id
@@ -2161,6 +2176,7 @@ BEGIN
        AND NOT attribute.attisdropped
        AND attribute.attname NOT IN (
             'source_session_id', 'semantic_entry_id', 'payload_kind',
+            'tool_result_request_id',
             'delegation_message_id',
             'delegation_result_awaiting_tool_request_id',
             'delegation_result_spawning_tool_request_id'
@@ -2182,12 +2198,15 @@ BEGIN
              ADD CONSTRAINT semantic_transcript_entry_payload_shape CHECK (
                  (payload_kind = ''delegation_message''
                     AND delegation_message_id IS NOT NULL
+                    AND tool_result_request_id IS NULL
                     AND delegation_result_awaiting_tool_request_id IS NULL
                     AND delegation_result_spawning_tool_request_id IS NULL
                     AND %s)
                  OR (payload_kind = ''delegation_result''
                     AND delegation_message_id IS NULL
                     AND delegation_result_awaiting_tool_request_id IS NOT NULL
+                    AND tool_result_request_id =
+                        delegation_result_awaiting_tool_request_id
                     AND delegation_result_spawning_tool_request_id IS NOT NULL
                     AND %s)
                  OR (payload_kind NOT IN (
@@ -2205,6 +2224,53 @@ BEGIN
     );
 END;
 $$;
+
+-- A delivered foreground child result is the logical result of its exact
+-- await_session request. Extend the pre-existing tool-loop validators rather
+-- than inventing a parallel result-ordering rule.
+DO $migration$
+DECLARE
+    checked_function regprocedure;
+    definition text;
+    updated_definition text;
+BEGIN
+    FOREACH checked_function IN ARRAY ARRAY[
+        'assert_tool_request_single_result(uuid)'::regprocedure,
+        'assert_tool_loop_turn_final_state_pre_delegation(uuid)'::regprocedure,
+        'assert_reconciliation_required_turn_final_state(uuid)'::regprocedure,
+        'continuation_frontier_closes_predecessor_tool_round(uuid,uuid,uuid,uuid)'::regprocedure
+    ]
+    LOOP
+        SELECT pg_get_functiondef(checked_function) INTO definition;
+        updated_definition := regexp_replace(
+            definition,
+            '''tool_execution_result''[[:space:]]*,[[:space:]]*''tool_denied''[[:space:]]*,[[:space:]]*''tool_closed_by_turn_end''',
+            '''tool_execution_result'', ''tool_denied'', ''tool_closed_by_turn_end'', ''delegation_result''',
+            'g'
+        );
+        IF updated_definition = definition THEN
+            RAISE EXCEPTION
+                'delegation result extension could not find tool-result vocabulary in %',
+                checked_function;
+        END IF;
+        EXECUTE updated_definition;
+    END LOOP;
+
+    SELECT pg_get_functiondef(
+        'assert_model_call_steering_final_state(uuid)'::regprocedure
+    ) INTO definition;
+    updated_definition := replace(
+        definition,
+        'entry.payload_kind = ''tool_denied''',
+        'entry.payload_kind IN (''tool_denied'', ''delegation_result'')'
+    );
+    IF updated_definition = definition THEN
+        RAISE EXCEPTION
+            'delegation result extension could not find continued-call result arm';
+    END IF;
+    EXECUTE updated_definition;
+END;
+$migration$;
 
 ALTER TABLE semantic_transcript_entry
     ADD CONSTRAINT semantic_transcript_entry_delegation_message_once
@@ -2597,14 +2663,43 @@ FOR EACH ROW EXECUTE FUNCTION require_delegation_spawn_update();
 
 CREATE FUNCTION require_delegation_wait_update()
 RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    waiting_update_sequence numeric(20, 0);
+    waiting_update_count bigint;
 BEGIN
-    IF (SELECT count(*) FROM delegation_update_outbox_event
-         WHERE update_kind = 'child_waiting'
-           AND awaiting_tool_request_id = NEW.awaiting_tool_request_id
-           AND session_id = NEW.parent_session_id) <> 1 THEN
+    SELECT count(*), min(event_sequence)
+      INTO waiting_update_count, waiting_update_sequence
+      FROM delegation_update_outbox_event
+     WHERE update_kind = 'child_waiting'
+       AND awaiting_tool_request_id = NEW.awaiting_tool_request_id
+       AND session_id = NEW.parent_session_id;
+    IF waiting_update_count <> 1 THEN
         RAISE EXCEPTION 'delegation wait requires exactly one child-waiting update'
             USING ERRCODE = '23503',
                 CONSTRAINT = 'delegation_child_waiting_update_required';
+    END IF;
+    IF NEW.wait_mode = 'foreground'
+        AND EXISTS (
+            SELECT 1 FROM session_child_result
+             WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM delegation_wake_outbox_event AS wake
+             WHERE wake.subject_kind = 'result'
+               AND wake.result_spawning_request_id =
+                    NEW.spawning_tool_request_id
+               AND wake.session_id = NEW.parent_session_id
+               AND wake.event_sequence > waiting_update_sequence
+               AND (
+                    wake.awaiting_tool_request_id IS NULL
+                    OR wake.awaiting_tool_request_id =
+                        NEW.awaiting_tool_request_id
+               )
+        )
+    THEN
+        RAISE EXCEPTION 'late foreground wait requires a fresh durable result wake'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_late_wait_wake_required';
     END IF;
     RETURN NULL;
 END;
@@ -2616,7 +2711,10 @@ FOR EACH ROW EXECUTE FUNCTION require_delegation_wait_update();
 CREATE FUNCTION require_delegation_lifecycle_update()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF NEW.event_kind = 'outcome_recorded' AND (
+    IF NEW.event_kind = 'outcome_recorded'
+        AND NEW.provenance_kind IN (
+            'parent_turn_command', 'parent_goal_command'
+        ) AND (
         SELECT count(*) FROM delegation_update_outbox_event AS emitted
           JOIN session_delegation AS relation
             ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
@@ -2693,13 +2791,14 @@ CREATE TABLE delegation_wake_outbox_event (
     spawning_tool_request_id uuid NOT NULL,
     subject_kind text NOT NULL CHECK (subject_kind IN ('result', 'message')),
     result_spawning_request_id uuid,
+    awaiting_tool_request_id uuid,
     message_id uuid,
     CONSTRAINT delegation_wake_subject_shape CHECK ((subject_kind = 'result'
             AND result_spawning_request_id IS NOT NULL
             AND result_spawning_request_id = spawning_tool_request_id
             AND message_id IS NULL)
         OR (subject_kind = 'message' AND result_spawning_request_id IS NULL
-            AND message_id IS NOT NULL)),
+            AND awaiting_tool_request_id IS NULL AND message_id IS NOT NULL)),
     FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
         REFERENCES outbox_event(event_sequence, event_kind, storage_version, session_id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
@@ -2709,22 +2808,39 @@ CREATE TABLE delegation_wake_outbox_event (
     FOREIGN KEY (result_spawning_request_id, session_id)
         REFERENCES session_delegation(spawning_tool_request_id, parent_session_id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (
+        awaiting_tool_request_id, result_spawning_request_id, session_id
+    ) REFERENCES session_delegation_wait(
+        awaiting_tool_request_id, spawning_tool_request_id, parent_session_id
+    ) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (message_id, spawning_tool_request_id)
         REFERENCES session_message(message_id, spawning_tool_request_id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
-CREATE UNIQUE INDEX delegation_result_wake_once
+CREATE UNIQUE INDEX delegation_initial_result_wake_once
     ON delegation_wake_outbox_event(result_spawning_request_id)
-    WHERE subject_kind = 'result';
+    WHERE subject_kind = 'result' AND awaiting_tool_request_id IS NULL;
+CREATE UNIQUE INDEX delegation_late_wait_wake_once
+    ON delegation_wake_outbox_event(awaiting_tool_request_id)
+    WHERE subject_kind = 'result' AND awaiting_tool_request_id IS NOT NULL;
 CREATE UNIQUE INDEX delegation_message_wake_once
     ON delegation_wake_outbox_event(message_id)
     WHERE subject_kind = 'message';
 CREATE FUNCTION require_delegation_wake_recipient()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF (NEW.subject_kind = 'result' AND NOT EXISTS (
-            SELECT 1 FROM session_delegation WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
-              AND parent_session_id = NEW.session_id))
+    IF (NEW.subject_kind = 'result' AND (
+            NOT EXISTS (
+                SELECT 1 FROM session_delegation
+                 WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
+                   AND parent_session_id = NEW.session_id
+            )
+            OR (NEW.awaiting_tool_request_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM session_delegation_wait
+                 WHERE awaiting_tool_request_id = NEW.awaiting_tool_request_id
+                   AND spawning_tool_request_id = NEW.spawning_tool_request_id
+                   AND parent_session_id = NEW.session_id
+            ))))
         OR (NEW.subject_kind = 'message' AND NOT EXISTS (
             SELECT 1 FROM session_message AS message JOIN session_delegation AS relation
               ON relation.spawning_tool_request_id = message.spawning_tool_request_id
@@ -2772,6 +2888,7 @@ BEGIN
             ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
          WHERE wake.subject_kind = 'result'
            AND wake.result_spawning_request_id = NEW.spawning_tool_request_id
+           AND wake.awaiting_tool_request_id IS NULL
            AND wake.session_id = relation.parent_session_id) <> 1 THEN
         RAISE EXCEPTION 'delegation result requires exactly one parent wake'
             USING ERRCODE = '23503',
