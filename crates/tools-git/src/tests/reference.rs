@@ -4,7 +4,10 @@ use std::{ffi::OsStr, fs, os::unix::fs::MetadataExt};
 
 use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat};
 
-use crate::descriptor::{QuarantineDirectory, file_identity, remove_entry_if_identity};
+use crate::descriptor::{
+    QuarantineDirectory, file_identity, remove_entry_if_identity,
+    remove_entry_if_identity_with_test_hook,
+};
 use crate::failure::LocalGitFailure;
 use crate::layout::validate_repository_layout;
 use crate::limits::{MAX_BRANCH_BYTES, MAX_REFERENCE_BYTES, MAX_REVISION_BYTES};
@@ -409,12 +412,42 @@ fn quarantine_drop_preserves_a_replacement_of_its_directory_path() {
         foreign_bytes
     );
     assert!(retired_path.is_dir());
-    assert!(
-        fs::read_dir(retired_path)
-            .expect("retired quarantine reads")
-            .next()
-            .is_none()
+    assert_eq!(
+        fs::read(retired_path.join("owned")).expect("retired owned entry reads"),
+        b"owned"
     );
+}
+
+#[test]
+fn quarantine_clear_preserves_a_replacement_after_snapshot() {
+    let parent = tempfile::tempdir().expect("quarantine parent constructs");
+    let parent_descriptor = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("quarantine parent opens");
+    let mut quarantine =
+        QuarantineDirectory::create(&parent_descriptor).expect("quarantine creates");
+    let quarantine_path = parent.path().join(quarantine.name());
+    let entry = quarantine_path.join("entry");
+    let retired = quarantine_path.join("retired");
+    let owned_bytes = b"owned entry";
+    let foreign_bytes = b"foreign entry";
+    fs::write(&entry, owned_bytes).expect("owned quarantine entry writes");
+    let expected = quarantine.snapshot().expect("quarantine snapshot captures");
+
+    let failure = quarantine
+        .clear_if_unchanged_with_test_hook(&expected, || {
+            fs::rename(&entry, &retired).expect("owned quarantine entry retires");
+            fs::write(&entry, foreign_bytes).expect("foreign quarantine entry writes");
+        })
+        .expect_err("post-snapshot replacement rejects cleanup");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(fs::read(entry).expect("foreign entry reads"), foreign_bytes);
+    assert_eq!(fs::read(retired).expect("owned entry reads"), owned_bytes);
 }
 
 #[test]
@@ -447,6 +480,40 @@ fn foreign_cleanup_entry_is_rejected_before_quarantine_creation() {
     assert_eq!(fs::read(entry).expect("foreign entry reads"), actor_bytes);
     assert_eq!(fs::read(retired).expect("owned entry reads"), owned_bytes);
     assert_eq!(remaining_entries, 2);
+}
+
+#[test]
+fn identity_conditioned_removal_restores_a_replacement_racing_the_rename() {
+    let parent = tempfile::tempdir().expect("cleanup parent constructs");
+    let directory = openat(
+        CWD,
+        parent.path(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("cleanup parent opens");
+    let entry = parent.path().join("entry");
+    let retired = parent.path().join("retired");
+    let owned_bytes = b"owned entry";
+    let foreign_bytes = b"foreign entry";
+    fs::write(&entry, owned_bytes).expect("owned entry writes");
+    let owned = file_identity(&fs::metadata(&entry).expect("owned entry metadata reads"));
+
+    let failure = remove_entry_if_identity_with_test_hook(
+        &directory,
+        OsStr::new("entry"),
+        owned,
+        AtFlags::empty(),
+        |_| {
+            fs::rename(&entry, &retired).expect("owned entry retires");
+            fs::write(&entry, foreign_bytes).expect("foreign entry writes");
+        },
+    )
+    .expect_err("replacement racing the quarantine rename rejects cleanup");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(fs::read(entry).expect("foreign entry reads"), foreign_bytes);
+    assert_eq!(fs::read(retired).expect("owned entry reads"), owned_bytes);
 }
 
 #[test]

@@ -1,0 +1,129 @@
+use std::collections::HashSet;
+
+use bstr::BStr;
+use git2::ObjectFormat;
+use signalbox_application::ToolArgumentValidator;
+use signalbox_domain::{NormalizedToolArguments, ToolExecutionErrorDetail};
+
+use crate::arguments::{
+    GitDiffArguments, GitStatusArguments, InvalidGitArguments, LocalOperation,
+    checked_relative_path,
+};
+use crate::contracts::LocalToolKind;
+use crate::layout::{parse_full_object_id, valid_reference_name};
+use crate::limits::{
+    MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REFERENCE_BYTES,
+    MAX_REVISION_BYTES, MAX_STAGE_PATHS,
+};
+
+pub(super) fn decode_operation(
+    kind: LocalToolKind,
+    arguments: &NormalizedToolArguments,
+    object_format: ObjectFormat,
+) -> Result<LocalOperation, InvalidGitArguments> {
+    let operation = match kind {
+        LocalToolKind::BranchCreate => {
+            serde_json::from_str(arguments.as_str()).map(LocalOperation::BranchCreate)
+        }
+        LocalToolKind::BranchSwitch => {
+            serde_json::from_str(arguments.as_str()).map(LocalOperation::BranchSwitch)
+        }
+        LocalToolKind::Commit => {
+            serde_json::from_str(arguments.as_str()).map(LocalOperation::Commit)
+        }
+        LocalToolKind::Diff => serde_json::from_str(arguments.as_str()).map(LocalOperation::Diff),
+        LocalToolKind::Log => serde_json::from_str(arguments.as_str()).map(LocalOperation::Log),
+        LocalToolKind::Stage => serde_json::from_str(arguments.as_str()).map(LocalOperation::Stage),
+        LocalToolKind::Status => serde_json::from_str::<GitStatusArguments>(arguments.as_str())
+            .map(|_| LocalOperation::Status),
+    }
+    .map_err(|_| InvalidGitArguments)?;
+    validate_operation(&operation, object_format)?;
+    Ok(operation)
+}
+
+pub(super) fn validate_operation(
+    operation: &LocalOperation,
+    object_format: ObjectFormat,
+) -> Result<(), InvalidGitArguments> {
+    match operation {
+        LocalOperation::BranchCreate(arguments) => {
+            validate_branch(&arguments.name)?;
+            validate_revision(&arguments.start, object_format)
+        }
+        LocalOperation::BranchSwitch(arguments) => validate_branch(&arguments.name),
+        LocalOperation::Commit(arguments) => (arguments.message.len() <= MAX_COMMIT_MESSAGE_BYTES
+            && !arguments.message.contains('\0'))
+        .then_some(())
+        .ok_or(InvalidGitArguments),
+        LocalOperation::Diff(GitDiffArguments::Worktree) | LocalOperation::Status => Ok(()),
+        LocalOperation::Diff(GitDiffArguments::Revisions { base, head }) => {
+            validate_revision(base, object_format)?;
+            validate_revision(head, object_format)
+        }
+        LocalOperation::Log(arguments) => {
+            validate_revision(&arguments.revision, object_format)?;
+            (arguments.max_entries > 0 && arguments.max_entries <= MAX_LOG_ENTRIES)
+                .then_some(())
+                .ok_or(InvalidGitArguments)
+        }
+        LocalOperation::Stage(arguments) => {
+            if arguments.paths.is_empty() || arguments.paths.len() > MAX_STAGE_PATHS {
+                return Err(InvalidGitArguments);
+            }
+            let mut unique = HashSet::new();
+            if arguments
+                .paths
+                .iter()
+                .all(|path| checked_relative_path(path).is_ok_and(|path| unique.insert(path)))
+            {
+                Ok(())
+            } else {
+                Err(InvalidGitArguments)
+            }
+        }
+    }
+}
+
+pub(super) fn validate_branch(value: &str) -> Result<(), InvalidGitArguments> {
+    if value.is_empty() || value.len() > MAX_BRANCH_BYTES || value.contains('\0') {
+        return Err(InvalidGitArguments);
+    }
+    let reference = format!("refs/heads/{value}");
+    gix_validate::reference::branch_name(BStr::new(reference.as_bytes()))
+        .is_ok()
+        .then_some(())
+        .ok_or(InvalidGitArguments)
+}
+
+pub(super) fn validate_revision(
+    value: &str,
+    object_format: ObjectFormat,
+) -> Result<(), InvalidGitArguments> {
+    let exact_object = parse_full_object_id(value, object_format).is_some();
+    let exact_reference = value == "HEAD"
+        || (value.len() <= MAX_REFERENCE_BYTES
+            && value.starts_with("refs/")
+            && valid_reference_name(value.as_bytes()));
+    (value.len() <= MAX_REVISION_BYTES && (exact_object || exact_reference))
+        .then_some(())
+        .ok_or(InvalidGitArguments)
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct GitArgumentValidator {
+    pub(super) kind: LocalToolKind,
+    pub(super) object_format: ObjectFormat,
+    pub(super) detail: ToolExecutionErrorDetail,
+}
+
+impl ToolArgumentValidator for GitArgumentValidator {
+    fn validate(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolExecutionErrorDetail> {
+        decode_operation(self.kind, arguments, self.object_format)
+            .map(|_| ())
+            .map_err(|_| self.detail.clone())
+    }
+}
