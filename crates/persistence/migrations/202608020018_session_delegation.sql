@@ -1161,6 +1161,559 @@ CREATE CONSTRAINT TRIGGER session_delegation_wait_purpose
 AFTER INSERT ON session_delegation_wait DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_delegation_wait_purpose();
 
+ALTER TABLE outbox_event DROP CONSTRAINT outbox_event_kind_closed;
+ALTER TABLE outbox_event ADD CONSTRAINT outbox_event_kind_closed CHECK (
+    event_kind IN ('session_created', 'input_accepted', 'goal_turn_retired',
+        'turn_activated', 'turn_failed', 'model_call_transition',
+        'tool_batch_transition', 'context_compacted', 'turn_completed',
+        'turn_refused', 'turn_cancelled', 'turn_reconciliation_required',
+        'delegation_update', 'delegation_wake')
+);
+CREATE TABLE delegation_update_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL CHECK (event_kind = 'delegation_update'),
+    storage_version smallint NOT NULL CHECK (storage_version = 1),
+    session_id uuid NOT NULL,
+    update_kind text NOT NULL CHECK (update_kind IN (
+        'child_spawned', 'child_waiting', 'child_lifecycle_disposition',
+        'child_result', 'session_message'
+    )),
+    spawning_tool_request_id uuid NOT NULL,
+    child_session_id uuid,
+    policy_kind text CHECK (
+        policy_kind IS NULL OR policy_kind IN ('background', 'bound')
+    ),
+    on_parent_stopped text CHECK (
+        on_parent_stopped IS NULL OR on_parent_stopped IN ('keep_running', 'stop', 'cancel')
+    ),
+    on_parent_cancelled text CHECK (
+        on_parent_cancelled IS NULL OR on_parent_cancelled IN ('keep_running', 'stop', 'cancel')
+    ),
+    awaiting_tool_request_id uuid,
+    wait_mode text CHECK (
+        wait_mode IS NULL OR wait_mode IN ('foreground', 'background')
+    ),
+    delegation_event_ordinal numeric(20, 0),
+    delegation_event_kind text,
+    outcome_kind text CHECK (
+        outcome_kind IS NULL OR outcome_kind IN (
+            'result_returned', 'child_failed', 'child_stopped',
+            'child_cancelled', 'continue_running', 'already_terminal'
+        )
+    ),
+    reason_kind text CHECK (
+        reason_kind IS NULL OR reason_kind IN (
+            'child_completed', 'child_execution_failed', 'child_result_unavailable',
+            'child_cancelled', 'parent_stopped_parent_and_descendants',
+            'parent_cancelled_parent_and_descendants'
+        )
+    ),
+    provenance_kind text CHECK (
+        provenance_kind IS NULL OR provenance_kind IN (
+            'child_turn', 'parent_turn_command', 'parent_goal_command'
+        )
+    ),
+    provenance_session_id uuid,
+    provenance_turn_id uuid,
+    provenance_goal_generation numeric(20, 0) CHECK (
+        provenance_goal_generation IS NULL
+        OR provenance_goal_generation BETWEEN 1 AND 18446744073709551615
+    ),
+    provenance_command_id uuid,
+    result_spawning_request_id uuid,
+    message_id uuid,
+    sender_session_id uuid,
+    recipient_session_id uuid,
+    message_ordinal numeric(20, 0) CHECK (
+        message_ordinal IS NULL
+        OR message_ordinal BETWEEN 1 AND 18446744073709551615
+    ),
+    content_text text CHECK (
+        content_text IS NULL OR octet_length(content_text) BETWEEN 1 AND 1048576
+    ),
+    CONSTRAINT delegation_update_provenance_shape CHECK (
+        (provenance_kind IS NULL AND provenance_session_id IS NULL
+            AND provenance_turn_id IS NULL
+            AND provenance_goal_generation IS NULL
+            AND provenance_command_id IS NULL)
+        OR (provenance_kind = 'child_turn'
+            AND provenance_session_id IS NOT NULL
+            AND provenance_turn_id IS NOT NULL
+            AND provenance_goal_generation IS NULL
+            AND provenance_command_id IS NULL)
+        OR (provenance_kind = 'parent_turn_command'
+            AND provenance_session_id IS NOT NULL
+            AND provenance_turn_id IS NOT NULL
+            AND provenance_goal_generation IS NULL
+            AND provenance_command_id IS NOT NULL)
+        OR (provenance_kind = 'parent_goal_command'
+            AND provenance_session_id IS NOT NULL
+            AND provenance_turn_id IS NULL
+            AND provenance_goal_generation IS NOT NULL
+            AND provenance_command_id IS NOT NULL)
+    ),
+    CONSTRAINT delegation_update_subject_shape CHECK (
+        (update_kind = 'child_spawned'
+            AND child_session_id IS NOT NULL
+            AND policy_kind IS NOT NULL
+            AND ((policy_kind = 'background'
+                    AND on_parent_stopped IS NULL AND on_parent_cancelled IS NULL)
+                OR (policy_kind = 'bound'
+                    AND on_parent_stopped IS NOT NULL
+                    AND on_parent_cancelled IS NOT NULL))
+            AND awaiting_tool_request_id IS NULL
+            AND wait_mode IS NULL
+            AND delegation_event_ordinal IS NOT NULL AND delegation_event_ordinal = 1
+            AND delegation_event_kind IS NOT NULL AND delegation_event_kind = 'spawned'
+            AND outcome_kind IS NULL AND reason_kind IS NULL
+            AND provenance_kind IS NULL
+            AND result_spawning_request_id IS NULL
+            AND message_id IS NULL AND sender_session_id IS NULL
+            AND recipient_session_id IS NULL AND message_ordinal IS NULL
+            AND content_text IS NULL)
+        OR (update_kind = 'child_waiting'
+            AND child_session_id IS NOT NULL
+            AND policy_kind IS NULL
+            AND on_parent_stopped IS NULL AND on_parent_cancelled IS NULL
+            AND awaiting_tool_request_id IS NOT NULL
+            AND wait_mode IS NOT NULL
+            AND delegation_event_ordinal IS NULL
+            AND delegation_event_kind IS NULL
+            AND outcome_kind IS NULL AND reason_kind IS NULL
+            AND provenance_kind IS NULL
+            AND result_spawning_request_id IS NULL
+            AND message_id IS NULL AND sender_session_id IS NULL
+            AND recipient_session_id IS NULL AND message_ordinal IS NULL
+            AND content_text IS NULL)
+        OR (update_kind = 'child_lifecycle_disposition'
+            AND child_session_id IS NOT NULL
+            AND policy_kind IS NULL
+            AND on_parent_stopped IS NULL AND on_parent_cancelled IS NULL
+            AND awaiting_tool_request_id IS NULL AND wait_mode IS NULL
+            AND delegation_event_ordinal IS NOT NULL
+            AND delegation_event_kind IS NOT NULL AND delegation_event_kind = 'outcome_recorded'
+            AND outcome_kind IS NOT NULL AND reason_kind IS NOT NULL
+            AND provenance_kind IS NOT NULL
+            AND result_spawning_request_id IS NULL
+            AND message_id IS NULL AND sender_session_id IS NULL
+            AND recipient_session_id IS NULL AND message_ordinal IS NULL
+            AND content_text IS NULL)
+        OR (update_kind = 'child_result'
+            AND child_session_id IS NOT NULL
+            AND policy_kind IS NULL
+            AND on_parent_stopped IS NULL AND on_parent_cancelled IS NULL
+            AND awaiting_tool_request_id IS NULL AND wait_mode IS NULL
+            AND delegation_event_ordinal IS NULL
+            AND delegation_event_kind IS NULL
+            AND outcome_kind IS NOT NULL AND outcome_kind IN (
+                'result_returned', 'child_failed', 'child_stopped', 'child_cancelled'
+            )
+            AND reason_kind IS NOT NULL AND provenance_kind IS NOT NULL
+            AND result_spawning_request_id IS NOT NULL AND result_spawning_request_id = spawning_tool_request_id
+            AND message_id IS NULL AND sender_session_id IS NULL
+            AND recipient_session_id IS NULL AND message_ordinal IS NULL
+            AND ((outcome_kind = 'result_returned' AND content_text IS NOT NULL)
+                OR (outcome_kind <> 'result_returned' AND content_text IS NULL)))
+        OR (update_kind = 'session_message'
+            AND child_session_id IS NULL
+            AND policy_kind IS NULL
+            AND on_parent_stopped IS NULL AND on_parent_cancelled IS NULL
+            AND awaiting_tool_request_id IS NULL
+            AND wait_mode IS NULL
+            AND delegation_event_ordinal IS NULL
+            AND delegation_event_kind IS NULL
+            AND outcome_kind IS NULL AND reason_kind IS NULL
+            AND provenance_kind IS NULL
+            AND result_spawning_request_id IS NULL
+            AND message_id IS NOT NULL
+            AND sender_session_id IS NOT NULL
+            AND recipient_session_id IS NOT NULL
+            AND sender_session_id <> recipient_session_id
+            AND message_ordinal IS NOT NULL
+            AND content_text IS NOT NULL)
+    ),
+    FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event(event_sequence, event_kind, storage_version, session_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (spawning_tool_request_id)
+        REFERENCES session_delegation(spawning_tool_request_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (spawning_tool_request_id, child_session_id)
+        REFERENCES session_delegation(spawning_tool_request_id, child_session_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (
+        spawning_tool_request_id,
+        delegation_event_ordinal,
+        delegation_event_kind
+    ) REFERENCES session_delegation_event(
+        spawning_tool_request_id, event_ordinal, event_kind
+    ) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (awaiting_tool_request_id, spawning_tool_request_id)
+        REFERENCES session_delegation_wait(
+            awaiting_tool_request_id, spawning_tool_request_id
+        ) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (result_spawning_request_id)
+        REFERENCES session_child_result(spawning_tool_request_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (message_id, spawning_tool_request_id)
+        REFERENCES session_message(message_id, spawning_tool_request_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (sender_session_id) REFERENCES session(session_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (recipient_session_id) REFERENCES session(session_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (provenance_command_id) REFERENCES durable_command(command_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+);
+CREATE UNIQUE INDEX delegation_child_spawned_update_once
+    ON delegation_update_outbox_event(spawning_tool_request_id)
+    WHERE update_kind = 'child_spawned';
+CREATE UNIQUE INDEX delegation_child_waiting_update_once
+    ON delegation_update_outbox_event(awaiting_tool_request_id)
+    WHERE update_kind = 'child_waiting';
+CREATE UNIQUE INDEX delegation_lifecycle_update_once
+    ON delegation_update_outbox_event(
+        spawning_tool_request_id, delegation_event_ordinal
+    ) WHERE update_kind = 'child_lifecycle_disposition';
+CREATE UNIQUE INDEX delegation_child_result_update_once
+    ON delegation_update_outbox_event(result_spawning_request_id)
+    WHERE update_kind = 'child_result';
+CREATE UNIQUE INDEX delegation_session_message_update_once
+    ON delegation_update_outbox_event(message_id)
+    WHERE update_kind = 'session_message';
+CREATE FUNCTION require_delegation_update_subject()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM session_delegation AS relation
+         WHERE relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+           AND CASE NEW.update_kind
+                WHEN 'child_spawned' THEN
+                    NEW.session_id = relation.parent_session_id
+                    AND NEW.child_session_id = relation.child_session_id
+                    AND NEW.policy_kind = relation.policy_kind
+                    AND NEW.on_parent_stopped IS NOT DISTINCT FROM relation.on_parent_stopped
+                    AND NEW.on_parent_cancelled IS NOT DISTINCT FROM relation.on_parent_cancelled
+                WHEN 'child_waiting' THEN EXISTS (
+                    SELECT 1 FROM session_delegation_wait AS wait
+                     WHERE wait.awaiting_tool_request_id = NEW.awaiting_tool_request_id
+                       AND wait.spawning_tool_request_id = NEW.spawning_tool_request_id
+                       AND wait.child_session_id = NEW.child_session_id
+                       AND wait.wait_mode = NEW.wait_mode
+                       AND NEW.session_id = relation.child_session_id
+                )
+                WHEN 'child_lifecycle_disposition' THEN EXISTS (
+                    SELECT 1 FROM session_delegation_event AS event
+                     WHERE event.spawning_tool_request_id = NEW.spawning_tool_request_id
+                       AND event.event_ordinal = NEW.delegation_event_ordinal
+                       AND event.event_kind = 'outcome_recorded'
+                       AND event.outcome_kind = NEW.outcome_kind
+                       AND event.reason_kind = NEW.reason_kind
+                       AND event.provenance_kind = NEW.provenance_kind
+                       AND event.provenance_session_id = NEW.provenance_session_id
+                       AND event.provenance_turn_id IS NOT DISTINCT FROM
+                            NEW.provenance_turn_id
+                       AND event.provenance_goal_generation IS NOT DISTINCT FROM
+                            NEW.provenance_goal_generation
+                       AND event.provenance_command_id IS NOT DISTINCT FROM
+                            NEW.provenance_command_id
+                       AND relation.child_session_id = NEW.child_session_id
+                       AND NEW.session_id = relation.parent_session_id
+                )
+                WHEN 'child_result' THEN EXISTS (
+                    SELECT 1
+                      FROM session_child_result AS result
+                      JOIN session_delegation_event AS event
+                        ON event.spawning_tool_request_id =
+                            result.spawning_tool_request_id
+                       AND event.event_ordinal = result.event_ordinal
+                     WHERE result.spawning_tool_request_id =
+                            NEW.result_spawning_request_id
+                       AND result.outcome_kind = NEW.outcome_kind
+                       AND result.content_text IS NOT DISTINCT FROM NEW.content_text
+                       AND event.reason_kind = NEW.reason_kind
+                       AND event.provenance_kind = NEW.provenance_kind
+                       AND event.provenance_session_id = NEW.provenance_session_id
+                       AND event.provenance_turn_id IS NOT DISTINCT FROM
+                            NEW.provenance_turn_id
+                       AND event.provenance_goal_generation IS NOT DISTINCT FROM
+                            NEW.provenance_goal_generation
+                       AND event.provenance_command_id IS NOT DISTINCT FROM
+                            NEW.provenance_command_id
+                       AND relation.child_session_id = NEW.child_session_id
+                       AND NEW.session_id = relation.parent_session_id
+                )
+                WHEN 'session_message' THEN EXISTS (
+                    SELECT 1 FROM session_message AS message
+                     WHERE message.message_id = NEW.message_id
+                       AND message.spawning_tool_request_id =
+                            NEW.spawning_tool_request_id
+                       AND message.event_ordinal = NEW.message_ordinal
+                       AND message.content_text = NEW.content_text
+                       AND NEW.sender_session_id = CASE message.direction
+                            WHEN 'parent_to_child' THEN relation.parent_session_id
+                            WHEN 'child_to_parent' THEN relation.child_session_id
+                       END
+                       AND NEW.recipient_session_id = CASE message.direction
+                            WHEN 'parent_to_child' THEN relation.child_session_id
+                            WHEN 'child_to_parent' THEN relation.parent_session_id
+                       END
+                       AND NEW.session_id = NEW.recipient_session_id
+                )
+           END
+    ) THEN
+        RAISE EXCEPTION 'delegation update payload does not match its typed state'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'delegation_update_subject';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER delegation_update_subject
+AFTER INSERT ON delegation_update_outbox_event DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_update_subject();
+
+CREATE FUNCTION require_delegation_spawn_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM delegation_update_outbox_event
+         WHERE update_kind = 'child_spawned'
+           AND spawning_tool_request_id = NEW.spawning_tool_request_id
+           AND session_id = NEW.parent_session_id) <> 1 THEN
+        RAISE EXCEPTION 'delegation relation requires exactly one child-spawned update'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_child_spawned_update_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_delegation_zz_requires_spawn_update
+AFTER INSERT ON session_delegation DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_spawn_update();
+
+CREATE FUNCTION require_delegation_wait_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM delegation_update_outbox_event
+         WHERE update_kind = 'child_waiting'
+           AND awaiting_tool_request_id = NEW.awaiting_tool_request_id
+           AND session_id = NEW.child_session_id) <> 1 THEN
+        RAISE EXCEPTION 'delegation wait requires exactly one child-waiting update'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_child_waiting_update_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_delegation_wait_zz_requires_update
+AFTER INSERT ON session_delegation_wait DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_wait_update();
+
+CREATE FUNCTION require_delegation_lifecycle_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.event_kind = 'outcome_recorded' AND (
+        SELECT count(*) FROM delegation_update_outbox_event AS emitted
+          JOIN session_delegation AS relation
+            ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+         WHERE emitted.update_kind = 'child_lifecycle_disposition'
+           AND emitted.spawning_tool_request_id = NEW.spawning_tool_request_id
+           AND emitted.delegation_event_ordinal = NEW.event_ordinal
+           AND emitted.session_id = relation.parent_session_id
+    ) <> 1 THEN
+        RAISE EXCEPTION 'delegation outcome requires exactly one lifecycle update'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_lifecycle_update_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_delegation_event_zz_requires_lifecycle_update
+AFTER INSERT ON session_delegation_event DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_lifecycle_update();
+
+CREATE FUNCTION require_delegation_message_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM delegation_update_outbox_event AS emitted
+          JOIN session_delegation AS relation
+            ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+         WHERE emitted.update_kind = 'session_message'
+           AND emitted.message_id = NEW.message_id
+           AND emitted.session_id = CASE NEW.direction
+                WHEN 'parent_to_child' THEN relation.child_session_id
+                WHEN 'child_to_parent' THEN relation.parent_session_id
+           END) <> 1 THEN
+        RAISE EXCEPTION 'delegation message requires exactly one message update'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_session_message_update_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_message_zz_requires_update
+AFTER INSERT ON session_message DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_message_update();
+
+CREATE FUNCTION require_delegation_result_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM delegation_update_outbox_event AS emitted
+          JOIN session_delegation AS relation
+            ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+         WHERE emitted.update_kind = 'child_result'
+           AND emitted.result_spawning_request_id = NEW.spawning_tool_request_id
+           AND emitted.session_id = relation.parent_session_id) <> 1 THEN
+        RAISE EXCEPTION 'delegation result requires exactly one child-result update'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_child_result_update_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_child_result_zz_requires_update
+AFTER INSERT ON session_child_result DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_result_update();
+CREATE TRIGGER delegation_update_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON delegation_update_outbox_event
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER delegation_update_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON delegation_update_outbox_event
+FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE TABLE delegation_wake_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL CHECK (event_kind = 'delegation_wake'),
+    storage_version smallint NOT NULL CHECK (storage_version = 1),
+    session_id uuid NOT NULL,
+    spawning_tool_request_id uuid NOT NULL,
+    subject_kind text NOT NULL CHECK (subject_kind IN ('result', 'message')),
+    result_spawning_request_id uuid,
+    message_id uuid,
+    CONSTRAINT delegation_wake_subject_shape CHECK ((subject_kind = 'result'
+            AND result_spawning_request_id IS NOT NULL
+            AND result_spawning_request_id = spawning_tool_request_id
+            AND message_id IS NULL)
+        OR (subject_kind = 'message' AND result_spawning_request_id IS NULL
+            AND message_id IS NOT NULL)),
+    FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event(event_sequence, event_kind, storage_version, session_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (result_spawning_request_id)
+        REFERENCES session_child_result(spawning_tool_request_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (result_spawning_request_id, session_id)
+        REFERENCES session_delegation(spawning_tool_request_id, parent_session_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (message_id, spawning_tool_request_id)
+        REFERENCES session_message(message_id, spawning_tool_request_id)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
+);
+CREATE UNIQUE INDEX delegation_result_wake_once
+    ON delegation_wake_outbox_event(result_spawning_request_id)
+    WHERE subject_kind = 'result';
+CREATE UNIQUE INDEX delegation_message_wake_once
+    ON delegation_wake_outbox_event(message_id)
+    WHERE subject_kind = 'message';
+CREATE FUNCTION require_delegation_wake_recipient()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.subject_kind = 'result' AND NOT EXISTS (
+            SELECT 1 FROM session_delegation WHERE spawning_tool_request_id = NEW.spawning_tool_request_id
+              AND parent_session_id = NEW.session_id))
+        OR (NEW.subject_kind = 'message' AND NOT EXISTS (
+            SELECT 1 FROM session_message AS message JOIN session_delegation AS relation
+              ON relation.spawning_tool_request_id = message.spawning_tool_request_id
+            WHERE message.message_id = NEW.message_id
+              AND ((message.direction = 'parent_to_child' AND relation.child_session_id = NEW.session_id)
+                OR (message.direction = 'child_to_parent' AND relation.parent_session_id = NEW.session_id)))) THEN
+        RAISE EXCEPTION 'delegation wake recipient does not match its subject'
+            USING ERRCODE = '23514', CONSTRAINT = 'delegation_wake_recipient';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER delegation_wake_recipient
+AFTER INSERT ON delegation_wake_outbox_event DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_wake_recipient();
+
+CREATE FUNCTION require_delegation_message_wake()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM delegation_wake_outbox_event AS wake
+          JOIN session_delegation AS relation
+            ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+         WHERE wake.subject_kind = 'message'
+           AND wake.message_id = NEW.message_id
+           AND wake.session_id = CASE NEW.direction
+                WHEN 'parent_to_child' THEN relation.child_session_id
+                WHEN 'child_to_parent' THEN relation.parent_session_id
+           END) <> 1 THEN
+        RAISE EXCEPTION 'delegation message requires exactly one recipient wake'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_message_wake_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_message_zz_requires_wake
+AFTER INSERT ON session_message DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_message_wake();
+
+CREATE FUNCTION require_delegation_result_wake()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT count(*) FROM delegation_wake_outbox_event AS wake
+          JOIN session_delegation AS relation
+            ON relation.spawning_tool_request_id = NEW.spawning_tool_request_id
+         WHERE wake.subject_kind = 'result'
+           AND wake.result_spawning_request_id = NEW.spawning_tool_request_id
+           AND wake.session_id = relation.parent_session_id) <> 1 THEN
+        RAISE EXCEPTION 'delegation result requires exactly one parent wake'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'delegation_result_wake_required';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER session_child_result_zz_requires_wake
+AFTER INSERT ON session_child_result DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_result_wake();
+CREATE TRIGGER delegation_wake_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON delegation_wake_outbox_event
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER delegation_wake_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON delegation_wake_outbox_event
+FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
+CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE matching_records bigint;
+BEGIN
+    CASE NEW.event_kind
+        WHEN 'session_created' THEN SELECT count(*) INTO matching_records FROM session_created_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'input_accepted' THEN SELECT count(*) INTO matching_records FROM input_accepted_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'goal_turn_retired' THEN SELECT count(*) INTO matching_records FROM goal_turn_retired_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_activated' THEN SELECT count(*) INTO matching_records FROM turn_activated_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_failed' THEN SELECT count(*) INTO matching_records FROM turn_failed_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'model_call_transition' THEN SELECT count(*) INTO matching_records FROM model_call_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_batch_transition' THEN SELECT count(*) INTO matching_records FROM tool_batch_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'context_compacted' THEN SELECT count(*) INTO matching_records FROM context_compacted_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_completed' THEN SELECT count(*) INTO matching_records FROM turn_completed_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_refused' THEN SELECT count(*) INTO matching_records FROM turn_refused_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_cancelled' THEN SELECT count(*) INTO matching_records FROM turn_cancelled_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN SELECT count(*) INTO matching_records FROM turn_reconciliation_required_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'delegation_update' THEN SELECT count(*) INTO matching_records FROM delegation_update_outbox_event WHERE event_sequence = NEW.event_sequence;
+        WHEN 'delegation_wake' THEN SELECT count(*) INTO matching_records FROM delegation_wake_outbox_event WHERE event_sequence = NEW.event_sequence;
+        ELSE RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind USING ERRCODE = '23514';
+    END CASE;
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION 'outbox event % requires exactly one % typed record', NEW.event_sequence, NEW.event_kind USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+
 CREATE CONSTRAINT TRIGGER session_delegation_event_requires_payload
 AFTER INSERT ON session_delegation_event DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_session_delegation_event_payload();
