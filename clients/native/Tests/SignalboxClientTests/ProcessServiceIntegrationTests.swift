@@ -521,6 +521,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolReconciliationSideProjectionFindsClosedSuffixBeforeLaterTurnEntry() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithClosedReconciliationResultAndLaterTurnEntry()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.reconciliationClosedToolNames
+    )
+  }
+
   func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -6037,9 +6052,12 @@ private enum ProcessProjectionFixture {
   static let laterTurnToolRequest = "55555555-3333-4333-8333-333333333333"
   static let laterTurnModelCall = "44444444-3333-4333-8333-333333333333"
   static let laterTurnToolName = "inspect_later_fixture"
+  static let reconciliationClosedEntry = "33333333-3333-4333-8333-333333333333"
+  static let reconciliationClosedOutput = "Ambiguous fixture tool closed."
   static let reconciliationSuffixToolNames = [
     proposedToolName, reconciliationSuffixToolName,
   ]
+  static let reconciliationClosedToolNames = [proposedToolName]
   static let completedUserEntry = "aaaaaaaa-2222-4222-8222-222222222222"
   static let completedAssistantEntry = "bbbbbbbb-2222-4222-8222-222222222222"
   static let completedAssistantText = "Fixture terminal assistant response."
@@ -9800,6 +9818,96 @@ private enum ProcessProjectionFixture {
         """
       ],
       entryCount: 5
+    )
+  }
+
+  static func snapshotWithClosedReconciliationResultAndLaterTurnEntry() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"tool_reconciliation_required",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_tool_attempt_id":"\(reconciliationAttempt)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          },
+          "cost":null
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        toolRequestMessage(index: 0),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationClosedEntry)",
+          "entry":{
+            "type":"tool_closed",
+            "tool_request_id":"\(proposedToolRequest)",
+            "content":"\(reconciliationClosedOutput)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(laterTurnToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(crossTurn)",
+            "model_call_id":"\(laterTurnModelCall)",
+            "tool_request_id":"\(laterTurnToolRequest)",
+            "tool_name":"\(laterTurnToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"3"
+        }
+        """,
+      ]
     )
   }
 

@@ -1321,48 +1321,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return snapshotFrontierID == terminalFrontierID
         && snapshotToolAttemptID == requiredAttemptID
     }
-    guard frontierMatches,
-      let anchorIndex = snapshot.records.firstIndex(where: { record in
-        guard case .entry(let message) = record,
-          message.sourceSessionID == snapshot.sessionID,
-          case .toolExecutionResult(_, let attemptID, _) = message.entry,
-          attemptID == requiredAttemptID
-        else {
-          return false
-        }
-        return toolEntry(message, belongsTo: turnID, modelCallID: nil)
-      })
-    else {
+    guard frontierMatches else {
       return []
     }
-
-    var firstIndex = anchorIndex
-    while firstIndex > snapshot.records.startIndex {
-      let precedingIndex = snapshot.records.index(before: firstIndex)
-      guard terminalToolResultEntryID(
-        for: snapshot.records[precedingIndex],
+    var currentSuffix: Set<SignalboxCanonicalUUID> = []
+    var terminalSuffix: Set<SignalboxCanonicalUUID> = []
+    for record in snapshot.records {
+      if let entryID = terminalToolResultEntryID(
+        for: record,
         in: snapshot,
         turnID: turnID
-      ) != nil else {
-        break
+      ) {
+        currentSuffix.insert(entryID)
+      } else if !currentSuffix.isEmpty {
+        terminalSuffix = currentSuffix
+        currentSuffix = []
       }
-      firstIndex = precedingIndex
     }
-
-    var endIndex = snapshot.records.index(after: anchorIndex)
-    while endIndex < snapshot.records.endIndex,
-      terminalToolResultEntryID(
-        for: snapshot.records[endIndex],
-        in: snapshot,
-        turnID: turnID
-      ) != nil
-    {
-      endIndex = snapshot.records.index(after: endIndex)
-    }
-
-    return Set(snapshot.records[firstIndex..<endIndex].compactMap {
-      terminalToolResultEntryID(for: $0, in: snapshot, turnID: turnID)
-    })
+    return currentSuffix.isEmpty ? terminalSuffix : currentSuffix
   }
 
   private func terminalToolResultEntryID(
