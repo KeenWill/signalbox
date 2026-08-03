@@ -182,6 +182,56 @@ async fn cross_wire_initial_placement_provenance(
     Ok(())
 }
 
+async fn install_reserved_command_claim_guard(
+    pool: &PgPool,
+    nil_command: DurableCommandId,
+    max_command: DurableCommandId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE reserved_command_claim_guard (
+            command_id uuid PRIMARY KEY
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO reserved_command_claim_guard (command_id)
+         VALUES ($1), ($2)",
+    )
+    .bind(*nil_command.as_uuid())
+    .bind(*max_command.as_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE FUNCTION reject_reserved_command_claim()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $guard$
+         BEGIN
+             IF EXISTS (
+                 SELECT 1
+                   FROM reserved_command_claim_guard
+                  WHERE command_id = NEW.command_id
+             ) THEN
+                 RAISE EXCEPTION 'reserved durable command claim attempted';
+             END IF;
+             RETURN NEW;
+         END
+         $guard$",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_reserved_command_claim
+         BEFORE INSERT ON durable_command
+         FOR EACH ROW
+         EXECUTE FUNCTION reject_reserved_command_claim()",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_claim()
@@ -197,6 +247,8 @@ async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_
         .await?;
     let repository = SessionPlacementRepository::new(pool.clone());
     let nil_command = DurableCommandId::from_uuid(Uuid::nil());
+    let max_command = DurableCommandId::from_uuid(Uuid::max());
+    install_reserved_command_claim_guard(&pool, nil_command, max_command).await?;
     let nil_error = repository
         .handle(UpdateSessionPlacement::new(
             nil_command,
@@ -209,7 +261,6 @@ async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_
     let SessionPlacementRepositoryError::InvalidCommandId = nil_error else {
         panic!("nil command identity returns the typed rejection")
     };
-    let max_command = DurableCommandId::from_uuid(Uuid::max());
     let max_error = repository
         .handle(UpdateSessionPlacement::new(
             max_command,
@@ -222,14 +273,6 @@ async fn s36_inv012_placement_update_rejects_reserved_command_identities_before_
     let SessionPlacementRepositoryError::InvalidCommandId = max_error else {
         panic!("max command identity returns the typed rejection")
     };
-    let sentinel_claim_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM durable_command WHERE command_id = $1 OR command_id = $2",
-    )
-    .bind(*nil_command.as_uuid())
-    .bind(*max_command.as_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(sentinel_claim_count, 0);
 
     pool.close().await;
     drop(container);
