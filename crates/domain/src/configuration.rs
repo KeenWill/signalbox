@@ -441,7 +441,7 @@ impl SessionConfigurationDefaults {
     /// A direct model can carry only settings validated for that same direct
     /// selection. Provider defaults remain model-independent, while an alias
     /// retains the direct validation identity needed to detect a later
-    /// retarget.
+    /// retarget. A defaults epoch cannot carry a per-call contribution.
     pub fn complete_with_model_settings(
         model: ModelSelectionRequest,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
@@ -453,7 +453,9 @@ impl SessionConfigurationDefaults {
             (ModelSelectionRequest::Direct(_), None)
             | (ModelSelectionRequest::Alias(_), Some(_) | None) => true,
         };
-        if !selection_matches {
+        let per_call_inherits =
+            model_settings.precedence().per_call() == ModelSettingsOverlay::inherit_all();
+        if !selection_matches || !per_call_inherits {
             return None;
         }
         Some(Self {
@@ -1123,6 +1125,41 @@ mod tests {
 
         let defaults = SessionConfigurationDefaults::complete_with_model_settings(
             ModelSelectionRequest::Direct(configured_selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        );
+
+        assert_eq!(defaults, None);
+    }
+
+    /// INV-003 / INV-051: a durable defaults epoch cannot retain a per-call
+    /// contribution that belongs only to one origin request.
+    #[test]
+    fn inv003_inv051_defaults_reject_per_call_settings_provenance() {
+        let selection = direct(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture level is supported");
+
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
             DangerousToolAutoApproval::Disabled,
             None,
             settings,

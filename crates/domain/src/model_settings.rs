@@ -897,16 +897,12 @@ impl SessionModelSettingsChanged {
         };
         let prior_precedence = prior_settings.precedence();
         let installed_precedence = installed_settings.precedence();
-        let copied_precedence = if model_changed {
-            ModelSettingsPrecedence::new(
-                prior_precedence.per_call(),
-                prior_precedence.session(),
-                installed_precedence.profile(),
-                installed_precedence.global_default(),
-            )
-        } else {
-            prior_precedence
-        };
+        let copied_precedence = ModelSettingsPrecedence::new(
+            prior_precedence.per_call(),
+            prior_precedence.session(),
+            installed_precedence.profile(),
+            installed_precedence.global_default(),
+        );
         let unadjusted_precedence = copied_precedence
             .with_session(caller_override.inheriting_from(prior_precedence.session()));
         let unadjusted = unadjusted_precedence.resolve();
@@ -1790,6 +1786,67 @@ mod tests {
             installed_version,
             ModelSelectionRequest::Direct(prior_selection),
             ModelSelectionRequest::Direct(installed_selection),
+            prior,
+            installed,
+            ModelSettingsOverlay::inherit_all(),
+            Vec::new(),
+        );
+
+        assert!(event.is_some());
+    }
+
+    /// S37 / INV-053: every successor epoch records its newly copied profile
+    /// and global layers even when its direct model is unchanged.
+    #[test]
+    fn s37_inv053_defaults_event_uses_same_model_successor_lower_layers() {
+        let selection = direct(1);
+        let supported = capabilities(
+            [ReasoningLevel::Low, ReasoningLevel::High],
+            FastModeSupport::Unsupported,
+            [],
+        );
+        let prior = supported
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::High),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the prior profile is supported");
+        let installed = supported
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the installed profile is supported");
+        let prior_version = SessionConfigurationDefaultsVersion::first();
+        let installed_version = prior_version
+            .checked_next()
+            .expect("the first version has a successor");
+
+        let event = SessionModelSettingsChanged::try_new(
+            session_id(1),
+            command_id(1),
+            prior_version,
+            installed_version,
+            ModelSelectionRequest::Direct(selection),
+            ModelSelectionRequest::Direct(selection),
             prior,
             installed,
             ModelSettingsOverlay::inherit_all(),
