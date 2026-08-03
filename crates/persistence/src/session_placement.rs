@@ -457,6 +457,22 @@ async fn authenticate_loaded_current(
             "session placement predecessor chain",
         ));
     }
+    let later_event_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM session_placement_event
+             WHERE session_id = $1 AND version > $2
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(version_to_numeric(current.version()))
+    .fetch_one(&mut *connection)
+    .await?;
+    if later_event_exists {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement head behind event history",
+        ));
+    }
     Ok(authenticated)
 }
 

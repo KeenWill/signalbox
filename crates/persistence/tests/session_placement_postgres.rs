@@ -40,6 +40,12 @@ const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const RESULT_SHAPE_CONSTRAINT: &str = "update_session_placement_command_result_shape";
 const ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED: u128 = 0x230;
 const ARBITRARY_RESERVED_IDENTITY_CREATION_COMMAND_ID_SEED: u128 = 0x130;
+const ARBITRARY_REJECTION_RECEIPT_SESSION_ID_SEED: u128 = 0x206;
+const ARBITRARY_REJECTION_RECEIPT_CREATION_COMMAND_ID_SEED: u128 = 0x110;
+const ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x111;
+const ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED: u128 = 0x227;
+const ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED: u128 = 0x12d;
+const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
 const ARBITRARY_PLACEMENT_UPDATE_SESSION_ID_SEED: u128 = 0x203;
 const ARBITRARY_PLACEMENT_UPDATE_CREATION_COMMAND_ID_SEED: u128 = 0x103;
 const ARBITRARY_PLACEMENT_UPDATE_COMMAND_ID_SEED: u128 = 0x104;
@@ -537,15 +543,15 @@ struct StatefulRejectionReceiptFixture {
 async fn stateful_rejection_receipt_fixture()
 -> Result<StatefulRejectionReceiptFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session = session(0x206);
+    let session = session(ARBITRARY_REJECTION_RECEIPT_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x110),
+            command(ARBITRARY_REJECTION_RECEIPT_CREATION_COMMAND_ID_SEED),
             session,
             SessionPlacement::pathless(),
         ))
         .await?;
-    let command = command(0x111);
+    let command = command(ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED);
     let update = UpdateSessionPlacement::new(
         command,
         session,
@@ -594,7 +600,7 @@ async fn s36_mismatch_receipt_schema_rejects_the_expected_version_as_current()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_mismatch_receipt_replay_rejects_the_expected_version_as_current()
+async fn s36_inv012_mismatch_receipt_replay_rejects_the_expected_version_as_current()
 -> Result<(), Box<dyn Error>> {
     let fixture = stateful_rejection_receipt_fixture().await?;
     sqlx::query(
@@ -656,8 +662,8 @@ async fn s36_exhaustion_receipt_schema_requires_the_maximum_version() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_exhaustion_receipt_replay_requires_the_maximum_version() -> Result<(), Box<dyn Error>>
-{
+async fn s36_inv012_exhaustion_receipt_replay_requires_the_maximum_version()
+-> Result<(), Box<dyn Error>> {
     let fixture = stateful_rejection_receipt_fixture().await?;
     sqlx::query(
         "ALTER TABLE update_session_placement_command
@@ -1115,6 +1121,53 @@ async fn s36_inv012_applied_update_replay_requires_the_event_to_reach_the_curren
         panic!("a lagging placement head fails applied replay with typed corruption")
     };
     assert_eq!(reason, "applied event not reached by placement head");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_public_placement_read_rejects_a_head_behind_event_history()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let session_id = session(ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED);
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation(
+            command(ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED),
+            session_id,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    let repository = SessionPlacementRepository::new(pool.clone());
+    repository
+        .handle(UpdateSessionPlacement::new(
+            command(ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED),
+            session_id,
+            SessionPlacementVersion::INITIAL,
+            scoped("projects.foo.current"),
+        ))
+        .await?;
+    sqlx::query("ALTER TABLE session_current_placement DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_current_placement SET current_version = 1
+          WHERE session_id = $1",
+    )
+    .bind(*session_id.as_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .load_current(session_id)
+        .await
+        .expect_err("a public placement read rejects a head behind append-only history");
+    let SessionPlacementRepositoryError::Corruption(reason) = error else {
+        panic!("a lagging placement head fails public read with typed corruption")
+    };
+    assert_eq!(reason, "session placement head behind event history");
 
     pool.close().await;
     drop(container);
