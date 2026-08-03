@@ -12,8 +12,8 @@ use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
     SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementPath,
-    SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
-    UpdateSessionPlacementResult,
+    SessionPlacementVersion, SessionReadScopeDecision, SessionReadScopeRefusal, TranscriptAncestry,
+    UpdateSessionPlacement, UpdateSessionPlacementResult,
 };
 use signalbox_expect_table::table;
 use signalbox_persistence::{
@@ -21,6 +21,9 @@ use signalbox_persistence::{
         CreateSessionCorruption, CreateSessionRepository, CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
+    process_read::{
+        ProcessReadCorruption, ProcessReadError, ProcessReadRepository, ProcessScopedTranscriptRead,
+    },
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     session_placement::{
         SessionPlacementRepository, SessionPlacementRepositoryError,
@@ -141,6 +144,205 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .await?;
     migrate(&pool).await?;
     Ok((container, pool))
+}
+
+struct ScopedReadFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    expected_refusal: SessionReadScopeRefusal,
+    requester: SessionId,
+    sibling: SessionId,
+    descendant: SessionId,
+    ancestor: SessionId,
+    disjoint: SessionId,
+    pathless: SessionId,
+    root_session: SessionId,
+}
+
+async fn scoped_read_fixture() -> Result<ScopedReadFixture, Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let requester = session(0x301);
+    let sibling = session(0x302);
+    let descendant = session(0x303);
+    let ancestor = session(0x304);
+    let disjoint = session(0x305);
+    let pathless = session(0x306);
+    let root_session = session(0x307);
+    let requester_placement = scoped("projects.foo.reviews.pr123");
+    let ancestor_placement = scoped("projects.foo.session");
+    let SessionReadScopeDecision::Refused(expected_refusal) =
+        requester_placement.decide_cross_session_read(&ancestor_placement)
+    else {
+        panic!("fixture ancestor is outside the requesting directory subtree")
+    };
+    let creation_repository = CreateSessionRepository::new(pool.clone(), credential_pin());
+    creation_repository
+        .handle(creation(
+            command(0x401),
+            requester,
+            requester_placement.clone(),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x402),
+            sibling,
+            scoped("projects.foo.reviews.pr456"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x403),
+            descendant,
+            scoped("projects.foo.reviews.pr456.followup"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(command(0x404), ancestor, ancestor_placement))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x405),
+            disjoint,
+            scoped("projects.bar.session"),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(
+            command(0x406),
+            pathless,
+            SessionPlacement::pathless(),
+        ))
+        .await?;
+    creation_repository
+        .handle(creation(command(0x407), root_session, root("operator")))
+        .await?;
+    Ok(ScopedReadFixture {
+        container,
+        pool,
+        expected_refusal,
+        requester,
+        sibling,
+        descendant,
+        ancestor,
+        disjoint,
+        pathless,
+        root_session,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_scoped_transcript_open_reads_a_sibling() -> Result<(), Box<dyn Error>> {
+    let fixture = scoped_read_fixture().await?;
+    let ProcessScopedTranscriptRead::Opened(reader) =
+        ProcessReadRepository::new(fixture.pool.clone())
+            .open_scoped_transcript(fixture.requester, fixture.sibling)
+            .await?
+    else {
+        panic!("a sibling in the requesting directory is readable")
+    };
+    assert_eq!(reader.session(), fixture.sibling);
+    drop(reader);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_scoped_transcript_open_reads_a_descendant() -> Result<(), Box<dyn Error>> {
+    let fixture = scoped_read_fixture().await?;
+    let ProcessScopedTranscriptRead::Opened(reader) =
+        ProcessReadRepository::new(fixture.pool.clone())
+            .open_scoped_transcript(fixture.requester, fixture.descendant)
+            .await?
+    else {
+        panic!("a descendant of the requesting directory is readable")
+    };
+    assert_eq!(reader.session(), fixture.descendant);
+    drop(reader);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_scoped_transcript_open_refuses_an_ancestor_with_typed_evidence()
+-> Result<(), Box<dyn Error>> {
+    let fixture = scoped_read_fixture().await?;
+    let ProcessScopedTranscriptRead::Refused(refusal) =
+        ProcessReadRepository::new(fixture.pool.clone())
+            .open_scoped_transcript(fixture.requester, fixture.ancestor)
+            .await?
+    else {
+        panic!("an ancestor of the requesting directory is refused")
+    };
+    assert_eq!(refusal, fixture.expected_refusal);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_scoped_transcript_open_refuses_a_disjoint_subtree_with_typed_evidence()
+-> Result<(), Box<dyn Error>> {
+    let fixture = scoped_read_fixture().await?;
+    let ProcessScopedTranscriptRead::Refused(refusal) =
+        ProcessReadRepository::new(fixture.pool.clone())
+            .open_scoped_transcript(fixture.requester, fixture.disjoint)
+            .await?
+    else {
+        panic!("a disjoint subtree is refused")
+    };
+    assert_eq!(refusal, fixture.expected_refusal);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_pathless_requester_keeps_legacy_transcript_reads() -> Result<(), Box<dyn Error>> {
+    let fixture = scoped_read_fixture().await?;
+    let ProcessScopedTranscriptRead::Opened(reader) =
+        ProcessReadRepository::new(fixture.pool.clone())
+            .open_scoped_transcript(fixture.pathless, fixture.disjoint)
+            .await?
+    else {
+        panic!("a pathless requester keeps legacy reads")
+    };
+    assert_eq!(reader.session(), fixture.disjoint);
+    drop(reader);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_root_placement_reads_every_transcript_globally() -> Result<(), Box<dyn Error>> {
+    let fixture = scoped_read_fixture().await?;
+    let ProcessScopedTranscriptRead::Opened(reader) =
+        ProcessReadRepository::new(fixture.pool.clone())
+            .open_scoped_transcript(fixture.root_session, fixture.pathless)
+            .await?
+    else {
+        panic!("root placement reads a pathless target globally")
+    };
+    assert_eq!(reader.session(), fixture.pathless);
+    drop(reader);
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
 }
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
@@ -1073,6 +1275,48 @@ async fn s36_placement_update_authenticates_every_placement_predecessor()
         panic!("a cross-wired predecessor fails update with typed corruption")
     };
     assert_eq!(reason, "session placement provenance receipt");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_scoped_transcript_open_rejects_a_corrupt_placement_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = corrupt_placement_predecessor_fixture().await?;
+    let error = ProcessReadRepository::new(fixture.pool.clone())
+        .open_scoped_transcript(fixture.session, fixture.session)
+        .await
+        .expect_err("scoped transcript open authenticates every placement predecessor");
+    let ProcessReadError::Corruption(ProcessReadCorruption::Inconsistent(reason)) = error else {
+        panic!("a corrupt placement predecessor fails scoped open with typed corruption")
+    };
+    assert_eq!(reason, "session placement");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_session_summary_rejects_a_corrupt_placement_predecessor() -> Result<(), Box<dyn Error>>
+{
+    let fixture = corrupt_placement_predecessor_fixture().await?;
+    let mut reader = ProcessReadRepository::new(fixture.pool.clone())
+        .open_session_summaries()
+        .await?;
+    let error = reader
+        .next_summary()
+        .await
+        .expect_err("session summary authenticates every placement predecessor");
+    let ProcessReadError::Corruption(ProcessReadCorruption::Inconsistent(reason)) = error else {
+        panic!("a corrupt placement predecessor fails summary read with typed corruption")
+    };
+    assert_eq!(reason, "session placement");
+    drop(reader);
 
     fixture.pool.close().await;
     drop(fixture.container);
