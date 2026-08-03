@@ -829,16 +829,6 @@ where
                             {
                                 RequestWait::Complete(Ok(())) => {
                                     output.tool_request_decided(tool_request_id, &decision)?;
-                                    if !refresh_approval_after_decision(
-                                        client,
-                                        output,
-                                        &mut interrupts,
-                                        &mut turns,
-                                        session_id,
-                                    )
-                                    .await? {
-                                        return Ok(());
-                                    }
                                 }
                                 RequestWait::Complete(Err(error)) => {
                                     report_request_error(output, error)?;
@@ -873,16 +863,6 @@ where
                             {
                                 RequestWait::Complete(Ok(())) => {
                                     output.tool_request_decided(tool_request_id, &decision)?;
-                                    if !refresh_approval_after_decision(
-                                        client,
-                                        output,
-                                        &mut interrupts,
-                                        &mut turns,
-                                        session_id,
-                                    )
-                                    .await? {
-                                        return Ok(());
-                                    }
                                 }
                                 RequestWait::Complete(Err(error)) => {
                                     report_request_error(output, error)?;

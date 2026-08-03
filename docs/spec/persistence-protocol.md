@@ -1053,9 +1053,10 @@ storage below plus the delegation-stack extension identified inline:
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
   `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
-  `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
-  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
-  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
+  `tool_batch_transition_outbox_event`, `tool_approval_decided_outbox_event`,
+  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
+  `turn_reconciliation_required_outbox_event`,
   `runner_state_transition_outbox_event`, and the delegation stack's
   `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
   deferred trigger requiring exactly one typed record per header. A

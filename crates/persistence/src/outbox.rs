@@ -49,6 +49,12 @@ type OutboxSlotRow = (
 
 type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
 
+#[derive(sqlx::FromRow)]
+struct ToolApprovalDecidedRow {
+    turn_id: Uuid,
+    request_id: Uuid,
+}
+
 /// One committed outbox event offered to the hub's single dispatcher consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
@@ -1054,7 +1060,7 @@ async fn load_event(
             }
         }
         TOOL_APPROVAL_DECIDED => {
-            let (turn, request): (Uuid, Uuid) = sqlx::query_as(
+            let row: ToolApprovalDecidedRow = sqlx::query_as(
                 "SELECT event.turn_id, event.request_id
                    FROM tool_approval_decided_outbox_event AS event
                    JOIN tool_request AS request
@@ -1071,7 +1077,7 @@ async fn load_event(
             .fetch_optional(&mut **transaction)
             .await?
             .ok_or(OutboxCorruption::MissingTypedRecord)?;
-            let request = ToolRequestId::from_uuid(request);
+            let request = ToolRequestId::from_uuid(row.request_id);
             let mut approvals =
                 match crate::tool_loop::load_approvals_by_request(transaction, &[request]).await {
                     Ok(approvals) => approvals,
@@ -1089,7 +1095,7 @@ async fn load_event(
                 return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
             };
             DispatchedOutboxEventKind::ToolApprovalDecided {
-                turn: TurnId::from_uuid(turn),
+                turn: TurnId::from_uuid(row.turn_id),
                 approval,
                 decider,
             }

@@ -16,6 +16,7 @@ use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
+use signalbox_domain::{ToolDecisionRationale, ToolDenialReason};
 use uuid::Uuid;
 
 /// The single admitted process-protocol version.
@@ -74,12 +75,6 @@ pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
 /// Maximum UTF-8 bytes in one transcript content fragment.
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
-
-/// Maximum UTF-8 bytes in one delegate approval rationale.
-pub const MAX_TOOL_DECISION_RATIONALE_BYTES: usize = 4_096;
-
-/// Maximum UTF-8 bytes in one user-authored tool denial reason.
-pub const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1_024;
 
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
@@ -1882,39 +1877,19 @@ fn validate_tool_approval_event_shape(
             },
             ToolApprovalEventDecider::User { .. },
             None,
-        ) => {
-            !reason.is_empty()
-                && reason.len() <= MAX_TOOL_DENIAL_REASON_BYTES
-                && !has_surrounding_posix_whitespace(reason)
-                && !reason.chars().any(char::is_control)
-        }
+        ) => ToolDenialReason::try_new(reason.clone()).is_ok(),
         (
             ToolApprovalEventDecision::Approve {}
             | ToolApprovalEventDecision::Deny { reason: None },
             ToolApprovalEventDecider::Delegate { .. },
             Some(rationale),
-        ) => {
-            !rationale.is_empty()
-                && rationale.len() <= MAX_TOOL_DECISION_RATIONALE_BYTES
-                && !rationale.contains('\0')
-        }
+        ) => ToolDecisionRationale::try_new(rationale.clone()).is_ok(),
         _ => false,
     };
     if !shape_matches {
         return Err(FrameValidationError::ToolApprovalShape);
     }
     Ok(())
-}
-
-fn has_surrounding_posix_whitespace(value: &str) -> bool {
-    value
-        .as_bytes()
-        .first()
-        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
-        || value
-            .as_bytes()
-            .last()
-            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
 }
 
 /// Validates the wire restatement of the derived display-title shape:
@@ -5714,12 +5689,12 @@ mod tests {
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-        MAX_TOOL_DECISION_RATIONALE_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-        ModelSelection, PROTOCOL_VERSION, ProtocolVersion, RejectionDetail, RequestId,
-        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
-        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
+        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
+        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
+        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -5730,6 +5705,7 @@ mod tests {
         TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance, decode_client_line,
         decode_server_line, encode_client_line, encode_server_line,
     };
+    use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
 
     fn command(value: u128) -> Result<CommandId, Box<dyn std::error::Error>> {
@@ -9096,7 +9072,8 @@ mod tests {
     #[test]
     fn tool_approval_delegate_rationale_rejects_oversize() {
         const RATIONALE_FILLER: &str = "x";
-        let oversized_rationale = RATIONALE_FILLER.repeat(MAX_TOOL_DECISION_RATIONALE_BYTES + 1);
+        let oversized_rationale =
+            RATIONALE_FILLER.repeat(ToolDecisionRationale::MAX_UTF8_BYTES + 1);
         let oversized_frame = [
             r#"{"version":1,"request_id":"10","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""#,
             oversized_rationale.as_str(),
