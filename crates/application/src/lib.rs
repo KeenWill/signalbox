@@ -23,6 +23,7 @@ mod submit_input;
 mod tool_dispatch_gate;
 mod tool_loop;
 mod tool_loop_ports;
+mod update_session_placement;
 
 pub use approval_judge::ApprovalJudgeAuthorization;
 pub use conversation_import::{
@@ -134,4 +135,8 @@ pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
+pub use update_session_placement::{
+    UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
+    UpdateSessionPlacementTransaction,
 };

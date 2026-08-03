@@ -40,8 +40,9 @@ export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
 verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
 pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag. The runner
+#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
+are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
+lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
@@ -525,10 +526,16 @@ immutable imported conversations. It exposes only persisted visible semantic
 content in tool results: source-attested imported text remains text, while
 unattested, non-text, thinking, redacted-thinking, document, and absent-content
 entries are content-silent typed markers. Native reads stream from the
-repeatable-read projection. Imported reads currently materialize the complete
-immutable aggregate, including its persisted raw source records, before the
-adapter projects normalized visible entries and enforces the tool page's entry
-and byte bounds; raw source records are never returned in the tool result.
+repeatable-read projection. A selected native read carries the trusted invoking
+session separately from the model-selected target. The adapter loads both
+current placement epochs before opening the transcript in that same snapshot; an
+out-of-directory target returns typed refusal evidence naming the requesting
+directory and `outside_requesting_directory_subtree`, never an empty page.
+Pathless requesters retain the pre-placement behavior and a loudly acknowledged
+root placement reads every target. Imported reads currently materialize the
+complete immutable aggregate, including its persisted raw source records, before
+the adapter projects normalized visible entries and enforces the tool page's
+entry and byte bounds; raw source records are never returned in the tool result.
 
 Each `[[models]]` entry defines one direct selection:
 
