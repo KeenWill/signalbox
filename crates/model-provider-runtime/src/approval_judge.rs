@@ -163,10 +163,8 @@ where
                 .runtime
                 .execute(prepared, &mut observations, CancellationSignal::never())
                 .await;
+            require_terminal_correlation(report.correlation, request.call)?;
             let usage = terminal_usage(&report.evidence);
-            if report.correlation != request.call {
-                return Err(ApprovalJudgeModelError::CorrelationMismatch(usage));
-            }
             require_observation_correlations(&observations, request.call, usage)?;
             for reported in observations.iter().filter_map(|observation| {
                 let signalbox_model_runtime::ObservationFact::ProviderModelReported(reported) =
@@ -305,6 +303,17 @@ fn terminal_usage(evidence: &TerminalEvidence) -> TokenUsage {
             TokenUsage::default()
         }
     }
+}
+
+fn require_terminal_correlation(
+    observed: ModelCallId,
+    expected: ModelCallId,
+) -> Result<(), ApprovalJudgeModelError> {
+    (observed == expected)
+        .then_some(())
+        .ok_or(ApprovalJudgeModelError::CorrelationMismatch(
+            TokenUsage::default(),
+        ))
 }
 
 fn require_observation_correlations(
@@ -565,5 +574,16 @@ mod tests {
             error,
             ApprovalJudgeModelError::CorrelationMismatch(reported_usage())
         );
+    }
+
+    #[test]
+    fn mismatched_terminal_correlation_does_not_attribute_usage() {
+        let error = super::require_terminal_correlation(
+            ModelCallId::from_uuid(Uuid::from_u128(99)),
+            request().call,
+        )
+        .expect_err("an unrelated terminal report is rejected before its evidence is read");
+
+        assert_eq!(error.usage(), TokenUsage::default());
     }
 }
