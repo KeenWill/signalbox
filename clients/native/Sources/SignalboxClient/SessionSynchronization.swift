@@ -1316,11 +1316,10 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .turnActivated, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused,
-      .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired,
-      .unknown:
+    case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+      .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
-    case .sessionCreated, .inputAccepted, .modelCallTransition:
+    case .sessionCreated, .inputAccepted, .modelCallTransition, .turnActivated:
       return false
     }
   }

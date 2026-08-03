@@ -1210,22 +1210,6 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
-  func testTurnActivationSideProjectionIncludesModelIdentityMarker() throws {
-    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
-    let trigger = try ProcessProjectionFixture.turnActivatedTrigger()
-    var projector = SignalboxProcessTranscriptProjector()
-
-    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    let record = try XCTUnwrap(projection.records.first)
-    let event = try ProcessProjectionFixture.modelIdentityEvent(in: record)
-
-    XCTAssertEqual(projection.records.count, ProcessProjectionFixture.singleRecordCount)
-    XCTAssertEqual(
-      event.defaultsVersion.rawValue,
-      ProcessProjectionFixture.activationModelIdentityDefaultsVersion
-    )
-  }
-
   func testCompletionSideProjectionExcludesEarlierModelIdentityMarker() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -9509,18 +9493,6 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureEvent
     }
     return event
-  }
-
-  static func turnActivatedTrigger() throws -> SignalboxFollowedSessionEvent {
-    try followedEvent(
-      """
-      {
-        "type":"turn_activated",
-        "turn_id":"\(ProcessDriverFixture.turn)",
-        "current_attempt_id":"\(ProcessDriverFixture.attempt)"
-      }
-      """
-    )
   }
 
   static func contextCompactedTrigger() throws -> SignalboxFollowedSessionEvent {

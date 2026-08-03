@@ -1105,12 +1105,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     nativeSourceSessionID: SignalboxCanonicalUUID,
     terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
   ) -> Bool {
+    if case .modelIdentityChanged = message.entry {
+      return false
+    }
     switch trigger {
-    case .turnActivated(let turnID, _):
-      guard case .modelIdentityChanged(let entryTurnID, _, _) = message.entry else {
-        return false
-      }
-      return entryTurnID == turnID
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
@@ -1149,7 +1147,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
-    case .sessionCreated, .inputAccepted, .modelCallTransition,
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
