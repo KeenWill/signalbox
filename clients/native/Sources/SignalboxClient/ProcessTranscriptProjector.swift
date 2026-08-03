@@ -1255,46 +1255,41 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for trigger: SignalboxProcessSessionEvent
   ) -> Set<SignalboxCanonicalUUID> {
     let turnID: SignalboxCanonicalUUID
-    let requiredAttemptID: SignalboxCanonicalUUID?
-    var eligibleRecords: ArraySlice<SignalboxSynchronizationSnapshot.Record> = []
     switch trigger {
     case .turnFailed(let triggerTurnID, _, _):
       turnID = triggerTurnID
-      requiredAttemptID = nil
     case .turnCancelled(let triggerTurnID, _, _):
       turnID = triggerTurnID
-      requiredAttemptID = nil
     case .turnToolReconciliationRequired(
       let triggerTurnID,
       let toolAttemptID,
-      _
+      let terminalFrontierID
     ):
-      turnID = triggerTurnID
-      requiredAttemptID = toolAttemptID
-      eligibleRecords = snapshot.records[...]
+      return reconciliationResultSuffixEntryIDs(
+        in: snapshot,
+        turnID: triggerTurnID,
+        requiredAttemptID: toolAttemptID,
+        terminalFrontierID: terminalFrontierID
+      )
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .contextCompacted, .turnCompleted, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return []
     }
-    if requiredAttemptID == nil {
-      guard let markerIndex = snapshot.records.firstIndex(where: { record in
-        guard case .entry(let message) = record else {
-          return false
-        }
-        return isExactTerminalMarker(
-          message,
-          for: trigger,
-          nativeSourceSessionID: snapshot.sessionID
-        )
-      }) else {
-        return []
+    guard let markerIndex = snapshot.records.firstIndex(where: { record in
+      guard case .entry(let message) = record else {
+        return false
       }
-      eligibleRecords = snapshot.records[..<markerIndex]
+      return isExactTerminalMarker(
+        message,
+        for: trigger,
+        nativeSourceSessionID: snapshot.sessionID
+      )
+    }) else {
+      return []
     }
     var entryIDs: Set<SignalboxCanonicalUUID> = []
-    var includesRequiredAttempt = requiredAttemptID == nil
-    for record in eligibleRecords.reversed() {
+    for record in snapshot.records[..<markerIndex].reversed() {
       guard case .entry(let message) = record,
         message.sourceSessionID == snapshot.sessionID,
         toolEntry(message, belongsTo: turnID, modelCallID: nil)
@@ -1302,13 +1297,86 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         break
       }
       entryIDs.insert(message.entryID)
-      if case .toolExecutionResult(_, let attemptID, _) = message.entry,
-        attemptID == requiredAttemptID
-      {
-        includesRequiredAttempt = true
-      }
     }
-    return includesRequiredAttempt ? entryIDs : []
+    return entryIDs
+  }
+
+  private func reconciliationResultSuffixEntryIDs(
+    in snapshot: SignalboxSynchronizationSnapshot,
+    turnID: SignalboxCanonicalUUID,
+    requiredAttemptID: SignalboxCanonicalUUID,
+    terminalFrontierID: SignalboxCanonicalUUID
+  ) -> Set<SignalboxCanonicalUUID> {
+    let frontierMatches = snapshot.records.contains { record in
+      guard case .turn(let turn) = record,
+        turn.turnID == turnID,
+        case .toolReconciliationRequired(
+          let snapshotFrontierID,
+          _,
+          let snapshotToolAttemptID
+        ) = turn.state
+      else {
+        return false
+      }
+      return snapshotFrontierID == terminalFrontierID
+        && snapshotToolAttemptID == requiredAttemptID
+    }
+    guard frontierMatches,
+      let anchorIndex = snapshot.records.firstIndex(where: { record in
+        guard case .entry(let message) = record,
+          message.sourceSessionID == snapshot.sessionID,
+          case .toolExecutionResult(_, let attemptID, _) = message.entry,
+          attemptID == requiredAttemptID
+        else {
+          return false
+        }
+        return toolEntry(message, belongsTo: turnID, modelCallID: nil)
+      })
+    else {
+      return []
+    }
+
+    var firstIndex = anchorIndex
+    while firstIndex > snapshot.records.startIndex {
+      let precedingIndex = snapshot.records.index(before: firstIndex)
+      guard terminalToolResultEntryID(
+        for: snapshot.records[precedingIndex],
+        in: snapshot,
+        turnID: turnID
+      ) != nil else {
+        break
+      }
+      firstIndex = precedingIndex
+    }
+
+    var endIndex = snapshot.records.index(after: anchorIndex)
+    while endIndex < snapshot.records.endIndex,
+      terminalToolResultEntryID(
+        for: snapshot.records[endIndex],
+        in: snapshot,
+        turnID: turnID
+      ) != nil
+    {
+      endIndex = snapshot.records.index(after: endIndex)
+    }
+
+    return Set(snapshot.records[firstIndex..<endIndex].compactMap {
+      terminalToolResultEntryID(for: $0, in: snapshot, turnID: turnID)
+    })
+  }
+
+  private func terminalToolResultEntryID(
+    for record: SignalboxSynchronizationSnapshot.Record,
+    in snapshot: SignalboxSynchronizationSnapshot,
+    turnID: SignalboxCanonicalUUID
+  ) -> SignalboxCanonicalUUID? {
+    guard case .entry(let message) = record,
+      message.sourceSessionID == snapshot.sessionID,
+      toolEntry(message, belongsTo: turnID, modelCallID: nil)
+    else {
+      return nil
+    }
+    return message.entryID
   }
 
   private func isExactTerminalMarker(

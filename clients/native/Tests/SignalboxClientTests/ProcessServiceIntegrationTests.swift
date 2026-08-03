@@ -506,6 +506,21 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolReconciliationSideProjectionFindsSuffixBeforeLaterTurnEntry() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithReconciliationResultSuffixAndLaterTurnEntry()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.reconciliationSuffixToolNames
+    )
+  }
+
   func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -6018,6 +6033,10 @@ private enum ProcessProjectionFixture {
   static let reconciliationSuffixResultEntry = "77777777-3333-4333-8333-333333333333"
   static let reconciliationSuffixToolName = "inspect_related_fixture"
   static let reconciliationSuffixOutput = "Related fixture inspected."
+  static let laterTurnToolEntry = "66666666-3333-4333-8333-333333333333"
+  static let laterTurnToolRequest = "55555555-3333-4333-8333-333333333333"
+  static let laterTurnModelCall = "44444444-3333-4333-8333-333333333333"
+  static let laterTurnToolName = "inspect_later_fixture"
   static let reconciliationSuffixToolNames = [
     proposedToolName, reconciliationSuffixToolName,
   ]
@@ -9755,6 +9774,39 @@ private enum ProcessProjectionFixture {
   static func snapshotWithReconciliationResultSuffix() throws
     -> SignalboxSynchronizationSnapshot
   {
+    try reconciliationResultSnapshot(trailingEntries: [], entryCount: 4)
+  }
+
+  static func snapshotWithReconciliationResultSuffixAndLaterTurnEntry() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try reconciliationResultSnapshot(
+      trailingEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"4",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(laterTurnToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(crossTurn)",
+            "model_call_id":"\(laterTurnModelCall)",
+            "tool_request_id":"\(laterTurnToolRequest)",
+            "tool_name":"\(laterTurnToolName)",
+            "arguments":"{}"
+          }
+        }
+        """
+      ],
+      entryCount: 5
+    )
+  }
+
+  private static func reconciliationResultSnapshot(
+    trailingEntries: [String],
+    entryCount: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -9764,7 +9816,41 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
-        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"tool_reconciliation_required",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_tool_attempt_id":"\(reconciliationAttempt)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_call_usage",
+          "model_call_index":"0",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "model_call_id":"\(ProcessDriverFixture.modelCall)",
+          "usage_provenance":"reported",
+          "usage":{
+            "input_tokens":null,
+            "output_tokens":null,
+            "cache_creation_input_tokens":null,
+            "cache_read_input_tokens":null
+          },
+          "cost":null
+        }
+        """,
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
         toolRequestMessage(index: 0),
         """
         {
@@ -9797,13 +9883,14 @@ private enum ProcessProjectionFixture {
           }
         }
         """,
+      ] + trailingEntries + [
         """
         {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
-          "turn_count":"0",
-          "entry_count":"4"
+          "turn_count":"1",
+          "entry_count":"\(entryCount)"
         }
         """,
       ]
