@@ -158,6 +158,10 @@ selection_id = "00000000-0000-0000-0000-000000000001"
 [[aliases]]
 alias_id = "7fde05bc-b4c3-44f7-8a87-748814c80191"
 selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
+selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
 
 fn session_template_configuration(
