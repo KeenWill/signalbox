@@ -78,14 +78,14 @@ with no events does not advance the cursor; an unchanged candidate carrying
 events is rejected.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
-per-pull-request state, branch heads, and completed branch-workflow identities,
-producing only the closed version-one event vocabulary below in deterministic
-order. The cursor retains provider identities for completed check suites, check
-runs, reviews, threads, and branch-workflow runs, so a provider fact retained in
-the consecutive comparison baseline is not re-emitted. Rules receive only
-events: they cannot inspect normalized snapshots or rerun the differ. Why:
-transport independence requires both polling and a later authenticated webhook
-receiver to feed the same durable facts.
+per-pull-request state, branch heads, and completed branch-workflow identities
+(`run_id`, `run_attempt`), producing only the closed version-one event
+vocabulary below in deterministic order. The cursor retains provider identities
+for completed check suites, check runs, reviews, threads, and branch-workflow
+runs, so a provider fact retained in the consecutive comparison baseline is not
+re-emitted. Rules receive only events: they cannot inspect normalized snapshots
+or rerun the differ. Why: transport independence requires both polling and a
+later authenticated webhook receiver to feed the same durable facts.
 
 **Foundation contract.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and

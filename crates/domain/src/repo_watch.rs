@@ -347,6 +347,20 @@ impl GitHubObjectId {
     }
 }
 
+/// One positive GitHub Actions attempt number within a workflow run.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchWorkflowRunAttempt(NonZeroU64);
+
+impl RepoWatchWorkflowRunAttempt {
+    pub const fn new(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// One bounded, anchored, linear-time regular expression.
 #[derive(Clone)]
 pub struct RepoWatchPattern {

@@ -6,8 +6,8 @@ use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId,
     MergeableState, PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent,
     ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventConstructionError,
-    RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug, ReviewState, ReviewThreadId,
-    WorkflowName,
+    RepoWatchEventId, RepoWatchEventKindV1, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -313,6 +313,7 @@ const fn reaction_subject_sort_key(subject: ReactionSubject) -> (u8, u64) {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchWorkflowRunObservation {
     id: GitHubObjectId,
+    attempt: RepoWatchWorkflowRunAttempt,
     branch: BranchName,
     workflow: WorkflowName,
     conclusion: CheckConclusion,
@@ -321,12 +322,14 @@ pub struct RepoWatchWorkflowRunObservation {
 impl RepoWatchWorkflowRunObservation {
     pub const fn new(
         id: GitHubObjectId,
+        attempt: RepoWatchWorkflowRunAttempt,
         branch: BranchName,
         workflow: WorkflowName,
         conclusion: CheckConclusion,
     ) -> Self {
         Self {
             id,
+            attempt,
             branch,
             workflow,
             conclusion,
@@ -335,6 +338,10 @@ impl RepoWatchWorkflowRunObservation {
 
     pub const fn id(&self) -> GitHubObjectId {
         self.id
+    }
+
+    pub const fn attempt(&self) -> RepoWatchWorkflowRunAttempt {
+        self.attempt
     }
 
     pub const fn branch(&self) -> &BranchName {
@@ -945,6 +952,7 @@ fn derive_workflow_events(
             prior.branch() == run.branch()
                 && prior.workflow() == run.workflow()
                 && prior.id() == run.id()
+                && prior.attempt() == run.attempt()
         });
         if !already_observed {
             events.push(RepoWatchEvent::branch_workflow(
@@ -1212,8 +1220,19 @@ mod tests {
         id: u64,
         conclusion: CheckConclusion,
     ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
+        workflow_run_attempt(id, 1, conclusion)
+    }
+
+    fn workflow_run_attempt(
+        id: u64,
+        attempt: u64,
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
         Ok(RepoWatchWorkflowRunObservation::new(
             object_id(id),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(attempt).expect("fixture workflow attempt is positive"),
+            ),
             BranchName::try_new(String::from(BASE_BRANCH))?,
             WorkflowName::try_new(String::from(WORKFLOW_NAME))?,
             conclusion,
@@ -1700,6 +1719,40 @@ mod tests {
             Vec::new(),
         )?;
         let current_run = workflow_run(NEXT_WORKFLOW_RUN_ID, CheckConclusion::Failure)?;
+        let current = observation(
+            Vec::new(),
+            vec![current_run.clone()],
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+                branch: current_run.branch().clone(),
+                workflow: current_run.workflow().clone(),
+                conclusion: current_run.conclusion(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn new_workflow_attempt_emits_when_run_identity_is_unchanged() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            vec![workflow_run_attempt(
+                WORKFLOW_RUN_ID,
+                1,
+                CheckConclusion::Failure,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current_run = workflow_run_attempt(WORKFLOW_RUN_ID, 2, CheckConclusion::Success)?;
         let current = observation(
             Vec::new(),
             vec![current_run.clone()],

@@ -21,7 +21,7 @@ use signalbox_domain::{
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
     ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchTextError,
-    RepositorySlug, ReviewThreadId, WorkflowName,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewThreadId, WorkflowName,
 };
 use sqlx::{
     PgPool, Postgres, Transaction,
@@ -694,6 +694,7 @@ struct ReactionRecord {
 #[serde(deny_unknown_fields)]
 struct WorkflowRunRecord {
     id: u64,
+    attempt: u64,
     branch: String,
     workflow: String,
     conclusion: String,
@@ -737,6 +738,7 @@ fn repository_state_record(state: &RepoWatchRepositoryState) -> RepositoryStateR
             .iter()
             .map(|run| WorkflowRunRecord {
                 id: run.id().get(),
+                attempt: run.attempt().get(),
                 branch: run.branch().as_str().to_owned(),
                 workflow: run.workflow().as_str().to_owned(),
                 conclusion: repo_watch_check_conclusion_to_str(run.conclusion()).to_owned(),
@@ -861,6 +863,11 @@ fn decode_repository_state(
         .map(|run| {
             Ok(RepoWatchWorkflowRunObservation::new(
                 github_object_id(run.id, "workflow_run.id")?,
+                NonZeroU64::new(run.attempt)
+                    .map(RepoWatchWorkflowRunAttempt::new)
+                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                        "workflow_run.attempt",
+                    ))?,
                 BranchName::try_new(run.branch)?,
                 WorkflowName::try_new(run.workflow)?,
                 repo_watch_check_conclusion_from_str(&run.conclusion).ok_or(
@@ -1663,7 +1670,12 @@ fn event_row_matches_encoded(row: &EventRow, encoded: &EncodedEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, num::NonZeroU16};
+    use std::{
+        error::Error,
+        num::{NonZeroU16, NonZeroU64},
+    };
+
+    use signalbox_domain::CheckConclusion;
 
     use super::*;
 
@@ -1678,6 +1690,40 @@ mod tests {
 
         assert_eq!(admitted?.get(), 100);
         assert_eq!(rejected, Err(RepoWatchPageSizeError));
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_round_trip_retains_workflow_run_attempt_identity() -> Result<(), Box<dyn Error>> {
+        let attempt = RepoWatchWorkflowRunAttempt::new(
+            NonZeroU64::new(2).ok_or("fixture workflow attempt must be positive")?,
+        );
+        let workflow_run = RepoWatchWorkflowRunObservation::new(
+            GitHubObjectId::new(
+                NonZeroU64::new(41).ok_or("fixture workflow run must be positive")?,
+            ),
+            attempt,
+            BranchName::try_new(String::from("main"))?,
+            WorkflowName::try_new(String::from("continuous-integration"))?,
+            CheckConclusion::Failure,
+        );
+        let candidate = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: Vec::new(),
+                workflow_runs: vec![workflow_run],
+                branch_heads: Vec::new(),
+            })?,
+        ));
+
+        let encoded = encode_cursor_candidate(&candidate)?;
+        let decoded = decode_cursor_candidate(encoded)?;
+
+        assert_eq!(decoded, candidate);
+        assert_eq!(
+            decoded.observation().state().workflow_runs()[0].attempt(),
+            attempt
+        );
         Ok(())
     }
 }

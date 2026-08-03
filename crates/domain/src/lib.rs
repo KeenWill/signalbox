@@ -161,8 +161,8 @@ pub use repo_watch::{
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
     RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleValidationError,
     RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
-    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug, ReviewState,
-    ReviewThreadId, WorkflowName,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,

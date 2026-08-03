@@ -5771,11 +5771,12 @@ pub struct RepoWatchWorkflowRunObservation { /* private */ }
 impl RepoWatchWorkflowRunObservation {
     pub const fn new(
         id: GitHubObjectId,
+        attempt: RepoWatchWorkflowRunAttempt,
         branch: BranchName,
         workflow: WorkflowName,
         conclusion: CheckConclusion,
     ) -> Self;
-    // accessors: id(), branch(), workflow(), conclusion()
+    // accessors: id(), attempt(), branch(), workflow(), conclusion()
 }
 
 pub struct RepoWatchBranchHead { /* private */ }
@@ -7762,6 +7763,12 @@ impl GitHubObjectId {
     pub const fn get(self) -> u64;
 }
 
+pub struct RepoWatchWorkflowRunAttempt(/* private NonZeroU64 */);
+impl RepoWatchWorkflowRunAttempt {
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+
 pub struct RepoWatchPattern(/* private String */);
 impl RepoWatchPattern {
     pub const MAX_UTF8_BYTES: usize;
@@ -8870,7 +8877,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 4                    |
 | domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
-| domain: repo_watch                                 | 47                   |
+| domain: repo_watch                                 | 48                   |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
@@ -8891,7 +8898,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **710 (+7 free fn)** |
+| **signalbox-domain total**                         | **711 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
