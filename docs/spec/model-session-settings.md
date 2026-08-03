@@ -83,8 +83,10 @@ Every direct model definition carries one first-class capability record:
 
 An empty reasoning set means the model exposes no reasoning setting. An empty
 service-tier set means every explicit service-tier value is unsupported. Sets
-are duplicate-free and use domain order. A mapped fast target is internal
-authorization evidence and is not another client-selectable model.
+are duplicate-free and use domain order. A mapped fast target is distinct from
+the selected target, is internal authorization evidence, and is not another
+client-selectable model; same-target request controls use the same-target
+capability variant.
 
 The catalog is declared per configured model. Signalbox does not infer support
 from model-name prefixes and does not run a provider CLI during request
