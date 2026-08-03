@@ -157,7 +157,7 @@ fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprova
 
 fn authorized_approval_judge(outcome: AuthorizeApprovalJudgeOutcome) -> AuthorizedApprovalJudge {
     match outcome {
-        AuthorizeApprovalJudgeOutcome::Authorized(authorization) => authorization,
+        AuthorizeApprovalJudgeOutcome::Authorized(authorization) => *authorization,
         AuthorizeApprovalJudgeOutcome::NoSend => {
             panic!("the fresh judge authorization permits one send")
         }

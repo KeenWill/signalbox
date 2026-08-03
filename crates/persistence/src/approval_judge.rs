@@ -105,7 +105,7 @@ pub enum AuthorizeApprovalJudgeOutcome {
     /// The call was already authorized or terminal; no provider send may begin.
     NoSend,
     /// This transaction committed the exact `Prepared -> InFlight` transition.
-    Authorized(AuthorizedApprovalJudge),
+    Authorized(Box<AuthorizedApprovalJudge>),
 }
 
 /// Result of reconciling the active delegated wait with its dedicated call.
@@ -318,11 +318,11 @@ impl PostgresApprovalJudgeRepository {
             .commit()
             .await
             .map_err(ApprovalJudgeRepositoryError::commit)?;
-        Ok(AuthorizeApprovalJudgeOutcome::Authorized(
+        Ok(AuthorizeApprovalJudgeOutcome::Authorized(Box::new(
             AuthorizedApprovalJudge {
                 prepared: prepared.clone(),
             },
-        ))
+        )))
     }
 
     /// Atomically records a completed recommendation and any decision effect.
