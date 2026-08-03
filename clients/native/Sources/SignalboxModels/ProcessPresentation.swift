@@ -742,13 +742,16 @@ public enum SignalboxProcessToolStatus: String, Codable, Equatable, Sendable {
 public struct SignalboxProcessToolRequestPosition: Codable, Equatable, Sendable {
   public let turnID: SignalboxCanonicalUUID
   public let entryIndex: SignalboxCanonicalUInt64
+  public let toolName: String
 
   public init(
     turnID: SignalboxCanonicalUUID,
-    entryIndex: SignalboxCanonicalUInt64
+    entryIndex: SignalboxCanonicalUInt64,
+    toolName: String
   ) {
     self.turnID = turnID
     self.entryIndex = entryIndex
+    self.toolName = toolName
   }
 }
 

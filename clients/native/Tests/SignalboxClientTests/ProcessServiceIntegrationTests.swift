@@ -421,6 +421,33 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertTrue(ProcessProjectionFixture.toolNames(in: projection).isEmpty)
   }
 
+  func testFailedTurnSideProjectionIncludesContiguousTerminalResult() throws {
+    let seed = try ProcessProjectionFixture.snapshotWithProposedTool()
+    let snapshot = try ProcessProjectionFixture.snapshotWithContiguousToolResultAndFailure()
+    let trigger = try ProcessProjectionFixture.failedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(seed)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolNames(in: projection),
+      ProcessProjectionFixture.terminalFailureToolNames
+    )
+  }
+
+  func testFailedTurnSideProjectionExcludesSeparatedToolResult() throws {
+    let seed = try ProcessProjectionFixture.snapshotWithProposedTool()
+    let snapshot = try ProcessProjectionFixture.snapshotWithSeparatedToolResultAndFailure()
+    let trigger = try ProcessProjectionFixture.failedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(seed)
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(ProcessProjectionFixture.toolNames(in: projection).isEmpty)
+  }
+
   func testSideProjectionRejectsReconciliationResultFromAnotherTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCrossTurnReconciliationResult()
     let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
@@ -724,7 +751,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadOutputPresentation)
   }
 
-  func testPlanCreateUsesTypedFaithfulTimelineSummary() throws {
+  func testPlanCreateUsesTypedArgumentsAndRawOutput() throws {
     let record = ProcessProjectionFixture.planCreateToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
@@ -734,7 +761,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       tool.compactArgumentSummary,
       ProcessProjectionFixture.planCreateArgumentPresentation
     )
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateOutputPresentation)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateRawOutputPreview)
   }
 
   func testPlanWriteWithMismatchedRequestProvenanceKeepsRawOutputVisible() throws {
@@ -761,6 +788,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateRawOutputPreview)
   }
 
+  func testPlanWriteWithMismatchedIssuingAttemptKeepsRawOutputVisible() throws {
+    let record = ProcessProjectionFixture.planCreateWithMismatchedIssuingAttemptToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.mismatchedIssuingAttemptPlanCreateOutputPreview
+    )
+  }
+
   func testDeniedPlanWriteKeepsResultShapedOutputRaw() throws {
     let record = ProcessProjectionFixture.deniedPlanCreateToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -779,7 +817,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadRawOutputPreview)
   }
 
-  func testPlanRevisionUsesTypedFaithfulTimelineSummary() throws {
+  func testPlanRevisionUsesTypedArgumentsAndRawOutput() throws {
     let record = ProcessProjectionFixture.planReviseToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
@@ -789,10 +827,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       tool.compactArgumentSummary,
       ProcessProjectionFixture.planReviseArgumentPresentation
     )
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReviseOutputPresentation)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReviseRawOutputPreview)
   }
 
-  func testPlanStatusUsesTypedFaithfulTimelineSummary() throws {
+  func testPlanStatusUsesTypedArgumentsAndRawOutput() throws {
     let record = ProcessProjectionFixture.planStatusToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
@@ -802,10 +840,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       tool.compactArgumentSummary,
       ProcessProjectionFixture.planStatusArgumentPresentation
     )
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planStatusOutputPresentation)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planStatusRawOutputPreview)
   }
 
-  func testPlanDependencyUsesTypedFaithfulTimelineSummary() throws {
+  func testPlanDependencyUsesTypedArgumentsAndRawOutput() throws {
     let record = ProcessProjectionFixture.planDependencyToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
@@ -815,7 +853,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       tool.compactArgumentSummary,
       ProcessProjectionFixture.planDependencyArgumentPresentation
     )
-    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planDependencyOutputPresentation)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planDependencyRawOutputPreview)
   }
 
   func testMalformedPlanWriteKeepsRawArgumentsVisible() throws {
@@ -919,6 +957,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
   func testPlanReadWithLaterSameTurnHistoryKeepsRawEvidenceVisible() throws {
     let record = ProcessProjectionFixture.laterSameTurnPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.planReadRawOutputPreview
+    )
+  }
+
+  func testPlanReadWithNonPlanHistoryProvenanceKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.nonPlanSameTurnHistoryToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
 
@@ -3590,6 +3639,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       MockProcessProtocolFixtures.activeTurnID
     )
     XCTAssertEqual(
+      tool.sessionToolRequestPositions?[
+        try SignalboxCanonicalUUID(
+          validating: MockProcessProtocolFixtures.completedToolRequestID
+        )
+      ]?.toolName,
+      MockProcessProtocolFixtures.completedToolName
+    )
+    XCTAssertEqual(
       tool.toolAttemptID?.rawValue,
       MockProcessProtocolFixtures.completedToolAttemptID
     )
@@ -5658,6 +5715,7 @@ private enum ProcessProjectionFixture {
   static let userText = "fixture materialized user input"
   static let proposedAssistantText = "I will inspect the fixture before using the tool."
   static let proposedToolName = "inspect_fixture"
+  static let terminalFailureToolNames = [proposedToolName]
   static let proposedAssistantEntry = "99999999-9999-4999-8999-999999999999"
   static let modelIdentityEntry = "99999999-1111-4111-8111-111111111111"
   static let proposedToolEntry = "aaaaaaaa-1111-4111-8111-111111111111"
@@ -5677,6 +5735,7 @@ private enum ProcessProjectionFixture {
   static let closedToolID = "cccccccc-1111-4111-8111-111111111111"
   static let closedToolName = "closed_fixture_tool"
   static let importedConversation = "eeeeeeee-4444-4444-8444-444444444444"
+  static let importedAssistantSpeaker = #"{"type":"attested","speaker":"assistant"}"#
   static let importedSourceEventEntry = "eeeeeeee-4444-4444-8444-444444444441"
   static let importedThinkingEntry = "eeeeeeee-4444-4444-8444-444444444442"
   static let importedToolCallEntry = "eeeeeeee-4444-4444-8444-444444444443"
@@ -5798,6 +5857,10 @@ private enum ProcessProjectionFixture {
   )
   static let planCreateArguments = #"{"kind":"create","text":"Draft protocol"}"#
   static let planCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planWriteProvenanceJSON(requestID: planCreateRequestID))}}"#
+  static let mismatchedIssuingAttemptPlanCreateOutput = planCreateOutput.replacingOccurrences(
+    of: planIssuingAttemptID,
+    with: crossTurn
+  )
   static let mismatchedPlanCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Different text",\#(planWriteProvenanceJSON(requestID: planCreateRequestID))}}"#
   static let planOutputWithoutProvenance =
     #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol"}}"#
@@ -5896,6 +5959,9 @@ private enum ProcessProjectionFixture {
   static let rawToolOutputLabel = "Output"
   static let planReadRawOutputPreview = rawToolOutputPreview(planReadOutput)
   static let planCreateRawOutputPreview = rawToolOutputPreview(planCreateOutput)
+  static let mismatchedIssuingAttemptPlanCreateOutputPreview = rawToolOutputPreview(
+    mismatchedIssuingAttemptPlanCreateOutput
+  )
   static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
   static let planCreateArgumentPresentation = "Create entry: Draft protocol"
   static let planReviseArgumentPresentation = "Revise entry #1: Audit protocol"
@@ -5918,57 +5984,16 @@ private enum ProcessProjectionFixture {
     """
   static let priorSessionTurnPlanHistoryPresentation =
     planReadOutputPresentation.replacingOccurrences(of: planTurnID, with: crossTurn)
-  static let planCreateOutputPresentation = """
-    Event #1: Create entry #1: Draft protocol
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planCreateRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
-    """
-  static let planReviseOutputPresentation = """
-    Event #2: Revise entry #1: Audit protocol
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planReviseRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
-    """
-  static let planStatusOutputPresentation = """
-    Event #3: Set entry #1 to Completed
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planStatusRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
-    """
-  static let planDependencyOutputPresentation = """
-    Event #4: Make entry #1 depend on entry #2
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planWriteRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
-    """
+  static let planReviseRawOutputPreview = rawToolOutputPreview(planReviseOutput)
+  static let planStatusRawOutputPreview = rawToolOutputPreview(planStatusOutput)
+  static let planDependencyRawOutputPreview = rawToolOutputPreview(planWriteOutput)
   static let multilinePlanArgumentPresentation = "Create entry: Draft\\nHistory"
-  static let multilinePlanOutputPresentation = """
-    Event #1: Create entry #1: Draft\\nHistory
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planCreateRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
-    """
+  static let multilinePlanRawOutputPreview = rawToolOutputPreview(multilinePlanOutput)
   static let alternateNewlinePlanArgumentPresentation =
     "Create entry: Carriage\\rVertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End"
-  static let alternateNewlinePlanOutputPresentation = """
-    Event #1: Create entry #1: Carriage\\rVertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End
-    Turn: \(planTurnID)
-    Issuing attempt: \(planIssuingAttemptID)
-    Request: \(planCreateRequestID)
-    Attempt: \(planAttemptID)
-    Generation: \(planGeneration)
-    """
+  static let alternateNewlinePlanRawOutputPreview = rawToolOutputPreview(
+    alternateNewlinePlanOutput
+  )
   static let firstPendingID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
   static let secondPendingID = "00000000-0000-4000-8000-000000000001"
   static let firstPendingTurn = "ffffffff-ffff-4fff-8fff-fffffffffffe"
@@ -6946,6 +6971,123 @@ private enum ProcessProjectionFixture {
 
   static func snapshotWithProposedTool() throws -> SignalboxSynchronizationSnapshot {
     try snapshotWithProposedTool(turnEvidence: [], usageEvidence: [])
+  }
+
+  static func snapshotWithContiguousToolResultAndFailure() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithToolResultAndFailure(
+      interveningEntries: [],
+      failureEntryIndex: 3
+    )
+  }
+
+  static func snapshotWithSeparatedToolResultAndFailure() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithToolResultAndFailure(
+      interveningEntries: [
+        importedMarker(
+          index: 3,
+          entryID: importedThinkingEntry,
+          speaker: importedAssistantSpeaker,
+          kind: "thinking"
+        )
+      ],
+      failureEntryIndex: 4
+    )
+  }
+
+  private static func snapshotWithToolResultAndFailure(
+    interveningEntries: [String],
+    failureEntryIndex: UInt64
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedAssistantEntry)",
+          "entry":{
+            "type":"assistant",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(proposedAssistantText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(proposedToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_name":"\(proposedToolName)",
+            "arguments":"{}"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"2",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationResultEntry)",
+          "entry":{
+            "type":"tool_execution_result",
+            "tool_request_id":"\(proposedToolRequest)",
+            "tool_attempt_id":"\(reconciliationAttempt)",
+            "content":"\(reconciliationOutput)"
+          }
+        }
+        """,
+      ] + interveningEntries + [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"\(failureEntryIndex)",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_failed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"\(interveningEntries.count + 4)"
+        }
+        """,
+      ]
+    )
   }
 
   static func snapshotWithProposedToolAndUnrelatedUsage() throws
@@ -8040,6 +8182,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func planCreateWithMismatchedIssuingAttemptToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: mismatchedIssuingAttemptPlanCreateOutput,
+      status: .completed
+    )
+  }
+
   static func deniedPlanCreateToolRecord() -> SignalboxStoredEvent {
     planToolRecord(
       requestID: planCreateRequestID,
@@ -8148,6 +8300,10 @@ private enum ProcessProjectionFixture {
     planToolRecord(
       requestID: planReadRequestID,
       sessionTurnAcceptancePositions: [crossTurn: 1, planTurnID: 2],
+      sessionToolRequestPositions: [
+        planProvenanceRequestID: (crossTurn, 1, "plan_write"),
+        planReadRequestID: (planTurnID, 2, "plan_read"),
+      ],
       toolName: "plan_read",
       arguments: planReadArguments,
       output: uncorrelatedPlanHistoryOutput,
@@ -8159,6 +8315,10 @@ private enum ProcessProjectionFixture {
     planToolRecord(
       requestID: planReadRequestID,
       sessionTurnAcceptancePositions: [planTurnID: 1, crossTurn: 2],
+      sessionToolRequestPositions: [
+        planReadRequestID: (planTurnID, 1, "plan_read"),
+        planProvenanceRequestID: (crossTurn, 2, "plan_write"),
+      ],
       toolName: "plan_read",
       arguments: planReadArguments,
       output: uncorrelatedPlanHistoryOutput,
@@ -8169,9 +8329,23 @@ private enum ProcessProjectionFixture {
   static func laterSameTurnPlanHistoryToolRecord() -> SignalboxStoredEvent {
     planToolRecord(
       requestID: planReadRequestID,
-      sameTurnToolRequestEntryPositions: [
-        planReadRequestID: 1,
-        planProvenanceRequestID: 2,
+      sessionToolRequestPositions: [
+        planReadRequestID: (planTurnID, 1, "plan_read"),
+        planProvenanceRequestID: (planTurnID, 2, "plan_write"),
+      ],
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: planReadOutput,
+      status: .completed
+    )
+  }
+
+  static func nonPlanSameTurnHistoryToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      sessionToolRequestPositions: [
+        planProvenanceRequestID: (planTurnID, 1, "save_report"),
+        planReadRequestID: (planTurnID, 2, "plan_read"),
       ],
       toolName: "plan_read",
       arguments: planReadArguments,
@@ -8310,11 +8484,17 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  private typealias ToolRequestFixturePosition = (
+    turnID: String,
+    entryIndex: UInt64,
+    toolName: String
+  )
+
   private static func planToolRecord(
     requestID: String,
     turnID: String = planTurnID,
     sessionTurnAcceptancePositions: [String: UInt64]? = nil,
-    sameTurnToolRequestEntryPositions: [String: UInt64]? = nil,
+    sessionToolRequestPositions: [String: ToolRequestFixturePosition]? = nil,
     toolAttemptID: String = planAttemptID,
     toolName: String,
     arguments: String,
@@ -8322,9 +8502,12 @@ private enum ProcessProjectionFixture {
     status: SignalboxProcessToolStatus
   ) -> SignalboxStoredEvent {
     let positions = sessionTurnAcceptancePositions ?? [turnID: 1]
-    let requestEntryPositions = sameTurnToolRequestEntryPositions
+    let requestPositions = sessionToolRequestPositions
       ?? (toolName == "plan_read"
-        ? [planProvenanceRequestID: 1, requestID: 2]
+        ? [
+          planProvenanceRequestID: (turnID, 1, "plan_write"),
+          requestID: (turnID, 2, "plan_read"),
+        ]
         : [:])
     return SignalboxStoredEvent(
       eventID: SignalboxEventID(rawValue: 1),
@@ -8340,12 +8523,13 @@ private enum ProcessProjectionFixture {
               )
             }),
           sessionToolRequestPositions: Dictionary(
-            uniqueKeysWithValues: requestEntryPositions.map {
+            uniqueKeysWithValues: requestPositions.map {
               (
                 try! SignalboxCanonicalUUID(validating: $0.key),
                 SignalboxProcessToolRequestPosition(
-                  turnID: try! SignalboxCanonicalUUID(validating: turnID),
-                  entryIndex: SignalboxCanonicalUInt64(rawValue: $0.value)
+                  turnID: try! SignalboxCanonicalUUID(validating: $0.value.turnID),
+                  entryIndex: SignalboxCanonicalUInt64(rawValue: $0.value.entryIndex),
+                  toolName: $0.value.toolName
                 )
               )
             }),
@@ -9903,7 +10087,7 @@ extension ProcessServiceIntegrationTests {
     )
     XCTAssertEqual(
       tool.outputPreview,
-      ProcessProjectionFixture.multilinePlanOutputPresentation
+      ProcessProjectionFixture.multilinePlanRawOutputPreview
     )
   }
 
@@ -9918,7 +10102,7 @@ extension ProcessServiceIntegrationTests {
     )
     XCTAssertEqual(
       tool.outputPreview,
-      ProcessProjectionFixture.alternateNewlinePlanOutputPresentation
+      ProcessProjectionFixture.alternateNewlinePlanRawOutputPreview
     )
   }
 }

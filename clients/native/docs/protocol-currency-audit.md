@@ -38,8 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 13 close-now, 14 staged, and 1 report-only. Resolved findings retained
-for traceability are excluded.
+variants: 13 close-now, 14 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -55,7 +54,7 @@ for traceability are excluded.
 | C09 | Medium   | `transcript_model_call_usage` decoded and participated in snapshot counts but the projector silently discarded provenance, all four nullable token fields, and optional dollar cost.                          | **close-now** — render a minimal typed usage entry for the owning model call.                                                                         |
 | C10 | Medium   | `context_summary` was rendered as an ordinary assistant message, hiding that the text is compacted context.                                                                                                   | **close-now** — retain the text while giving it a distinct typed timeline label.                                                                      |
 | C11 | Medium   | `plan_read` tool results were shown only as an undifferentiated raw JSON tool result.                                                                                                                         | **close-now** — recognize the current tool name and render a minimal faithful plan read in the existing tool card.                                    |
-| C12 | Medium   | `plan_write` arguments and results were shown only as undifferentiated raw JSON.                                                                                                                              | **close-now** — recognize the current tool name and render a minimal faithful plan update in the existing tool card.                                  |
+| C12 | Medium   | `plan_write` arguments and results were shown only as undifferentiated raw JSON.                                                                                                                              | **close-now** — recognize the tool and its arguments; keep result JSON raw because transcript evidence lacks complete dispatch provenance.            |
 | C13 | Medium   | Imported non-text transcript markers, including source events, thinking, tool calls, and tool results, were deliberately routed to generic `imported_*` unknown cards despite retaining their order and kind. | **close-now** — render every current imported marker as a faithful typed notice using only the kind and source-speaker attestation the wire supplies. |
 | C14 | Medium   | Imported summaries whose protocol title state is `underivable` had no source-authored label for the unified list or detail navigation.                                                                        | **close-now** — provide a stable, visibly untitled imported-conversation label rather than presenting an empty title.                                 |
 
@@ -84,18 +83,10 @@ for traceability are excluded.
 | --- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | R01 | Low      | Session metadata `last_writer` decodes but is not carried into native presentation, so replacement provenance is unavailable to the user. | **report-only** — retain as a presentation backlog item; no existing timeline idiom fits it. |
 
-## Daemon-side findings
+## Daemon-side finding
 
-These findings are outside `clients/native/**`; this effort records them and
-does not alter daemon behavior. Staged daemon finding S08 appears in the staged
-inventory above. The two live findings below were resolved by daemon work that
-merged while this audit remained open, so they are retained for traceability and
-excluded from current-gap disposition totals.
-
-| ID  | Severity | Finding                                                                                                                                       | Current status                                                                                                                                                                                        |
-| --- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| R02 | High     | Import rejection mapped 17 failure classes to one opaque `invalid_request` response and emitted no diagnostic log, erasing actionable detail. | **resolved upstream** — current protocol/runtime returns content-silent typed rejection evidence with the closed failure class and applicable record ordinal.                                         |
-| R03 | High     | The former single-frame import ceiling rejected oversized imports before schema processing.                                                   | **resolved upstream** — current protocol/runtime provides bounded begin, append, commit, and abort transport under a separately configured total-source limit; native adoption remains staged as S14. |
+The current daemon-side finding is S08 in the staged inventory. It is outside
+`clients/native/**`, and this effort does not alter daemon behavior.
 
 ## Current shape catalog
 

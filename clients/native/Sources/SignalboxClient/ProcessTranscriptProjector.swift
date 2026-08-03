@@ -112,9 +112,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     ) else {
       throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
     }
+    let terminalResultEntryIDs = candidate.terminalResultSuffixEntryIDs(
+      in: snapshot.records,
+      for: trigger.event
+    )
     let projection = try candidate.project(
       snapshot,
-      selection: .trigger(trigger.event)
+      selection: .trigger(
+        trigger.event,
+        terminalResultEntryIDs: terminalResultEntryIDs
+      )
     )
     self = candidate
     return projection
@@ -175,7 +182,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private enum Selection {
     case all
-    case trigger(SignalboxProcessSessionEvent)
+    case trigger(
+      SignalboxProcessSessionEvent,
+      terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
+    )
 
     var includesConservativeSnapshotEvidence: Bool {
       switch self {
@@ -462,13 +472,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   ) -> [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition] {
     records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
-        case .assistantToolUse(let turnID, _, let requestID, _, _) = message.entry
+        case .assistantToolUse(let turnID, _, let requestID, let toolName, _) = message.entry
       else {
         return
       }
       positions[requestID] = SignalboxProcessToolRequestPosition(
         turnID: turnID,
-        entryIndex: message.entryIndex
+        entryIndex: message.entryIndex,
+        toolName: toolName
       )
     }
   }
@@ -945,7 +956,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch selection {
     case .all:
       return true
-    case .trigger(let trigger):
+    case .trigger(let trigger, _):
       switch trigger {
       case .modelCallTransition(let turnID, let modelCallID, .terminal),
         .turnCompleted(let turnID, let modelCallID, _, _):
@@ -979,7 +990,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch selection {
     case .all:
       return true
-    case .trigger(let trigger):
+    case .trigger(let trigger, _):
       switch message.entry {
       case .user:
         return false
@@ -1026,14 +1037,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch selection {
     case .all:
       return true
-    case .trigger(let trigger):
-      return entry(message, isAttributableTo: trigger)
+    case .trigger(let trigger, let terminalResultEntryIDs):
+      return entry(
+        message,
+        isAttributableTo: trigger,
+        terminalResultEntryIDs: terminalResultEntryIDs
+      )
     }
   }
 
   private func entry(
     _ message: SignalboxTranscriptEntryMessage,
-    isAttributableTo trigger: SignalboxProcessSessionEvent
+    isAttributableTo trigger: SignalboxProcessSessionEvent,
+    terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
   ) -> Bool {
     if case .modelIdentityChanged = message.entry {
       return false
@@ -1056,12 +1072,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
     case .turnCompleted(_, _, let completionEntryID, _):
       return message.entryID == completionEntryID
-    case .turnFailed(let turnID, let failureEntryID, _):
+    case .turnFailed(_, let failureEntryID, _):
       return message.entryID == failureEntryID
-        || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
-    case .turnCancelled(let turnID, let cancellationEntryID, _):
+        || terminalResultEntryIDs.contains(message.entryID)
+    case .turnCancelled(_, let cancellationEntryID, _):
       return message.entryID == cancellationEntryID
-        || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
+        || terminalResultEntryIDs.contains(message.entryID)
     case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
       guard
         case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
@@ -1098,6 +1114,44 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return false
     }
     return modelCallID.map { context.modelCallID == $0 } ?? true
+  }
+
+  private func terminalResultSuffixEntryIDs(
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    for trigger: SignalboxProcessSessionEvent
+  ) -> Set<SignalboxCanonicalUUID> {
+    let turnID: SignalboxCanonicalUUID
+    let markerEntryID: SignalboxCanonicalUUID
+    switch trigger {
+    case .turnFailed(let triggerTurnID, let failureEntryID, _):
+      turnID = triggerTurnID
+      markerEntryID = failureEntryID
+    case .turnCancelled(let triggerTurnID, let cancellationEntryID, _):
+      turnID = triggerTurnID
+      markerEntryID = cancellationEntryID
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnRefused,
+      .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
+      return []
+    }
+    guard let markerIndex = records.firstIndex(where: { record in
+      guard case .entry(let message) = record else {
+        return false
+      }
+      return message.entryID == markerEntryID
+    }) else {
+      return []
+    }
+    var entryIDs: Set<SignalboxCanonicalUUID> = []
+    for record in records[..<markerIndex].reversed() {
+      guard case .entry(let message) = record,
+        toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
+      else {
+        break
+      }
+      entryIDs.insert(message.entryID)
+    }
+    return entryIDs
   }
 
   private func containsRequiredEvidence(

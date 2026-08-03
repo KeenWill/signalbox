@@ -729,24 +729,6 @@ public enum SignalboxEventNormalizer {
         }
     }
 
-    private struct PlanWriteOutput: Decodable {
-        let event: PlanEvent
-
-        private enum CodingKeys: String, CodingKey {
-            case event
-        }
-
-        init(from decoder: Decoder) throws {
-            let payload = try SignalboxUntaggedPayload(from: decoder)
-            try payload.rejectUnadmittedFields(["event"], decoder: decoder)
-            try payload.requireFields(["event"], decoder: decoder)
-            event = try decoder.container(keyedBy: CodingKeys.self).decode(
-                PlanEvent.self,
-                forKey: .event
-            )
-        }
-    }
-
     private static func planPresentation(
         _ tool: SignalboxProcessToolEvent
     ) -> PlanPresentation? {
@@ -776,22 +758,12 @@ public enum SignalboxEventNormalizer {
             )
         case "plan_write":
             let decodedArguments = tool.arguments.flatMap(decodePlanWriteArguments)
-            let decodedOutput = tool.status == .completed
-                ? tool.output.flatMap { decode(PlanWriteOutput.self, from: $0) }
-                : nil
-            let presentationOutput = decodedArguments.flatMap { arguments in
-                decodedOutput.flatMap { output in
-                    planEvent(output.event, matches: arguments, tool: tool)
-                        ? formattedPlanEvent(output.event)
-                        : nil
-                }
-            }
             return PlanPresentation(
                 name: "Plan update",
                 argumentsLabel: "Plan operation",
                 arguments: decodedArguments.map(formattedPlanWriteArguments),
-                outputLabel: presentationOutput == nil ? nil : "Appended event",
-                output: presentationOutput
+                outputLabel: nil,
+                output: nil
             )
         default:
             return nil
@@ -863,39 +835,6 @@ public enum SignalboxEventNormalizer {
         case "depends_on":
             return value.entryID.map({ $0 > 0 }) == true
                 && value.dependencyID.map({ $0 > 0 }) == true
-        default:
-            return false
-        }
-    }
-
-    private static func planEvent(
-        _ event: PlanEvent,
-        matches arguments: PlanWriteArguments,
-        tool: SignalboxProcessToolEvent
-    ) -> Bool {
-        guard let turnID = tool.turnID,
-            let toolAttemptID = tool.toolAttemptID,
-            event.provenance.requestID.rawValue == tool.toolRequestID.rawValue,
-            event.provenance.turnID == turnID,
-            event.provenance.attemptID == toolAttemptID
-        else {
-            return false
-        }
-        switch arguments.kind {
-        case "create":
-            return event.kind == "created" && event.text == arguments.text
-        case "revise":
-            return event.kind == "text_revised"
-                && event.entryID == arguments.entryID
-                && event.text == arguments.text
-        case "set_status":
-            return event.kind == "status_changed"
-                && event.entryID == arguments.entryID
-                && event.status == arguments.status
-        case "depends_on":
-            return event.kind == "depends_on"
-                && event.entryID == arguments.entryID
-                && event.dependencyID == arguments.dependencyID
         default:
             return false
         }
@@ -1073,23 +1012,25 @@ public enum SignalboxEventNormalizer {
             guard
                 let eventPosition = sessionTurnAcceptancePositions[
                     event.provenance.turnID
-                ]
+                ],
+                let sessionToolRequestPositions = tool.sessionToolRequestPositions,
+                let eventRequestPosition = sessionToolRequestPositions[
+                    event.provenance.requestID
+                ],
+                eventRequestPosition.turnID == event.provenance.turnID,
+                eventRequestPosition.toolName == "plan_write"
             else {
                 return false
             }
             guard event.provenance.turnID == owningTurnID else {
                 return eventPosition < owningPosition
             }
-            guard let sessionToolRequestPositions = tool.sessionToolRequestPositions,
-                let owningRequestID = try? SignalboxCanonicalUUID(
+            guard let owningRequestID = try? SignalboxCanonicalUUID(
                     validating: tool.toolRequestID.rawValue
                 ),
                 let owningRequestPosition = sessionToolRequestPositions[owningRequestID],
                 owningRequestPosition.turnID == owningTurnID,
-                let eventRequestPosition = sessionToolRequestPositions[
-                    event.provenance.requestID
-                ],
-                eventRequestPosition.turnID == owningTurnID
+                owningRequestPosition.toolName == "plan_read"
             else {
                 return false
             }
