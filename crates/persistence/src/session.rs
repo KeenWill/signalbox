@@ -205,6 +205,12 @@ pub(crate) async fn load_session_from_connection(
             ,placement_native_creation.command_id AS current_native_creation_command_id
             ,placement_imported_creation.command_id AS current_imported_creation_command_id
             ,placement_update.command_id AS current_placement_update_command_id
+            ,EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+             ) AS current_placement_later_event_exists
          FROM session AS s
          LEFT JOIN session_current_defaults AS p
            ON p.session_id = s.session_id
@@ -267,20 +273,20 @@ pub(crate) async fn load_session_from_connection(
         );
     }
 
+    let history_head_state =
+        crate::session_placement::PlacementHistoryHeadState::from_later_event_exists(required(
+            &row,
+            "current_placement_later_event_exists",
+        )?);
     let session = decode_complete(row, requested_session)?;
-    let authenticated_placement = crate::session_placement::load_authenticated_version(
+    crate::session_placement::authenticate_loaded_current(
         connection,
         requested_session,
-        session.current_placement().version(),
+        session.current_placement().clone(),
+        history_head_state,
     )
     .await
-    .map_err(map_placement_error)?
-    .ok_or(SessionCorruption::Inconsistent(
-        "current placement authentication",
-    ))?;
-    if session.current_placement() != &authenticated_placement {
-        return Err(SessionCorruption::Inconsistent("current placement authentication").into());
-    }
+    .map_err(map_placement_error)?;
     Ok(Some(session))
 }
 

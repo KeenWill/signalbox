@@ -49,8 +49,9 @@ pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
 };
 pub use daemon_tools::{
-    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonToolExecutor,
-    DaemonToolExecutorError, DaemonTools, DaemonToolsConstructionError, PinnedWorkspaceFileSystem,
+    BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,
+    DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
+    DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
@@ -100,8 +101,8 @@ pub use signalbox_tools_code_host::{
 pub use signalbox_tools_conversations::{
     CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort,
     ConversationListItem, ConversationListPage, ConversationListRequest, ConversationTools,
-    ConversationTranscriptRequest, ImportedTranscriptRequest, TranscriptEntry, TranscriptEntryKind,
-    TranscriptPage,
+    ConversationTranscriptRead, ConversationTranscriptRequest, ImportedTranscriptRequest,
+    TranscriptEntry, TranscriptEntryKind, TranscriptPage,
 };
 pub use signalbox_tools_github::{
     GITHUB_CREDENTIAL_REFERENCE, GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy,
