@@ -47,7 +47,8 @@ use signalbox_domain::{
     GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
+    ImportedTranscriptPosition, ModelAlias, ModelCallId,
+    ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, PerInputConfigurationChoices,
@@ -68,9 +69,11 @@ use signalbox_domain::{
     ReviewWorkflowKind, SemanticTranscriptEntryId, ServiceTier as DomainServiceTier,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
     SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot,
-    SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
-    SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UnsupportedModelSetting,
+    SessionModelSettingsChanged as DomainSessionModelSettingsChanged, SessionTemplateName,
+    SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, ToolApprovalDecision,
+    ToolDenialReason, ToolRequestId, TurnId,
+    TurnModelSettingsResolved as DomainTurnModelSettingsResolved, UnsupportedModelSetting,
     UserContent, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{
@@ -131,8 +134,9 @@ use signalbox_process_protocol::{
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
     ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-    ModelCapabilities as WireModelCapabilities, ModelSelection as WireModelSelection,
-    ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
+    ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
+    ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
+    ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
     ModelSettingsSnapshot as WireModelSettingsSnapshot, ProtocolVersion,
     ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
@@ -186,26 +190,6 @@ const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
-
-fn provider_default_wire_model_settings() -> WireModelSettingsSnapshot {
-    WireModelSettingsSnapshot {
-        precedence: WireModelSettingsPrecedence {
-            per_call: WireModelSettingsOverlay::inherit_all(),
-            session: WireModelSettingsOverlay::inherit_all(),
-            profile: WireModelSettingsOverlay::inherit_all(),
-            global_default: WireModelSettingsOverlay::inherit_all(),
-        },
-        effective: WireEffectiveModelSettings {
-            reasoning_level: None,
-            fast_mode: FastMode::Disabled,
-            service_tier: None,
-        },
-        reasoning_source: None,
-        fast_mode_source: None,
-        service_tier_source: None,
-        validated_for_selection_id: None,
-    }
-}
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -494,6 +478,8 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
             observe_model_call_metrics(metrics, *state);
         }
         DispatchedOutboxEventKind::SessionCreated
+        | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
+        | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
@@ -1106,15 +1092,6 @@ where
             model_settings,
             system_prompt,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_create_session(
                 writer,
                 version,
@@ -1149,15 +1126,6 @@ where
             initial_model_selection,
             model_settings,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_create_session_from_imported_frontier(
                 writer,
                 version,
@@ -1349,15 +1317,6 @@ where
             model_settings,
             delivery,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_submit_input(
                 writer,
                 version,
@@ -1549,15 +1508,6 @@ where
             dangerous_tool_auto_approval,
             system_prompt,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_replace_session_defaults(
                 writer,
                 version,
@@ -7935,7 +7885,10 @@ where
     };
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let model_settings = domain_model_settings_overlay(model_settings);
@@ -8029,7 +7982,10 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -8188,7 +8144,10 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -9687,6 +9646,17 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
     }
 }
 
+fn wire_frozen_model_selection(selection: &FrozenModelSelection) -> WireModelSelection {
+    match selection {
+        FrozenModelSelection::Direct(selection) => WireModelSelection::Direct {
+            selection_id: wire_uuid(selection.into_uuid()),
+        },
+        FrozenModelSelection::FrozenAlias { alias, .. } => WireModelSelection::Alias {
+            alias_id: wire_uuid(alias.into_uuid()),
+        },
+    }
+}
+
 fn domain_model_settings_overlay(value: WireModelSettingsOverlay) -> DomainModelSettingsOverlay {
     DomainModelSettingsOverlay::new(
         domain_setting_overlay(value.reasoning_level, domain_reasoning_level),
@@ -9901,6 +9871,32 @@ const fn wire_service_tier(value: DomainServiceTier) -> WireServiceTier {
                 signalbox_process_protocol::CodexCliServiceTier::Flex
             }
         }),
+    }
+}
+
+const fn wire_model_change_adjustment(
+    value: DomainModelChangeAdjustment,
+) -> WireModelChangeAdjustment {
+    match value {
+        DomainModelChangeAdjustment::ReasoningLevelClamped { from, to } => {
+            WireModelChangeAdjustment::ReasoningLevelClamped {
+                from: wire_reasoning_level(from),
+                to: wire_reasoning_level(to),
+            }
+        }
+        DomainModelChangeAdjustment::ReasoningLevelCleared { from } => {
+            WireModelChangeAdjustment::ReasoningLevelCleared {
+                from: wire_reasoning_level(from),
+            }
+        }
+        DomainModelChangeAdjustment::FastModeDisabled => {
+            WireModelChangeAdjustment::FastModeDisabled {}
+        }
+        DomainModelChangeAdjustment::ServiceTierCleared { from } => {
+            WireModelChangeAdjustment::ServiceTierCleared {
+                from: wire_service_tier(from),
+            }
+        }
     }
 }
 
@@ -11176,6 +11172,8 @@ impl From<&DispatchedOutboxEvent> for ProcessUpdate {
 #[derive(Clone, Debug)]
 enum ProcessUpdateEvent {
     SessionCreated,
+    SessionModelSettingsChanged(DomainSessionModelSettingsChanged),
+    TurnModelSettingsResolved(DomainTurnModelSettingsResolved),
     InputAccepted {
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
@@ -11238,6 +11236,12 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
     fn from(event: &DispatchedOutboxEventKind) -> Self {
         match event {
             DispatchedOutboxEventKind::SessionCreated => Self::SessionCreated,
+            DispatchedOutboxEventKind::SessionModelSettingsChanged(event) => {
+                Self::SessionModelSettingsChanged(event.clone())
+            }
+            DispatchedOutboxEventKind::TurnModelSettingsResolved(event) => {
+                Self::TurnModelSettingsResolved(event.clone())
+            }
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input,
                 turn,
@@ -11343,6 +11347,39 @@ impl ProcessUpdateEvent {
     fn wire(&self) -> SessionEvent {
         match self {
             Self::SessionCreated => SessionEvent::SessionCreated {},
+            Self::SessionModelSettingsChanged(event) => SessionEvent::SessionModelSettingsChanged {
+                command_id: wire_uuid(event.command_id().into_uuid()),
+                prior_defaults_version: CanonicalU64::new(event.prior_defaults_version().as_u64()),
+                installed_defaults_version: CanonicalU64::new(
+                    event.installed_defaults_version().as_u64(),
+                ),
+                prior_model: wire_domain_model_selection(event.prior_model()),
+                installed_model: wire_domain_model_selection(event.installed_model()),
+                prior_settings: wire_model_settings(event.prior_settings()),
+                installed_settings: wire_model_settings(event.installed_settings()),
+                caller_override: wire_model_settings_overlay(event.caller_override()),
+                adjustments: event
+                    .adjustments()
+                    .iter()
+                    .copied()
+                    .map(wire_model_change_adjustment)
+                    .collect(),
+            },
+            Self::TurnModelSettingsResolved(event) => SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id: wire_uuid(event.accepted_input().into_uuid()),
+                turn_id: wire_uuid(event.turn().into_uuid()),
+                defaults_version: CanonicalU64::new(event.defaults_version().as_u64()),
+                requested_model: wire_frozen_model_selection(event.selection()),
+                selected_direct_id: wire_uuid(event.selection().selected_direct().into_uuid()),
+                per_call_override: wire_model_settings_overlay(event.per_call_override()),
+                settings: wire_model_settings(event.settings()),
+                adjustments: event
+                    .adjustments()
+                    .iter()
+                    .copied()
+                    .map(wire_model_change_adjustment)
+                    .collect(),
+            },
             Self::InputAccepted {
                 accepted_input,
                 turn,
@@ -11646,15 +11683,17 @@ mod tests {
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId, Goal,
-        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
+        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
+        FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
+        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
+        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay, ReasoningLevel,
         ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
         ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
         ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
-        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId,
-        SessionInputPosition, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
-        TurnAttemptId, TurnId,
+        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId,
+        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+        SessionModelSettingsChanged, SubmitInputRejectedResult, ToolApprovalDecision,
+        ToolAttemptId, TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
@@ -11698,7 +11737,8 @@ mod tests {
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
-        wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
+        wire_model_call_state, wire_model_settings, wire_model_settings_overlay,
+        wire_tool_decision, wire_turn_state, wire_uuid, write_content,
         write_context_compaction_repository_error, write_snapshot_spool_error,
         write_transcript_entry,
     };
@@ -13982,6 +14022,93 @@ context_window_tokens = 200000
             update.wire(),
             SessionEvent::GoalTurnRetired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+            }
+        );
+    }
+
+    #[test]
+    fn durable_model_settings_events_project_to_the_closed_wire_shapes() {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(2));
+        let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(3));
+        let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
+        let prior_version = SessionConfigurationDefaultsVersion::initial();
+        let installed_version = prior_version
+            .checked_next()
+            .expect("the initial defaults version has a successor");
+        let settings = ValidatedModelSettings::provider_defaults();
+        let caller_override = ModelSettingsOverlay::inherit_all();
+        let changed = SessionModelSettingsChanged::try_new(
+            session,
+            command,
+            prior_version,
+            installed_version,
+            ModelSelectionRequest::Direct(prior_selection),
+            ModelSelectionRequest::Direct(installed_selection),
+            settings,
+            settings,
+            caller_override,
+            Vec::new(),
+        )
+        .expect("the fixture changes direct model selection");
+        let changed_update = ProcessUpdateEvent::from(
+            &DispatchedOutboxEventKind::SessionModelSettingsChanged(changed),
+        );
+
+        assert_eq!(
+            changed_update.wire(),
+            SessionEvent::SessionModelSettingsChanged {
+                command_id: CanonicalUuid::from_uuid(command.into_uuid()),
+                prior_defaults_version: CanonicalU64::new(prior_version.as_u64()),
+                installed_defaults_version: CanonicalU64::new(installed_version.as_u64()),
+                prior_model: signalbox_process_protocol::ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(prior_selection.into_uuid()),
+                },
+                installed_model: signalbox_process_protocol::ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
+                },
+                prior_settings: wire_model_settings(settings),
+                installed_settings: wire_model_settings(settings),
+                caller_override: wire_model_settings_overlay(caller_override),
+                adjustments: Vec::new(),
+            }
+        );
+
+        let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
+        let turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let resolved = TurnModelSettingsResolved::try_new(
+            accepted_input,
+            turn,
+            installed_version,
+            FrozenModelSelection::Direct(installed_selection),
+            caller_override,
+            settings,
+            vec![ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            }],
+        )
+        .expect("provider-default settings are valid for the fixture selection");
+        let resolved_update = ProcessUpdateEvent::from(
+            &DispatchedOutboxEventKind::TurnModelSettingsResolved(resolved),
+        );
+
+        assert_eq!(
+            resolved_update.wire(),
+            SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id: CanonicalUuid::from_uuid(accepted_input.into_uuid()),
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                defaults_version: CanonicalU64::new(installed_version.as_u64()),
+                requested_model: signalbox_process_protocol::ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
+                },
+                selected_direct_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
+                per_call_override: wire_model_settings_overlay(caller_override),
+                settings: wire_model_settings(settings),
+                adjustments: vec![
+                    signalbox_process_protocol::ModelChangeAdjustment::ReasoningLevelCleared {
+                        from: signalbox_process_protocol::ReasoningLevel::High,
+                    },
+                ],
             }
         );
     }
