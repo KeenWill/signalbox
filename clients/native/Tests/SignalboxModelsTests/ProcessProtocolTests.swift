@@ -536,6 +536,56 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testSettingsChangeSessionEventRejectsUnrelatedInstalledSessionLayer() throws {
+    let priorSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        sessionReasoning: #"{"kind":"value","value":"high"}"#,
+        effectiveReasoning: "\"high\"",
+        reasoningSource: "\"session\"",
+        validatedForSelectionID: "\"(turnID)\""
+      ),
+      as: UTF8.self
+    )
+    let installedSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        sessionReasoning: #"{"kind":"value","value":"low"}"#,
+        effectiveReasoning: "\"low\"",
+        reasoningSource: "\"session\"",
+        validatedForSelectionID: "\"(turnID)\""
+      ),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"session_model_settings_changed",
+            "command_id":"33333333-3333-4333-8333-333333333333",
+            "prior_defaults_version":"1",
+            "installed_defaults_version":"2",
+            "prior_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "installed_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "prior_settings":\(priorSettings),
+            "installed_settings":\(installedSettings),
+            "caller_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "adjustments":[]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
   func testTurnSettingsSessionEventDecodesAsKnown() throws {
     let settings = String(
       decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
