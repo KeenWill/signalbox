@@ -507,6 +507,84 @@ fn failed_branch_switch_retains_every_obstructed_directory_quarantine() {
 }
 
 #[test]
+fn failed_branch_switch_preserves_a_foreign_entry_in_a_restored_quarantine() {
+    let fixture = Fixture::new();
+    let original_content = b"original directory\n";
+    let foreign_content = b"foreign quarantine entry\n";
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::create_dir(fixture.root().join("src")).expect("source fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), original_content)
+        .expect("source fixture file writes");
+    let current = commit_all(&repository, "directory source");
+    let current_tree = repository
+        .find_commit(current)
+        .expect("current fixture commit exists")
+        .tree()
+        .expect("current fixture tree opens");
+    let target_blob = repository
+        .blob(b"target file\n")
+        .expect("target fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&current_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", target_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, current);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    let executor = fixture.executor();
+    let merge_head = format!("{current}\n");
+
+    let failure = executor
+        .branch_switch_with_quarantine_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let quarantined_entry = fs::read_dir(fixture.root())
+                    .expect("fixture root reads")
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path().join("entry/main.txt"))
+                    .find(|path| path.is_file())
+                    .expect("quarantined source entry exists");
+                let quarantine = quarantined_entry
+                    .parent()
+                    .and_then(Path::parent)
+                    .expect("quarantine root exists");
+                fs::write(quarantine.join("foreign.txt"), foreign_content)
+                    .expect("foreign quarantine entry writes");
+                fs::write(fixture.root().join(".git/MERGE_HEAD"), merge_head)
+                    .expect("concurrent merge state writes");
+            },
+        )
+        .expect_err("foreign quarantine entry prevents cleanup");
+    fs::remove_file(fixture.root().join(".git/MERGE_HEAD"))
+        .expect("concurrent merge state removes");
+    let retained_foreign = fs::read_dir(fixture.root())
+        .expect("fixture root reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("foreign.txt"))
+        .find(|path| path.is_file())
+        .expect("foreign quarantine entry remains");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join("src/main.txt")).expect("restored source fixture reads"),
+        original_content
+    );
+    assert_eq!(
+        fs::read(retained_foreign).expect("foreign quarantine entry reads"),
+        foreign_content
+    );
+}
+
+#[test]
 fn branch_switch_checks_out_exact_blob_bytes_without_attribute_filtering() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");

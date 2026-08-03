@@ -143,8 +143,8 @@ impl QuarantineDirectory {
         self.clear_on_drop = false;
     }
 
-    pub(super) fn remove_on_drop(&mut self) {
-        self.clear_on_drop = true;
+    pub(super) fn remove_if_empty_and_current(&self) -> Result<(), LocalGitFailure> {
+        remove_quarantine_directory_if_identity(&self.parent, &self.name, self.identity)
     }
 }
 

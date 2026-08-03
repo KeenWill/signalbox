@@ -970,11 +970,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 )
                 .map_err(|_| LocalGitFailure::Operation)
             })();
-            if let Err(failure) = restoration {
+            let cleanup =
+                restoration.and_then(|()| transition.quarantine.remove_if_empty_and_current());
+            if let Err(failure) = cleanup {
                 transition.quarantine.keep();
                 first_failure.get_or_insert(failure);
-            } else {
-                transition.quarantine.remove_on_drop();
             }
         }
         first_failure.map_or(Ok(()), Err)
