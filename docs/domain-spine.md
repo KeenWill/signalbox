@@ -1685,6 +1685,8 @@ pub enum ReasoningLevel {
 
 pub enum FastMode { Disabled, Enabled }
 
+pub enum FastModeOverlay { Inherit, Value(FastMode) }
+
 pub enum AnthropicServiceTier { Auto, StandardOnly }
 
 pub enum OpenAiServiceTier { Auto, Default, Flex, Scale, Priority, Fast }
@@ -1708,7 +1710,7 @@ impl ModelSettingsOverlay {
     pub const fn inherit_all() -> Self;
     pub const fn new(
         reasoning_level: SettingOverlay<ReasoningLevel>,
-        fast_mode: SettingOverlay<FastMode>,
+        fast_mode: FastModeOverlay,
         service_tier: SettingOverlay<ServiceTier>,
     ) -> Self;
     pub const fn from_effective(settings: EffectiveModelSettings) -> Self;
@@ -9032,7 +9034,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 24                   |
-| domain: model_settings                             | 24                   |
+| domain: model_settings                             | 25                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
@@ -9059,7 +9061,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **735 (+7 free fn)** |
+| **signalbox-domain total**                         | **736 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

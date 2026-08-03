@@ -42,6 +42,15 @@ pub enum FastMode {
     Enabled,
 }
 
+/// One fast-mode contribution at a precedence layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FastModeOverlay {
+    /// Consult the next lower-precedence layer.
+    Inherit,
+    /// Explicitly select enabled or disabled fast mode and stop resolution.
+    Value(FastMode),
+}
+
 /// Anthropic service-tier values.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AnthropicServiceTier {
@@ -105,7 +114,7 @@ pub enum SettingOverlay<T> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ModelSettingsOverlay {
     reasoning_level: SettingOverlay<ReasoningLevel>,
-    fast_mode: SettingOverlay<FastMode>,
+    fast_mode: FastModeOverlay,
     service_tier: SettingOverlay<ServiceTier>,
 }
 
@@ -114,7 +123,7 @@ impl ModelSettingsOverlay {
     pub const fn inherit_all() -> Self {
         Self {
             reasoning_level: SettingOverlay::Inherit,
-            fast_mode: SettingOverlay::Inherit,
+            fast_mode: FastModeOverlay::Inherit,
             service_tier: SettingOverlay::Inherit,
         }
     }
@@ -122,7 +131,7 @@ impl ModelSettingsOverlay {
     /// Constructs a complete labeled overlay.
     pub const fn new(
         reasoning_level: SettingOverlay<ReasoningLevel>,
-        fast_mode: SettingOverlay<FastMode>,
+        fast_mode: FastModeOverlay,
         service_tier: SettingOverlay<ServiceTier>,
     ) -> Self {
         Self {
@@ -139,7 +148,7 @@ impl ModelSettingsOverlay {
                 Some(value) => SettingOverlay::Value(value),
                 None => SettingOverlay::ProviderDefault,
             },
-            fast_mode: SettingOverlay::Value(settings.fast_mode),
+            fast_mode: FastModeOverlay::Value(settings.fast_mode),
             service_tier: match settings.service_tier {
                 Some(value) => SettingOverlay::Value(value),
                 None => SettingOverlay::ProviderDefault,
@@ -153,7 +162,7 @@ impl ModelSettingsOverlay {
     }
 
     /// Returns the fast-mode contribution.
-    pub const fn fast_mode(&self) -> SettingOverlay<FastMode> {
+    pub const fn fast_mode(&self) -> FastModeOverlay {
         self.fast_mode
     }
 
@@ -478,7 +487,7 @@ impl ModelSettingsPrecedence {
     }
 
     fn set_fast_mode_at_source(&mut self, source: Option<ModelSettingSource>, value: FastMode) {
-        let overlay = SettingOverlay::Value(value);
+        let overlay = FastModeOverlay::Value(value);
         match source {
             Some(ModelSettingSource::PerCall) => self.per_call.fast_mode = overlay,
             Some(ModelSettingSource::Session) => self.session.fast_mode = overlay,
@@ -521,13 +530,12 @@ fn resolve_nullable<T: Copy>(
 }
 
 fn resolve_fast(
-    layers: impl IntoIterator<Item = (ModelSettingSource, SettingOverlay<FastMode>)>,
+    layers: impl IntoIterator<Item = (ModelSettingSource, FastModeOverlay)>,
 ) -> (FastMode, Option<ModelSettingSource>) {
     for (source, overlay) in layers {
         match overlay {
-            SettingOverlay::Inherit => {}
-            SettingOverlay::ProviderDefault => return (FastMode::Disabled, Some(source)),
-            SettingOverlay::Value(value) => return (value, Some(source)),
+            FastModeOverlay::Inherit => {}
+            FastModeOverlay::Value(value) => return (value, Some(source)),
         }
     }
     (FastMode::Disabled, None)
@@ -595,7 +603,7 @@ impl ModelCapabilities {
                 requested: level,
             });
         }
-        if overlay.fast_mode == SettingOverlay::Value(FastMode::Enabled)
+        if overlay.fast_mode == FastModeOverlay::Value(FastMode::Enabled)
             && self.fast_mode == FastModeSupport::Unsupported
         {
             return Err(UnsupportedModelSetting::FastMode { selection });
@@ -1072,10 +1080,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        AnthropicServiceTier, EffectiveModelSettings, FastMode, FastModeSupport, ModelCapabilities,
-        ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
-        OpenAiServiceTier, ReasoningLevel, ServiceTier, SessionModelSettingsChanged,
-        SettingOverlay, UnsupportedModelSetting,
+        AnthropicServiceTier, EffectiveModelSettings, FastMode, FastModeOverlay, FastModeSupport,
+        ModelCapabilities, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
+        ModelSettingsPrecedence, OpenAiServiceTier, ReasoningLevel, ServiceTier,
+        SessionModelSettingsChanged, SettingOverlay, UnsupportedModelSetting,
     };
     use crate::test_support::{command_id, direct, provider_model_identity, session_id};
     use crate::{
@@ -1101,22 +1109,22 @@ mod tests {
     fn s37_inv051_resolves_the_fixed_precedence_chain_with_explicit_clearing() {
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::ProviderDefault,
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
         let session = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Value(FastMode::Enabled),
+            FastModeOverlay::Value(FastMode::Enabled),
             SettingOverlay::Inherit,
         );
         let profile = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::Medium),
-            SettingOverlay::Value(FastMode::Disabled),
+            FastModeOverlay::Value(FastMode::Disabled),
             SettingOverlay::Value(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
         );
         let global = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::Low),
-            SettingOverlay::Value(FastMode::Disabled),
+            FastModeOverlay::Value(FastMode::Disabled),
             SettingOverlay::Value(ServiceTier::Anthropic(AnthropicServiceTier::Auto)),
         );
 
@@ -1152,7 +1160,7 @@ mod tests {
             ModelSettingsOverlay::inherit_all(),
             ModelSettingsOverlay::new(
                 SettingOverlay::Value(ReasoningLevel::Medium),
-                SettingOverlay::Inherit,
+                FastModeOverlay::Inherit,
                 SettingOverlay::Inherit,
             ),
             ModelSettingsOverlay::inherit_all(),
@@ -1205,7 +1213,7 @@ mod tests {
         );
         let requested = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
 
@@ -1293,7 +1301,7 @@ mod tests {
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
         let session = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
         let precedence = ModelSettingsPrecedence::new(
@@ -1332,7 +1340,7 @@ mod tests {
         let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
         let caller = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
         let precedence = ModelSettingsPrecedence::new(
@@ -1386,7 +1394,7 @@ mod tests {
                     ModelSettingsOverlay::inherit_all(),
                     ModelSettingsOverlay::new(
                         SettingOverlay::Value(ReasoningLevel::Low),
-                        SettingOverlay::Inherit,
+                        FastModeOverlay::Inherit,
                         SettingOverlay::Inherit,
                     ),
                     ModelSettingsOverlay::inherit_all(),
