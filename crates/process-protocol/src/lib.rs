@@ -103,6 +103,9 @@ pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 /// Maximum entries in one deployment model-alias catalog.
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
+/// Maximum entries in one deployment model-capability catalog.
+pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
+
 /// Maximum canonical decimal USD amount text.
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
@@ -1345,6 +1348,193 @@ pub enum ModelSelection {
     },
 }
 
+/// Provider-neutral reasoning effort at the process boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+/// Whether fast serving is selected.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FastMode {
+    Disabled,
+    Enabled,
+}
+
+/// Anthropic Messages service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicServiceTier {
+    Auto,
+    StandardOnly,
+}
+
+/// OpenAI service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+}
+
+/// Codex CLI service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexCliServiceTier {
+    Default,
+    Priority,
+    Flex,
+}
+
+/// Provider-tagged service tier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "provider", content = "value", rename_all = "snake_case")]
+pub enum ServiceTier {
+    Anthropic(AnthropicServiceTier),
+    OpenAi(OpenAiServiceTier),
+    CodexCli(CodexCliServiceTier),
+}
+
+/// One precedence-layer contribution for a setting.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SettingOverlay<ValueT> {
+    Inherit,
+    ProviderDefault,
+    Value(ValueT),
+}
+
+/// Three provenance-preserving setting contributions at one layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettingsOverlay {
+    pub reasoning_level: SettingOverlay<ReasoningLevel>,
+    pub fast_mode: SettingOverlay<FastMode>,
+    pub service_tier: SettingOverlay<ServiceTier>,
+}
+
+impl ModelSettingsOverlay {
+    /// Constructs an overlay that inherits every setting.
+    pub const fn inherit_all() -> Self {
+        Self {
+            reasoning_level: SettingOverlay::Inherit,
+            fast_mode: SettingOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        }
+    }
+}
+
+impl Default for ModelSettingsOverlay {
+    fn default() -> Self {
+        Self::inherit_all()
+    }
+}
+
+/// Complete effective setting values.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveModelSettings {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub reasoning_level: Option<ReasoningLevel>,
+    pub fast_mode: FastMode,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub service_tier: Option<ServiceTier>,
+}
+
+/// Precedence layer that supplied one effective value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSettingSource {
+    PerCall,
+    Session,
+    Profile,
+    GlobalDefault,
+}
+
+/// Exact four-layer setting contributions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettingsPrecedence {
+    pub per_call: ModelSettingsOverlay,
+    pub session: ModelSettingsOverlay,
+    pub profile: ModelSettingsOverlay,
+    pub global_default: ModelSettingsOverlay,
+}
+
+/// Complete resolved settings and their validation provenance.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSettingsSnapshot {
+    pub precedence: ModelSettingsPrecedence,
+    pub effective: EffectiveModelSettings,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub reasoning_source: Option<ModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub fast_mode_source: Option<ModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub service_tier_source: Option<ModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub validated_for_selection_id: Option<CanonicalUuid>,
+}
+
+/// One automatic compatibility adjustment caused by a model change.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelChangeAdjustment {
+    ReasoningLevelClamped {
+        from: ReasoningLevel,
+        to: ReasoningLevel,
+    },
+    ReasoningLevelCleared {
+        from: ReasoningLevel,
+    },
+    FastModeDisabled {},
+    ServiceTierCleared {
+        from: ServiceTier,
+    },
+}
+
+/// Client-visible exact capabilities for one direct selection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapabilities {
+    pub reasoning_levels: Vec<ReasoningLevel>,
+    pub fast_mode_supported: bool,
+    pub service_tiers: Vec<ServiceTier>,
+}
+
+impl ModelCapabilities {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        let reasoning = self
+            .reasoning_levels
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let tiers = self.service_tiers.iter().copied().collect::<BTreeSet<_>>();
+        if reasoning.len() != self.reasoning_levels.len()
+            || tiers.len() != self.service_tiers.len()
+            || !self.reasoning_levels.is_sorted()
+            || !self.service_tiers.is_sorted()
+        {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        Ok(())
+    }
+}
+
 /// One exact complete session-metadata object.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -2367,6 +2557,8 @@ pub enum ClientRequest {
     },
     /// Read the deployment's complete configured model-alias catalog.
     ListModelAliases {},
+    /// Read the deployment's complete per-model capability catalog.
+    ListModelCapabilities {},
     /// Read one complete current metadata snapshot.
     ReadSessionMetadata {
         /// Target session.
@@ -2695,6 +2887,7 @@ impl ClientRequest {
             | Self::ListSessionMetadata { .. }
             | Self::ListConversations { .. }
             | Self::ListModelAliases {}
+            | Self::ListModelCapabilities {}
             | Self::ReadSessionMetadata { .. }
             | Self::ReplaceSessionMetadata { .. }
             | Self::ReplaceSessionDefaults { .. }
@@ -3114,6 +3307,18 @@ pub enum ErrorCode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RejectionDetail {
+    /// An explicit reasoning value is unsupported by the selected model.
+    UnsupportedReasoningLevel {
+        selection_id: CanonicalUuid,
+        requested: ReasoningLevel,
+    },
+    /// Enabled fast mode is unsupported by the selected model.
+    UnsupportedFastMode { selection_id: CanonicalUuid },
+    /// An explicit service tier is unsupported by the selected model.
+    UnsupportedServiceTier {
+        selection_id: CanonicalUuid,
+        requested: ServiceTier,
+    },
     /// The target session did not exist at command handling.
     SessionNotFound {
         /// Absent target.
@@ -3307,6 +3512,9 @@ impl RejectionDetail {
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::SessionNotFound { .. }
+            | Self::UnsupportedReasoningLevel { .. }
+            | Self::UnsupportedFastMode { .. }
+            | Self::UnsupportedServiceTier { .. }
             | Self::GoalCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::ActiveTurnMismatch { .. }
@@ -4143,6 +4351,29 @@ pub enum ToolBatchState {
 pub enum SessionEvent {
     /// Session creation committed.
     SessionCreated {},
+    /// One defaults replacement changed model selection or settings.
+    SessionModelSettingsChanged {
+        command_id: CanonicalUuid,
+        prior_defaults_version: CanonicalU64,
+        installed_defaults_version: CanonicalU64,
+        prior_model: ModelSelection,
+        installed_model: ModelSelection,
+        prior_settings: ModelSettingsSnapshot,
+        installed_settings: ModelSettingsSnapshot,
+        caller_override: ModelSettingsOverlay,
+        adjustments: Vec<ModelChangeAdjustment>,
+    },
+    /// One accepted origin turn froze complete model settings.
+    TurnModelSettingsResolved {
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        defaults_version: CanonicalU64,
+        requested_model: ModelSelection,
+        selected_direct_id: CanonicalUuid,
+        per_call_override: ModelSettingsOverlay,
+        settings: ModelSettingsSnapshot,
+        adjustments: Vec<ModelChangeAdjustment>,
+    },
     /// User input acceptance and its queued turn committed.
     InputAccepted {
         /// Accepted input.
@@ -4416,6 +4647,15 @@ pub enum ServerMessage {
         /// Number of preceding alias summaries.
         alias_count: CanonicalU64,
     },
+    /// Begins the configured model-capability sequence.
+    ModelCapabilitiesStart {},
+    /// One direct selection and its exact client-visible capabilities.
+    ModelCapabilityItem {
+        selection_id: CanonicalUuid,
+        capabilities: ModelCapabilities,
+    },
+    /// Completes the configured model-capability sequence.
+    ModelCapabilitiesEnd { capability_count: CanonicalU64 },
     /// One complete current metadata read.
     SessionMetadata {
         /// Selected session.
@@ -4819,6 +5059,12 @@ impl ServerMessage {
                 }
             }
             Self::ConversationSummary { conversation } => conversation.validate()?,
+            Self::ModelCapabilityItem { capabilities, .. } => capabilities.validate()?,
+            Self::ModelCapabilitiesEnd { capability_count }
+                if capability_count.value() > MAX_MODEL_CAPABILITY_CATALOG_ENTRIES as u64 =>
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
+            }
             Self::ReviewPassCompleted {
                 state: ReviewPassLifecycle::Queued | ReviewPassLifecycle::Running,
                 ..
@@ -5078,6 +5324,9 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::UnsupportedReasoningLevel { .. }
+        | RejectionDetail::UnsupportedFastMode { .. }
+        | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -5148,6 +5397,8 @@ pub enum FrameValidationError {
     ModelCallUsageShape,
     /// A goal request, state, or event carried an invalid shape.
     GoalShape,
+    /// Model settings or capability data carried a contradictory shape.
+    ModelSettingsShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -5177,6 +5428,7 @@ impl fmt::Display for FrameValidationError {
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
+            Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
         })
     }
 }
@@ -5586,31 +5838,33 @@ mod tests {
         ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
         ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, ErrorCode, ErrorDetail, FailedModelCallCause,
-        FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
-        FrameEncodeError, FrameValidationError, GoalBlockedProvenance, GoalBlockedReason,
-        GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
-        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+        CurrentModelCallState, EffectiveModelSettings, ErrorCode, ErrorDetail,
+        FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
+        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
+        GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
+        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
+        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
         MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
         MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
         MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
         MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
         MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
         MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
-        ModelCallState, ModelCallTokenUsage, ModelSelection, PROTOCOL_VERSION, ProtocolVersion,
-        RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
-        ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
+        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, ProtocolVersion,
+        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
         ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
-        ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line,
+        ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
+        SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
+        TranscriptTextEntry, TurnState, UsageProvenance, decode_client_line, decode_server_line,
+        encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -5624,6 +5878,32 @@ mod tests {
 
     fn uuid(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn settings_snapshot_fixture() -> ModelSettingsSnapshot {
+        let per_call = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: SettingOverlay::Inherit,
+            service_tier: SettingOverlay::ProviderDefault,
+        };
+        let inherited = ModelSettingsOverlay::inherit_all();
+        ModelSettingsSnapshot {
+            precedence: ModelSettingsPrecedence {
+                per_call,
+                session: inherited,
+                profile: inherited,
+                global_default: inherited,
+            },
+            effective: EffectiveModelSettings {
+                reasoning_level: Some(ReasoningLevel::High),
+                fast_mode: FastMode::Disabled,
+                service_tier: None,
+            },
+            reasoning_source: Some(ModelSettingSource::PerCall),
+            fast_mode_source: None,
+            service_tier_source: Some(ModelSettingSource::PerCall),
+            validated_for_selection_id: Some(uuid(4)),
+        }
     }
 
     fn orchestration_snapshot_fixture(
@@ -10197,6 +10477,79 @@ mod tests {
             },
             r#"{"type":"error","code":"not_found","message":"not found"}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn model_capability_catalog_wire_vocabulary_is_exact() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_client_request_round_trip(
+            request(41)?,
+            ClientRequest::ListModelCapabilities {},
+            r#"{"type":"list_model_capabilities"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(41)?,
+            ServerMessage::ModelCapabilityItem {
+                selection_id: uuid(4),
+                capabilities: ModelCapabilities {
+                    reasoning_levels: vec![ReasoningLevel::Low, ReasoningLevel::High],
+                    fast_mode_supported: true,
+                    service_tiers: vec![ServiceTier::OpenAi(OpenAiServiceTier::Priority)],
+                },
+            },
+            r#"{"type":"model_capability_item","selection_id":"00000000-0000-0000-0000-000000000004","capabilities":{"reasoning_levels":["low","high"],"fast_mode_supported":true,"service_tiers":[{"provider":"open_ai","value":"priority"}]}}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn turn_settings_event_round_trip_preserves_override_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::SessionEvent {
+            cursor: CanonicalU64::new(9),
+            session_id: uuid(1),
+            event: SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id: uuid(2),
+                turn_id: uuid(3),
+                defaults_version: CanonicalU64::new(7),
+                requested_model: ModelSelection::Direct {
+                    selection_id: uuid(4),
+                },
+                selected_direct_id: uuid(4),
+                per_call_override: settings_snapshot_fixture().precedence.per_call,
+                settings: settings_snapshot_fixture(),
+                adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                    from: ReasoningLevel::XHigh,
+                    to: ReasoningLevel::High,
+                }],
+            },
+        };
+
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(42)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+        let decoded = decode_server_line(&encoded)?;
+
+        assert_eq!(decoded, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn capability_item_rejects_noncanonical_reasoning_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::ModelCapabilityItem {
+            selection_id: uuid(4),
+            capabilities: ModelCapabilities {
+                reasoning_levels: vec![ReasoningLevel::High, ReasoningLevel::Low],
+                fast_mode_supported: false,
+                service_tiers: Vec::new(),
+            },
+        };
+
+        let error = ServerFrame::try_new_for_version(ProtocolVersion::One, request(43)?, message)
+            .expect_err("capability sets use canonical ascending wire order");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
         Ok(())
     }
 }

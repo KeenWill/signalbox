@@ -237,6 +237,7 @@ that variant.
 | `list_conversations`                    | `title_contains` (string or null), `origin` (`native`, `imported`, or `all`), `include_archived` (boolean), `page_size` (canonical decimal string), `after` (cursor object or null)                                                                                      | Read one filtered unified conversation-summary page across native sessions and imported conversations in unified keyset order.                                                                                                                                                                                                                                                  |
 | `read_imported_conversation`            | `imported_conversation_id` (canonical UUID string)                                                                                                                                                                                                                       | Read one immutable imported conversation's complete entry inventory, including the positions `create_session_from_imported_frontier` consumes.                                                                                                                                                                                                                                  |
 | `list_model_aliases`                    | none                                                                                                                                                                                                                                                                     | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                                                                                                                                                    |
+| `list_model_capabilities`               | none                                                                                                                                                                                                                                                                     | Read the deployment's complete configured per-direct-selection settings-capability catalog.                                                                                                                                                                                                                                                                                     |
 | `compact_session`                       | `command_id` and `session_id` (canonical UUID strings), `through_position` (positive canonical decimal string or null)                                                                                                                                                   | Append a dedicated-call summary through the exact requested safe position, or through the latest safe boundary for null, without deleting or rewriting transcript history.                                                                                                                                                                                                      |
 | `read_runner_status` (proposed)         | `page_size` (canonical decimal string) and `after` (runner-evidence cursor object or null)                                                                                                                                                                               | Read the active and optional pending runner registrations, connection/loss state, advertised availability, retained operation failures, and startup workspace-leak reports, with one bounded evidence page.                                                                                                                                                                     |
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                             | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
@@ -986,6 +987,20 @@ The daemon rejects a deployment configuration containing more than 10,000
 aliases, and the native client enforces that same terminal catalog bound before
 presenting it.
 
+The model-capability catalog is the parallel ordered sequence
+`model_capabilities_start`, zero through 10,000 `model_capability_item` messages
+in direct-selection identity order, and
+`model_capabilities_end { capability_count }`. The item contains only the
+client-visible direct selection identity, ordered reasoning-level and
+provider-tagged service-tier sets, and fast-mode support Boolean. The exact
+settings vocabulary and the prohibition on exposing an alternate fast serving
+identity are owned by
+[model/session settings](model-session-settings.md#local-process-representation).
+The same vocabulary carries the closed `unsupported_reasoning_level`,
+`unsupported_fast_mode`, and `unsupported_service_tier` rejection details; each
+names the direct selection, and the value-bearing forms retain the unsupported
+value.
+
 `session_metadata` is the successful single-session read and
 `session_metadata_replaced` is the successful write receipt. Both carry
 `session_id`, the complete metadata object, and `last_writer`. The initial
@@ -1656,23 +1671,25 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
 closed `event` object. The protocol admits these event shapes:
 
-| Event                          | Additional members                                                                                         |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `session_created`              | none                                                                                                       |
-| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                       |
-| `goal_turn_retired`            | `turn_id`                                                                                                  |
-| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                         |
-| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                    |
-| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                              |
-| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                  |
-| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
-| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                             |
-| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                     |
-| `child_spawned`                | `spawning_request_id`, `child_session_id`, and `relationship`                                              |
-| `child_waiting`                | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                  |
-| `child_lifecycle_disposition`  | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                           |
-| `child_result`                 | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                |
-| `session_message`              | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content` |
+| Event                            | Additional members                                                                                                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_created`                | none                                                                                                                                                             |
+| `session_model_settings_changed` | `command_id`, prior and installed defaults versions, models and complete settings, `caller_override`, and ordered `adjustments`                                  |
+| `turn_model_settings_resolved`   | `accepted_input_id`, `turn_id`, `defaults_version`, requested and selected model identities, `per_call_override`, complete `settings`, and ordered `adjustments` |
+| `input_accepted`                 | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                                                             |
+| `goal_turn_retired`              | `turn_id`                                                                                                                                                        |
+| `turn_activated`                 | `turn_id` and `current_attempt_id`                                                                                                                               |
+| `model_call_transition`          | `turn_id`, `model_call_id`, and `state`                                                                                                                          |
+| `turn_completed`                 | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                                                    |
+| `turn_failed`                    | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                                                        |
+| `turn_refused`                   | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                           |
+| `turn_cancelled`                 | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                                                   |
+| `turn_reconciliation_required`   | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                           |
+| `child_spawned`                  | `spawning_request_id`, `child_session_id`, and `relationship`                                                                                                    |
+| `child_waiting`                  | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                                                                        |
+| `child_lifecycle_disposition`    | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                                                                                 |
+| `child_result`                   | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                                                                      |
+| `session_message`                | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content`                                                       |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A
