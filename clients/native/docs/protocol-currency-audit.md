@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `dd08783f` on 2026-08-03.
+Verified against repository head `6f350d9d` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 20 close-now, 16 staged, and 1 report-only.
+variants: 23 close-now, 16 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -64,6 +64,9 @@ variants: 20 close-now, 16 staged, and 1 report-only.
 | C19 | High     | Crash recovery can close an ambiguous tool request without carrying its attempt ID in the transcript entry, so attempt-only reconciliation anchoring rejected genuine terminal evidence.                                                 | **close-now** — use the authenticated frontier and source-qualified request-to-turn correlation to select the triggering turn's last contiguous terminal-result run. |
 | C20 | High     | If the current ambiguous tool batch had no materialized result, reconciliation suffix discovery could misattribute an older result run from the same turn.                                                                                | **close-now** — require a complete result run for the terminal same-turn proposal batch and authenticate its named attempt whenever attempt-bearing evidence exists.   |
 | C21 | Medium   | Authoritative refreshes retained presentation identities for transcript entries removed by compaction, so repeated compaction made projector memory grow with lifetime history.                                                          | **close-now** — prune identities absent from each valid authoritative snapshot while preserving stable IDs for every surviving record.                               |
+| C22 | Medium   | An unknown turn-state card used its current transcript anchor as its event identity, so compaction could make a newly observed turn reuse a retained turn's ID and replace that older card.                                                | **close-now** — allocate the stable event ID from turn identity and use the current transcript anchor only for presentation order.                                    |
+| C23 | High     | Side rereads for refusal and model-call reconciliation admitted no semantic rows but accepted a snapshot whose named turn, model call, frontier, or terminal state did not match the trigger.                                             | **close-now** — authenticate the exact terminal turn projection even when the triggering event contributes no semantic timeline entry.                               |
+| C24 | Medium   | Plan tool cards accepted display names, labels, arguments, and outputs as independent public overrides, allowing contradictory visible labels unrelated to the typed presentation state.                                                | **close-now** — represent recognized plan presentation as an internal typed variant and derive all display labels and content from it.                               |
 
 ## Staged gaps
 
