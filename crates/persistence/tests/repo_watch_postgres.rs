@@ -566,6 +566,24 @@ async fn cursor_constraint_rejects_a_non_numeric_payload_storage_version()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_constraint_rejects_a_fractional_payload_storage_version()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let update = sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = '{\"storage_version\": 0.6}'::jsonb
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .execute(&pool)
+    .await;
+
+    assert!(update.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn pull_request_target_constraint_rejects_a_null_number() -> Result<(), Box<dyn Error>> {
     let (_container, pool, repository) = migrated_cursor_fixture().await?;
     let insert = sqlx::query(
@@ -976,6 +994,37 @@ async fn actor_login_constraint_rejects_domain_invalid_spelling() -> Result<(), 
     .bind(PULL_REQUEST as i64)
     .bind(INITIAL_HEAD)
     .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn head_repository_constraint_rejects_domain_invalid_spelling() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $5, 'namespace/bad repo', $6, $7, $8, $9, ARRAY[]::text[], false
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
     .bind(BASE_BRANCH)
     .bind(HEAD_BRANCH)
     .bind(TITLE)
