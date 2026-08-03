@@ -105,10 +105,54 @@ BEGIN
                AND earlier.request_ordinal < request.request_ordinal
                AND earlier_decision.request_id IS NULL
        )
-       AND NOT (
-            lifecycle.state_kind = 'active'
-            AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
-            AND lifecycle.approval_tool_request_id = NEW.request_id
+       AND (
+            (
+                lifecycle.state_kind = 'active'
+                AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+                AND lifecycle.approval_tool_request_id = (
+                    SELECT later.request_id
+                      FROM tool_request AS later
+                      LEFT JOIN tool_approval_decision AS later_decision
+                        ON later_decision.request_id = later.request_id
+                     WHERE later.producing_model_call_id =
+                           request.producing_model_call_id
+                       AND later_decision.request_id IS NULL
+                     ORDER BY later.request_ordinal
+                     LIMIT 1
+                )
+            )
+            OR
+            (
+                lifecycle.state_kind = 'active'
+                AND lifecycle.active_phase_kind = 'running'
+                AND lifecycle.approval_tool_request_id IS NULL
+                AND lifecycle.recovery_tool_attempt_id IS NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_request AS undecided
+                      LEFT JOIN tool_approval_decision AS undecided_decision
+                        ON undecided_decision.request_id = undecided.request_id
+                     WHERE undecided.producing_model_call_id =
+                           request.producing_model_call_id
+                       AND undecided_decision.request_id IS NULL
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM turn_attempt AS successor
+                      JOIN model_call AS producing_call
+                        ON producing_call.model_call_id =
+                           request.producing_model_call_id
+                       AND producing_call.turn_id = request.turn_id
+                       AND producing_call.session_id = request.session_id
+                     WHERE successor.turn_attempt_id =
+                           lifecycle.current_attempt_id
+                       AND successor.turn_id = request.turn_id
+                       AND successor.session_id = request.session_id
+                       AND successor.continued_from_attempt_id =
+                           producing_call.turn_attempt_id
+                       AND successor.state_kind = 'prepared'
+                )
+            )
        );
     IF matching_effects <> 1 THEN
         RAISE EXCEPTION

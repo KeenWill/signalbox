@@ -4790,6 +4790,167 @@ async fn s10_inv019_approval_guard_rejects_decision_for_later_request() -> Resul
     Ok(())
 }
 
+/// S10 / INV-019: recovery remains the sole active gate after an earlier
+/// automatic request becomes ambiguous; a later human request cannot acquire
+/// a decision and event while that recovery wait owns the turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv019_approval_guard_rejects_decision_during_recovery() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = APPROVAL_FIXTURE_SEED + 0x200;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        &[
+            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+            ("later-human-tool", "{}"),
+        ],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let [automatic_request, later_request] = requests.as_slice() else {
+        panic!("the recovery fixture has two ordered requests")
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xd0));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("the automatic request is ready to execute");
+    let authorized = repository
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    assert_eq!(authorized.request().id(), *automatic_request);
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    let StartupScanSessionOutcome::RecoveredToolAttempt(outcome) =
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xd2)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd3)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?
+    else {
+        panic!("the in-flight external attempt becomes a recovery wait")
+    };
+    let ToolAttemptCrashOutcome::Ambiguous(ended) = *outcome else {
+        panic!("the external effect is ambiguous after restart")
+    };
+    assert_eq!(ended.request(), *automatic_request);
+    assert_eq!(ended.end(), &ToolAttemptEnd::Ambiguous);
+    let recovery_attempt: Uuid = sqlx::query_scalar(
+        "SELECT recovery_tool_attempt_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1
+            AND session_id = $2
+            AND active_phase_kind = 'awaiting_tool_recovery'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(recovery_attempt, attempt.into_uuid());
+
+    let mut stale_state = pool.begin().await?;
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&mut *stale_state)
+        .await?;
+    sqlx::query("DELETE FROM tool_approval_decision WHERE request_id = $1")
+        .bind(later_request.into_uuid())
+        .execute(&mut *stale_state)
+        .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&mut *stale_state)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER ALL")
+        .execute(&mut *stale_state)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_request
+            SET approval_posture = 'human'
+          WHERE request_id = $1",
+    )
+    .bind(later_request.into_uuid())
+    .execute(&mut *stale_state)
+    .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER ALL")
+        .execute(&mut *stale_state)
+        .await?;
+    stale_state.commit().await?;
+
+    let command = Uuid::from_u128(seed + 0xd1);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(later_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, owner_command_id)
+         VALUES ($1, 'approve', 'owner_command', $2)",
+    )
+    .bind(later_request.into_uuid())
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ('tool_approval_decided', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_approval_decided_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, $3
+           FROM header",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(later_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a later approval cannot bypass the active recovery wait");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_explicit_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_unsent_judge_call_rejects_usage() -> Result<(), Box<dyn Error>> {

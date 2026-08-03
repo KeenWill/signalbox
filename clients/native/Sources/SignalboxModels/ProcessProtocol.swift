@@ -2525,7 +2525,9 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   }
 
   private static func validRationale(_ rationale: String) -> Bool {
-    !rationale.isEmpty && rationale.utf8.count <= 4_096
+    !rationale.isEmpty
+      && rationale.utf8.count <= 4_096
+      && rationale.unicodeScalars.allSatisfy { $0.value != 0 }
   }
 }
 

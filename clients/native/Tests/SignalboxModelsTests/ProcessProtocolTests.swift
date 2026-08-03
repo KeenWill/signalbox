@@ -319,6 +319,38 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testDelegateRationaleRejectsNUL() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"13",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"tool_approval_decided",
+            "turn_id":"\(turnID)",
+            "tool_request_id":"44444444-4444-4444-8444-444444444444",
+            "decision":{"type":"approve"},
+            "decider":{
+              "type":"delegate",
+              "model_selection_id":"55555555-5555-4555-8555-555555555555",
+              "model_call_id":"66666666-6666-4666-8666-666666666666"
+            },
+            "rationale":"unsafe\\u0000rationale"
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.toolApprovalDecisionDiagnostic(in: frame.message))
+  }
+
   func testUserDenialReasonAllowsNonPOSIXUnicodeWhitespaceAtEdges() throws {
     let nonbreakingSpace = "\u{00A0}"
     let reason = "\(nonbreakingSpace)kept verbatim\(nonbreakingSpace)"
@@ -1486,6 +1518,17 @@ private enum ProcessProtocolFixture {
       return nil
     }
     return reason
+  }
+
+  static func toolApprovalDecisionDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard case .sessionEvent(let followed) = message,
+      case .unknown("tool_approval_decided", _, let diagnostic) = followed.event
+    else {
+      return nil
+    }
+    return diagnostic
   }
 }
 
