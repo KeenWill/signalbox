@@ -23,6 +23,7 @@ mod model_execution;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod repo_watch;
 mod review_workflow;
 mod runner;
 mod semantic_entry;
@@ -148,6 +149,20 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsReconstitutionFailure, ReplaceSessionDefaultsReconstitutionInput,
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
+};
+pub use repo_watch::{
+    BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
+    DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
+    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError,
+    RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
+    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleValidationError,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug, ReviewState,
+    ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -473,6 +488,16 @@ define_identity!(
     ReviewExternalLinkId
 );
 
+define_identity!(
+    /// Identifies one durable repository-watch event.
+    RepoWatchEventId
+);
+
+define_identity!(
+    /// Identifies one durable repository-watch dispatch audit record.
+    RepoWatchDispatchId
+);
+
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Behavior-irrelevant test plumbing shared across unit-test modules.
@@ -527,9 +552,10 @@ pub(crate) mod test_support {
 mod tests {
     use super::{
         AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RunnerAuthenticationId,
-        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceManifestId,
+        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId,
+        RepoWatchEventId, RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -568,5 +594,7 @@ mod tests {
         assert_uuid_contract!(RunnerAuthenticationId);
         assert_uuid_contract!(RunnerLeaseId);
         assert_uuid_contract!(WorkspaceManifestId);
+        assert_uuid_contract!(RepoWatchEventId);
+        assert_uuid_contract!(RepoWatchDispatchId);
     }
 }
