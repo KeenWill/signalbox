@@ -273,8 +273,27 @@ impl PostgresToolLoopRepository {
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND state_kind = 'active'
-                AND active_phase_kind = 'running'
-                AND active_tool_round_call_id IS NOT NULL",
+                AND active_tool_round_call_id IS NOT NULL
+                AND (
+                    active_phase_kind = 'running'
+                    OR (
+                        active_phase_kind = 'awaiting_tool_approval'
+                        AND EXISTS (
+                            SELECT 1
+                              FROM tool_request AS request
+                             WHERE request.request_id = approval_tool_request_id
+                               AND request.session_id = turn_lifecycle.session_id
+                               AND request.turn_id = turn_lifecycle.turn_id
+                               AND request.approval_posture = 'delegated'
+                               AND NOT EXISTS (
+                                    SELECT 1
+                                      FROM tool_approval_judge_model_call AS judge
+                                     WHERE judge.request_id = request.request_id
+                                       AND judge.state_kind = 'terminal'
+                               )
+                        )
+                    )
+                )",
         )
         .bind(session_id_to_uuid(session))
         .fetch_optional(&self.pool)
