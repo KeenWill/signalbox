@@ -17,20 +17,25 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and differ behavior below is verified against this PR
-(`agent/repo-watch-persistence`). Polling and rule dispatch become implemented
-only in the later child pull requests named by their verification references.
+(`agent/repo-watch-persistence`). Polling behavior is verified against its child
+PR (`agent/repo-watch-poller`). Rule dispatch becomes implemented only in the
+later child pull request named by its verification reference.
 
 ## Configuration and credential boundary
 
-**Foundation contract.** Repository watch has one optional, versioned TOML
-section. It contains a list of repositories, a list of signal-reviewer logins,
-and versioned structured rules. Each repository entry names exactly one
-`namespace/name` repository, a positive polling interval, and its own credential
-file reference. Duplicate repositories, missing credential-file references,
-unknown keys, unsupported versions, zero intervals, malformed values, and
-invalid rules fail configuration before any watch task starts. Other daemon
-GitHub credentials do not substitute for a missing repository-watch credential
-reference.
+**Implemented behavior.** Repository watch has one optional, versioned TOML
+section containing a list of repositories and a list of signal-reviewer logins.
+Each repository entry names exactly one `namespace/name` repository, a positive
+polling interval, and its own credential file reference. Duplicate repositories,
+shared or missing credential-file references, unknown keys, unsupported
+versions, zero intervals, malformed values, and invalid entries fail
+configuration before any watch task starts. Other daemon GitHub credentials do
+not substitute for a missing repository-watch credential reference.
+
+**Committed unimplemented functionality.** Slice 4 adds versioned structured
+rules to this same section and makes invalid rules a startup configuration
+failure. No present configuration surface accepts rules; this paragraph binds
+only that compatibility constraint.
 
 **Implemented behavior.** Repository identities normalize to ASCII lowercase at
 construction. Both slug segments are nonempty ASCII letters, digits, dots,
@@ -39,7 +44,7 @@ managed-user, and App-bot logins likewise normalize to ASCII lowercase so exact
 author matching and signal-reviewer filtering use GitHub's case-insensitive
 identity semantics.
 
-**Foundation contract.** Credential files follow the house credential-file
+**Implemented behavior.** Credential files follow the house credential-file
 pattern: configuration stores paths rather than secrets; request preparation
 reopens the selected file and reads a bounded value; errors and telemetry name
 only the reference, never the secret; and rotation affects later requests
@@ -51,20 +56,24 @@ dispatch record, session parameter, error, or log.
 
 ## Poll transport and differ
 
-**Foundation contract.** Version one uses conditional-request polling with one
+**Implemented behavior.** Version one uses conditional-request polling with one
 independent task per configured repository and the repository's configured
 interval. Each resource request sends `If-None-Match` only when the repository
 task's process-local cache holds that resource's ETag and typed accepted state.
-A resource-level `304 Not Modified` reuses only that resource's accepted state
-and does not skip the remaining fetches; GitHub does not count a conditional
-`304` against the primary rate limit. Cache keys are bounded, non-secret
-resource/page identifiers rather than query strings. The cache starts empty on
-every daemon start, so the first poll and the first poll after restart perform
-one complete unconditional fetch. A failed, rejected, partial, or unparseable
-poll submits no persistence candidate. The next poll occurs after the
-per-repository interval; version one has no webhook fallback and no speculative
-second polling transport. No present runtime performs these polls; Slice 3
-implements this constraint.
+A production task sends only to the fixed `https://api.github.com` origin. REST
+paths are anchored to the configured base repository, and GraphQL variables name
+that same repository. The client requires TLS 1.2 or newer and disables
+redirects, environment proxies, and automatic retries so credential-bearing
+requests cannot be redirected or silently replayed outside their repository
+attempt. A resource-level `304 Not Modified` reuses only that resource's
+accepted state and does not skip the remaining fetches; GitHub does not count a
+conditional `304` against the primary rate limit. Cache keys are bounded,
+non-secret resource/page identifiers rather than query strings. The cache starts
+empty on every daemon start, so the first poll and the first poll after restart
+perform one complete unconditional fetch. A failed, rejected, partial, or
+unparseable poll submits no persistence candidate. The next poll occurs after
+the per-repository interval; version one has no webhook fallback and no
+speculative second polling transport.
 
 **Implemented behavior.** The versioned durable cursor retains only the complete
 normalized repository state and exact signal-reviewer set needed for comparison.
@@ -87,12 +96,12 @@ events: they cannot inspect normalized snapshots or rerun the differ. Why:
 transport independence requires both polling and a later authenticated webhook
 receiver to feed the same durable facts.
 
-**Foundation contract.** Polling fetches repository state, not rule inputs. The
+**Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
 the transport follows every result page needed to build that finite projection
 and retains its per-page validator only in the repository task's process-local
-cache. Slice 3 implements this transport behavior.
+cache.
 
 ## Durable event vocabulary
 
@@ -148,7 +157,7 @@ kind is constructible.
 submitted review. A later GitHub dismissal is not a version-one fact and emits
 no event.
 
-**Foundation contract.** Reaction ingestion includes only reactions by a login
+**Implemented behavior.** Reaction ingestion includes only reactions by a login
 in the configured signal-reviewer list. Reactions from every other actor are
 excluded while normalizing state, so they cannot create durable
 `ReactionChanged` events. Why: reviewer signals are actionable facts; the full
@@ -180,7 +189,7 @@ not a string DSL. Fields within one rule are conjunctive and distinct rules are
 disjunctive. Omitting every target field means everything; requiring labels or
 supplying regex fields narrows only that rule. There is no global targeting
 switch. No present configuration or execution surface loads or evaluates these
-rules; Slices 3 and 4 implement this constraint.
+rules; Slice 4 implements this constraint.
 
 **Implemented behavior.** The version-one matcher value has exactly these
 fields:

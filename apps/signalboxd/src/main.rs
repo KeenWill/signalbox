@@ -51,10 +51,11 @@ use signalboxd::{
     FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
     HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
     PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -461,6 +462,7 @@ enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
+    RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -500,6 +502,7 @@ enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
+    RepositoryWatchCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -512,6 +515,9 @@ impl RuntimeTaskDefect {
             Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
+            Self::RepositoryWatchCompletedBeforeShutdown => {
+                "repository_watch_completed_before_shutdown"
+            }
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -720,6 +726,15 @@ fn report_runner_runtime_failure(error: &RunnerProtocolRuntimeError) {
     );
 }
 
+fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::CallerOrHubBug,
+        cause = %error,
+        "repository-watch runtime violated its lifecycle contract"
+    );
+}
+
 /// Records an unexpected top-level task state using closed evidence only.
 ///
 /// The cause names the task-control condition without formatting `JoinError`,
@@ -747,7 +762,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::Process(Ok(())))
-        | Ok(RuntimeTaskExit::Runner(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::Runner(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(()))) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -755,6 +771,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::Runner(Err(error))) => {
             report_runner_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
+            report_repository_watch_runtime_defect(&error);
+            RuntimeTaskCompletion::Defect
         }
         Err(error) => {
             report_runtime_task_defect(joined_task_defect(&error));
@@ -1105,6 +1125,21 @@ async fn run_hub(
         return Err(error);
     }
 
+    let repository_watch_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match RepositoryWatchRuntime::try_new(pool.clone(), configuration) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
+
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1213,6 +1248,7 @@ async fn run_hub(
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
+    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -1229,6 +1265,15 @@ async fn run_hub(
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
     });
+    if let Some(repository_watch_runtime) = repository_watch_runtime {
+        runtime_tasks.spawn(async move {
+            RuntimeTaskExit::RepositoryWatch(
+                repository_watch_runtime
+                    .run(repository_watch_shutdown_receiver)
+                    .await,
+            )
+        });
+    }
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let mut outcome = {
@@ -1266,6 +1311,16 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                        report_repository_watch_runtime_defect(&error);
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -1292,6 +1347,7 @@ async fn run_hub(
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
+            let _ = repository_watch_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
@@ -1611,13 +1667,13 @@ mod tests {
         GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
-        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, run_scheduler_until_shutdown,
+        RepositoryWatchRuntimeError, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
+        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
+        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, migrate_scan_then_schedule, operator_filter,
+        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
@@ -2477,6 +2533,15 @@ mod tests {
             completed_runtime_outcome(cause, drain),
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
         );
+    }
+
+    #[test]
+    fn repository_watch_supervisor_failure_is_a_runtime_lifecycle_defect() {
+        let completion = super::runtime_task_completion(Ok(RuntimeTaskExit::RepositoryWatch(Err(
+            RepositoryWatchRuntimeError::RepositoryTaskExited,
+        ))));
+
+        assert_eq!(completion, RuntimeTaskCompletion::Defect);
     }
 
     #[test]

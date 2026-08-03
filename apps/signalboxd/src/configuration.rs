@@ -7,13 +7,14 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
     DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
-    ToolApprovalPosture, ToolName,
+    ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, RepoWatchAuthorLogin,
+    RepositorySlug, ResolvedProviderTarget, ToolApprovalPosture, ToolName,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -30,6 +31,7 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_RATE_VERSION_UTF8_BYTES};
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use signalbox_tools_web::WebFetchEgressPolicy;
+use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
@@ -245,6 +247,69 @@ pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// Default maximum assembled source bytes for one conversation import.
 pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
+const MAX_WATCHED_REPOSITORIES: usize = 128;
+const MAX_SIGNAL_REVIEWERS: usize = 128;
+
+/// One repository-specific version-one polling and credential configuration.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WatchedRepositoryConfiguration {
+    repository: RepositorySlug,
+    poll_interval: Duration,
+    credential_file: PathBuf,
+}
+
+impl WatchedRepositoryConfiguration {
+    /// Returns the canonical repository identity authorized by this entry.
+    pub const fn repository(&self) -> &RepositorySlug {
+        &self.repository
+    }
+
+    /// Returns the positive interval between completed polling attempts.
+    pub const fn poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    /// Returns the deployment-owned credential-file reference.
+    pub fn credential_file(&self) -> &Path {
+        &self.credential_file
+    }
+
+    /// Returns the non-secret request credential reference for this repository.
+    pub fn credential_reference(&self) -> CredentialReference {
+        CredentialReference::new(format!("repository-watch:{}", self.repository.as_str()))
+    }
+}
+
+impl fmt::Debug for WatchedRepositoryConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WatchedRepositoryConfiguration")
+            .field("repository", &self.repository)
+            .field("poll_interval", &self.poll_interval)
+            .field("credential_file", &"[REDACTED REFERENCE]")
+            .finish()
+    }
+}
+
+/// Complete optional version-one repository-watch configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryWatchConfiguration {
+    signal_reviewers: Box<[RepoWatchAuthorLogin]>,
+    repositories: Box<[WatchedRepositoryConfiguration]>,
+}
+
+impl RepositoryWatchConfiguration {
+    /// Returns the exact canonical login set used for reaction ingestion.
+    pub fn signal_reviewers(&self) -> &[RepoWatchAuthorLogin] {
+        &self.signal_reviewers
+    }
+
+    /// Returns every independently credentialed repository task.
+    pub fn repositories(&self) -> &[WatchedRepositoryConfiguration] {
+        &self.repositories
+    }
+}
+
 /// Validated static model and alias definitions used by hub composition.
 #[derive(Clone, Debug)]
 pub struct HubModelConfiguration {
@@ -267,6 +332,7 @@ pub struct HubModelConfiguration {
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
+    repository_watch: Option<RepositoryWatchConfiguration>,
 }
 
 impl HubModelConfiguration {
@@ -295,6 +361,7 @@ impl HubModelConfiguration {
                 "tool_mappings",
                 "tool_approval_postures",
                 "approval_judge",
+                "repository_watch",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -386,6 +453,10 @@ impl HubModelConfiguration {
         let tool_approval_postures =
             parse_tool_approval_postures(document.get("tool_approval_postures"))?;
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
+        let repository_watch = document
+            .get("repository_watch")
+            .map(parse_repository_watch_configuration)
+            .transpose()?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -635,6 +706,7 @@ impl HubModelConfiguration {
             daemon_tools,
             tool_approval_postures,
             approval_judge_selection,
+            repository_watch,
         })
     }
 
@@ -818,6 +890,11 @@ impl HubModelConfiguration {
         self.direct_selections.contains(&selection)
     }
 
+    /// Returns the complete watch configuration, or absence when no task starts.
+    pub const fn repository_watch(&self) -> Option<&RepositoryWatchConfiguration> {
+        self.repository_watch.as_ref()
+    }
+
     /// Resolves one configured alias to the immutable definition frozen at
     /// acceptance time.
     pub fn resolve_alias(&self, alias: ModelAlias) -> Option<FrozenAliasDefinition> {
@@ -830,6 +907,95 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn parse_repository_watch_configuration(
+    item: &Item,
+) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["version", "signal_reviewers", "repositories"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if table.get("version").and_then(Item::as_integer) != Some(1) {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let reviewer_values = table
+        .get("signal_reviewers")
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if reviewer_values.len() > MAX_SIGNAL_REVIEWERS {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut signal_reviewers = Vec::with_capacity(reviewer_values.len());
+    let mut reviewer_set = HashSet::with_capacity(reviewer_values.len());
+    for value in reviewer_values {
+        let login = value
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            .and_then(|value| {
+                RepoWatchAuthorLogin::try_new(value.to_owned())
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            })?;
+        if !reviewer_set.insert(login.clone()) {
+            return Err(HubModelConfigurationError::DuplicateSignalReviewer);
+        }
+        signal_reviewers.push(login);
+    }
+    signal_reviewers.sort();
+
+    let repository_tables = table
+        .get("repositories")
+        .and_then(Item::as_array_of_tables)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if repository_tables.is_empty() || repository_tables.len() > MAX_WATCHED_REPOSITORIES {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut repositories = Vec::with_capacity(repository_tables.len());
+    let mut repository_set = HashSet::with_capacity(repository_tables.len());
+    let mut credential_file_set = HashSet::with_capacity(repository_tables.len());
+    for repository in repository_tables {
+        reject_unknown_fields(
+            repository,
+            &["repository", "poll_interval_seconds", "credential_file"],
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        let repository_slug = RepositorySlug::try_new(
+            required_string(repository, "repository")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                .to_owned(),
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if !repository_set.insert(repository_slug.clone()) {
+            return Err(HubModelConfigurationError::DuplicateWatchedRepository);
+        }
+        let interval = repository
+            .get("poll_interval_seconds")
+            .and_then(Item::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        let credential_file = PathBuf::from(
+            required_string(repository, "credential_file")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?,
+        );
+        if !credential_file.is_absolute() {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        if !credential_file_set.insert(credential_file.clone()) {
+            return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+        }
+        repositories.push(WatchedRepositoryConfiguration {
+            repository: repository_slug,
+            poll_interval: Duration::from_secs(interval),
+            credential_file,
+        });
+    }
+    repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
+    Ok(RepositoryWatchConfiguration {
+        signal_reviewers: signal_reviewers.into_boxed_slice(),
+        repositories: repositories.into_boxed_slice(),
+    })
 }
 
 fn parse_tool_approval_postures(
@@ -1199,6 +1365,14 @@ pub enum HubModelConfigurationError {
     InvalidConversationImportLimit,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
+    /// The optional version-one repository-watch section was malformed.
+    InvalidRepositoryWatchConfiguration,
+    /// Two repository-watch entries normalized to the same repository.
+    DuplicateWatchedRepository,
+    /// Two signal-reviewer spellings normalized to the same login.
+    DuplicateSignalReviewer,
+    /// Two watched repositories named the same credential-file reference.
+    DuplicateRepositoryWatchCredentialFile,
     /// One direct selection appeared more than once.
     DuplicateSelection,
     /// One target was assigned conflicting runtime meanings.
@@ -1286,6 +1460,16 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
             }
+            Self::InvalidRepositoryWatchConfiguration => {
+                "model configuration contains invalid repository-watch settings"
+            }
+            Self::DuplicateWatchedRepository => "model configuration repeats a watched repository",
+            Self::DuplicateSignalReviewer => {
+                "model configuration repeats a repository-watch signal reviewer"
+            }
+            Self::DuplicateRepositoryWatchCredentialFile => {
+                "model configuration repeats a repository-watch credential-file reference"
+            }
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
             Self::InvalidAliases => "model aliases are not an array of tables",
@@ -1344,6 +1528,7 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 pub struct FileCredentialAccess {
     path: Arc<PathBuf>,
     reference: CredentialReference,
+    maximum_bytes: Option<usize>,
 }
 
 impl FileCredentialAccess {
@@ -1352,6 +1537,19 @@ impl FileCredentialAccess {
         Self {
             path: Arc::new(path),
             reference,
+            maximum_bytes: None,
+        }
+    }
+
+    pub(crate) fn new_bounded(
+        path: PathBuf,
+        reference: CredentialReference,
+        maximum_bytes: usize,
+    ) -> Self {
+        Self {
+            path: Arc::new(path),
+            reference,
+            maximum_bytes: Some(maximum_bytes),
         }
     }
 
@@ -1382,7 +1580,13 @@ impl CredentialAccess for FileCredentialAccess {
                 CredentialAccessFailure::Unmapped,
             ));
         }
-        match tokio::fs::read(self.path.as_ref()).await {
+        let file_bytes = match self.maximum_bytes {
+            Some(maximum_bytes) => {
+                read_bounded_credential_file(self.path.as_ref(), maximum_bytes).await
+            }
+            None => tokio::fs::read(self.path.as_ref()).await,
+        };
+        match file_bytes {
             Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
             Err(error) => Err(CredentialAccessError::new(
                 reference.clone(),
@@ -1396,11 +1600,29 @@ impl CredentialAccess for FileCredentialAccess {
     }
 }
 
+async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    let read_limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(maximum_bytes.min(8 * 1_024));
+    file.take(read_limit).read_to_end(&mut bytes).await?;
+    if bytes.len() > maximum_bytes {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "credential file exceeds its accepted byte bound",
+        ))
+    } else {
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
+        time::Duration,
     };
 
     use rust_decimal::Decimal;
@@ -1421,6 +1643,22 @@ mod tests {
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
+    const WATCH_REPOSITORY: &str = "owner/repository";
+    const SECOND_WATCH_REPOSITORY: &str = "owner/second";
+    const WATCH_CREDENTIAL_FILE: &str = "/run/credentials/repository-watch-token";
+    const SECOND_WATCH_CREDENTIAL_FILE: &str = "/run/credentials/second-watch-token";
+    const WATCH_CREDENTIAL_REFERENCE: &str = "repository-watch:owner/repository";
+    const WATCH_INTERVAL_SECONDS: u64 = 90;
+    const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
+    const SIGNAL_REVIEWER: &str = "signal-reviewer";
+    const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
+    const PROVIDER_WATCH_REPOSITORY: &str = "Owner/Repository";
+    const PROVIDER_SECOND_WATCH_REPOSITORY: &str = "Owner/Second";
+    const PROVIDER_SIGNAL_REVIEWER: &str = "Signal-Reviewer";
+    const PROVIDER_SECOND_SIGNAL_REVIEWER: &str = "Review-Bot[bot]";
+    const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "OWNER/REPOSITORY";
+    const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
+    const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -1546,6 +1784,31 @@ cache_read_input_usd_per_million_tokens = "4"
         format!("{}{}", &CONFIGURATION[..start], &CONFIGURATION[end..])
     }
 
+    fn configuration_with_repository_watch() -> String {
+        format!(
+            r#"{CONFIGURATION}
+
+[repository_watch]
+version = 1
+signal_reviewers = ["{PROVIDER_SIGNAL_REVIEWER}", "{PROVIDER_SECOND_SIGNAL_REVIEWER}"]
+
+[[repository_watch.repositories]]
+repository = "{PROVIDER_WATCH_REPOSITORY}"
+poll_interval_seconds = {WATCH_INTERVAL_SECONDS}
+credential_file = "{WATCH_CREDENTIAL_FILE}"
+
+[[repository_watch.repositories]]
+repository = "{PROVIDER_SECOND_WATCH_REPOSITORY}"
+poll_interval_seconds = {SECOND_WATCH_INTERVAL_SECONDS}
+credential_file = "{SECOND_WATCH_CREDENTIAL_FILE}"
+"#,
+        )
+    }
+
+    fn watch_interval_fixture() -> Duration {
+        Duration::from_secs(WATCH_INTERVAL_SECONDS)
+    }
+
     fn judged_direct_selection_fixture() -> DirectModelSelection {
         DirectModelSelection::from_uuid(Uuid::from_u128(2))
     }
@@ -1615,6 +1878,214 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         let judged = judged_direct_selection_fixture();
 
         assert_eq!(configured.approval_judge_selection(judged), judged);
+    }
+
+    #[test]
+    fn absent_repository_watch_configuration_starts_no_watch_tasks() {
+        let configured =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+
+        assert_eq!(configured.repository_watch(), None);
+    }
+
+    #[test]
+    fn repository_watch_normalizes_signal_reviewer_logins() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repository_watch = configured
+            .repository_watch()
+            .expect("fixture configures repository watch");
+
+        assert_eq!(
+            repository_watch.signal_reviewers()[0].as_str(),
+            SECOND_SIGNAL_REVIEWER
+        );
+        assert_eq!(
+            repository_watch.signal_reviewers()[1].as_str(),
+            SIGNAL_REVIEWER
+        );
+    }
+
+    #[test]
+    fn repository_watch_builds_a_canonical_repository_inventory() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repositories = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories();
+
+        assert_eq!(repositories[0].repository().as_str(), WATCH_REPOSITORY);
+        assert_eq!(
+            repositories[1].repository().as_str(),
+            SECOND_WATCH_REPOSITORY
+        );
+    }
+
+    #[test]
+    fn repository_watch_preserves_each_repository_interval() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+
+        assert_eq!(watched.poll_interval(), watch_interval_fixture());
+    }
+
+    #[test]
+    fn repository_watch_preserves_each_credential_file_reference() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repositories = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories();
+
+        assert_eq!(
+            repositories[0].credential_file(),
+            Path::new(WATCH_CREDENTIAL_FILE)
+        );
+        assert_eq!(
+            repositories[1].credential_file(),
+            Path::new(SECOND_WATCH_CREDENTIAL_FILE)
+        );
+    }
+
+    #[test]
+    fn repository_watch_derives_a_repository_scoped_credential_reference() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+
+        assert_eq!(
+            watched.credential_reference().as_str(),
+            WATCH_CREDENTIAL_REFERENCE
+        );
+    }
+
+    #[test]
+    fn repository_watch_debug_redacts_the_credential_file_reference() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+        let debug = format!("{watched:?}");
+
+        assert!(!debug.contains(WATCH_CREDENTIAL_FILE));
+        assert!(debug.contains("[REDACTED REFERENCE]"));
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_missing_credential_file_reference() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+            "credential_path_was_omitted = true",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_relative_credential_file_reference() {
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, RELATIVE_WATCH_CREDENTIAL_FILE);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_zero_poll_interval() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("poll_interval_seconds = {WATCH_INTERVAL_SECONDS}"),
+            "poll_interval_seconds = 0",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_duplicate_canonical_repositories() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("repository = \"{PROVIDER_SECOND_WATCH_REPOSITORY}\""),
+            &format!("repository = \"{DUPLICATE_PROVIDER_WATCH_REPOSITORY}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateWatchedRepository)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_duplicate_canonical_signal_reviewers() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!(
+                "signal_reviewers = [\"{PROVIDER_SIGNAL_REVIEWER}\", \"{PROVIDER_SECOND_SIGNAL_REVIEWER}\"]"
+            ),
+            &format!(
+                "signal_reviewers = [\"{PROVIDER_SIGNAL_REVIEWER}\", \"{DUPLICATE_PROVIDER_SIGNAL_REVIEWER}\"]"
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateSignalReviewer)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_shared_credential_file_reference() {
+        let configured = configuration_with_repository_watch()
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, WATCH_CREDENTIAL_FILE);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_unknown_repository_fields() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+            &format!(
+                "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\nwebhook_secret_file = \"/not-v1\""
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_an_unsupported_version() {
+        let configured = configuration_with_repository_watch().replace(
+            "[repository_watch]\nversion = 1",
+            "[repository_watch]\nversion = 2",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
     }
 
     #[test]
@@ -2549,6 +3020,29 @@ extra = true"#,
             b"rotated-test-value"
         );
         std::fs::remove_file(path).expect("fixture file is removable");
+    }
+
+    #[tokio::test]
+    async fn bounded_file_credentials_reject_before_accumulating_past_the_limit() {
+        const ACCEPTED_BYTES: usize = 8;
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let path = temporary.path().join("bounded-credential");
+        std::fs::write(&path, vec![b'x'; ACCEPTED_BYTES + 1])
+            .expect("oversized credential fixture is writable");
+        let source = FileCredentialAccess::new_bounded(
+            path,
+            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+            ACCEPTED_BYTES,
+        );
+
+        assert_eq!(
+            source
+                .resolve(&source.credential_reference())
+                .await
+                .expect_err("oversized credential is rejected")
+                .failure,
+            CredentialAccessFailure::Unreadable
+        );
     }
 
     /// A credential-printing tool terminates the line it writes, so the
