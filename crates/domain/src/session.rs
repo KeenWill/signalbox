@@ -2361,19 +2361,21 @@ mod tests {
     /// creation family owned by the spawning-request transaction.
     #[test]
     fn s18_inv003_create_session_rejects_delegated_creation() {
+        let command = command_id(3);
+        let session = session_id(5);
         let provenance = SessionCreationProvenance::delegated(delegated_spawning_request());
-        let create = CreateSession::new(command_id(3), provenance, defaults(4));
+        let create = CreateSession::new(command, provenance, defaults(4));
 
         let error = create
-            .prepare(session_id(5))
+            .prepare(session)
             .expect_err("ordinary creation cannot claim delegated provenance");
 
         assert_eq!(
             error.failure(),
             CreateSessionPreparationFailure::DelegatedCreationRequiresSpawn
         );
-        assert_eq!(error.session(), session_id(5));
-        assert_eq!(error.command().command_id(), command_id(3));
+        assert_eq!(error.session(), session);
+        assert_eq!(error.command().command_id(), command);
         assert_eq!(error.command().provenance(), provenance);
     }
 
@@ -2471,6 +2473,24 @@ mod tests {
         assert_creation_input_is_unchanged(&returned, &facts);
         assert_eq!(returned_failure, failure);
         failure
+    }
+
+    /// S18 / INV-003: ordinary creation reconstitution cannot claim the
+    /// delegated provenance family owned by the spawning-request transaction.
+    #[test]
+    fn s18_inv003_creation_reconstitution_rejects_delegated_provenance() {
+        let command = CreateSession::new(
+            command_id(1),
+            SessionCreationProvenance::delegated(delegated_spawning_request()),
+            defaults(2),
+        );
+        let failure =
+            creation_reconstitution_failure(CreationFacts::matching(command, session_id(3)));
+
+        assert_eq!(
+            failure,
+            CreateSessionReconstitutionFailure::DelegatedCreationRequiresSpawn
+        );
     }
 
     #[track_caller]
