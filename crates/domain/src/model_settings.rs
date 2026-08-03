@@ -896,8 +896,11 @@ impl SessionModelSettingsChanged {
         };
         let prior_precedence = prior_settings.precedence();
         let installed_precedence = installed_settings.precedence();
+        let defaults_snapshots_have_no_per_call_layer = prior_precedence.per_call()
+            == ModelSettingsOverlay::inherit_all()
+            && installed_precedence.per_call() == ModelSettingsOverlay::inherit_all();
         let copied_precedence = ModelSettingsPrecedence::new(
-            prior_precedence.per_call(),
+            ModelSettingsOverlay::inherit_all(),
             prior_precedence.session(),
             installed_precedence.profile(),
             installed_precedence.global_default(),
@@ -929,6 +932,7 @@ impl SessionModelSettingsChanged {
             && records_change
             && prior_model_matches
             && installed_model_matches
+            && defaults_snapshots_have_no_per_call_layer
             && provenance_matches
             && adjustments_target_inherited_values
             && adjustments_match_model_change)
@@ -1006,12 +1010,14 @@ pub struct TurnModelSettingsResolved {
     selection: FrozenModelSelection,
     per_call_override: ModelSettingsOverlay,
     settings: ValidatedModelSettings,
+    adjusted_from_selection: Option<DirectModelSelection>,
     adjustments: Box<[ModelChangeAdjustment]>,
 }
 
 impl TurnModelSettingsResolved {
     /// Constructs an event when the settings evidence belongs to the frozen
     /// direct selection. Provider-default evidence is model-independent.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         accepted_input: AcceptedInputId,
         turn: TurnId,
@@ -1019,6 +1025,7 @@ impl TurnModelSettingsResolved {
         selection: FrozenModelSelection,
         per_call_override: ModelSettingsOverlay,
         settings: ValidatedModelSettings,
+        adjusted_from_selection: Option<DirectModelSelection>,
         adjustments: Vec<ModelChangeAdjustment>,
     ) -> Option<Self> {
         let settings_selection = settings.validated_for();
@@ -1037,8 +1044,12 @@ impl TurnModelSettingsResolved {
                     },
                 )
             });
-        let adjustments_match_selection =
-            adjustments.is_empty() || matches!(selection, FrozenModelSelection::FrozenAlias { .. });
+        let adjustments_match_selection = match adjustments.is_empty() {
+            true => adjusted_from_selection.is_none(),
+            false => {
+                adjusted_from_selection.is_some_and(|prior| prior != selection.selected_direct())
+            }
+        };
         (selection_matches && caller_matches && adjustments_match && adjustments_match_selection)
             .then(|| Self {
                 accepted_input,
@@ -1047,6 +1058,7 @@ impl TurnModelSettingsResolved {
                 selection,
                 per_call_override,
                 settings,
+                adjusted_from_selection,
                 adjustments: adjustments.into_boxed_slice(),
             })
     }
@@ -1081,7 +1093,12 @@ impl TurnModelSettingsResolved {
         self.settings
     }
 
-    /// Borrows ordered automatic alias-retarget adjustments.
+    /// Returns the prior direct validation identity that caused adjustments.
+    pub const fn adjusted_from_selection(&self) -> Option<DirectModelSelection> {
+        self.adjusted_from_selection
+    }
+
+    /// Borrows ordered automatic model-change adjustments.
     pub fn adjustments(&self) -> &[ModelChangeAdjustment] {
         &self.adjustments
     }
@@ -1996,6 +2013,140 @@ mod tests {
         assert!(event.is_some());
     }
 
+    /// INV-003 / INV-053: durable defaults snapshots cannot contain a
+    /// request-scoped settings contribution.
+    #[test]
+    fn inv003_inv053_defaults_event_rejects_per_call_layers() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::High),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let supported = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, []);
+        let prior = supported
+            .validate_precedence(prior_selection, precedence)
+            .expect("the prior fixture level is supported");
+        let installed = supported
+            .validate_precedence(installed_selection, precedence)
+            .expect("the installed fixture level is supported");
+        let prior_version = SessionConfigurationDefaultsVersion::first();
+        let installed_version = prior_version
+            .checked_next()
+            .expect("the first version has a successor");
+
+        let event = SessionModelSettingsChanged::try_new(
+            session_id(1),
+            command_id(1),
+            prior_version,
+            installed_version,
+            ModelSelectionRequest::Direct(prior_selection),
+            ModelSelectionRequest::Direct(installed_selection),
+            prior,
+            installed,
+            ModelSettingsOverlay::inherit_all(),
+            Vec::new(),
+        );
+
+        assert_eq!(event, None);
+    }
+
+    /// INV-003 / INV-053: alias adjustment evidence names the distinct prior
+    /// direct selection whose capability change caused it.
+    #[test]
+    fn inv003_inv053_turn_event_accepts_distinct_alias_adjustment_source() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(3));
+        let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
+            .validate_precedence(
+                installed_selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the adjusted fixture level is supported");
+
+        let event = TurnModelSettingsResolved::try_new(
+            AcceptedInputId::from_uuid(Uuid::from_u128(1)),
+            TurnId::from_uuid(Uuid::from_u128(2)),
+            SessionConfigurationDefaultsVersion::first(),
+            FrozenModelSelection::FrozenAlias {
+                alias,
+                definition: crate::FrozenAliasDefinition::selecting(installed_selection),
+            },
+            ModelSettingsOverlay::inherit_all(),
+            settings,
+            Some(prior_selection),
+            vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }],
+        );
+
+        assert_eq!(
+            event
+                .expect("the distinct prior selection authenticates the adjustment")
+                .adjusted_from_selection(),
+            Some(prior_selection)
+        );
+    }
+
+    /// INV-003 / INV-053: an alias spelling cannot authenticate an adjustment
+    /// when its prior validation identity equals its selected direct model.
+    #[test]
+    fn inv003_inv053_turn_event_rejects_unchanged_alias_adjustment_source() {
+        let selection = direct(1);
+        let alias = crate::ModelAlias::from_uuid(Uuid::from_u128(2));
+        let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the adjusted fixture level is supported");
+
+        let event = TurnModelSettingsResolved::try_new(
+            AcceptedInputId::from_uuid(Uuid::from_u128(1)),
+            TurnId::from_uuid(Uuid::from_u128(2)),
+            SessionConfigurationDefaultsVersion::first(),
+            FrozenModelSelection::FrozenAlias {
+                alias,
+                definition: crate::FrozenAliasDefinition::selecting(selection),
+            },
+            ModelSettingsOverlay::inherit_all(),
+            settings,
+            Some(selection),
+            vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }],
+        );
+
+        assert_eq!(event, None);
+    }
+
     /// INV-003 / INV-053: a turn settings event cannot contradict the
     /// per-call contribution sealed into its complete precedence chain.
     #[test]
@@ -2017,6 +2168,7 @@ mod tests {
             FrozenModelSelection::Direct(selection),
             contradictory,
             settings,
+            None,
             Vec::new(),
         );
 
@@ -2039,6 +2191,7 @@ mod tests {
             FrozenModelSelection::Direct(selection),
             ModelSettingsOverlay::inherit_all(),
             settings,
+            Some(direct(2)),
             vec![ModelChangeAdjustment::ReasoningLevelClamped {
                 from: ReasoningLevel::High,
                 to: ReasoningLevel::Low,
@@ -2048,10 +2201,10 @@ mod tests {
         assert_eq!(event, None);
     }
 
-    /// INV-003 / INV-053: immutable direct selections cannot produce the
-    /// alias-retarget adjustments recorded at input acceptance.
+    /// INV-003 / INV-053: adjustment evidence requires a changed direct model,
+    /// regardless of whether the frozen selection is direct or aliased.
     #[test]
-    fn inv003_inv053_turn_event_rejects_adjustments_for_direct_selection() {
+    fn inv003_inv053_turn_event_rejects_adjustments_without_direct_model_change() {
         let selection = direct(1);
         let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
             .validate_precedence(
@@ -2076,6 +2229,7 @@ mod tests {
             FrozenModelSelection::Direct(selection),
             ModelSettingsOverlay::inherit_all(),
             settings,
+            Some(selection),
             vec![ModelChangeAdjustment::ReasoningLevelClamped {
                 from: ReasoningLevel::High,
                 to: ReasoningLevel::Low,

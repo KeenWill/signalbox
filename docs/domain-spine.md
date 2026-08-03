@@ -1637,7 +1637,8 @@ impl OriginConfiguration {
         stored_settings: ValidatedModelSettings,
         adjustments: Vec<ModelChangeAdjustment>,
     ) -> Option<Self>;
-    // accessors: requested(), session_defaults_version(), effective(), model_settings_adjustments()
+    // accessors: requested(), session_defaults_version(), effective(),
+    // model_settings_adjusted_from(), model_settings_adjustments()
 }
 
 pub enum OriginModelSettingsError {
@@ -1863,10 +1864,11 @@ impl TurnModelSettingsResolved {
         selection: FrozenModelSelection,
         per_call_override: ModelSettingsOverlay,
         settings: ValidatedModelSettings,
+        adjusted_from_selection: Option<DirectModelSelection>,
         adjustments: Vec<ModelChangeAdjustment>,
     ) -> Option<Self>;
     // accessors: accepted_input(), turn(), defaults_version(), selection(),
-    // per_call_override(), settings(), adjustments()
+    // per_call_override(), settings(), adjusted_from_selection(), adjustments()
 }
 
 pub struct ModelCapabilityDefinition { /* private */ }

@@ -4840,6 +4840,7 @@ pub enum SessionEvent {
         selected_direct_id: CanonicalUuid,
         per_call_override: ModelSettingsOverlay,
         settings: ModelSettingsSnapshot,
+        adjusted_from_selection_id: Option<CanonicalUuid>,
         adjustments: Vec<ModelChangeAdjustment>,
     },
     /// User input acceptance and its queued turn committed.
@@ -5011,6 +5012,7 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             selected_direct_id,
             per_call_override,
             settings,
+            adjusted_from_selection_id,
             adjustments,
             ..
         } => {
@@ -5031,8 +5033,12 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
                 || direct_selection_mismatch
                 || validation_mismatch
                 || settings.precedence.per_call != *per_call_override
-                || (!adjustments.is_empty()
-                    && matches!(requested_model, ModelSelection::Direct { .. }))
+                || match adjustments.is_empty() {
+                    true => adjusted_from_selection_id.is_some(),
+                    false => {
+                        adjusted_from_selection_id.is_none_or(|prior| prior == *selected_direct_id)
+                    }
+                }
                 || adjustment_provenance_mismatch
             {
                 return Err(FrameValidationError::ModelSettingsShape);
@@ -11553,6 +11559,7 @@ mod tests {
                 selected_direct_id: uuid(4),
                 per_call_override: settings_snapshot_fixture().precedence.per_call,
                 settings: settings_snapshot_fixture(),
+                adjusted_from_selection_id: None,
                 adjustments: Vec::new(),
             },
         };
@@ -11636,6 +11643,7 @@ mod tests {
                     selected_direct_id: uuid(4),
                     per_call_override: ModelSettingsOverlay::inherit_all(),
                     settings: settings_snapshot_fixture(),
+                    adjusted_from_selection_id: None,
                     adjustments: Vec::new(),
                 },
             },
@@ -11645,9 +11653,9 @@ mod tests {
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
-    /// INV-033: direct requests cannot claim alias-retarget adjustment evidence.
+    /// INV-033: adjustments require a distinct prior direct validation identity.
     #[test]
-    fn inv033_turn_settings_event_rejects_adjustments_for_direct_request() {
+    fn inv033_turn_settings_event_rejects_unchanged_adjustment_source() {
         let mut settings = settings_snapshot_fixture();
         settings.precedence.session = settings.precedence.per_call;
         settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
@@ -11668,6 +11676,7 @@ mod tests {
                     selected_direct_id: uuid(4),
                     per_call_override: ModelSettingsOverlay::inherit_all(),
                     settings,
+                    adjusted_from_selection_id: Some(uuid(4)),
                     adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
                         from: ReasoningLevel::XHigh,
                         to: ReasoningLevel::High,
@@ -11675,9 +11684,45 @@ mod tests {
                 },
             },
         )
-        .expect_err("direct requests cannot carry model-change adjustments");
+        .expect_err("the selected model cannot also be the adjustment source");
 
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: a distinct prior direct selection authenticates automatic
+    /// model-change adjustment evidence for the frozen turn.
+    #[test]
+    fn inv033_turn_settings_event_accepts_distinct_adjustment_source() {
+        let mut settings = settings_snapshot_fixture();
+        settings.precedence.session = settings.precedence.per_call;
+        settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
+        settings.reasoning_source = Some(ModelSettingSource::Session);
+        settings.service_tier_source = Some(ModelSettingSource::Session);
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings,
+                    adjusted_from_selection_id: Some(uuid(5)),
+                    adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                        from: ReasoningLevel::XHigh,
+                        to: ReasoningLevel::High,
+                    }],
+                },
+            },
+        );
+
+        assert!(result.is_ok());
     }
 
     /// INV-033: caller and adjustment evidence must derive the exact installed
@@ -11933,6 +11978,7 @@ mod tests {
                     selected_direct_id: uuid(4),
                     per_call_override: settings_snapshot_fixture().precedence.per_call,
                     settings: settings_snapshot_fixture(),
+                    adjusted_from_selection_id: None,
                     adjustments: Vec::new(),
                 },
             },
@@ -11959,6 +12005,7 @@ mod tests {
                     selected_direct_id: uuid(4),
                     per_call_override: ModelSettingsOverlay::inherit_all(),
                     settings: provider_default_settings_snapshot_fixture(),
+                    adjusted_from_selection_id: None,
                     adjustments: Vec::new(),
                 },
             },
@@ -11986,6 +12033,7 @@ mod tests {
                     selected_direct_id: uuid(4),
                     per_call_override: settings.precedence.per_call,
                     settings,
+                    adjusted_from_selection_id: None,
                     adjustments: Vec::new(),
                 },
             },

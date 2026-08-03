@@ -81,6 +81,7 @@ CREATE TABLE turn_model_settings_resolved (
     selected_direct_model_id uuid NOT NULL,
     per_call_model_settings jsonb NOT NULL,
     resolved_model_settings jsonb NOT NULL,
+    adjusted_from_selection_id uuid,
     adjustments jsonb NOT NULL,
 
     CONSTRAINT turn_model_settings_resolved_session_key
@@ -90,6 +91,18 @@ CREATE TABLE turn_model_settings_resolved (
             jsonb_typeof(per_call_model_settings) = 'object'
             AND jsonb_typeof(resolved_model_settings) = 'object'
             AND jsonb_typeof(adjustments) = 'array'
+        ),
+    CONSTRAINT turn_model_settings_resolved_adjustment_source
+        CHECK (
+            (
+                adjusted_from_selection_id IS NULL
+                AND adjustments = '[]'::jsonb
+            )
+            OR (
+                adjusted_from_selection_id IS NOT NULL
+                AND adjusted_from_selection_id <> selected_direct_model_id
+                AND jsonb_array_length(adjustments) > 0
+            )
         ),
     CONSTRAINT turn_model_settings_resolved_input_fk
         FOREIGN KEY (accepted_input_id)

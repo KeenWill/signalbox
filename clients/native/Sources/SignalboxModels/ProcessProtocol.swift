@@ -2789,7 +2789,8 @@ private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
     try tagged.rejectUnadmittedFields(
       [
         "type", "accepted_input_id", "turn_id", "defaults_version", "requested_model",
-        "selected_direct_id", "per_call_override", "settings", "adjustments",
+        "selected_direct_id", "per_call_override", "settings", "adjusted_from_selection_id",
+        "adjustments",
       ],
       decoder: decoder
     )
@@ -2801,24 +2802,26 @@ private struct SignalboxTurnModelSettingsResolvedShape: Decodable {
     let perCallOverride: SignalboxModelSettingsOverlayShape =
       try decoder.decode("per_call_override")
     let settings: SignalboxModelSettingsSnapshot = try decoder.decode("settings")
+    let adjustedFromSelectionID: SignalboxCanonicalUUID? =
+      try decoder.decodeIfPresent("adjusted_from_selection_id")
     let adjustments: [SignalboxModelChangeAdjustmentShape] = try decoder.decode("adjustments")
     let requestedModelMatches: Bool
-    let directRequest: Bool
     switch requestedModel {
     case .direct(let selectionID):
       requestedModelMatches = selectionID == selectedDirectID
-      directRequest = true
     case .alias:
       requestedModelMatches = true
-      directRequest = false
     }
+    let adjustmentSourceMatches = adjustments.isEmpty
+      ? adjustedFromSelectionID == nil
+      : adjustedFromSelectionID != nil && adjustedFromSelectionID != selectedDirectID
     guard
       defaultsVersion.rawValue != 0,
       requestedModelMatches,
       settings.matches(selectedDirectID: selectedDirectID),
       settings.carries(perCallOverride: perCallOverride),
       SignalboxModelChangeAdjustmentShape.areCanonical(adjustments),
-      adjustments.isEmpty || !directRequest,
+      adjustmentSourceMatches,
       settings.admits(adjustments)
     else {
       throw DecodingError.dataCorrupted(

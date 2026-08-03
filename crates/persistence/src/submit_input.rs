@@ -4093,8 +4093,8 @@ async fn insert_prepared(
             "INSERT INTO turn_model_settings_resolved
                 (accepted_input_id, turn_id, session_id, defaults_version,
                  selected_direct_model_id, per_call_model_settings,
-                 resolved_model_settings, adjustments)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 resolved_model_settings, adjusted_from_selection_id, adjustments)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(accepted_input_id_to_uuid(settings_event.accepted_input()))
         .bind(turn_id_to_uuid(settings_event.turn()))
@@ -4107,6 +4107,11 @@ async fn insert_prepared(
             settings_event.per_call_override(),
         ))
         .bind(model_settings_to_json(settings_event.settings()))
+        .bind(
+            settings_event
+                .adjusted_from_selection()
+                .map(DirectModelSelection::into_uuid),
+        )
         .bind(model_change_adjustments_to_json(
             settings_event.adjustments(),
         ))
@@ -4731,6 +4736,7 @@ async fn load_complete_rows(
             settings.defaults_version AS settings_defaults_version,
             settings.per_call_model_settings,
             settings.resolved_model_settings,
+            settings.adjusted_from_selection_id,
             settings.adjustments AS model_settings_adjustments,
             (
                 SELECT count(*)
@@ -5817,6 +5823,7 @@ fn decode_applied_turn_origin(
     let stored_settings_defaults: Option<Decimal> = row.try_get("settings_defaults_version")?;
     let stored_per_call_settings: Option<Value> = row.try_get("per_call_model_settings")?;
     let stored_resolved_settings: Option<Value> = row.try_get("resolved_model_settings")?;
+    let stored_adjusted_from_selection: Option<Uuid> = row.try_get("adjusted_from_selection_id")?;
     let stored_adjustments: Option<Value> = row.try_get("model_settings_adjustments")?;
     let (stored_model_settings, stored_model_settings_adjustments) = match (
         stored_settings_selection,
@@ -5841,6 +5848,11 @@ fn decode_applied_turn_origin(
                 .map_err(|_| SubmitInputCorruption::Inconsistent("resolved model settings"))?;
             let adjustments = model_change_adjustments_from_json(adjustments)
                 .map_err(|_| SubmitInputCorruption::Inconsistent("model settings adjustments"))?;
+            let adjusted_from_selection =
+                stored_adjusted_from_selection.map(DirectModelSelection::from_uuid);
+            let expected_adjusted_from_selection = (!adjustments.is_empty())
+                .then_some(defaults.model_settings().validated_for())
+                .flatten();
             if DirectModelSelection::from_uuid(selection) != stored_frozen_model.selected_direct()
                 || session_id_from_uuid(settings_session) != result_session
                 || defaults_version_from_numeric(settings_defaults).map_err(|reason| {
@@ -5853,6 +5865,7 @@ fn decode_applied_turn_origin(
                     != configured_model_settings(accepted_delivery).ok_or(
                         SubmitInputCorruption::Inconsistent("origin delivery settings"),
                     )?
+                || adjusted_from_selection != expected_adjusted_from_selection
             {
                 return Err(SubmitInputCorruption::Inconsistent(
                     "resolved model settings correlation",

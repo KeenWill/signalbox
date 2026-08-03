@@ -1738,25 +1738,25 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one
 closed `event` object. The protocol admits these event shapes:
 
-| Event                            | Additional members                                                                                                                                               |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_created`                | none                                                                                                                                                             |
-| `session_model_settings_changed` | `command_id`, prior and installed defaults versions, models and complete settings, `caller_override`, and ordered `adjustments`                                  |
-| `turn_model_settings_resolved`   | `accepted_input_id`, `turn_id`, `defaults_version`, requested and selected model identities, `per_call_override`, complete `settings`, and ordered `adjustments` |
-| `input_accepted`                 | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                                                             |
-| `goal_turn_retired`              | `turn_id`                                                                                                                                                        |
-| `turn_activated`                 | `turn_id` and `current_attempt_id`                                                                                                                               |
-| `model_call_transition`          | `turn_id`, `model_call_id`, and `state`                                                                                                                          |
-| `turn_completed`                 | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                                                    |
-| `turn_failed`                    | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                                                        |
-| `turn_refused`                   | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                           |
-| `turn_cancelled`                 | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                                                   |
-| `turn_reconciliation_required`   | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                           |
-| `child_spawned`                  | `spawning_request_id`, `child_session_id`, and `relationship`                                                                                                    |
-| `child_waiting`                  | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                                                                        |
-| `child_lifecycle_disposition`    | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                                                                                 |
-| `child_result`                   | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                                                                      |
-| `session_message`                | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content`                                                       |
+| Event                            | Additional members                                                                                                                                                                                               |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_created`                | none                                                                                                                                                                                                             |
+| `session_model_settings_changed` | `command_id`, prior and installed defaults versions, models and complete settings, `caller_override`, and ordered `adjustments`                                                                                  |
+| `turn_model_settings_resolved`   | `accepted_input_id`, `turn_id`, `defaults_version`, requested and selected model identities, `per_call_override`, complete `settings`, optional distinct `adjusted_from_selection_id`, and ordered `adjustments` |
+| `input_accepted`                 | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                                                                                                             |
+| `goal_turn_retired`              | `turn_id`                                                                                                                                                                                                        |
+| `turn_activated`                 | `turn_id` and `current_attempt_id`                                                                                                                                                                               |
+| `model_call_transition`          | `turn_id`, `model_call_id`, and `state`                                                                                                                                                                          |
+| `turn_completed`                 | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                                                                                                    |
+| `turn_failed`                    | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                                                                                                        |
+| `turn_refused`                   | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                                                                           |
+| `turn_cancelled`                 | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                                                                                                   |
+| `turn_reconciliation_required`   | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                                                                                           |
+| `child_spawned`                  | `spawning_request_id`, `child_session_id`, and `relationship`                                                                                                                                                    |
+| `child_waiting`                  | `await_request_id`, `spawning_request_id`, `child_session_id`, and `mode`                                                                                                                                        |
+| `child_lifecycle_disposition`    | `spawning_request_id`, `child_session_id`, `outcome`, `reason`, and `provenance`                                                                                                                                 |
+| `child_result`                   | `spawning_request_id`, `child_session_id`, `outcome`, `content`, `reason`, and `provenance`                                                                                                                      |
+| `session_message`                | `spawning_request_id`, `message_id`, `sender_session_id`, `recipient_session_id`, `ordinal`, and `content`                                                                                                       |
 
 A `goal_turn_retired` event clears only the exact queued turn it names; an
 unmatched or already-active identity leaves local turn controls unchanged. A
