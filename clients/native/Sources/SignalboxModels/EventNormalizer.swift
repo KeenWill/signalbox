@@ -759,6 +759,10 @@ public enum SignalboxEventNormalizer {
             let presentationOutput = decodedArguments.flatMap { arguments in
                 decodedOutput.flatMap { output in
                     validPlanReadResponse(arguments: arguments, output: output)
+                        && validPlanHistoryCorrelation(
+                            output.history,
+                            owningTurnID: tool.turnID
+                        )
                         ? formattedPlanReadOutput(output)
                         : nil
                 }
@@ -1050,6 +1054,19 @@ public enum SignalboxEventNormalizer {
             }
         }
         return foldedPlanHistory(history) != nil
+    }
+
+    private static func validPlanHistoryCorrelation(
+        _ history: [PlanEvent]?,
+        owningTurnID: SignalboxCanonicalUUID?
+    ) -> Bool {
+        guard let history, !history.isEmpty else {
+            return true
+        }
+        guard let owningTurnID else {
+            return false
+        }
+        return history.allSatisfy { $0.provenance.turnID == owningTurnID }
     }
 
     private static func foldedPlanHistory(_ history: [PlanEvent]) -> [PlanEntry]? {

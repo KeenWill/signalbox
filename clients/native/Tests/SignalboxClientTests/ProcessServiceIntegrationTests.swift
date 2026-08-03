@@ -873,6 +873,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testPlanReadWithUncorrelatedHistoryTurnKeepsRawEvidenceVisible() throws {
+    let record = ProcessProjectionFixture.uncorrelatedPlanHistoryToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.uncorrelatedPlanHistoryPreview
+    )
+  }
+
   func testExpandedPlanWriteOutputKeepsRawEvidenceVisible() throws {
     let record = ProcessProjectionFixture.expandedPlanWriteOutputToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -5715,6 +5726,10 @@ private enum ProcessProjectionFixture {
   static let planProvenance = #""provenance":{"turn_id":"\#(planTurnID)","issuing_attempt_id":"\#(planIssuingAttemptID)","request_id":"\#(planProvenanceRequestID)","attempt_id":"\#(planAttemptID)","generation":\#(planGeneration)}"#
   static let planReadArguments = #"{"include_history":true}"#
   static let planReadOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":[{"ordinal":1,"kind":"created","entry_id":1,"text":"Audit protocol",\#(planProvenance)}],"history_truncated":false}"#
+  static let uncorrelatedPlanHistoryOutput = planReadOutput.replacingOccurrences(
+    of: planTurnID,
+    with: crossTurn
+  )
   static let planCreateArguments = #"{"kind":"create","text":"Draft protocol"}"#
   static let planCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planWriteProvenanceJSON(requestID: planCreateRequestID))}}"#
   static let mismatchedPlanCreateOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Different text",\#(planWriteProvenanceJSON(requestID: planCreateRequestID))}}"#
@@ -5807,6 +5822,9 @@ private enum ProcessProjectionFixture {
     planHistoryDependencyOverflowOutput
   )
   static let cyclicPlanHistoryPreview = rawToolOutputPreview(cyclicPlanHistoryOutput)
+  static let uncorrelatedPlanHistoryPreview = rawToolOutputPreview(
+    uncorrelatedPlanHistoryOutput
+  )
   static let planReadDisplayName = "Plan read"
   static let planWriteDisplayName = "Plan update"
   static let rawToolOutputLabel = "Output"
@@ -8052,6 +8070,10 @@ private enum ProcessProjectionFixture {
       output: contradictoryPlanReadCursorOutput,
       status: .completed
     )
+  }
+
+  static func uncorrelatedPlanHistoryToolRecord() -> SignalboxStoredEvent {
+    planReadToolRecord(output: uncorrelatedPlanHistoryOutput)
   }
 
   static func futurePlanEntryReferenceToolRecord() -> SignalboxStoredEvent {
