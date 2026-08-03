@@ -91,6 +91,13 @@ impl QuarantineSnapshot {
                 .collect(),
         }
     }
+
+    pub(super) fn entry_identity(&self, path: &Path) -> Option<FileIdentity> {
+        match self.entries.get(path)? {
+            QuarantineSnapshotEntry::Directory { identity, .. } => Some(*identity),
+            QuarantineSnapshotEntry::Other { identity, .. } => Some(identity.file),
+        }
+    }
 }
 
 impl QuarantineDirectory {

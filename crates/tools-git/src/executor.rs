@@ -88,6 +88,7 @@ struct BranchSwitchHooks<
     BeforeReferenceLocks,
     BeforeQuarantineSnapshot,
     PostQuarantine,
+    BeforeTargetPublish,
     PostCheckout,
     PostIndexPublish,
     BeforeHeadPublish,
@@ -95,6 +96,7 @@ struct BranchSwitchHooks<
     before_reference_locks: BeforeReferenceLocks,
     before_quarantine_snapshot: BeforeQuarantineSnapshot,
     post_quarantine: PostQuarantine,
+    before_target_publish: BeforeTargetPublish,
     post_checkout: PostCheckout,
     post_index_publish: PostIndexPublish,
     before_head_publish: BeforeHeadPublish,
@@ -945,12 +947,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             }
             let (target_parent, target_leaf) =
                 open_worktree_parent(transition.target.descriptor(), &transition.path)?;
-            let target_identity = statat(&target_parent, &target_leaf, AtFlags::SYMLINK_NOFOLLOW)
-                .map(|status| FileIdentity {
-                    device: status.st_dev,
-                    inode: status.st_ino,
-                })
+            let target_status = statat(&target_parent, &target_leaf, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|_| LocalGitFailure::Operation)?;
+            let expected_target_identity = transition
+                .target_snapshot
+                .entry_identity(&transition.path)
+                .ok_or(LocalGitFailure::Operation)?;
+            if (FileIdentity {
+                device: target_status.st_dev,
+                inode: target_status.st_ino,
+            }) != expected_target_identity
+            {
+                transition.target.keep();
+                return Err(LocalGitFailure::Operation);
+            }
+            let target_identity = expected_target_identity;
             if renameat_with(
                 &target_parent,
                 &target_leaf,
@@ -961,6 +972,26 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .is_err()
             {
                 transition.quarantine.keep();
+                return Err(LocalGitFailure::Operation);
+            }
+            let published_status = statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|_| LocalGitFailure::Operation)?;
+            if (FileIdentity {
+                device: published_status.st_dev,
+                inode: published_status.st_ino,
+            }) != expected_target_identity
+            {
+                let restoration = renameat_with(
+                    &parent,
+                    &leaf,
+                    &target_parent,
+                    &target_leaf,
+                    RenameFlags::NOREPLACE,
+                );
+                transition.target.keep();
+                if restoration.is_err() {
+                    transition.quarantine.keep();
+                }
                 return Err(LocalGitFailure::Operation);
             }
             updated_paths.borrow_mut().insert(transition.path.clone());
@@ -1048,6 +1079,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot: || {},
                 post_quarantine: || {},
+                before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1069,6 +1101,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot: || {},
                 post_quarantine: || {},
+                before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1099,6 +1132,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot: || {},
                 post_quarantine: || {},
+                before_target_publish: || {},
                 post_checkout,
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1129,6 +1163,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot: || {},
                 post_quarantine,
+                before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1159,6 +1194,38 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot,
                 post_quarantine: || {},
+                before_target_publish: || {},
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn branch_switch_with_target_publish_hook<Hook: FnOnce()>(
+        &self,
+        arguments: GitBranchSwitchArguments,
+        before_target_publish: Hook,
+    ) -> Result<BranchResult, LocalGitFailure> {
+        self.validate_current_repository()?;
+        let repository = self.repository_authority.repository()?;
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.branch_switch_with_hooks(
+            &repository,
+            &pinned_objects,
+            arguments,
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                before_quarantine_snapshot: || {},
+                post_quarantine: || {},
+                before_target_publish,
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1182,6 +1249,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks,
                 before_quarantine_snapshot: || {},
                 post_quarantine: || {},
+                before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish: || {},
@@ -1205,6 +1273,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot: || {},
                 post_quarantine: || {},
+                before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish,
                 before_head_publish: || {},
@@ -1235,6 +1304,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_reference_locks: || {},
                 before_quarantine_snapshot: || {},
                 post_quarantine: || {},
+                before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
                 before_head_publish,
@@ -1246,6 +1316,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         BeforeLocks: FnOnce(),
         BeforeQuarantineSnapshot: FnMut(),
         PostQuarantine: FnOnce(),
+        BeforeTargetPublish: FnOnce(),
         PostCheckout: FnOnce(),
         PostIndexPublish: FnOnce(),
         BeforeHeadPublish: FnOnce(),
@@ -1258,6 +1329,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             BeforeLocks,
             BeforeQuarantineSnapshot,
             PostQuarantine,
+            BeforeTargetPublish,
             PostCheckout,
             PostIndexPublish,
             BeforeHeadPublish,
@@ -1267,6 +1339,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             before_reference_locks,
             mut before_quarantine_snapshot,
             post_quarantine,
+            before_target_publish,
             post_checkout,
             post_index_publish,
             before_head_publish,
@@ -1502,6 +1575,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             )?;
             return Err(failure);
         }
+        before_target_publish();
         let target_publication = self.publish_quarantined_checkout_targets(
             &mut quarantined_directories,
             &updated_paths,

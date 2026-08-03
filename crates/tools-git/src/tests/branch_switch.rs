@@ -391,6 +391,73 @@ fn branch_switch_replaces_a_clean_tracked_directory_with_a_file() {
 }
 
 #[test]
+fn branch_switch_preserves_a_prepared_target_replaced_before_publication() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists")
+        .tree()
+        .expect("fixture initial tree opens");
+    let target_content = b"target file\n";
+    let foreign_content = b"foreign target\n";
+    let target_blob = repository
+        .blob(target_content)
+        .expect("target fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&initial_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", target_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    fs::create_dir(fixture.root().join("src")).expect("current fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), b"nested\n")
+        .expect("current nested fixture writes");
+    commit_all(&repository, "nested source");
+    let executor = fixture.executor();
+
+    let failure = executor
+        .branch_switch_with_target_publish_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                let target_quarantine = cleanup_directories(fixture.root())
+                    .into_iter()
+                    .find(|path| path.join("src").is_file())
+                    .expect("prepared target quarantine exists");
+                fs::rename(
+                    target_quarantine.join("src"),
+                    target_quarantine.join("retired"),
+                )
+                .expect("prepared target retires");
+                fs::write(target_quarantine.join("src"), foreign_content)
+                    .expect("foreign target writes");
+            },
+        )
+        .expect_err("prepared target replacement rejects publication");
+    let retained_foreign = cleanup_directories(fixture.root())
+        .into_iter()
+        .map(|path| path.join("src"))
+        .find(|path| path.is_file())
+        .expect("foreign prepared target remains quarantined");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(retained_foreign).expect("foreign prepared target reads"),
+        foreign_content
+    );
+}
+
+#[test]
 fn branch_switch_preserves_an_untracked_file_inside_a_replaced_directory() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
