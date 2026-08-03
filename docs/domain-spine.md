@@ -1567,12 +1567,12 @@ impl SessionConfigurationDefaults {
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
     ) -> Self;
-    pub const fn complete_with_model_settings(
+    pub fn complete_with_model_settings(
         model: ModelSelectionRequest,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
         model_settings: ValidatedModelSettings,
-    ) -> Self;
+    ) -> Option<Self>;
     // accessors: model(), dangerous_tool_auto_approval(), system_prompt(), model_settings()
 }
 
