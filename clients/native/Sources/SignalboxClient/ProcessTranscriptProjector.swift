@@ -61,6 +61,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private struct ToolContext: Sendable {
     let turnID: SignalboxCanonicalUUID
     let modelCallID: SignalboxCanonicalUUID
+    let presentationOrder: SignalboxEventID
   }
 
   private struct TextAssembly: Sendable {
@@ -633,18 +634,18 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         status: .proposed
       )
       toolsByRequestID[request] = event
+      let presentationOrder = try semanticPresentationOrder(message.entryIndex)
       toolContextsByRequestID[request] = ToolContext(
         turnID: turnID,
-        modelCallID: modelCallID
+        modelCallID: modelCallID,
+        presentationOrder: presentationOrder
       )
-      let eventID = try claimPresentationID(
-        .toolRequest(request),
-        entryIndex: message.entryIndex
-      )
+      let eventID = try claimSemanticEventID(.toolRequest(request))
       return toolRecord(
         event,
         awaitsDecision: request == awaitingToolDecisionRequestID,
-        eventID: eventID
+        eventID: eventID,
+        presentationOrder: presentationOrder
       )
     case .toolExecutionResult(let requestID, let toolAttemptID, let content):
       return try updateTool(
@@ -743,16 +744,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       status: status
     )
     toolsByRequestID[requestID] = updated
-    guard let eventID = presentationIDs[.toolRequest(requestID)] else {
+    guard let eventID = presentationIDs[.toolRequest(requestID)],
+      let presentationOrder = toolContextsByRequestID[requestID]?.presentationOrder
+    else {
       throw SignalboxProcessTranscriptProjectionError.orphanedToolResult(requestID)
     }
-    return toolRecord(updated, awaitsDecision: false, eventID: eventID)
+    return toolRecord(
+      updated,
+      awaitsDecision: false,
+      eventID: eventID,
+      presentationOrder: presentationOrder
+    )
   }
 
   private mutating func toolRecord(
     _ event: SignalboxProcessToolEvent,
     awaitsDecision: Bool,
-    eventID: SignalboxEventID
+    eventID: SignalboxEventID,
+    presentationOrder: SignalboxEventID
   ) -> SignalboxStoredEvent {
     let status = awaitsDecision ? SignalboxProcessToolStatus.awaitingDecision : event.status
     let presented = SignalboxProcessToolEvent(
@@ -768,6 +777,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     )
     return SignalboxStoredEvent(
       eventID: eventID,
+      presentationOrder: presentationOrder,
       event: .processTool(presented)
     )
   }
@@ -811,23 +821,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return SignalboxEventID(
       rawValue: Int(entryIndex.rawValue) * Self.presentationLaneStride + 1
     )
-  }
-
-  private mutating func claimPresentationID(
-    _ identity: PresentationIdentity,
-    entryIndex: SignalboxCanonicalUInt64
-  ) throws -> SignalboxEventID {
-    if let existing = presentationIDs[identity] {
-      return existing
-    }
-    guard entryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
-      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
-    }
-    let claimed = SignalboxEventID(
-      rawValue: Int(entryIndex.rawValue) * Self.presentationLaneStride + 1
-    )
-    presentationIDs[identity] = claimed
-    return claimed
   }
 
   private mutating func claimTrailingPresentationID(

@@ -569,6 +569,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testAuthoritativeRefreshReanchorsToolAfterCompaction() throws {
+    var projector = SignalboxProcessTranscriptProjector()
+    let before = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithToolBeforeCompaction()
+    )
+
+    let after = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithToolAfterCompaction()
+    )
+    let beforeTool = try ProcessProjectionFixture.onlyToolRecord(in: before)
+    let afterTool = try ProcessProjectionFixture.onlyToolRecord(in: after)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: after.records)
+
+    XCTAssertEqual(afterTool.eventID, beforeTool.eventID)
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.compactedToolTimelineKinds
+    )
+  }
+
   func testImportedSemanticMarkersProjectAsTypedTimelineNotices() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithImportedMarkers()
     var projector = SignalboxProcessTranscriptProjector()
@@ -5875,6 +5895,9 @@ private enum ProcessProjectionFixture {
   static let contextSummaryText = "Fixture compacted context summary."
   static let contextSummaryLabel = "Context summary"
   static let contextCompactionNoticeTitles = ["Model usage"]
+  static let compactedToolTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .message, .tool, .unknown,
+  ]
   static let contextSummaryEntry = "cccccccc-2222-4222-8222-222222222222"
   static let contextCompactionID = "dddddddd-2222-4222-8222-222222222222"
   static let closedToolID = "cccccccc-1111-4111-8111-111111111111"
@@ -7473,6 +7496,155 @@ private enum ProcessProjectionFixture {
         """,
       ]
     )
+  }
+
+  static func snapshotWithToolBeforeCompaction() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        importedMarker(
+          index: 0,
+          entryID: importedSourceEventEntry,
+          speaker: importedAssistantSpeaker,
+          kind: "source_event"
+        ),
+        importedMarker(
+          index: 1,
+          entryID: importedThinkingEntry,
+          speaker: importedAssistantSpeaker,
+          kind: "thinking"
+        ),
+        importedMarker(
+          index: 2,
+          entryID: importedToolCallEntry,
+          speaker: importedAssistantSpeaker,
+          kind: "tool_call"
+        ),
+        importedMarker(
+          index: 3,
+          entryID: importedToolResultEntry,
+          speaker: importedAssistantSpeaker,
+          kind: "tool_result"
+        ),
+        toolRequestMessage(index: 4),
+        toolResultMessage(index: 5),
+        importedMarker(
+          index: 6,
+          entryID: importedFutureEntry,
+          speaker: importedAssistantSpeaker,
+          kind: futureImportedContentKind
+        ),
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"7"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithToolAfterCompaction() throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"2"
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(contextSummaryEntry)",
+          "entry":{
+            "type":"context_summary",
+            "model_call_id":"\(ProcessDriverFixture.modelCall)",
+            "first_source_session_id":"\(ProcessDriverFixture.session)",
+            "first_entry_id":"\(importedSourceEventEntry)",
+            "through_source_session_id":"\(ProcessDriverFixture.session)",
+            "through_entry_id":"\(importedToolResultEntry)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(contextSummaryText)"
+        }
+        """,
+        toolRequestMessage(index: 1),
+        toolResultMessage(index: 2),
+        importedMarker(
+          index: 3,
+          entryID: importedFutureEntry,
+          speaker: importedAssistantSpeaker,
+          kind: futureImportedContentKind
+        ),
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"2",
+          "turn_count":"0",
+          "entry_count":"4"
+        }
+        """,
+      ]
+    )
+  }
+
+  private static func toolRequestMessage(index: UInt64) -> String {
+    """
+    {
+      "type":"transcript_entry",
+      "entry_index":"\(index)",
+      "source_session_id":"\(ProcessDriverFixture.session)",
+      "entry_id":"\(proposedToolEntry)",
+      "entry":{
+        "type":"assistant_tool_use",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "tool_request_id":"\(proposedToolRequest)",
+        "tool_name":"\(proposedToolName)",
+        "arguments":"{}"
+      }
+    }
+    """
+  }
+
+  private static func toolResultMessage(index: UInt64) -> String {
+    """
+    {
+      "type":"transcript_entry",
+      "entry_index":"\(index)",
+      "source_session_id":"\(ProcessDriverFixture.session)",
+      "entry_id":"\(reconciliationResultEntry)",
+      "entry":{
+        "type":"tool_execution_result",
+        "tool_request_id":"\(proposedToolRequest)",
+        "tool_attempt_id":"\(reconciliationAttempt)",
+        "content":"\(reconciliationOutput)"
+      }
+    }
+    """
   }
 
   static func snapshotWithImportedMarkers() throws -> SignalboxSynchronizationSnapshot {
@@ -9921,6 +10093,21 @@ private enum ProcessProjectionFixture {
       throw ProcessDriverUpdateRecorderError.missingFixtureTool
     }
     return tool
+  }
+
+  static func onlyToolRecord(
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> SignalboxStoredEvent {
+    let records = projection.records.filter {
+      if case .processTool = $0.event {
+        return true
+      }
+      return false
+    }
+    guard records.count == 1, let record = records.first else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureTool
+    }
+    return record
   }
 
   static func onlyToolCard(
