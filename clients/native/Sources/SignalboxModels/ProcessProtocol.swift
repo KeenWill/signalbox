@@ -2007,6 +2007,15 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           ],
           decoder: decoder
         )
+        guard tagged.payload["approval"] != .null else {
+          throw DecodingError.valueNotFound(
+            SignalboxTranscriptToolApproval.self,
+            .init(
+              codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("approval")],
+              debugDescription: "Tool approval provenance must be absent or a typed decision."
+            )
+          )
+        }
         self = .assistantToolUse(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),

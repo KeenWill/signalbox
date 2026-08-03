@@ -236,14 +236,16 @@ DECLARE
     prior_decision record;
 BEGIN
     FOR prior_decision IN
-        SELECT request.request_id, request.turn_id, request.session_id
+        SELECT request.request_id, request.turn_id, request.session_id,
+               request.request_ordinal
           FROM tool_approval_decision AS decision
           JOIN tool_request AS request
             ON request.request_id = decision.request_id
          WHERE decision.decision_source NOT IN (
                    'policy_auto', 'session_blanket'
                )
-         ORDER BY request.request_id
+         ORDER BY request.session_id, request.turn_id,
+                  request.request_ordinal, request.request_id
     LOOP
         WITH header AS (
             INSERT INTO outbox_event

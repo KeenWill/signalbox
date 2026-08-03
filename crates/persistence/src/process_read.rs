@@ -19,7 +19,10 @@ use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
-    mapping::{durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid},
+    mapping::{
+        ToolApprovalDecisionSourceStorageKind, durable_command_id_from_uuid, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str,
+    },
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -3580,6 +3583,12 @@ fn decode_process_tool_approval(
         }
         return Ok(None);
     };
+    let source_kind = tool_approval_decision_source_from_str(&source).ok_or_else(|| {
+        ProcessReadError::from(ProcessReadCorruption::Unsupported {
+            field: "tool approval decision source",
+            value: source,
+        })
+    })?;
     let decision = match decision_kind.as_deref() {
         Some("approve") if denial_reason.is_none() => ToolApprovalDecision::Approve,
         Some("deny") => ToolApprovalDecision::Deny {
@@ -3593,48 +3602,55 @@ fn decode_process_tool_approval(
         }
     };
     match (
-        source.as_str(),
+        source_kind,
         user_command,
         delegate_model,
         delegate_call,
         rationale,
     ) {
-        ("policy_auto" | "session_blanket", None, None, None, None)
-            if decision == ToolApprovalDecision::Approve =>
-        {
-            Ok(None)
-        }
-        ("owner_command", Some(command), None, None, None) => Ok(Some(ProcessToolApproval {
-            decision,
-            decider: ToolApprovalDecider::User {
-                command: durable_command_id_from_uuid(command).map_err(|_| {
-                    ProcessReadCorruption::Inconsistent("tool approval user command")
-                })?,
-            },
-            rationale: None,
-        })),
-        ("delegate", None, Some(model), Some(call), Some(rationale)) => {
+        (
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            | ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+            None,
+            None,
+            None,
+            None,
+        ) if decision == ToolApprovalDecision::Approve => Ok(None),
+        (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
             Ok(Some(ProcessToolApproval {
                 decision,
-                decider: ToolApprovalDecider::Delegate {
-                    model: DirectModelSelection::from_uuid(model),
-                    call: ModelCallId::from_uuid(call),
-                },
-                rationale: Some(
-                    ToolDecisionRationale::try_new(rationale).map_err(|_| {
-                        ProcessReadCorruption::Inconsistent("tool decision rationale")
+                decider: ToolApprovalDecider::User {
+                    command: durable_command_id_from_uuid(command).map_err(|_| {
+                        ProcessReadCorruption::Inconsistent("tool approval user command")
                     })?,
-                ),
+                },
+                rationale: None,
             }))
         }
-        ("policy_auto" | "session_blanket" | "owner_command" | "delegate", ..) => {
-            Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into())
-        }
-        (value, ..) => Err(ProcessReadCorruption::Unsupported {
-            field: "tool approval decision source",
-            value: value.to_owned(),
-        }
-        .into()),
+        (
+            ToolApprovalDecisionSourceStorageKind::Delegate,
+            None,
+            Some(model),
+            Some(call),
+            Some(rationale),
+        ) => Ok(Some(ProcessToolApproval {
+            decision,
+            decider: ToolApprovalDecider::Delegate {
+                model: DirectModelSelection::from_uuid(model),
+                call: ModelCallId::from_uuid(call),
+            },
+            rationale: Some(
+                ToolDecisionRationale::try_new(rationale)
+                    .map_err(|_| ProcessReadCorruption::Inconsistent("tool decision rationale"))?,
+            ),
+        })),
+        (
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            | ToolApprovalDecisionSourceStorageKind::SessionBlanket
+            | ToolApprovalDecisionSourceStorageKind::UserCommand
+            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            ..,
+        ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
     }
 }
 

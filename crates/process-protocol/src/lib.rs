@@ -4145,7 +4145,11 @@ pub enum TranscriptEntry {
         /// Exact normalized or scrubbed-undecodable arguments.
         arguments: String,
         /// Explicit decision provenance, absent while pending and for automatic policy.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         approval: Option<TranscriptToolApproval>,
     },
     /// One physical tool attempt produced the logical result.
@@ -5167,6 +5171,16 @@ where
     ValueT: Deserialize<'de>,
 {
     Option::<ValueT>::deserialize(deserializer)
+}
+
+fn deserialize_optional_non_null<'de, DeserializerT, ValueT>(
+    deserializer: DeserializerT,
+) -> Result<Option<ValueT>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+    ValueT: Deserialize<'de>,
+{
+    ValueT::deserialize(deserializer).map(Some)
 }
 
 /// One validated server frame.
@@ -9442,7 +9456,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_tool_approval_round_trips_historical_delegate_provenance()
+    fn inv033_transcript_tool_approval_round_trips_historical_delegate_provenance()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(16)?,
@@ -9468,6 +9482,13 @@ mod tests {
             },
             r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"request exceeds the stated scope"}}}"#,
         )
+    }
+
+    #[test]
+    fn inv033_transcript_tool_approval_rejects_explicit_null() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"16","message":{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":null}}}"#,
+        );
     }
 
     #[test]

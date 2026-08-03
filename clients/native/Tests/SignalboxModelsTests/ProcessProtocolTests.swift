@@ -604,6 +604,35 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertTrue(diagnostic.message.contains(ProcessProtocolFixture.defaultsVersionField))
   }
 
+  func testTranscriptToolApprovalRejectsExplicitNull() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"33333333-3333-4333-8333-333333333333",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(turnID)",
+            "model_call_id":"44444444-4444-4444-8444-444444444444",
+            "tool_request_id":"55555555-5555-4555-8555-555555555555",
+            "tool_name":"publish",
+            "arguments":"{}",
+            "approval":null
+          }
+        }
+      }
+      """.utf8
+    )
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message))
+  }
+
   func testFutureProviderFailureCauseRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
