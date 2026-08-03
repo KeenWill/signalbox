@@ -187,6 +187,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
     let modelCallAnchors = modelCallAnchors(in: snapshot.records)
+    let trailingModelCallUsageIDs = trailingModelCallUsageIDs(in: snapshot.records)
     var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
     var unanchoredUsage: [SignalboxStoredEvent] = []
 
@@ -227,7 +228,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           let usageRecord = SignalboxStoredEvent(
             eventID: try claimModelCallUsagePresentationID(
               evidence,
-              anchorEntryIndex: anchor?.entryIndex
+              anchorEntryIndex: anchor?.entryIndex,
+              trailingWhenUnanchored: trailingModelCallUsageIDs.contains(
+                evidence.modelCallID.rawValue
+              )
             ),
             event: .processModelCallUsage(
               SignalboxProcessModelCallUsageEvent(evidence: evidence)
@@ -378,6 +382,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .refused, .reconciliationRequired, .toolReconciliationRequired, .unknown:
       return nil
     }
+  }
+
+  private func trailingModelCallUsageIDs(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> Set<String> {
+    var modelCallIDs: Set<String> = []
+    for case .turn(let turn) in records {
+      switch turn.state {
+      case .refused(_, _, let modelCallID),
+        .reconciliationRequired(_, _, let modelCallID):
+        modelCallIDs.insert(modelCallID.rawValue)
+      case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+        .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .failed,
+        .completed, .cancelled, .toolReconciliationRequired, .unknown:
+        break
+      }
+    }
+    return modelCallIDs
   }
 
   private mutating func projectText(
@@ -622,7 +644,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return claimed
   }
 
-  private mutating func claimSyntheticPresentationID(
+  private mutating func claimTrailingPresentationID(
     _ identity: PresentationIdentity
   ) throws -> SignalboxEventID {
     if let existing = presentationIDs[identity] {
@@ -639,7 +661,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private mutating func claimModelCallUsagePresentationID(
     _ evidence: SignalboxTranscriptModelCallUsage,
-    anchorEntryIndex: SignalboxCanonicalUInt64?
+    anchorEntryIndex: SignalboxCanonicalUInt64?,
+    trailingWhenUnanchored: Bool
   ) throws -> SignalboxEventID {
     let identity = PresentationIdentity.modelCallUsage(evidence.modelCallID.rawValue)
     if let existing = presentationIDs[identity] {
@@ -652,6 +675,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let claimed = SignalboxEventID(rawValue: Int(anchorEntryIndex.rawValue) * 2 + 2)
       presentationIDs[identity] = claimed
       return claimed
+    }
+    if trailingWhenUnanchored {
+      return try claimTrailingPresentationID(identity)
     }
     guard nextModelCallUsageEventID < 0 else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
@@ -714,7 +740,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return nil
     }
     return SignalboxStoredEvent(
-      eventID: try claimSyntheticPresentationID(.turnState(turn.turnID.rawValue)),
+      eventID: try claimTrailingPresentationID(.turnState(turn.turnID.rawValue)),
       event: .processConservative(
         SignalboxProcessConservativeEvent(
           kind: content.kind,

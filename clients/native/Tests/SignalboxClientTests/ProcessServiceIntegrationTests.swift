@@ -5326,6 +5326,7 @@ private enum ProcessProjectionFixture {
     "Imported source event", "Imported thinking", "Imported tool call",
     "Imported tool result",
   ]
+  static let terminalUsageNoticeTitles = ["Imported source event", "Model usage"]
   static let importedSpeakerLabels = [
     SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested.presentationLabel,
     SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
@@ -5488,9 +5489,9 @@ private enum ProcessProjectionFixture {
   static let multilinePlanArguments = #"{"kind":"create","text":"Draft\nHistory"}"#
   static let multilinePlanOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft\nHistory",\#(planProvenance)}}"#
   static let alternateNewlinePlanArguments =
-    #"{"kind":"create","text":"Vertical\u000bForm\u000cNext\u0085Line\u2028Paragraph\u2029End"}"#
+    #"{"kind":"create","text":"Carriage\rVertical\u000bForm\u000cNext\u0085Line\u2028Paragraph\u2029End"}"#
   static let alternateNewlinePlanOutput =
-    #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Vertical\u000bForm\u000cNext\u0085Line\u2028Paragraph\u2029End",\#(planProvenance)}}"#
+    #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Carriage\rVertical\u000bForm\u000cNext\u0085Line\u2028Paragraph\u2029End",\#(planProvenance)}}"#
   static let incompletePlanHistoryPreview = rawToolOutputPreview(incompletePlanHistoryOutput)
   static let mismatchedPlanHistoryPreview = rawToolOutputPreview(mismatchedPlanHistoryOutput)
   static let repeatedPlanHistoryAttemptPreview = rawToolOutputPreview(
@@ -5567,9 +5568,9 @@ private enum ProcessProjectionFixture {
     Generation: \(planGeneration)
     """
   static let alternateNewlinePlanArgumentPresentation =
-    "Create entry: Vertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End"
+    "Create entry: Carriage\\rVertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End"
   static let alternateNewlinePlanOutputPresentation = """
-    Event #1: Create entry #1: Vertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End
+    Event #1: Create entry #1: Carriage\\rVertical\\u{B}Form\\u{C}Next\\u{85}Line\\u{2028}Paragraph\\u{2029}End
     Turn: \(planTurnID)
     Issuing attempt: \(planIssuingAttemptID)
     Request: \(planProvenanceRequestID)
@@ -7001,6 +7002,82 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"1",
           "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithRefusedUsageAfterImportedMarker() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithTrailingUsage(
+      turnState: """
+        {
+          "type":"refused",
+          "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+          "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+          "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+        }
+        """
+    )
+  }
+
+  static func snapshotWithReconciliationUsageAfterImportedMarker() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithTrailingUsage(
+      turnState: """
+        {
+          "type":"reconciliation_required",
+          "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+          "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+          "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+        }
+        """
+    )
+  }
+
+  private static func snapshotWithTrailingUsage(
+    turnState: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":\(turnState)
+        }
+        """,
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall),
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        importedMarker(
+          index: 0,
+          entryID: importedSourceEventEntry,
+          speaker: #"{"type":"not_attested"}"#,
+          kind: "source_event"
+        ),
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"1"
         }
         """,
       ]
@@ -8609,6 +8686,32 @@ extension ProcessServiceIntegrationTests {
     XCTAssertEqual(
       ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
       ProcessProjectionFixture.terminalMarkerUsageTimelineKinds
+    )
+  }
+
+  func testRefusedCallUsageStaysAfterEarlierTranscriptEvidence() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithRefusedUsageAfterImportedMarker()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.terminalUsageNoticeTitles
+    )
+  }
+
+  func testReconciliationCallUsageStaysAfterEarlierTranscriptEvidence() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithReconciliationUsageAfterImportedMarker()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.terminalUsageNoticeTitles
     )
   }
 

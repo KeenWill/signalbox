@@ -295,6 +295,21 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testUnrecognizedSpeakerWithKnownRoleDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_message","role":"\#(Self.assistantRole)","text":"Fixture text","unrecognized_kind":"\#(Self.futureSpeakerKind)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["unrecognized_kind"],
+            .string(Self.futureSpeakerKind)
+        )
+        XCTAssertEqual(unknown.payload["role"], .string(Self.assistantRole))
+    }
+
     func testStoredImportedSpeakerLabelIsBounded() throws {
         let speaker = String(
             repeating: "x",
@@ -337,6 +352,7 @@ final class SignalboxModelsTests: XCTestCase {
     private static let importedUserAttribution = "imported_user_role"
     private static let importedSpeakerAbsentAttribution = "imported_speaker_absent"
     private static let futureSpeakerKind = "fixture_future_speaker"
+    private static let assistantRole = "assistant"
     private static let storedTurnID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     private static let storedModelCallID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     private static let storedEventID = 9
