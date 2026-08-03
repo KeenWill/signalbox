@@ -17,8 +17,6 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9_]+")
 OWNER_FRAGMENT = re.compile("owner", re.IGNORECASE)
 CROSS_FRAGMENT_OWNER = re.compile(r"(?:Unknown|Known)(?:Error|Rejection)")
 BARE_USER_MESSAGE = re.compile(r"(?i:\buser[ \t\r\n]+message\b)")
-
-
 def owner_matches(line: str) -> Iterator[re.Match[str]]:
     for identifier in IDENTIFIER.finditer(line):
         token = identifier.group()

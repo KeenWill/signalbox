@@ -30,6 +30,16 @@ pub struct ConfiguredModelRuntime<A> {
     routes: HashMap<String, ModelAdapter>,
 }
 
+impl<A> Clone for ConfiguredModelRuntime<A> {
+    fn clone(&self) -> Self {
+        Self {
+            anthropic: self.anthropic.clone(),
+            codex_cli: self.codex_cli.clone(),
+            routes: self.routes.clone(),
+        }
+    }
+}
+
 impl<A> ConfiguredModelRuntime<A> {
     /// Constructs every configured adapter without provider interaction.
     pub fn new(
