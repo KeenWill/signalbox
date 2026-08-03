@@ -134,15 +134,19 @@ The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
 is `$HOME/.config/signalbox/github-token`, overridable with
 `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and `SIGNALBOX_DEV_GITHUB_TOKEN_FILE`
-respectively. No credential material is committed or generated. The
+respectively. The devenv Brave key path defaults to
+`$DEVENV_STATE/dev-instance/brave-api-key` and is overridable with
+`SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. No credential material is committed or
+generated. The
 [credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle)
 owns when those files are read, what their bytes mean, and how absence is
 handled. Provision the default code-host path from the GitHub CLI, and create
-the Anthropic path for editing, with these one-line commands:
+the Anthropic and Brave paths for editing, with these one-line commands:
 
 ```console
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/anthropic-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
+install -d -m 700 "$DEVENV_STATE/dev-instance" && (umask 077; destination="$DEVENV_STATE/dev-instance/brave-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 ```
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that
