@@ -1023,6 +1023,20 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
     }
     return priorSelection != installedSelection
   }
+
+  fileprivate func preservesChangeProvenance(
+    from prior: Self,
+    callerOverride: SignalboxModelSettingsOverlayShape,
+    adjustments: [SignalboxModelChangeAdjustmentShape]
+  ) -> Bool {
+    let unadjusted = SignalboxModelSettingsPrecedenceShape(
+      perCall: prior.precedence.perCall,
+      session: callerOverride.inheriting(from: prior.precedence.session),
+      profile: precedence.profile,
+      globalDefault: precedence.globalDefault
+    )
+    return unadjusted.applying(adjustments) == precedence
+  }
 }
 
 private enum SignalboxReasoningLevelShape: String, Decodable, Equatable, Sendable {
@@ -1164,7 +1178,7 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
     serviceTier: .inherit
   )
 
-  private init(
+  fileprivate init(
     reasoningLevel: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>,
     fastMode: SignalboxFastModeOverlayShape,
     serviceTier: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
@@ -1172,6 +1186,42 @@ private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable, Sendabl
     self.reasoningLevel = reasoningLevel
     self.fastMode = fastMode
     self.serviceTier = serviceTier
+  }
+
+  fileprivate func inheriting(from prior: Self) -> Self {
+    Self(
+      reasoningLevel: reasoningLevel == .inherit ? prior.reasoningLevel : reasoningLevel,
+      fastMode: fastMode == .inherit ? prior.fastMode : fastMode,
+      serviceTier: serviceTier == .inherit ? prior.serviceTier : serviceTier
+    )
+  }
+
+  fileprivate func replacingReasoningLevel(
+    _ replacement: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>
+  ) -> Self {
+    Self(
+      reasoningLevel: replacement,
+      fastMode: fastMode,
+      serviceTier: serviceTier
+    )
+  }
+
+  fileprivate func replacingFastMode(_ replacement: SignalboxFastModeOverlayShape) -> Self {
+    Self(
+      reasoningLevel: reasoningLevel,
+      fastMode: replacement,
+      serviceTier: serviceTier
+    )
+  }
+
+  fileprivate func replacingServiceTier(
+    _ replacement: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
+  ) -> Self {
+    Self(
+      reasoningLevel: reasoningLevel,
+      fastMode: fastMode,
+      serviceTier: replacement
+    )
   }
 
   func admitsAutomaticAdjustments(
@@ -1214,7 +1264,7 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
     globalDefault: .inheritAll
   )
 
-  private init(
+  fileprivate init(
     perCall: SignalboxModelSettingsOverlayShape,
     session: SignalboxModelSettingsOverlayShape,
     profile: SignalboxModelSettingsOverlayShape,
@@ -1224,6 +1274,82 @@ private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable, Send
     self.session = session
     self.profile = profile
     self.globalDefault = globalDefault
+  }
+
+  fileprivate func applying(
+    _ adjustments: [SignalboxModelChangeAdjustmentShape]
+  ) -> Self? {
+    let resolved = resolve()
+    var adjusted = self
+    for adjustment in adjustments {
+      switch adjustment {
+      case .reasoningLevelClamped(let from, let to):
+        guard from != to,
+          resolved.reasoningSource != .perCall,
+          resolved.effective.reasoningLevel == from,
+          let source = resolved.reasoningSource
+        else { return nil }
+        adjusted = adjusted.replacingReasoningLevel(.value(to), at: source)
+      case .reasoningLevelCleared(let from):
+        guard resolved.reasoningSource != .perCall,
+          resolved.effective.reasoningLevel == from,
+          let source = resolved.reasoningSource
+        else { return nil }
+        adjusted = adjusted.replacingReasoningLevel(.providerDefault, at: source)
+      case .fastModeDisabled:
+        guard resolved.fastModeSource != .perCall,
+          resolved.effective.fastMode == .enabled,
+          let source = resolved.fastModeSource
+        else { return nil }
+        adjusted = adjusted.replacingFastMode(.value(.disabled), at: source)
+      case .serviceTierCleared(let from):
+        guard resolved.serviceTierSource != .perCall,
+          resolved.effective.serviceTier == from,
+          let source = resolved.serviceTierSource
+        else { return nil }
+        adjusted = adjusted.replacingServiceTier(.providerDefault, at: source)
+      }
+    }
+    return adjusted
+  }
+
+  private func replacingReasoningLevel(
+    _ replacement: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>,
+    at source: SignalboxModelSettingSourceShape
+  ) -> Self {
+    Self(
+      perCall: source == .perCall ? perCall.replacingReasoningLevel(replacement) : perCall,
+      session: source == .session ? session.replacingReasoningLevel(replacement) : session,
+      profile: source == .profile ? profile.replacingReasoningLevel(replacement) : profile,
+      globalDefault: source == .globalDefault
+        ? globalDefault.replacingReasoningLevel(replacement) : globalDefault
+    )
+  }
+
+  private func replacingFastMode(
+    _ replacement: SignalboxFastModeOverlayShape,
+    at source: SignalboxModelSettingSourceShape
+  ) -> Self {
+    Self(
+      perCall: source == .perCall ? perCall.replacingFastMode(replacement) : perCall,
+      session: source == .session ? session.replacingFastMode(replacement) : session,
+      profile: source == .profile ? profile.replacingFastMode(replacement) : profile,
+      globalDefault: source == .globalDefault
+        ? globalDefault.replacingFastMode(replacement) : globalDefault
+    )
+  }
+
+  private func replacingServiceTier(
+    _ replacement: SignalboxSettingOverlayShape<SignalboxServiceTierShape>,
+    at source: SignalboxModelSettingSourceShape
+  ) -> Self {
+    Self(
+      perCall: source == .perCall ? perCall.replacingServiceTier(replacement) : perCall,
+      session: source == .session ? session.replacingServiceTier(replacement) : session,
+      profile: source == .profile ? profile.replacingServiceTier(replacement) : profile,
+      globalDefault: source == .globalDefault
+        ? globalDefault.replacingServiceTier(replacement) : globalDefault
+    )
   }
 
   func resolve() -> SignalboxResolvedModelSettingsShape {
@@ -2771,7 +2897,12 @@ private struct SignalboxSessionModelSettingsChangedShape: Decodable {
       SignalboxModelChangeAdjustmentShape.areCanonical(adjustments),
       adjustments.isEmpty || installedSettings.validationIdentityDiffers(from: priorSettings),
       callerOverride.admitsAutomaticAdjustments(adjustments),
-      installedSettings.admits(adjustments)
+      installedSettings.admits(adjustments),
+      installedSettings.preservesChangeProvenance(
+        from: priorSettings,
+        callerOverride: callerOverride,
+        adjustments: adjustments
+      )
     else {
       throw DecodingError.dataCorrupted(
         .init(

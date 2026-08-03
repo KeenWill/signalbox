@@ -728,7 +728,17 @@ where
     Ok(
         match OriginConfiguration::freeze(checked, select_definition) {
             Ok(configuration) => CurrentOriginConfiguration::Selected(configuration),
-            Err(error) => CurrentOriginConfiguration::UnknownAlias(error.alias()),
+            Err(signalbox_domain::OriginModelSettingsError::UnknownAlias(error)) => {
+                CurrentOriginConfiguration::UnknownAlias(error.alias())
+            }
+            Err(
+                signalbox_domain::OriginModelSettingsError::MissingCapabilities { .. }
+                | signalbox_domain::OriginModelSettingsError::Unsupported(_),
+            ) => {
+                return Err(
+                    GoalCorruption::Inconsistent("current goal turn model settings").into(),
+                );
+            }
         },
     )
 }

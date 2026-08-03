@@ -1175,11 +1175,12 @@ INV-tagged test names and attached doc comments.
   carries an optional per-call override and freezes one complete effective
   value. Steering inherits its source turn and carries no override.
 - **State transitions:** An explicit unsupported value rejects before command
-  effects or provider preparation. A model-change-induced incompatibility clamps
-  reasoning downward, disables fast mode, or clears service tier, then records
-  the exact adjustment. Alias retargeting applies the same rule at input
-  acceptance. A declared fast serving target is authorized lineage; no
-  undeclared target or suffix is.
+  effects or provider preparation. A model-change-induced incompatibility uses
+  the greatest supported reasoning level no higher than the prior level, or the
+  lowest supported level when none is lower; it disables fast mode or clears
+  service tier, then records the exact adjustment. Alias retargeting applies the
+  same rule at input acceptance. A declared fast serving target is authorized
+  lineage; no undeclared target or suffix is.
 - **Transient updates:** None. Capability discovery is a read-only projection;
   settings, provenance, and adjustments are durable facts.
 - **Owning component:** Domain owns setting values, precedence, compatibility,
