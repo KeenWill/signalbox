@@ -93,6 +93,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let turnID: SignalboxCanonicalUUID?
   }
 
+  private struct TerminalToolResultEvidence: Sendable {
+    let entryID: SignalboxCanonicalUUID
+    let requestID: String
+    let attemptID: SignalboxCanonicalUUID?
+  }
+
   private static let presentationLaneStride = 4
   private static let firstSemanticEventID = Int.min + 1
   private static let semanticEventIDLimit = Int.min / 2
@@ -121,6 +127,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     candidate.toolContextsByIdentity = [:]
     candidate.toolIdentitiesByCorrelation = [:]
     let projection = try candidate.project(snapshot, selection: .all)
+    let retainedIdentities = candidate.retainedPresentationIdentities(in: snapshot)
+    candidate.presentationIDs = candidate.presentationIDs.filter {
+      retainedIdentities.contains($0.key)
+    }
     self = candidate
     return projection
   }
@@ -1324,35 +1334,147 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard frontierMatches else {
       return []
     }
-    var currentSuffix: Set<SignalboxCanonicalUUID> = []
+    guard let terminalRequestIDs = terminalToolRequestIDs(
+      in: snapshot,
+      turnID: turnID
+    ) else {
+      return []
+    }
+    var currentSuffix: [TerminalToolResultEvidence] = []
     var terminalSuffix: Set<SignalboxCanonicalUUID> = []
     for record in snapshot.records {
-      if let entryID = terminalToolResultEntryID(
+      if let evidence = terminalToolResultEvidence(
         for: record,
         in: snapshot,
         turnID: turnID
       ) {
-        currentSuffix.insert(entryID)
+        currentSuffix.append(evidence)
       } else if !currentSuffix.isEmpty {
-        terminalSuffix = currentSuffix
+        if terminalResultRun(
+          currentSuffix,
+          matches: terminalRequestIDs,
+          requiredAttemptID: requiredAttemptID
+        ) {
+          terminalSuffix = Set(currentSuffix.map(\.entryID))
+        }
         currentSuffix = []
       }
     }
-    return currentSuffix.isEmpty ? terminalSuffix : currentSuffix
+    if terminalResultRun(
+      currentSuffix,
+      matches: terminalRequestIDs,
+      requiredAttemptID: requiredAttemptID
+    ) {
+      terminalSuffix = Set(currentSuffix.map(\.entryID))
+    }
+    return terminalSuffix
   }
 
-  private func terminalToolResultEntryID(
+  private func terminalToolRequestIDs(
+    in snapshot: SignalboxSynchronizationSnapshot,
+    turnID: SignalboxCanonicalUUID
+  ) -> Set<String>? {
+    let terminalModelCallID = snapshot.records.reversed().compactMap {
+      record -> SignalboxCanonicalUUID? in
+      guard case .entry(let message) = record,
+        message.sourceSessionID == snapshot.sessionID,
+        case .assistantToolUse(let entryTurnID, let modelCallID, _, _, _) = message.entry,
+        entryTurnID == turnID
+      else {
+        return nil
+      }
+      return modelCallID
+    }.first
+    guard let terminalModelCallID else {
+      return nil
+    }
+    let requestIDs = Set(snapshot.records.compactMap { record -> String? in
+      guard case .entry(let message) = record,
+        message.sourceSessionID == snapshot.sessionID,
+        case .assistantToolUse(
+          let entryTurnID,
+          let modelCallID,
+          let requestID,
+          _,
+          _
+        ) = message.entry,
+        entryTurnID == turnID,
+        modelCallID == terminalModelCallID
+      else {
+        return nil
+      }
+      return requestID.rawValue
+    })
+    return requestIDs.isEmpty ? nil : requestIDs
+  }
+
+  private func terminalToolResultEvidence(
     for record: SignalboxSynchronizationSnapshot.Record,
     in snapshot: SignalboxSynchronizationSnapshot,
     turnID: SignalboxCanonicalUUID
-  ) -> SignalboxCanonicalUUID? {
+  ) -> TerminalToolResultEvidence? {
     guard case .entry(let message) = record,
       message.sourceSessionID == snapshot.sessionID,
       toolEntry(message, belongsTo: turnID, modelCallID: nil)
     else {
       return nil
     }
-    return message.entryID
+    switch message.entry {
+    case .toolExecutionResult(let requestID, let attemptID, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: attemptID
+      )
+    case .toolDenied(let requestID, _), .toolClosed(let requestID, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: nil
+      )
+    case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+      .turnCancelled, .imported, .unknown:
+      return nil
+    }
+  }
+
+  private func terminalResultRun(
+    _ evidence: [TerminalToolResultEvidence],
+    matches terminalRequestIDs: Set<String>,
+    requiredAttemptID: SignalboxCanonicalUUID
+  ) -> Bool {
+    guard evidence.count == terminalRequestIDs.count,
+      Set(evidence.map(\.requestID)) == terminalRequestIDs
+    else {
+      return false
+    }
+    let attemptIDs = evidence.compactMap(\.attemptID)
+    return attemptIDs.isEmpty || attemptIDs.contains(requiredAttemptID)
+  }
+
+  private func retainedPresentationIdentities(
+    in snapshot: SignalboxSynchronizationSnapshot
+  ) -> Set<PresentationIdentity> {
+    Set(snapshot.records.compactMap { record in
+      switch record {
+      case .turn(let turn):
+        return .turnState(turn.turnID.rawValue)
+      case .modelCallUsage(let usage):
+        return .modelCallUsage(usage.modelCallID.rawValue)
+      case .entry(let message):
+        return .semantic(
+          sourceSessionID: message.sourceSessionID.rawValue,
+          entryID: message.entryID.rawValue
+        )
+      case .textEntry(let message):
+        return .semantic(
+          sourceSessionID: message.sourceSessionID.rawValue,
+          entryID: message.entryID.rawValue
+        )
+      case .content:
+        return nil
+      }
+    })
   }
 
   private func isExactTerminalMarker(

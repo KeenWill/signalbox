@@ -536,6 +536,23 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolReconciliationSideProjectionRejectsStaleSameTurnResultRun() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithStaleSameTurnReconciliationResult()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testAuthoritativeProjectionRestoresWireOrderAfterSideProjection() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedTurnEntries()
     let trigger = try ProcessProjectionFixture.completedTrigger()
@@ -671,6 +688,25 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
       ProcessProjectionFixture.compactedToolTimelineKinds
+    )
+  }
+
+  func testAuthoritativeRefreshReleasesCompactedPresentationIdentity() throws {
+    var projector = SignalboxProcessTranscriptProjector()
+    let before = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithToolBeforeCompaction()
+    )
+    _ = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithToolAfterCompaction()
+    )
+
+    let reintroduced = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithToolBeforeCompaction()
+    )
+
+    XCTAssertNotEqual(
+      try ProcessProjectionFixture.importedContentEventID(.sourceEvent, in: before),
+      try ProcessProjectionFixture.importedContentEventID(.sourceEvent, in: reintroduced)
     )
   }
 
@@ -9573,6 +9609,21 @@ private enum ProcessProjectionFixture {
     return kinds
   }
 
+  static func importedContentEventID(
+    _ kind: SignalboxProcessImportedContentKind,
+    in projection: SignalboxProcessTranscriptProjection
+  ) throws -> SignalboxEventID {
+    guard let record = projection.records.first(where: { record in
+      guard case .processImportedContent(let event) = record.event else {
+        return false
+      }
+      return event.contentKind == kind
+    }) else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    return record.eventID
+  }
+
   static func noticeTitles(in timeline: [SignalboxTimelineItem]) -> [String] {
     timeline.compactMap {
       guard case .processEvidence(let notice) = $0 else {
@@ -9809,6 +9860,32 @@ private enum ProcessProjectionFixture {
           "entry":{
             "type":"assistant_tool_use",
             "turn_id":"\(crossTurn)",
+            "model_call_id":"\(laterTurnModelCall)",
+            "tool_request_id":"\(laterTurnToolRequest)",
+            "tool_name":"\(laterTurnToolName)",
+            "arguments":"{}"
+          }
+        }
+        """
+      ],
+      entryCount: 5
+    )
+  }
+
+  static func snapshotWithStaleSameTurnReconciliationResult() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try reconciliationResultSnapshot(
+      trailingEntries: [
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"4",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(laterTurnToolEntry)",
+          "entry":{
+            "type":"assistant_tool_use",
+            "turn_id":"\(ProcessDriverFixture.turn)",
             "model_call_id":"\(laterTurnModelCall)",
             "tool_request_id":"\(laterTurnToolRequest)",
             "tool_name":"\(laterTurnToolName)",
