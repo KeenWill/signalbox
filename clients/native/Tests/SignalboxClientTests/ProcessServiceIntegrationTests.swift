@@ -448,6 +448,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertTrue(ProcessProjectionFixture.toolNames(in: projection).isEmpty)
   }
 
+  func testFailedTurnSideProjectionExcludesImportedMarkerIdentityCollision() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithImportedFailureMarkerCollision()
+    let trigger = try ProcessProjectionFixture.failedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      projection.records.map(\.event.kind),
+      ProcessProjectionFixture.terminalFailureEventKinds
+    )
+  }
+
   func testSideProjectionRejectsReconciliationResultFromAnotherTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCrossTurnReconciliationResult()
     let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
@@ -609,6 +622,33 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       ProcessProjectionFixture.modelCallUsageIDs(in: normalizer.timelineItems),
       ProcessProjectionFixture.orderedModelCallUsageIDs
+    )
+  }
+
+  func testModelUsageGainsAnchorOrderWithoutChangingStableIdentity() throws {
+    let initialSnapshot = try ProcessProjectionFixture.snapshotWithLaterModelUsageOnly()
+    let anchoredSnapshot =
+      try ProcessProjectionFixture.snapshotWithFailedUsageMarkerAndLaterImportedContent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let initial = try projector.projectAuthoritativeSnapshot(initialSnapshot)
+    let anchored = try projector.projectAuthoritativeSnapshot(anchoredSnapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: initial.records)
+    try normalizer.replaceAll(with: anchored.records)
+
+    XCTAssertEqual(
+      try ProcessProjectionFixture.modelCallUsageEventID(
+        ProcessDriverFixture.modelCall,
+        in: initial
+      ),
+      try ProcessProjectionFixture.modelCallUsageEventID(
+        ProcessDriverFixture.modelCall,
+        in: anchored
+      )
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.reanchoredUsageNoticeTitles
     )
   }
 
@@ -6067,6 +6107,10 @@ private enum ProcessProjectionFixture {
   static let terminalMarkerUsageTimelineKinds: [ProcessTimelineFixtureKind] = [
     .processEvidence, .turnFailure, .processEvidence,
   ]
+  static let terminalFailureEventKinds = ["process_turn_failure"]
+  static let reanchoredUsageNoticeTitles = [
+    "Imported source event", modelUsageNoticeTitle, "Imported thinking",
+  ]
   static let orderedMessageRoles = [SignalboxMessageRole.user, .assistant]
   static let acceptedTranscriptRowID = "accepted-\(ProcessSubmissionFixture.acceptedInputID)"
   static let completedAssistantTranscriptRowID = "timeline-message-1"
@@ -7017,6 +7061,51 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithImportedFailureMarkerCollision() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        emptyModelCallsBoundary,
+        importedMarker(
+          index: 0,
+          entryID: ProcessDriverFixture.completionEntry,
+          sourceSessionID: crossTurn,
+          speaker: importedAssistantSpeaker,
+          kind: "thinking"
+        ),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_failed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
   private static func snapshotWithToolResultAndFailure(
     interveningEntries: [String],
     failureEntryIndex: UInt64
@@ -7706,6 +7795,27 @@ private enum ProcessProjectionFixture {
   static func snapshotWithFailedUsageAndMarker() throws
     -> SignalboxSynchronizationSnapshot
   {
+    try snapshotWithFailedUsageAndMarker(trailingEntries: [])
+  }
+
+  static func snapshotWithFailedUsageMarkerAndLaterImportedContent() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithFailedUsageAndMarker(
+      trailingEntries: [
+        importedMarker(
+          index: 2,
+          entryID: importedThinkingEntry,
+          speaker: importedAssistantSpeaker,
+          kind: "thinking"
+        )
+      ]
+    )
+  }
+
+  private static func snapshotWithFailedUsageAndMarker(
+    trailingEntries: [String]
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -7756,13 +7866,14 @@ private enum ProcessProjectionFixture {
           }
         }
         """,
+      ] + trailingEntries + [
         """
         {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
           "turn_count":"1",
-          "entry_count":"2"
+          "entry_count":"\(2 + trailingEntries.count)"
         }
         """,
       ]
@@ -8767,6 +8878,7 @@ private enum ProcessProjectionFixture {
   private static func importedMarker(
     index: UInt64,
     entryID: String,
+    sourceSessionID: String = ProcessDriverFixture.session,
     speaker: String,
     kind: String
   ) -> String {
@@ -8774,7 +8886,7 @@ private enum ProcessProjectionFixture {
     {
       "type":"transcript_entry",
       "entry_index":"\(index)",
-      "source_session_id":"\(ProcessDriverFixture.session)",
+      "source_session_id":"\(sourceSessionID)",
       "entry_id":"\(entryID)",
       "entry":{
         "type":"imported",
