@@ -1118,7 +1118,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .contextCompacted(_, let modelCallID, _, _, _):
         return modelCallID == evidence.modelCallID
       case .sessionCreated, .inputAccepted, .turnActivated, .turnFailed, .turnRefused,
-        .turnCancelled, .turnReconciliationRequired,
+        .turnCancelled, .toolApprovalDecided, .turnReconciliationRequired,
         .turnToolReconciliationRequired, .unknown:
         return false
       }

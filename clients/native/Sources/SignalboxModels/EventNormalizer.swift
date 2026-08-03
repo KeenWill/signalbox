@@ -90,6 +90,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
             output: output,
             statusUpdates: statusUpdates,
             decisionReason: decisionReason,
+            approvalDecider: approvalDecider,
+            approvalRationale: approvalRationale,
             childSessionID: childSessionID,
             decisionAvailable: decisionAvailable,
             presentation: nil
@@ -105,6 +107,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         output: String?,
         statusUpdates: [String],
         decisionReason: String?,
+        approvalDecider: String? = nil,
+        approvalRationale: String? = nil,
         childSessionID: SignalboxSessionID?,
         decisionAvailable: Bool,
         presentation: SignalboxToolCardPresentation?
