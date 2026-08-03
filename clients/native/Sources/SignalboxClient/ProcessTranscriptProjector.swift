@@ -481,6 +481,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let request = requestID.rawValue
       let event = SignalboxProcessToolEvent(
         toolRequestID: SignalboxToolInvocationID(rawValue: request),
+        turnID: turnID,
         toolName: toolName,
         arguments: arguments,
         output: nil,
@@ -500,21 +501,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         awaitsDecision: request == awaitingToolDecisionRequestID,
         eventID: eventID
       )
-    case .toolExecutionResult(let requestID, _, let content):
+    case .toolExecutionResult(let requestID, let toolAttemptID, let content):
       return try updateTool(
         requestID: requestID.rawValue,
+        toolAttemptID: toolAttemptID,
         output: content,
         status: .completed
       )
     case .toolDenied(let requestID, let content):
       return try updateTool(
         requestID: requestID.rawValue,
+        toolAttemptID: nil,
         output: content,
         status: .denied
       )
     case .toolClosed(let requestID, let content):
       return try updateTool(
         requestID: requestID.rawValue,
+        toolAttemptID: nil,
         output: content,
         status: .closed
       )
@@ -575,6 +579,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private mutating func updateTool(
     requestID: String,
+    toolAttemptID: SignalboxCanonicalUUID?,
     output: String,
     status: SignalboxProcessToolStatus
   ) throws -> SignalboxStoredEvent {
@@ -583,6 +588,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     let updated = SignalboxProcessToolEvent(
       toolRequestID: prior.toolRequestID,
+      turnID: prior.turnID,
+      toolAttemptID: toolAttemptID,
       toolName: prior.toolName,
       arguments: prior.arguments,
       output: output,
@@ -603,6 +610,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let status = awaitsDecision ? SignalboxProcessToolStatus.awaitingDecision : event.status
     let presented = SignalboxProcessToolEvent(
       toolRequestID: event.toolRequestID,
+      turnID: event.turnID,
+      toolAttemptID: event.toolAttemptID,
       toolName: event.toolName,
       arguments: event.arguments,
       output: event.output,
@@ -850,7 +859,22 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
     if case .modelIdentityChanged(let entryTurnID, _, _) = message.entry {
-      return turnID(for: trigger) == entryTurnID
+      switch trigger {
+      case .toolBatchTransition(let turnID, _, let state):
+        switch state {
+        case .proposed, .resultsProjected:
+          return turnID == entryTurnID
+        case .recoveryRequired, .unknown:
+          return false
+        }
+      case .turnCompleted(let turnID, _, _, _), .turnFailed(let turnID, _, _),
+        .turnCancelled(let turnID, _, _),
+        .turnToolReconciliationRequired(let turnID, _, _):
+        return turnID == entryTurnID
+      case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+        .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
+        return false
+      }
     }
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):

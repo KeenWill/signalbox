@@ -303,12 +303,7 @@ public enum SignalboxEventNormalizer {
         case .processImportedContent(let event):
             return .processEvidence(importedContentCard(record: record, event: event))
         case .processTool(let event):
-            let plan = planPresentation(
-                toolName: event.toolName,
-                arguments: event.arguments,
-                output: event.output,
-                status: event.status
-            )
+            let plan = planPresentation(event)
             return .tool(
                 SignalboxToolCard(
                     eventID: record.eventID,
@@ -753,16 +748,13 @@ public enum SignalboxEventNormalizer {
     }
 
     private static func planPresentation(
-        toolName: String,
-        arguments: String?,
-        output: String?,
-        status: SignalboxProcessToolStatus
+        _ tool: SignalboxProcessToolEvent
     ) -> PlanPresentation? {
-        switch toolName {
+        switch tool.toolName {
         case "plan_read":
-            let decodedArguments = arguments.flatMap(decodePlanReadArguments)
-            let decodedOutput = status == .completed
-                ? output.flatMap { decode(PlanReadOutput.self, from: $0) }
+            let decodedArguments = tool.arguments.flatMap(decodePlanReadArguments)
+            let decodedOutput = tool.status == .completed
+                ? tool.output.flatMap { decode(PlanReadOutput.self, from: $0) }
                 : nil
             let presentationOutput = decodedArguments.flatMap { arguments in
                 decodedOutput.flatMap { output in
@@ -779,13 +771,13 @@ public enum SignalboxEventNormalizer {
                 output: presentationOutput
             )
         case "plan_write":
-            let decodedArguments = arguments.flatMap(decodePlanWriteArguments)
-            let decodedOutput = status == .completed
-                ? output.flatMap { decode(PlanWriteOutput.self, from: $0) }
+            let decodedArguments = tool.arguments.flatMap(decodePlanWriteArguments)
+            let decodedOutput = tool.status == .completed
+                ? tool.output.flatMap { decode(PlanWriteOutput.self, from: $0) }
                 : nil
             let presentationOutput = decodedArguments.flatMap { arguments in
                 decodedOutput.flatMap { output in
-                    planEvent(output.event, matches: arguments)
+                    planEvent(output.event, matches: arguments, tool: tool)
                         ? formattedPlanEvent(output.event)
                         : nil
                 }
@@ -874,8 +866,17 @@ public enum SignalboxEventNormalizer {
 
     private static func planEvent(
         _ event: PlanEvent,
-        matches arguments: PlanWriteArguments
+        matches arguments: PlanWriteArguments,
+        tool: SignalboxProcessToolEvent
     ) -> Bool {
+        guard let turnID = tool.turnID,
+            let toolAttemptID = tool.toolAttemptID,
+            event.provenance.requestID.rawValue == tool.toolRequestID.rawValue,
+            event.provenance.turnID == turnID,
+            event.provenance.attemptID == toolAttemptID
+        else {
+            return false
+        }
         switch arguments.kind {
         case "create":
             return event.kind == "created" && event.text == arguments.text
