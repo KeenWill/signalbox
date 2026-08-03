@@ -27,9 +27,12 @@ a law is cited as `INV-NNN`, the generated
 [invariant test index](../invariants.md) resolves it; where mechanics owned by
 another contract are summarized, the owning sibling page is linked inline.
 
-The path-scoped session-placement paragraphs are the foundation proposal at the
-bottom of their implementing stack and become verified only with its
-read-introspection and process-surface child pull request.
+The path-scoped session-placement domain and persistence paragraphs were
+verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
+current-head authentication is additionally verified against this PR
+(`agent/scoped-visibility`). The read-scope enforcement paragraphs become
+verified only with their read-introspection and process-surface child pull
+request.
 
 ## Session identity and creation provenance
 
@@ -160,8 +163,14 @@ hyphen, and underscore; each segment is at most 64 bytes and a path is at most
 appends version-one `Created`, so no update rewrites history. Every
 current-placement load authenticates the contiguous history from version one
 through the selected head against each event's typed receipt and durable-command
-registry claim; a missing, cross-wired, or invalid command fact fails closed as
-typed storage corruption.
+registry claim and rejects a head when immutable history contains a later event.
+Equal native and imported-frontier creation replay likewise rejects a missing or
+lagging current head while reconstituting its immutable creation receipt. A
+placement-update replay authenticates the current head event and rejects either
+a head that selects no authenticated event or a head that lags later history
+before reconstituting applied or stateful-rejection evidence. A missing or
+lagging head, cross-wired history, or invalid command fact fails closed as typed
+storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one
