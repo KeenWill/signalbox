@@ -10,9 +10,9 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    DurableCommandId, ModelSettingsOverlay, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
-    ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId,
+    DurableCommandId, ModelChangeAdjustment, ModelSettingsOverlay,
+    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsResult,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
 };
 
 use crate::InvalidDurableCommandId;
@@ -31,6 +31,7 @@ pub struct ReplaceSessionDefaultsRequest {
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
     caller_model_settings: ModelSettingsOverlay,
+    model_settings_adjustments: Box<[ModelChangeAdjustment]>,
     prompt_member: PromptMemberStatement,
 }
 
@@ -63,6 +64,28 @@ impl ReplaceSessionDefaultsRequest {
         caller_model_settings: ModelSettingsOverlay,
         prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId> {
+        Self::try_new_with_model_settings_adjustments(
+            command_id,
+            session,
+            expected_current_version,
+            replacement,
+            caller_model_settings,
+            Vec::new(),
+            prompt_member,
+        )
+    }
+
+    /// Validates a request with server-derived automatic adjustment evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId> {
         if command_id.as_uuid().is_nil() {
             return Err(InvalidDurableCommandId::Nil);
         }
@@ -76,6 +99,7 @@ impl ReplaceSessionDefaultsRequest {
             expected_current_version,
             replacement,
             caller_model_settings,
+            model_settings_adjustments: model_settings_adjustments.into_boxed_slice(),
             prompt_member,
         })
     }
@@ -103,6 +127,11 @@ impl ReplaceSessionDefaultsRequest {
     /// Returns the caller's exact session-settings contribution.
     pub const fn caller_model_settings(&self) -> ModelSettingsOverlay {
         self.caller_model_settings
+    }
+
+    /// Borrows ordered automatic adjustments derived for the replacement.
+    pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment] {
+        &self.model_settings_adjustments
     }
 
     /// Returns whether the caller's boundary could state the prompt member.
@@ -199,12 +228,13 @@ where
         &mut self,
         request: ReplaceSessionDefaultsRequest,
     ) -> Result<ReplaceSessionDefaultsOutcome, Transaction::Error> {
-        let command = DomainReplaceSessionDefaults::with_model_settings(
+        let command = DomainReplaceSessionDefaults::with_model_settings_adjustments(
             request.command_id,
             request.session,
             request.expected_current_version,
             request.replacement,
             request.caller_model_settings,
+            request.model_settings_adjustments.into_vec(),
         );
         self.transaction
             .handle(command, request.prompt_member)

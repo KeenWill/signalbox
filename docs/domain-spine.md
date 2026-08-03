@@ -225,13 +225,6 @@ impl ImportedSourceMetadata {
         metadata: ImportedSourceAttestation<bool>,
         message_role: ImportedSourceAttestation<ImportedSpeaker>,
     ) -> Self;
-    pub const fn with_model_settings(
-        command_id: DurableCommandId,
-        session: SessionId,
-        expected_current_version: SessionConfigurationDefaultsVersion,
-        replacement: SessionConfigurationDefaults,
-        caller_model_settings: ModelSettingsOverlay,
-    ) -> Self;
     // accessors: record_id(), parent_record_id(), source_session_id(),
     //   timestamp(), sidechain(), metadata(), message_role()
 }
@@ -4595,17 +4588,32 @@ built from its candidate, crate-internally.
 ```rust
 pub struct ReplaceSessionDefaults { /* private */ }
 impl ReplaceSessionDefaults {
-    pub const fn new(
+    pub fn new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
     ) -> Self;
+    pub fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+    ) -> Self;
+    pub fn with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Self;
     pub const fn prepare_session_not_found(self) -> PreparedReplaceSessionDefaults;
     pub fn prepare_against(self, current: &Session)
         -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
     // accessors: command_id(), session(), expected_current_version(), replacement(),
-    // caller_model_settings()
+    // caller_model_settings(), model_settings_adjustments()
 }
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
@@ -5933,8 +5941,17 @@ impl ReplaceSessionDefaultsRequest {
         caller_model_settings: ModelSettingsOverlay,
         prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId>;
     // accessors: command_id(), session(), expected_current_version(), replacement(),
-    // caller_model_settings(), prompt_member()
+    // caller_model_settings(), model_settings_adjustments(), prompt_member()
 }
 
 pub enum PromptMemberStatement {
