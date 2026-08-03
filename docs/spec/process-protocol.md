@@ -698,8 +698,8 @@ transport request — `create_session`, `create_session_from_template`,
 `import_conversation`, `begin_conversation_import`,
 `append_conversation_import`, `commit_conversation_import`,
 `abort_conversation_import`, `spawn_session`, `await_session`,
-`send_session_message`, `replace_lost_runner`,
-`abandon_lost_runner`, or `promote_pending_runner` — produces exactly one of:
+`send_session_message`, `replace_lost_runner`, `abandon_lost_runner`, or
+`promote_pending_runner` — produces exactly one of:
 
 - `session_created` with `session_id`;
 - `session_placement_updated` with `session_id`, the positive successor
