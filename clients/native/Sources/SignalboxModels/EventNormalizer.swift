@@ -1232,7 +1232,14 @@ public enum SignalboxEventNormalizer {
         guard planJSONUsesCanonicalUnsignedIntegerTokens(json) else {
             return nil
         }
-        return try? SignalboxJSONCoding.decoder().decode(type, from: Data(json.utf8))
+        let data = Data(json.utf8)
+        var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
+        guard let duplicateObjectPaths = try? scanner.scan() else {
+            return nil
+        }
+        let decoder = SignalboxJSONCoding.decoder()
+        decoder.userInfo[.signalboxDuplicateObjectPaths] = duplicateObjectPaths
+        return try? decoder.decode(type, from: data)
     }
 
     private static func planJSONUsesCanonicalUnsignedIntegerTokens(_ json: String) -> Bool {

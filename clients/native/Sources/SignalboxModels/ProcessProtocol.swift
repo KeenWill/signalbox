@@ -2877,7 +2877,7 @@ struct SignalboxUntaggedPayload: Decodable {
 }
 
 extension CodingUserInfoKey {
-  fileprivate static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
+  static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
     rawValue: "org.signalbox.process-protocol.duplicate-object-paths"
   )!
 }
@@ -2916,7 +2916,7 @@ extension Decoder {
   }
 }
 
-private struct SignalboxJSONDuplicateMemberScanner {
+struct SignalboxJSONDuplicateMemberScanner {
   private let bytes: [UInt8]
   private let stringDecoder = JSONDecoder()
   private var index = 0
@@ -3154,27 +3154,5 @@ extension Decoder {
       Value.self,
       forKey: SignalboxDynamicCodingKey(key)
     )
-  }
-}
-
-final class SignalboxDuplicateAwareJSONDecoder: JSONDecoder, @unchecked Sendable {
-  private let duplicateScanLock = NSLock()
-
-  override func decode<Value: Decodable>(
-    _ type: Value.Type,
-    from data: Data
-  ) throws -> Value {
-    duplicateScanLock.lock()
-    defer {
-      duplicateScanLock.unlock()
-    }
-    if userInfo[.signalboxDuplicateObjectPaths] == nil {
-      var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
-      userInfo[.signalboxDuplicateObjectPaths] = try scanner.scan()
-    }
-    defer {
-      userInfo[.signalboxDuplicateObjectPaths] = nil
-    }
-    return try super.decode(type, from: data)
   }
 }

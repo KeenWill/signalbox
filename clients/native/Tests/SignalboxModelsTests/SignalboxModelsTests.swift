@@ -484,37 +484,13 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
-    func testDuplicateStoredProcessMembersDegradeToPayloadPreservingUnknown() throws {
-        let data = Data(
-            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_identity","turn_id":"\#(Self.storedTurnID)","defaults_version":"1","defaults_version":"2","selected_model_id":"\#(Self.storedModelCallID)"}}"#.utf8
+    func testSharedDecoderAcceptsDeepNonProcessJSON() throws {
+        let decoded = try SignalboxJSONCoding.decoder().decode(
+            SignalboxJSONValue.self,
+            from: Self.deepNonProcessJSON
         )
 
-        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
-        let unknown = try Self.unknownEvent(in: stored)
-
-        XCTAssertEqual(
-            unknown.payload["selected_model_id"],
-            .string(Self.storedModelCallID)
-        )
-    }
-
-    func testSharedDecoderIsolatesConcurrentDuplicateScans() async throws {
-        let decoder = SignalboxJSONCoding.decoder()
-        async let identity = decoder.decode(
-            SignalboxStoredEvent.self,
-            from: Self.duplicateModelIdentityData
-        )
-        async let tool = decoder.decode(
-            SignalboxStoredEvent.self,
-            from: Self.duplicateProcessToolData
-        )
-
-        let values = try await (identity, tool)
-        let identityUnknown = try Self.unknownEvent(in: values.0)
-        let toolUnknown = try Self.unknownEvent(in: values.1)
-
-        XCTAssertEqual(identityUnknown.kind, Self.processModelIdentityKind)
-        XCTAssertEqual(toolUnknown.kind, Self.processToolKind)
+        XCTAssertEqual(decoded, Self.deepNonProcessJSONValue)
     }
 
     func testExpandedStoredProcessToolDegradesToPayloadPreservingUnknown() throws {
@@ -532,6 +508,18 @@ final class SignalboxModelsTests: XCTestCase {
     }
 
     private static let expandedProcessEventFieldValue = "retained"
+    private static let deepNonProcessJSON = Data(
+        (
+            String(repeating: "[", count: 128)
+                + "null"
+                + String(repeating: "]", count: 128)
+        ).utf8
+    )
+    private static let deepNonProcessJSONValue = (0..<128).reduce(
+        SignalboxJSONValue.null
+    ) { value, _ in
+        .array([value])
+    }
     private static let futureProcessEvidenceKind = "fixture_future_evidence"
     private static let importedContentKind = "thinking"
     private static let partialUsageCostAmount = "0.01"

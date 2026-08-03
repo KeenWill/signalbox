@@ -97,6 +97,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let entryID: SignalboxCanonicalUUID
     let requestID: String
     let attemptID: SignalboxCanonicalUUID?
+    let closesAttemptWithoutID: Bool
   }
 
   private static let presentationLaneStride = 4
@@ -1407,13 +1408,22 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return TerminalToolResultEvidence(
         entryID: message.entryID,
         requestID: requestID.rawValue,
-        attemptID: attemptID
+        attemptID: attemptID,
+        closesAttemptWithoutID: false
       )
-    case .toolDenied(let requestID, _), .toolClosed(let requestID, _):
+    case .toolDenied(let requestID, _):
       return TerminalToolResultEvidence(
         entryID: message.entryID,
         requestID: requestID.rawValue,
-        attemptID: nil
+        attemptID: nil,
+        closesAttemptWithoutID: false
+      )
+    case .toolClosed(let requestID, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: nil,
+        closesAttemptWithoutID: true
       )
     case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
       .turnCancelled, .imported, .unknown:
@@ -1433,6 +1443,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     let attemptIDs = evidence.compactMap(\.attemptID)
     return attemptIDs.isEmpty || attemptIDs.contains(requiredAttemptID)
+      || evidence.contains(where: \.closesAttemptWithoutID)
   }
 
   private func retainedPresentationIdentities(
