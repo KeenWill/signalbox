@@ -108,7 +108,7 @@ impl<Credentials, Transport> WebSearchTool<Credentials, Transport> {
             ToolExecutionErrorDetail::try_new(String::from(INVALID_RESPONSE_DETAIL))
                 .map_err(|_| WebSearchToolConstructionError::ErrorDetail)?;
         let definition = compile_contract_definition::<Self>(
-            ToolPermissionDefault::Auto,
+            ToolPermissionDefault::Confirm,
             ToolEffectClass::ExternalEffect,
         )
         .map_err(|error| match error {

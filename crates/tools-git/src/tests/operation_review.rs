@@ -22,11 +22,12 @@ use crate::arguments::{
 };
 use crate::bounded::RevisionSnapshot;
 use crate::branch::branch_create;
+use crate::decode::validate_operation;
 use crate::descriptor::file_identity;
 use crate::failure::LocalGitFailure;
 use crate::limits::{
     GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
-    MAX_REVISION_BYTES, MAX_STAGE_PATHS,
+    MAX_REFERENCE_BYTES, MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
 use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
 use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
@@ -123,6 +124,23 @@ fn revision_arguments_reject_a_value_above_the_byte_bound_during_decode() {
     let result = serde_json::from_value::<GitLogArguments>(serde_json::json!({
         "revision": revision,
     }));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn reference_revision_rejects_a_name_above_the_reference_bound() {
+    let prefix = "refs/heads/";
+    let revision = format!(
+        "{prefix}{}",
+        "a".repeat(MAX_REFERENCE_BYTES + 1 - prefix.len())
+    );
+    let operation = LocalOperation::Log(GitLogArguments {
+        revision,
+        max_entries: 1,
+    });
+
+    let result = validate_operation(&operation, ObjectFormat::Sha1);
 
     assert!(result.is_err());
 }

@@ -23,7 +23,6 @@ impl SessionPlacementPath {
     pub const MAX_DEPTH: usize = MAX_SESSION_PLACEMENT_DEPTH;
     /// Maximum admitted ASCII bytes per segment.
     pub const MAX_SEGMENT_BYTES: usize = MAX_SESSION_PLACEMENT_SEGMENT_BYTES;
-
     /// Validates a nonempty dotted path of bounded ASCII label segments.
     pub fn try_new(value: String) -> Result<Self, SessionPlacementPathError> {
         if value.is_empty() {
