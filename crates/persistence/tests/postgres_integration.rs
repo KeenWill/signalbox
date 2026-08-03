@@ -1541,7 +1541,6 @@ async fn insert_outbox_session_fixture(
     .bind(session)
     .execute(&mut *transaction)
     .await?;
-
     transaction.commit().await?;
     Ok(session)
 }
