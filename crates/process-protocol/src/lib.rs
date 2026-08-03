@@ -8334,7 +8334,8 @@ mod tests {
     #[test]
     fn root_placement_creation_and_update_frames_record_global_read_intent_loudly()
     -> Result<(), Box<dyn std::error::Error>> {
-        let root = super::SessionPlacement::try_root_global_read(String::from("operator"))?;
+        let root_path = "operator";
+        let root = super::SessionPlacement::try_root_global_read(String::from(root_path))?;
         let create = ClientFrame::try_new_for_version(
             ProtocolVersion::One,
             request(70)?,
@@ -8364,7 +8365,7 @@ mod tests {
         )?;
         assert_eq!(decode_client_line(&encode_client_line(&update)?)?, update);
         assert_eq!(
-            super::SessionPlacement::try_scoped(String::from("operator")),
+            super::SessionPlacement::try_scoped(String::from(root_path)),
             Err(super::CanonicalValueError::Placement)
         );
         Ok(())

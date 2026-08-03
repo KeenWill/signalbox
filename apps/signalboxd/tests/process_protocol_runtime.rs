@@ -597,16 +597,27 @@ impl RunningRuntime {
 async fn create_alias_session(
     connection: &mut Connection,
 ) -> Result<CanonicalUuid, Box<dyn Error>> {
+    create_alias_session_with(
+        connection,
+        CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+        SessionPlacement::Pathless {},
+    )
+    .await
+}
+
+async fn create_alias_session_with(
+    connection: &mut Connection,
+    alias_id: CanonicalUuid,
+    placement: SessionPlacement,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
     connection
         .request(
             1,
             ClientRequest::CreateSession {
                 command_id: command()?,
-                initial_model_selection: ModelSelection::Alias {
-                    alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                },
+                initial_model_selection: ModelSelection::Alias { alias_id },
                 system_prompt: SystemPromptMember::present(None),
-                placement: SessionPlacement::Pathless {},
+                placement,
             },
         )
         .await?;
@@ -1892,8 +1903,10 @@ async fn s28_selects_the_codex_rollout_converter() -> Result<(), Box<dyn Error>>
 async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let session_id = create_alias_session(&mut connection).await?;
     let alias_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+    let expected_placement = SessionPlacement::Pathless {};
+    let session_id =
+        create_alias_session_with(&mut connection, alias_id, expected_placement.clone()).await?;
 
     connection
         .request(2, ClientRequest::ListSessions {})
@@ -1911,16 +1924,22 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
             alias_id: listed_alias,
         },
         placement_version,
-        placement,
+        placement: listed_placement,
     } = summary.message()
     else {
         panic!("session listing carries one alias summary")
     };
     assert_eq!(*listed, session_id);
-    assert_eq!(defaults_version.value(), 1);
+    assert_eq!(
+        defaults_version.value(),
+        SessionConfigurationDefaultsVersion::first().as_u64()
+    );
     assert_eq!(*listed_alias, alias_id);
-    assert_eq!(placement_version.value(), 1);
-    assert_eq!(placement, &SessionPlacement::Pathless {});
+    assert_eq!(
+        placement_version.value(),
+        signalbox_domain::SessionPlacementVersion::INITIAL.as_u64()
+    );
+    assert_eq!(listed_placement, &expected_placement);
     let end = response_within(&mut connection).await?;
     let ServerMessage::SessionsEnd { session_count } = end.message() else {
         panic!("session listing ends explicitly")

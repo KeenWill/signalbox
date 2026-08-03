@@ -3305,13 +3305,14 @@ mod tests {
     #[test]
     fn create_root_placement_requires_and_preserves_global_read_intent() {
         let selection = "00000000-0000-0000-0000-000000000001";
+        let root_path = "operator";
         let Ok(ParseOutcome::Run(arguments)) = parse(
             [
                 "create",
                 "--model",
                 selection,
                 "--placement",
-                "operator",
+                root_path,
                 "--root-global-read",
             ]
             .map(Into::into),
@@ -3325,12 +3326,12 @@ mod tests {
         assert_eq!(
             placement,
             SessionPlacement::RootGlobalRead {
-                path: String::from("operator"),
+                path: String::from(root_path),
                 intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
             }
         );
         assert!(
-            parse(["create", "--model", selection, "--placement", "operator"].map(Into::into))
+            parse(["create", "--model", selection, "--placement", root_path].map(Into::into))
                 .is_err()
         );
     }
@@ -3338,14 +3339,17 @@ mod tests {
     #[test]
     fn place_binds_expected_version_and_complete_replacement() {
         let session = "00000000-0000-0000-0000-000000000001";
+        let expected_version = CanonicalU64::new(2);
+        let expected_version_argument = expected_version.value().to_string();
+        let replacement_path = "projects.foo.session";
         let Ok(ParseOutcome::Run(arguments)) = parse(
             [
                 "place",
                 session,
                 "--expected-placement-version",
-                "2",
+                expected_version_argument.as_str(),
                 "--placement",
-                "projects.foo.session",
+                replacement_path,
             ]
             .map(Into::into),
         ) else {
@@ -3362,11 +3366,11 @@ mod tests {
         };
 
         assert_eq!(session_id.to_string(), session);
-        assert_eq!(expected_placement_version.value(), 2);
+        assert_eq!(expected_placement_version, expected_version);
         assert_eq!(
             replacement,
             SessionPlacement::Scoped {
-                path: String::from("projects.foo.session"),
+                path: String::from(replacement_path),
             }
         );
     }
