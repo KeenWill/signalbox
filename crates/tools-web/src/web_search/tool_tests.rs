@@ -3,8 +3,8 @@ use signalbox_domain::{ToolEffectClass, ToolPermissionDefault};
 
 use super::{test_provider_support::*, test_service_support::*, test_support::*, tool::*};
 
-/// The provider read is auto-approved but remains crash-relevant because
-/// the remote provider observes the authenticated GET.
+/// The provider read defaults to confirmation because the remote provider
+/// observes the authenticated GET.
 #[test]
 fn web_search_definition_carries_exact_policy() {
     let (catalog, _executor) = WebSearchTool::try_new((), (), configuration())

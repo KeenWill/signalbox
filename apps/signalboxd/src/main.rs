@@ -166,31 +166,42 @@ struct HubConfiguration {
     runner_socket_path: PathBuf,
 }
 
+struct HubConfigurationValues {
+    database_url: Option<OsString>,
+    model_configuration_file: Option<OsString>,
+    template_configuration_file: Option<OsString>,
+    anthropic_api_key_file: Option<OsString>,
+    brave_api_key_file: Option<OsString>,
+    github_token_file: Option<OsString>,
+    process_socket_path: Option<OsString>,
+    runner_socket_path: Option<OsString>,
+}
+
 impl HubConfiguration {
     fn from_environment() -> Result<Self, HubConfigurationError> {
-        Self::from_values(
-            env::var_os(DATABASE_URL_ENVIRONMENT),
-            env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
-            env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
-            env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
-            env::var_os(BRAVE_API_KEY_FILE_ENVIRONMENT),
-            env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
-            env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
-            env::var_os(RUNNER_SOCKET_PATH_ENVIRONMENT),
-        )
+        Self::from_values(HubConfigurationValues {
+            database_url: env::var_os(DATABASE_URL_ENVIRONMENT),
+            model_configuration_file: env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
+            template_configuration_file: env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
+            anthropic_api_key_file: env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
+            brave_api_key_file: env::var_os(BRAVE_API_KEY_FILE_ENVIRONMENT),
+            github_token_file: env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
+            process_socket_path: env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
+            runner_socket_path: env::var_os(RUNNER_SOCKET_PATH_ENVIRONMENT),
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn from_values(
-        database_url: Option<OsString>,
-        model_configuration_file: Option<OsString>,
-        template_configuration_file: Option<OsString>,
-        anthropic_api_key_file: Option<OsString>,
-        brave_api_key_file: Option<OsString>,
-        github_token_file: Option<OsString>,
-        process_socket_path: Option<OsString>,
-        runner_socket_path: Option<OsString>,
-    ) -> Result<Self, HubConfigurationError> {
+    fn from_values(values: HubConfigurationValues) -> Result<Self, HubConfigurationError> {
+        let HubConfigurationValues {
+            database_url,
+            model_configuration_file,
+            template_configuration_file,
+            anthropic_api_key_file,
+            brave_api_key_file,
+            github_token_file,
+            process_socket_path,
+            runner_socket_path,
+        } = values;
         let database_url = database_url
             .ok_or_else(|| {
                 HubConfigurationError::new(
@@ -1627,7 +1638,7 @@ mod tests {
     use super::{
         ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError,
         BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
-        HubConfiguration, HubConfigurationError, HubRuntimeError,
+        HubConfiguration, HubConfigurationError, HubConfigurationValues, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
         RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
@@ -1642,6 +1653,19 @@ mod tests {
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
     const BRAVE_KEY_FILE_FIXTURE: &str = "brave-key";
+
+    fn hub_configuration_values() -> HubConfigurationValues {
+        HubConfigurationValues {
+            database_url: Some(OsString::from("postgres://secret")),
+            model_configuration_file: Some(OsString::from("models.toml")),
+            template_configuration_file: Some(OsString::from("templates.toml")),
+            anthropic_api_key_file: Some(OsString::from("key")),
+            brave_api_key_file: Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
+            github_token_file: Some(OsString::from("github-token")),
+            process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
+            runner_socket_path: Some(OsString::from("/tmp/signalbox-runner.sock")),
+        }
+    }
 
     #[derive(Clone, Default)]
     struct CapturedOutput(Arc<Mutex<Vec<u8>>>);
@@ -1858,16 +1882,10 @@ mod tests {
     #[test]
     fn deployment_paths_and_database_url_are_validated() {
         assert_eq!(
-            HubConfiguration::from_values(
-                None,
-                Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
-                Some(OsString::from("key")),
-                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-                Some(OsString::from("github-token")),
-                Some(OsString::from("/tmp/signalbox.sock")),
-                Some(OsString::from("/tmp/signalbox-runner.sock")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                database_url: None,
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 DATABASE_URL_ENVIRONMENT,
@@ -1875,16 +1893,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("")),
-                Some(OsString::from("templates.toml")),
-                Some(OsString::from("key")),
-                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-                Some(OsString::from("github-token")),
-                Some(OsString::from("/tmp/signalbox.sock")),
-                Some(OsString::from("/tmp/signalbox-runner.sock")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                model_configuration_file: Some(OsString::from("")),
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 MODEL_CONFIGURATION_FILE_ENVIRONMENT,
@@ -1892,16 +1904,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("models.toml")),
-                None,
-                Some(OsString::from("key")),
-                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-                Some(OsString::from("github-token")),
-                Some(OsString::from("/tmp/signalbox.sock")),
-                Some(OsString::from("/tmp/signalbox-runner.sock")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                template_configuration_file: None,
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
@@ -1909,16 +1915,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
-                Some(OsString::from("key")),
-                None,
-                Some(OsString::from("github-token")),
-                Some(OsString::from("/tmp/signalbox.sock")),
-                Some(OsString::from("/tmp/signalbox-runner.sock")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                brave_api_key_file: None,
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 BRAVE_API_KEY_FILE_ENVIRONMENT,
@@ -1926,16 +1926,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
-                Some(OsString::from("key")),
-                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-                None,
-                Some(OsString::from("/tmp/signalbox.sock")),
-                Some(OsString::from("/tmp/signalbox-runner.sock")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                github_token_file: None,
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1943,48 +1937,30 @@ mod tests {
             ))
         );
         assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
-                Some(OsString::from("key")),
-                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-                Some(OsString::from("github-token")),
-                None,
-                Some(OsString::from("/tmp/signalbox-runner.sock")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                process_socket_path: None,
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 PROCESS_SOCKET_PATH_ENVIRONMENT,
                 RequiredSettingFailure::Missing,
             ))
         );
-        let defaulted_runner_socket = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            Some(OsString::from("key")),
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(OsString::from("/tmp/signalbox.sock")),
-            None,
-        )
+        let defaulted_runner_socket = HubConfiguration::from_values(HubConfigurationValues {
+            runner_socket_path: None,
+            ..hub_configuration_values()
+        })
         .expect("an omitted runner socket uses the process-socket sibling");
         assert_eq!(
             defaulted_runner_socket.runner_socket_path(),
             std::path::Path::new("/tmp/signalbox.runner.sock")
         );
         assert_eq!(
-            HubConfiguration::from_values(
-                Some(OsString::from("postgres://secret")),
-                Some(OsString::from("models.toml")),
-                Some(OsString::from("templates.toml")),
-                Some(OsString::from("key")),
-                Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-                Some(OsString::from("github-token")),
-                Some(OsString::from("/tmp/signalbox.sock")),
-                Some(OsString::from("")),
-            )
+            HubConfiguration::from_values(HubConfigurationValues {
+                runner_socket_path: Some(OsString::from("")),
+                ..hub_configuration_values()
+            })
             .err(),
             Some(HubConfigurationError::new(
                 RUNNER_SOCKET_PATH_ENVIRONMENT,
@@ -1992,17 +1968,8 @@ mod tests {
             ))
         );
 
-        let configuration = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            Some(OsString::from("key")),
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(OsString::from("/tmp/signalbox.sock")),
-            Some(OsString::from("/tmp/signalbox-runner.sock")),
-        )
-        .expect("nonempty deployment values are accepted before I/O");
+        let configuration = HubConfiguration::from_values(hub_configuration_values())
+            .expect("nonempty deployment values are accepted before I/O");
         assert_eq!(configuration.database_url(), "postgres://secret");
         assert_eq!(
             configuration.model_configuration_file(),
@@ -2038,16 +2005,11 @@ mod tests {
     fn default_runner_socket_replaces_only_the_final_extension() {
         let process_socket = OsString::from("/tmp/signalbox.runner.sock");
         let expected_runner_socket = std::path::Path::new("/tmp/signalbox.runner.runner.sock");
-        let configuration = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            Some(OsString::from("key")),
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(process_socket),
-            None,
-        )
+        let configuration = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(process_socket),
+            runner_socket_path: None,
+            ..hub_configuration_values()
+        })
         .expect("the derived runner socket remains a distinct sibling");
 
         assert_eq!(configuration.runner_socket_path(), expected_runner_socket);
@@ -2056,16 +2018,11 @@ mod tests {
     #[test]
     fn explicit_runner_socket_cannot_equal_the_process_socket() {
         let shared_socket = OsString::from("/tmp/signalbox.sock");
-        let error = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            Some(OsString::from("key")),
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(shared_socket.clone()),
-            Some(shared_socket),
-        )
+        let error = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(shared_socket.clone()),
+            runner_socket_path: Some(shared_socket),
+            ..hub_configuration_values()
+        })
         .err()
         .expect("the two listeners cannot share a filesystem path");
 
@@ -2089,16 +2046,11 @@ mod tests {
         let process_socket = canonical_parent.join("signalbox.sock");
         let runner_socket = alias_parent.join("signalbox.sock");
 
-        let error = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            Some(OsString::from("key")),
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(process_socket.into_os_string()),
-            Some(runner_socket.into_os_string()),
-        )
+        let error = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(process_socket.into_os_string()),
+            runner_socket_path: Some(runner_socket.into_os_string()),
+            ..hub_configuration_values()
+        })
         .err()
         .expect("resolved listener artifacts cannot overlap");
 
@@ -2117,16 +2069,11 @@ mod tests {
         let mut runner_socket = process_socket.as_os_str().to_owned();
         runner_socket.push(".lock");
 
-        let error = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            Some(OsString::from("key")),
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(process_socket.into_os_string()),
-            Some(runner_socket),
-        )
+        let error = HubConfiguration::from_values(HubConfigurationValues {
+            process_socket_path: Some(process_socket.into_os_string()),
+            runner_socket_path: Some(runner_socket),
+            ..hub_configuration_values()
+        })
         .err()
         .expect("listener public paths cannot overlap peer sidecars");
 
@@ -2141,16 +2088,11 @@ mod tests {
 
     #[test]
     fn anthropic_credentials_are_required_only_for_an_anthropic_route() {
-        let codex_only = HubConfiguration::from_values(
-            Some(OsString::from("postgres://secret")),
-            Some(OsString::from("models.toml")),
-            Some(OsString::from("templates.toml")),
-            None,
-            Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
-            Some(OsString::from("github-token")),
-            Some(OsString::from("/tmp/signalbox.sock")),
-            None,
-        )
+        let codex_only = HubConfiguration::from_values(HubConfigurationValues {
+            anthropic_api_key_file: None,
+            runner_socket_path: None,
+            ..hub_configuration_values()
+        })
         .expect("Anthropic credentials are optional before routes are loaded");
         assert_eq!(codex_only.anthropic_api_key_file(false), Ok(None));
         assert_eq!(

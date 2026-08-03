@@ -602,8 +602,8 @@ mod tests {
             .expect("fixture origin is admitted")
     }
 
-    /// The read-only operation is auto-approved but crash-relevant because a
-    /// remote server observes the GET.
+    /// The read-only operation defaults to confirmation because a remote
+    /// server observes the GET.
     #[test]
     fn web_fetch_definition_carries_exact_policy() {
         let (catalog, _executor) = WebFetchTool::try_new(FailingTransport, fixture_egress_policy())

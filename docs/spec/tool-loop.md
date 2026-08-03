@@ -953,6 +953,12 @@ tools:
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
 
+For both web tools, an explicit shipped `Human` posture supersedes the
+declaration's `Confirm` default and the session blanket, so a request parks for
+the user before entering its transport or credential boundary. The
+[approval policy and decision sources](#approval-policy-and-decision-sources)
+section owns that precedence and the durable approval flow.
+
 The code-host catalog contains sixteen GitHub tools. Every operation is
 `ExternalEffect` because GitHub observes its authenticated request. The twelve
 read-only declarations — `change_request_summary`,

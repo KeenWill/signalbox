@@ -512,15 +512,12 @@ publication, and every workspace mutation default to `Confirm`. Reading the
 invoking session's transcript defaults to `Auto`, while listing conversations
 and reading another native or imported conversation default to `Confirm`.
 `web_search` and `web_fetch` also default to `Confirm`; the checked-in example
-strengthens both exact names to `human`, so its resolved requests park for the
-user even under a session blanket. With the session posture disabled, a
-confirmed request creates the ordinary durable approval wait exposed by the
-process protocol; execution does not enter its transport or filesystem boundary
-until a per-request approval is recorded. A session frozen with `ApproveAll`
-instead receives the existing explicit `SessionBlanket` approval and does not
-park unless an explicit human posture is configured. Only the explicit
-`[tool_approval_postures]` table changes a declaration's resolved posture;
-family composition itself does not.
+maps both exact names to `human`. The runtime meaning and precedence of those
+declaration defaults, the explicit posture, the session blanket, and the durable
+approval wait are owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
+Only the explicit `[tool_approval_postures]` table changes a declaration's
+resolved posture; family composition itself does not.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
