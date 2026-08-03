@@ -9,7 +9,7 @@ aggregation are verified against PR #389 (`agent/cost-accounting`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
-The descendant-termination command scope was re-verified through PR #424
+The descendant-termination command scope was re-verified through this PR
 (`agent/delegation-command-scope`).
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
