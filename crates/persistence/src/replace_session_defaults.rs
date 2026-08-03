@@ -317,13 +317,8 @@ impl ReplaceSessionDefaultsRepository {
             return Ok(outcome);
         }
 
-        let prepared = prepare_against_current(&mut transaction, command.clone()).await?;
-        let mut prior_defaults = match prepared.result() {
-            ReplaceSessionDefaultsResult::Applied(_) => {
-                load_current_defaults(&mut transaction, command.session()).await?
-            }
-            ReplaceSessionDefaultsResult::Rejected(_) => None,
-        };
+        let (prepared, mut prior_defaults) =
+            prepare_against_current(&mut transaction, command.clone()).await?;
         let prepared = match prepared.result() {
             ReplaceSessionDefaultsResult::Applied(applied) => {
                 let updated = sqlx::query(
@@ -358,7 +353,7 @@ impl ReplaceSessionDefaultsRepository {
                     insert_defaults_version(&mut transaction, applied).await?;
                     prepared.clone()
                 } else if updated == 0 {
-                    let rederived = prepare_against_current(&mut transaction, command).await?;
+                    let (rederived, _) = prepare_against_current(&mut transaction, command).await?;
                     if matches!(rederived.result(), ReplaceSessionDefaultsResult::Applied(_)) {
                         transaction.rollback().await?;
                         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -482,12 +477,22 @@ async fn expected_epoch_carries_prompt(
 async fn prepare_against_current(
     connection: &mut PgConnection,
     command: ReplaceSessionDefaults,
-) -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsRepositoryError> {
+) -> Result<
+    (
+        PreparedReplaceSessionDefaults,
+        Option<VersionedSessionConfigurationDefaults>,
+    ),
+    ReplaceSessionDefaultsRepositoryError,
+> {
     match load_session_from_connection(connection, command.session()).await {
-        Ok(Some(session)) => command.prepare_against(&session).map_err(|_| {
-            ReplaceSessionDefaultsCorruption::Inconsistent("current session ownership").into()
-        }),
-        Ok(None) => Ok(command.prepare_session_not_found()),
+        Ok(Some(session)) => {
+            let prior_defaults = session.current_configuration_defaults().clone();
+            let prepared = command.prepare_against(&session).map_err(|_| {
+                ReplaceSessionDefaultsCorruption::Inconsistent("current session ownership")
+            })?;
+            Ok((prepared, Some(prior_defaults)))
+        }
+        Ok(None) => Ok((command.prepare_session_not_found(), None)),
         Err(SessionRepositoryError::Database(error)) => Err(error.into()),
         Err(SessionRepositoryError::Corruption(error)) => {
             Err(ReplaceSessionDefaultsCorruption::CurrentSession(error).into())
@@ -609,20 +614,6 @@ async fn insert_typed_record(
     .execute(&mut *connection)
     .await?;
     Ok(())
-}
-
-async fn load_current_defaults(
-    connection: &mut PgConnection,
-    session: SessionId,
-) -> Result<Option<VersionedSessionConfigurationDefaults>, ReplaceSessionDefaultsRepositoryError> {
-    match load_session_from_connection(connection, session).await {
-        Ok(Some(session)) => Ok(Some(session.current_configuration_defaults().clone())),
-        Ok(None) => Ok(None),
-        Err(SessionRepositoryError::Database(error)) => Err(error.into()),
-        Err(SessionRepositoryError::Corruption(error)) => {
-            Err(ReplaceSessionDefaultsCorruption::CurrentSession(error).into())
-        }
-    }
 }
 
 async fn insert_model_settings_event(

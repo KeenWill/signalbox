@@ -1136,13 +1136,14 @@ mod tests {
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
         PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
-        input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
+        SessionPlacementResultStorageKind, StoredModelSettingsError, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
+        input_position_to_numeric, model_change_adjustments_from_json,
         model_change_adjustments_to_json, model_settings_from_json,
         model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
         plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
@@ -1197,9 +1198,10 @@ mod tests {
             .expect("the fixture encoder produces an object")
             .insert(String::from("unknown_member"), serde_json::Value::Null);
 
-        let result = model_settings_from_json(encoded);
+        let error = model_settings_from_json(encoded)
+            .expect_err("an unknown settings member must fail closed");
 
-        assert!(result.is_err());
+        assert!(matches!(error, StoredModelSettingsError::Json(_)));
     }
 
     /// INV-003: fast mode has no provider-default state in the domain, so a
@@ -1212,9 +1214,10 @@ mod tests {
             "service_tier": {"kind": "inherit"}
         });
 
-        let result = model_settings_overlay_from_json(encoded);
+        let error = model_settings_overlay_from_json(encoded)
+            .expect_err("provider-default fast mode must fail closed");
 
-        assert!(result.is_err());
+        assert!(matches!(error, StoredModelSettingsError::Json(_)));
     }
 
     #[test]
@@ -1244,9 +1247,10 @@ mod tests {
     fn model_change_adjustment_json_rejects_unknown_variants() {
         let encoded = serde_json::json!([{"kind": "unknown"}]);
 
-        let result = model_change_adjustments_from_json(encoded);
+        let error = model_change_adjustments_from_json(encoded)
+            .expect_err("an unknown adjustment variant must fail closed");
 
-        assert!(result.is_err());
+        assert!(matches!(error, StoredModelSettingsError::Json(_)));
     }
 
     #[test]
