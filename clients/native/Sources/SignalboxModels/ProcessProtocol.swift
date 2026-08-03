@@ -287,6 +287,11 @@ public enum SignalboxMetadataActor: Codable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxDescendantTerminationScope: String, Codable, Equatable, Sendable {
+  case parentAlone = "parent_alone"
+  case parentAndDescendants = "parent_and_descendants"
+}
+
 public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
   case createSession(
     commandID: SignalboxCommandID,
@@ -329,7 +334,8 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
     sessionID: SignalboxCanonicalUUID,
     expectedActiveTurnID: SignalboxCanonicalUUID,
     content: String,
-    expectedDefaultsVersion: SignalboxCanonicalUInt64
+    expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    descendantScope: SignalboxDescendantTerminationScope
   )
   case decideToolRequest(
     commandID: SignalboxCommandID,
@@ -412,7 +418,8 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       let sessionID,
       let activeTurnID,
       let content,
-      let expectedDefaultsVersion
+      let expectedDefaultsVersion,
+      let descendantScope
     ):
       try container.encode("stop_turn", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
@@ -420,6 +427,7 @@ public enum SignalboxProcessClientRequest: Encodable, Equatable, Sendable {
       try container.encode(activeTurnID, forKey: "expected_active_turn_id")
       try container.encode(content, forKey: "content")
       try container.encode(expectedDefaultsVersion, forKey: "expected_defaults_version")
+      try container.encode(descendantScope, forKey: "descendant_scope")
     case .decideToolRequest(let commandID, let sessionID, let toolRequestID, let decision):
       try container.encode("decide_tool_request", forKey: "type")
       try container.encode(commandID, forKey: "command_id")
