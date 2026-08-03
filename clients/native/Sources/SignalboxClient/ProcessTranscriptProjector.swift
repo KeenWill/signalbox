@@ -308,7 +308,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var terminalModelCallIDsByTurnID: [String: String] = [:]
     var textModelCall: (id: String, entryIndex: SignalboxCanonicalUInt64)?
     for case .turn(let turn) in records {
-      if let modelCallID = failedOrCancelledTerminalModelCallID(for: turn.state) {
+      if let modelCallID = transcriptMarkerTerminalModelCallID(for: turn.state) {
         terminalModelCallIDsByTurnID[turn.turnID.rawValue] = modelCallID.rawValue
       }
     }
@@ -350,7 +350,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               entryIndex: message.entryIndex
             )
           }
-        case .turnFailed(let turnID), .turnCancelled(let turnID):
+        case .turnCompleted(let turnID), .turnFailed(let turnID),
+          .turnCancelled(let turnID):
           if let modelCallID = terminalModelCallIDsByTurnID[turnID.rawValue],
             anchors[modelCallID] == nil
           {
@@ -359,7 +360,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               entryIndex: message.entryIndex
             )
           }
-        case .modelIdentityChanged, .turnCompleted, .imported, .unknown:
+        case .modelIdentityChanged, .imported, .unknown:
           break
         }
       case .turn, .modelCallUsage:
@@ -369,17 +370,19 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return anchors
   }
 
-  private func failedOrCancelledTerminalModelCallID(
+  private func transcriptMarkerTerminalModelCallID(
     for state: SignalboxTranscriptTurnState
   ) -> SignalboxCanonicalUUID? {
     switch state {
     case .failed(_, _, let terminalModelCall):
       return terminalModelCall?.modelCallID
+    case .completed(_, _, let terminalModelCallID):
+      return terminalModelCallID
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
     case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
-      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
-      .refused, .reconciliationRequired, .toolReconciliationRequired, .unknown:
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
+      .reconciliationRequired, .toolReconciliationRequired, .unknown:
       return nil
     }
   }
@@ -768,10 +771,29 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .all:
       return true
     case .trigger(let trigger):
-      if case .contextCompacted(_, let modelCallID, _, _, _) = trigger {
+      switch trigger {
+      case .modelCallTransition(let turnID, let modelCallID, .terminal),
+        .turnCompleted(let turnID, let modelCallID, _, _):
+        return turnID == evidence.turnID && modelCallID == evidence.modelCallID
+      case .modelCallTransition(_, _, .prepared),
+        .modelCallTransition(_, _, .inFlight),
+        .modelCallTransition(_, _, .cancellationRequested),
+        .modelCallTransition(_, _, .unknown):
+        return false
+      case .toolBatchTransition(let turnID, let modelCallID, let state):
+        switch state {
+        case .proposed, .resultsProjected:
+          return turnID == evidence.turnID && modelCallID == evidence.modelCallID
+        case .recoveryRequired, .unknown:
+          return false
+        }
+      case .contextCompacted(_, let modelCallID, _, _, _):
         return modelCallID == evidence.modelCallID
+      case .sessionCreated, .inputAccepted, .turnActivated, .turnFailed, .turnRefused,
+        .turnCancelled, .turnReconciliationRequired,
+        .turnToolReconciliationRequired, .unknown:
+        return false
       }
-      return turnID(for: trigger) == evidence.turnID
     }
   }
 
@@ -819,26 +841,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return true
     case .queued, .failed, .completed, .refused, .cancelled, .unknown:
       return false
-    }
-  }
-
-  private func turnID(
-    for trigger: SignalboxProcessSessionEvent
-  ) -> SignalboxCanonicalUUID? {
-    switch trigger {
-    case .inputAccepted(_, let turnID, _, _),
-      .turnActivated(let turnID, _),
-      .modelCallTransition(let turnID, _, _),
-      .toolBatchTransition(let turnID, _, _),
-      .turnCompleted(let turnID, _, _, _),
-      .turnFailed(let turnID, _, _),
-      .turnRefused(let turnID, _, _),
-      .turnCancelled(let turnID, _, _),
-      .turnReconciliationRequired(let turnID, _, _),
-      .turnToolReconciliationRequired(let turnID, _, _):
-      return turnID
-    case .sessionCreated, .contextCompacted, .unknown:
-      return nil
     }
   }
 
@@ -998,15 +1000,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryModelCallID == modelCallID
       }
-    case .turnCompleted(let turnID, let modelCallID, let completionEntryID, _):
-      let hasAssistantText = snapshot.records.contains {
-        guard case .textEntry(let message) = $0,
-          case .assistant(let entryTurnID, let entryModelCallID) = message.entry
-        else {
-          return false
-        }
-        return entryTurnID == turnID && entryModelCallID == modelCallID
-      }
+    case .turnCompleted(let turnID, _, let completionEntryID, _):
       let hasCompletionMarker = snapshot.records.contains {
         guard case .entry(let message) = $0,
           message.entryID == completionEntryID,
@@ -1016,7 +1010,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID
       }
-      return hasAssistantText && hasCompletionMarker
+      return hasCompletionMarker
     case .turnFailed(let turnID, let failureEntryID, _):
       return snapshot.records.contains {
         guard case .entry(let message) = $0,

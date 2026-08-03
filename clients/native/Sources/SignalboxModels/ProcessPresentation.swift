@@ -572,17 +572,16 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
     case costLabel = "cost_label"
   }
 
-  init(closedFrom decoder: Decoder) throws {
-    let payload = try SignalboxUntaggedPayload(from: decoder)
-    try payload.rejectUnadmittedFields(
-      [
-        "kind", "turn_id", "model_call_id", "usage_provenance", "input_tokens",
-        "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
-        "cost_amount_usd", "cost_rate_version", "cost_label",
-      ],
-      decoder: decoder
-    )
+  public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_model_call_usage" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not model-usage evidence."
+      )
+    }
     let provenance = try container.decode(
       SignalboxUsageProvenance.self,
       forKey: .usageProvenance
@@ -599,16 +598,35 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
       SignalboxModelCallCostLabel.self,
       forKey: .costLabel
     )
-    self = try Self(from: decoder)
+    self.kind = kind
+    self.turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+    self.modelCallID = try container.decode(
+      SignalboxCanonicalUUID.self,
+      forKey: .modelCallID
+    )
+    self.usageProvenance = provenance.rawValue
+    self.inputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .inputTokens
+    )
+    self.outputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .outputTokens
+    )
+    self.cacheCreationInputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .cacheCreationInputTokens
+    )
+    self.cacheReadInputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .cacheReadInputTokens
+    )
+    self.costAmountUSD = amount?.rawValue
+    self.costRateVersion = rateVersion?.rawValue
+    self.costLabel = label?.rawValue
     let hasUsage = inputTokens != nil || outputTokens != nil
       || cacheCreationInputTokens != nil || cacheReadInputTokens != nil
-    guard hasAtomicCostFields,
-      usageProvenance == provenance.rawValue,
-      costAmountUSD == amount?.rawValue,
-      costRateVersion == rateVersion?.rawValue,
-      costLabel == label?.rawValue,
-      amount == nil || hasUsage
-    else {
+    guard hasAtomicCostFields, amount == nil || hasUsage else {
       throw DecodingError.dataCorrupted(
         .init(
           codingPath: decoder.codingPath,
@@ -616,6 +634,19 @@ public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable 
         )
       )
     }
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      [
+        "kind", "turn_id", "model_call_id", "usage_provenance", "input_tokens",
+        "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+        "cost_amount_usd", "cost_rate_version", "cost_label",
+      ],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
   }
 }
 

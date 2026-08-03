@@ -395,19 +395,14 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     }
   }
 
-  func testSideProjectionRejectsCompletionWithoutAssistantText() throws {
+  func testSideProjectionAcceptsCompletionWithoutAssistantText() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletionMarkerOnly()
     let trigger = try ProcessProjectionFixture.completedTrigger()
     var projector = SignalboxProcessTranscriptProjector()
 
-    XCTAssertThrowsError(
-      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    ) { error in
-      XCTAssertEqual(
-        error as? SignalboxProcessTranscriptProjectionError,
-        .missingTriggerEvidence
-      )
-    }
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(projection.records.isEmpty)
   }
 
   func testSideProjectionRejectsReconciliationResultFromAnotherTurn() throws {
@@ -455,6 +450,29 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     XCTAssertEqual(message.text, ProcessProjectionFixture.proposedAssistantText)
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
+  }
+
+  func testProposedToolSideProjectionSelectsUsageForExactModelCall() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithProposedToolAndUnrelatedUsage()
+    let trigger = try ProcessProjectionFixture.proposedToolTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.modelCallUsageIDs(in: projection),
+      ProcessProjectionFixture.triggeredModelCallUsageIDs
+    )
+  }
+
+  func testPreparedModelCallSideProjectionExcludesLaterUsageForSameCall() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithLaterModelUsageOnly()
+    let trigger = try ProcessProjectionFixture.preparedModelCallTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(ProcessProjectionFixture.modelCallUsageIDs(in: projection).isEmpty)
   }
 
   func testContextCompactionSideProjectionIncludesItsSummary() throws {
@@ -909,6 +927,26 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
 
     XCTAssertTrue(projection.records.isEmpty)
+  }
+
+  func testRefusedSideProjectionExcludesSameTurnModelUsage() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithRefusedUsageAfterImportedMarker()
+    let trigger = try ProcessProjectionFixture.refusedEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(ProcessProjectionFixture.modelCallUsageIDs(in: projection).isEmpty)
+  }
+
+  func testModelReconciliationSideProjectionExcludesSameTurnModelUsage() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithReconciliationUsageAfterImportedMarker()
+    let trigger = try ProcessProjectionFixture.modelReconciliationTrigger(cursor: 1)
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+
+    XCTAssertTrue(ProcessProjectionFixture.modelCallUsageIDs(in: projection).isEmpty)
   }
 
   func testToolRecoverySideProjectionExcludesModelIdentityMarker() throws {
@@ -5395,6 +5433,8 @@ private enum ProcessProjectionFixture {
     "Imported tool result",
   ]
   static let terminalUsageNoticeTitles = ["Imported source event", "Model usage"]
+  static let triggeredModelCallUsageIDs = [ProcessDriverFixture.modelCall]
+  static let legacyGenericOutputPreviewLimit = 480
   static let importedSpeakerLabels = [
     SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested.presentationLabel,
     SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
@@ -6604,6 +6644,39 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithProposedTool() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(turnEvidence: [], usageEvidence: [])
+  }
+
+  static func snapshotWithProposedToolAndUnrelatedUsage() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshotWithProposedTool(
+      turnEvidence: [
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+      ],
+      usageEvidence: [
+        modelUsageMessage(index: 0, modelCallID: earlierModelCall),
+        modelUsageMessage(index: 1, modelCallID: ProcessDriverFixture.modelCall),
+      ]
+    )
+  }
+
+  private static func snapshotWithProposedTool(
+    turnEvidence: [String],
+    usageEvidence: [String]
+  ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
         """
@@ -6613,7 +6686,13 @@ private enum ProcessProjectionFixture {
           "cursor":"1"
         }
         """,
-        emptyModelCallsBoundary,
+      ] + turnEvidence + usageEvidence + [
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"\(usageEvidence.count)"
+        }
+        """,
         """
         {
           "type":"transcript_text_entry",
@@ -6657,7 +6736,7 @@ private enum ProcessProjectionFixture {
           "type":"transcript_snapshot_end",
           "session_id":"\(ProcessDriverFixture.session)",
           "cursor":"1",
-          "turn_count":"0",
+          "turn_count":"\(turnEvidence.count)",
           "entry_count":"2"
         }
         """,
@@ -7079,6 +7158,69 @@ private enum ProcessProjectionFixture {
           "entry_id":"\(completedAssistantEntry)",
           "entry":{
             "type":"turn_failed",
+            "turn_id":"\(ProcessDriverFixture.turn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"1",
+          "entry_count":"2"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCompletedUsageAndMarker() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"completed",
+            "terminal_frontier_id":"\(ProcessDriverFixture.frontier)",
+            "terminal_attempt_id":"\(ProcessDriverFixture.attempt)",
+            "terminal_model_call_id":"\(ProcessDriverFixture.modelCall)"
+          }
+        }
+        """,
+        modelUsageMessage(index: 0, modelCallID: ProcessDriverFixture.modelCall),
+        """
+        {
+          "type":"transcript_model_calls_end",
+          "model_call_count":"1"
+        }
+        """,
+        importedMarker(
+          index: 0,
+          entryID: importedSourceEventEntry,
+          speaker: #"{"type":"not_attested"}"#,
+          kind: "source_event"
+        ),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"1",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(ProcessDriverFixture.completionEntry)",
+          "entry":{
+            "type":"turn_completed",
             "turn_id":"\(ProcessDriverFixture.turn)"
           }
         }
@@ -8510,6 +8652,19 @@ private enum ProcessProjectionFixture {
     try modelCallEvent(disposition: "completed", cursor: cursor)
   }
 
+  static func preparedModelCallTrigger() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"model_call_transition",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "model_call_id":"\(ProcessDriverFixture.modelCall)",
+        "state":{"type":"prepared"}
+      }
+      """
+    )
+  }
+
   static func ambiguousModelCallEvent() throws -> SignalboxFollowedSessionEvent {
     try modelCallEvent(disposition: "ambiguous")
   }
@@ -8847,6 +9002,19 @@ extension ProcessServiceIntegrationTests {
     )
   }
 
+  func testCompletedCallUsageFallsBackToItsCompletionMarkerAnchor() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletedUsageAndMarker()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.terminalUsageNoticeTitles
+    )
+  }
+
   func testRefusedCallUsageStaysAfterEarlierTranscriptEvidence() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithRefusedUsageAfterImportedMarker()
     var projector = SignalboxProcessTranscriptProjector()
@@ -9066,7 +9234,13 @@ extension ProcessServiceIntegrationTests {
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
     let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
 
-    XCTAssertNotEqual(tool.outputPreview, ProcessProjectionFixture.denseAcyclicPlanOutput)
+    let typedOutput = try XCTUnwrap(tool.presentationOutput)
+    XCTAssertGreaterThan(
+      typedOutput.count,
+      ProcessProjectionFixture.legacyGenericOutputPreviewLimit
+    )
+    XCTAssertNotEqual(typedOutput, ProcessProjectionFixture.denseAcyclicPlanOutput)
+    XCTAssertEqual(tool.outputPreview, typedOutput)
   }
 
   func testMultilinePlanTextCannotCreateSummaryLabels() throws {

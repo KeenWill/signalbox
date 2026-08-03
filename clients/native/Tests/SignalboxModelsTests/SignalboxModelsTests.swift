@@ -288,6 +288,45 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testModelUsageDirectDecodeRejectsUnknownProvenance() {
+        let data = Data(
+            #"{"kind":"process_model_call_usage","turn_id":"\#(Self.storedTurnID)","model_call_id":"\#(Self.storedModelCallID)","usage_provenance":"\#(Self.unknownUsageProvenance)"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try SignalboxJSONCoding.decoder().decode(
+                SignalboxProcessModelCallUsageEvent.self,
+                from: data
+            )
+        )
+    }
+
+    func testModelUsageDirectDecodeRejectsPartialCost() {
+        let data = Data(
+            #"{"kind":"process_model_call_usage","turn_id":"\#(Self.storedTurnID)","model_call_id":"\#(Self.storedModelCallID)","usage_provenance":"reported","input_tokens":"1","cost_amount_usd":"\#(Self.storedUsageCostAmount)"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try SignalboxJSONCoding.decoder().decode(
+                SignalboxProcessModelCallUsageEvent.self,
+                from: data
+            )
+        )
+    }
+
+    func testModelUsageDirectDecodeRejectsCostWithoutUsage() {
+        let data = Data(
+            #"{"kind":"process_model_call_usage","turn_id":"\#(Self.storedTurnID)","model_call_id":"\#(Self.storedModelCallID)","usage_provenance":"reported","cost_amount_usd":"\#(Self.storedUsageCostAmount)","cost_rate_version":"fixture-rate","cost_label":"\#(Self.storedUsageCostLabel)"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try SignalboxJSONCoding.decoder().decode(
+                SignalboxProcessModelCallUsageEvent.self,
+                from: data
+            )
+        )
+    }
+
     func testZeroStoredDefaultsVersionDegradesToPayloadPreservingUnknown() throws {
         let data = Data(
             #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_model_identity","turn_id":"\#(Self.storedTurnID)","defaults_version":"\#(Self.zeroDefaultsVersion)","selected_model_id":"\#(Self.storedModelCallID)"}}"#.utf8
