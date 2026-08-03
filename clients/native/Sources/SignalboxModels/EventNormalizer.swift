@@ -525,7 +525,7 @@ public enum SignalboxEventNormalizer {
         }
     }
 
-    private struct PlanEvent: Decodable {
+    private struct PlanEvent: Decodable, Equatable {
         let ordinal: UInt64
         let kind: String
         let entryID: UInt64
@@ -636,7 +636,23 @@ public enum SignalboxEventNormalizer {
         }
     }
 
-    private struct PlanEventProvenance: Decodable {
+    private struct PlanWriteOutput: Decodable {
+        let event: PlanEvent
+
+        private enum CodingKeys: String, CodingKey {
+            case event
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            try payload.rejectUnadmittedFields(["event"], decoder: decoder)
+            try payload.requireFields(["event"], decoder: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            event = try container.decode(PlanEvent.self, forKey: .event)
+        }
+    }
+
+    private struct PlanEventProvenance: Decodable, Equatable {
         let turnID: SignalboxCanonicalUUID
         let issuingAttemptID: SignalboxCanonicalUUID
         let requestID: SignalboxCanonicalUUID
@@ -1019,7 +1035,10 @@ public enum SignalboxEventNormalizer {
                 ],
                 eventRequestPosition.turnID == event.provenance.turnID,
                 eventRequestPosition.toolName == "plan_write",
-                eventRequestPosition.toolAttemptID == event.provenance.attemptID
+                eventRequestPosition.toolAttemptID == event.provenance.attemptID,
+                eventRequestPosition.toolOutput.flatMap({
+                    decode(PlanWriteOutput.self, from: $0)
+                })?.event == event
             else {
                 return false
             }

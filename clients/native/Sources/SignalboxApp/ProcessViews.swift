@@ -2239,7 +2239,31 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
     }
     refreshedPresentationOrder.append(contentsOf: pendingAdditions)
-    timelinePresentationOrder = refreshedPresentationOrder
+    let normalizedRanks = Dictionary(
+      uniqueKeysWithValues: normalizedKeys.enumerated().map { ($0.element, $0.offset) }
+    )
+    var reorderedPresentationOrder: [TimelinePresentationKey] = []
+    var normalizedSegment: [TimelinePresentationKey] = []
+    for key in refreshedPresentationOrder {
+      switch key {
+      case .normalized:
+        normalizedSegment.append(key)
+      case .unrecognized, .unrecognizedHistoryBoundary:
+        reorderedPresentationOrder.append(
+          contentsOf: normalizedSegment.sorted {
+            normalizedRanks[$0, default: .max] < normalizedRanks[$1, default: .max]
+          }
+        )
+        normalizedSegment = []
+        reorderedPresentationOrder.append(key)
+      }
+    }
+    reorderedPresentationOrder.append(
+      contentsOf: normalizedSegment.sorted {
+        normalizedRanks[$0, default: .max] < normalizedRanks[$1, default: .max]
+      }
+    )
+    timelinePresentationOrder = reorderedPresentationOrder
     normalizedTimelineItemIDs = currentNormalizedIDs
     timeline = timelinePresentationOrder.compactMap { key in
       switch key {

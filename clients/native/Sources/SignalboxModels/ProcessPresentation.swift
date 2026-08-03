@@ -744,17 +744,20 @@ public struct SignalboxProcessToolRequestPosition: Codable, Equatable, Sendable 
   public let entryIndex: SignalboxCanonicalUInt64
   public let toolName: String
   public let toolAttemptID: SignalboxCanonicalUUID?
+  public let toolOutput: String?
 
   public init(
     turnID: SignalboxCanonicalUUID,
     entryIndex: SignalboxCanonicalUInt64,
     toolName: String,
-    toolAttemptID: SignalboxCanonicalUUID?
+    toolAttemptID: SignalboxCanonicalUUID?,
+    toolOutput: String?
   ) {
     self.turnID = turnID
     self.entryIndex = entryIndex
     self.toolName = toolName
     self.toolAttemptID = toolAttemptID
+    self.toolOutput = toolOutput
   }
 }
 

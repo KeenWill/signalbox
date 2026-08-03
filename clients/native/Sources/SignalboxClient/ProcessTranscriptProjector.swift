@@ -472,18 +472,20 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     in records: [SignalboxSynchronizationSnapshot.Record]
   ) -> [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition] {
     var resultAttemptIDs: [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
+    var resultOutputs: [SignalboxCanonicalUUID: String] = [:]
     var ambiguousResultRequestIDs: Set<SignalboxCanonicalUUID> = []
     for case .entry(let message) in records {
-      guard case .toolExecutionResult(let requestID, let attemptID, _) = message.entry
+      guard case .toolExecutionResult(let requestID, let attemptID, let output) = message.entry
       else {
         continue
       }
       if let previousAttemptID = resultAttemptIDs[requestID],
-        previousAttemptID != attemptID
+        previousAttemptID != attemptID || resultOutputs[requestID] != output
       {
         ambiguousResultRequestIDs.insert(requestID)
       } else {
         resultAttemptIDs[requestID] = attemptID
+        resultOutputs[requestID] = output
       }
     }
     return records.reduce(into: [:]) { positions, record in
@@ -497,7 +499,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         entryIndex: message.entryIndex,
         toolName: toolName,
         toolAttemptID: ambiguousResultRequestIDs.contains(requestID)
-          ? nil : resultAttemptIDs[requestID]
+          ? nil : resultAttemptIDs[requestID],
+        toolOutput: !ambiguousResultRequestIDs.contains(requestID)
+          ? resultOutputs[requestID] : nil
       )
     }
   }
