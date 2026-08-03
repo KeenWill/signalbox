@@ -3427,6 +3427,8 @@ impl RejectionDetail {
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::SessionNotFound { .. }
+            | Self::SessionPlacementCurrentVersionMismatch { .. }
+            | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::ActiveTurnMismatch { .. }
@@ -5223,6 +5225,8 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
+        | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }

@@ -801,6 +801,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::CreateSessionFromTemplate { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
+        | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }
         | ClientRequest::ResumeGoal { .. }
@@ -6480,18 +6481,17 @@ where
         UpdateSessionPlacementService::new(SessionPlacementRepository::new(pool.clone()));
     match service.execute(request).await {
         Ok(UpdateSessionPlacementOutcome::Recorded(UpdateSessionPlacementResult::Applied(
-            event,
+            applied,
         ))) => {
+            let recorded = applied.event().placement();
             write_message(
                 writer,
                 version,
                 request_id,
                 ServerMessage::SessionPlacementUpdated {
                     session_id,
-                    placement_version: CanonicalU64::new(
-                        event.event().placement().version().as_u64(),
-                    ),
-                    placement: wire_session_placement(event.event().placement().placement()),
+                    placement_version: CanonicalU64::new(recorded.version().as_u64()),
+                    placement: wire_session_placement(recorded.placement()),
                 },
             )
             .await
@@ -6499,53 +6499,42 @@ where
         Ok(UpdateSessionPlacementOutcome::Recorded(UpdateSessionPlacementResult::Rejected(
             rejected,
         ))) => {
-            let detail = match rejected.kind() {
-                UpdateSessionPlacementRejectionKind::SessionNotFound => {
-                    RejectionDetail::SessionNotFound {
+            // Both version-bearing kinds carry their current version by
+            // construction, so an absent one is placement-state corruption
+            // rather than a rejection this connection can state on the wire.
+            let error = match (rejected.kind(), rejected.current_version()) {
+                (UpdateSessionPlacementRejectionKind::SessionNotFound, _) => {
+                    ProtocolError::rejected(RejectionDetail::SessionNotFound {
                         session_id: wire_uuid(rejected.session().into_uuid()),
-                    }
+                    })
                 }
-                UpdateSessionPlacementRejectionKind::CurrentVersionMismatch => {
-                    let Some(current) = rejected.current_version() else {
-                        return write_error(
-                            writer,
-                            version,
-                            request_id,
-                            internal_protocol_error(
-                                None,
-                                InternalDiagnostic::ProcessReadCorruption,
+                (UpdateSessionPlacementRejectionKind::CurrentVersionMismatch, Some(current)) => {
+                    ProtocolError::rejected(
+                        RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                            session_id: wire_uuid(rejected.session().into_uuid()),
+                            expected_placement_version: CanonicalU64::new(
+                                rejected.expected_version().as_u64(),
                             ),
-                        )
-                        .await;
-                    };
-                    RejectionDetail::SessionPlacementCurrentVersionMismatch {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                        expected_placement_version: CanonicalU64::new(
-                            rejected.expected_version().as_u64(),
-                        ),
-                        current_placement_version: CanonicalU64::new(current.as_u64()),
-                    }
+                            current_placement_version: CanonicalU64::new(current.as_u64()),
+                        },
+                    )
                 }
-                UpdateSessionPlacementRejectionKind::VersionExhausted => {
-                    let Some(current) = rejected.current_version() else {
-                        return write_error(
-                            writer,
-                            version,
-                            request_id,
-                            internal_protocol_error(
-                                None,
-                                InternalDiagnostic::ProcessReadCorruption,
-                            ),
-                        )
-                        .await;
-                    };
-                    RejectionDetail::SessionPlacementVersionExhausted {
+                (UpdateSessionPlacementRejectionKind::VersionExhausted, Some(current)) => {
+                    ProtocolError::rejected(RejectionDetail::SessionPlacementVersionExhausted {
                         session_id: wire_uuid(rejected.session().into_uuid()),
                         current_placement_version: CanonicalU64::new(current.as_u64()),
-                    }
+                    })
                 }
+                (
+                    UpdateSessionPlacementRejectionKind::CurrentVersionMismatch
+                    | UpdateSessionPlacementRejectionKind::VersionExhausted,
+                    None,
+                ) => internal_protocol_error(
+                    Some(rejected.session().into_uuid()),
+                    InternalDiagnostic::ProcessReadCorruption,
+                ),
             };
-            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+            write_error(writer, version, request_id, error).await
         }
         Ok(UpdateSessionPlacementOutcome::ConflictingReuse { .. }) => {
             write_error(
@@ -9678,18 +9667,17 @@ fn domain_session_placement(placement: WireSessionPlacement) -> Result<DomainSes
 }
 
 fn wire_session_placement(placement: &DomainSessionPlacement) -> WireSessionPlacement {
-    let Some(path) = placement.path() else {
-        return WireSessionPlacement::Pathless {};
-    };
-    if placement.records_root_global_read_intent() {
-        WireSessionPlacement::RootGlobalRead {
-            path: path.as_str().to_owned(),
-            intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
+    match placement.path() {
+        None => WireSessionPlacement::Pathless {},
+        Some(path) if placement.records_root_global_read_intent() => {
+            WireSessionPlacement::RootGlobalRead {
+                path: path.as_str().to_owned(),
+                intent: signalbox_process_protocol::RootPlacementGlobalReadIntent::Acknowledged,
+            }
         }
-    } else {
-        WireSessionPlacement::Scoped {
+        Some(path) => WireSessionPlacement::Scoped {
             path: path.as_str().to_owned(),
-        }
+        },
     }
 }
 

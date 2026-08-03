@@ -11,10 +11,9 @@ use expect_test::expect;
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     RootPlacementGlobalReadIntent, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementEventKind,
-    SessionPlacementPath, SessionPlacementVersion, SessionReadScopeDecision,
-    SessionReadScopeRefusal, TranscriptAncestry, UpdateSessionPlacement,
-    UpdateSessionPlacementResult,
+    SessionCreationProvenance, SessionId, SessionPlacement, SessionPlacementPath,
+    SessionPlacementVersion, SessionReadScopeDecision, SessionReadScopeRefusal, TranscriptAncestry,
+    UpdateSessionPlacement, UpdateSessionPlacementResult,
 };
 use signalbox_expect_table::table;
 use signalbox_persistence::{
