@@ -420,7 +420,7 @@ ALLOWLIST = (
         re.compile(
             r"^(?:apps/signalboxd/tests/offline_tool_loop[.]rs|"
             r"crates/persistence/src/(?:create_session|"
-            r"create_session_from_imported_frontier|model_execution|session|"
+            r"create_session_from_imported_frontier|mapping|model_execution|process_read|session|"
             r"session_metadata|submit_input|tool_loop)[.]rs|"
             r"crates/persistence/tests/(?:conversation_import_postgres|postgres_integration|"
             r"runner_protocol_postgres|session_metadata_postgres)[.]rs|"

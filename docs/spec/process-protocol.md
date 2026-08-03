@@ -9,6 +9,9 @@ aggregation are verified against PR #389 (`agent/cost-accounting`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
+The tool-approval decision event surface is verified against this implementing
+change.
+
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
 (`agent/audit-verified-fixes`), and the review-orchestration wire and terminal
@@ -1389,13 +1392,17 @@ Each non-text native frontier member is one `transcript_entry` with
 `entry_index`, `source_session_id`, `entry_id`, and one closed `entry` object:
 `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
 `turn_cancelled { turn_id }`. The tool-bearing vocabulary also admits
-`assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
+`assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments, approval? }`,
 `tool_execution_result { tool_request_id, tool_attempt_id, content }`,
 `tool_denied { tool_request_id, content }`, and
 `tool_closed { tool_request_id, content }`. The vocabulary also admits
 `model_identity_changed { turn_id, defaults_version, selected_model_id }`,
 naming the first started turn bound to a changed frozen direct selection. The
-vocabulary additionally admits the text-bearing
+optional `approval` object repeats the exact `decision`, `decider`, and nullable
+`rationale` shape of `tool_approval_decided`; it is absent while the request is
+pending and when automatic policy decided without an explicit event. This makes
+explicit provenance available from an authoritative snapshot after its event
+cursor has passed. The vocabulary additionally admits the text-bearing
 `context_summary { model_call_id, first_source_session_id, first_entry_id, through_source_session_id, through_entry_id }`;
 its content follows through the ordinary `transcript_content` sequence, and its
 source-qualified endpoints and call identify the exact recorded provenance. The
@@ -1713,6 +1720,7 @@ closed `event` object. The protocol admits these event shapes:
 | `goal_turn_retired`            | `turn_id`                                                                                                                       |
 | `turn_activated`               | `turn_id` and `current_attempt_id`                                                                                              |
 | `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                                         |
+| `tool_approval_decided`        | `turn_id`, `tool_request_id`, `decision`, `decider`, and nullable `rationale`                                                   |
 | `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                   |
 | `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                       |
 | `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                          |
@@ -1729,6 +1737,15 @@ unmatched or already-active identity leaves local turn controls unchanged. A
 superseding transaction publishes this event before its replacement
 `input_accepted`, so a live follower cannot retain the obsolete queued identity
 and ignore the replacement activation.
+
+The `tool_approval_decided` decision is exactly `approve {}` or
+`deny { reason }`, where `reason` is required-nullable because delegate denials
+carry no user-authored reason. Its decider is exactly `user { command_id }` or
+`delegate { model_selection_id, model_call_id }`; `rationale` is
+required-nullable and present only for a delegate decision. A delegate denial
+has a null `reason`; its rationale is 1 through 4,096 UTF-8 bytes and contains
+no U+0000. A present user denial reason is nonempty, at most 1,024 UTF-8 bytes,
+contains no Unicode control scalar, and has no surrounding POSIX whitespace.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.

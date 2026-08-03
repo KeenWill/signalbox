@@ -31,7 +31,8 @@ transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 the approval-judge lifecycle transactions were verified through this PR
-(`agent/approval-judge-execution-support`); and the session-placement event,
+(`agent/approval-judge-execution-support`); the approval-decision outbox is
+verified against this implementing change; and the session-placement event,
 current head, and creation transaction were verified through PR #415
 (`agent/scoped-visibility-creation`); and the exact stop-command descendant
 scopes, delegated transcript origins, foreground-result closure, pre-outbox
@@ -203,9 +204,13 @@ Implemented table families (across the forward-only migrations):
   certifies both tips;
 - migration `202608020015` freezes `approval_posture` on each tool request,
   records dedicated approval-judge calls in the global model-call identity
-  namespace only while their request is the current active approval wait, and
+  namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale; and
+  recommendation, and rationale;
+- migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
+  family, appends one migration-boundary event for each explicit decision that
+  already exists, and requires every later explicit decision to install exactly
+  one ordered lifecycle effect and outbox event atomically; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -1104,9 +1109,10 @@ storage below plus the delegation-stack extension identified inline:
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
   `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
-  `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
-  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
-  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
+  `tool_batch_transition_outbox_event`, `tool_approval_decided_outbox_event`,
+  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
+  `turn_reconciliation_required_outbox_event`,
   `runner_state_transition_outbox_event`, and the delegation stack's
   `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
   deferred trigger requiring exactly one typed record per header. A

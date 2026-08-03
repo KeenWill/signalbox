@@ -29,17 +29,20 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
   public let pendingInputs: [SignalboxProcessPendingInput]
   public let activity: SignalboxProcessActivity
   public let materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
+  public let toolApprovalDecisionsByRequestID: [String: SignalboxTranscriptToolApproval]
 
   public init(
     records: [SignalboxStoredEvent],
     pendingInputs: [SignalboxProcessPendingInput],
     activity: SignalboxProcessActivity,
-    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
+    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>,
+    toolApprovalDecisionsByRequestID: [String: SignalboxTranscriptToolApproval]
   ) {
     self.records = records
     self.pendingInputs = pendingInputs
     self.activity = activity
     self.materializedAcceptedInputIDs = materializedAcceptedInputIDs
+    self.toolApprovalDecisionsByRequestID = toolApprovalDecisionsByRequestID
   }
 }
 
@@ -189,7 +192,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
       activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
-      materializedAcceptedInputIDs: materializedAcceptedInputIDs
+      materializedAcceptedInputIDs: materializedAcceptedInputIDs,
+      toolApprovalDecisionsByRequestID: toolApprovalDecisions(in: snapshot)
+    )
+  }
+
+  private func toolApprovalDecisions(
+    in snapshot: SignalboxSynchronizationSnapshot
+  ) -> [String: SignalboxTranscriptToolApproval] {
+    Dictionary(
+      snapshot.records.compactMap { record in
+        guard case .entry(let message) = record,
+          case .assistantToolUse(_, _, let requestID, _, _, let approval) = message.entry,
+          let approval
+        else {
+          return nil
+        }
+        return (requestID.rawValue, approval)
+      },
+      uniquingKeysWith: { first, _ in first }
     )
   }
 
@@ -240,7 +261,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     awaitingToolDecisionRequestID: String?,
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
-    guard entryIsSelected(message, selection: selection) else {
+    guard
+      entryIsSelected(
+        message,
+        awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
+        selection: selection
+      )
+    else {
       return nil
     }
     switch message.entry {
@@ -312,7 +339,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let modelCallID,
       let requestID,
       let toolName,
-      let arguments
+      let arguments,
+      _
     ):
       let request = requestID.rawValue
       let event = SignalboxProcessToolEvent(
@@ -527,6 +555,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .turnActivated(let turnID, _),
       .modelCallTransition(let turnID, _, _),
       .toolBatchTransition(let turnID, _, _),
+      .toolApprovalDecided(let turnID, _, _, _, _),
       .turnCompleted(let turnID, _, _, _),
       .turnFailed(let turnID, _, _),
       .turnRefused(let turnID, _, _),
@@ -541,26 +570,32 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func entryIsSelected(
     _ message: SignalboxTranscriptEntryMessage,
+    awaitingToolDecisionRequestID: String?,
     selection: Selection
   ) -> Bool {
     switch selection {
     case .all:
       return true
     case .trigger(let trigger):
-      return entry(message, isAttributableTo: trigger)
+      return entry(
+        message,
+        isAttributableTo: trigger,
+        awaitingToolDecisionRequestID: awaitingToolDecisionRequestID
+      )
     }
   }
 
   private func entry(
     _ message: SignalboxTranscriptEntryMessage,
-    isAttributableTo trigger: SignalboxProcessSessionEvent
+    isAttributableTo trigger: SignalboxProcessSessionEvent,
+    awaitingToolDecisionRequestID: String?
   ) -> Bool {
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
       case .proposed:
         guard
-          case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+          case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
             message.entry
         else {
           return false
@@ -580,6 +615,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnCancelled(let turnID, let cancellationEntryID, _):
       return message.entryID == cancellationEntryID
         || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
+    case .toolApprovalDecided(let turnID, _, _, _, _):
+      guard let awaitingToolDecisionRequestID,
+        case .assistantToolUse(let entryTurnID, _, let requestID, _, _, _) = message.entry
+      else {
+        return false
+      }
+      return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
     case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
       guard
         case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
@@ -632,7 +674,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .proposed:
         return snapshot.records.contains { record in
           guard case .entry(let message) = record,
-            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
               message.entry
           else {
             return false
@@ -733,8 +775,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryAttemptID == toolAttemptID && context.turnID == turnID
       }
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolApprovalDecided, .turnRefused, .turnReconciliationRequired, .unknown:
       return true
     }
   }
