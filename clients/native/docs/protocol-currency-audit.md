@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `c27e725d` on 2026-08-03.
+Verified against repository head `6e297188` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 13 close-now, 16 staged, and 1 report-only.
+variants: 14 close-now, 16 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -57,6 +57,7 @@ variants: 13 close-now, 16 staged, and 1 report-only.
 | C12 | Medium   | `plan_write` arguments and results were shown only as undifferentiated raw JSON.                                                                                                                              | **close-now** — recognize the tool and its arguments; keep result JSON raw because transcript evidence lacks complete dispatch provenance.            |
 | C13 | Medium   | Imported non-text transcript markers, including source events, thinking, tool calls, and tool results, were deliberately routed to generic `imported_*` unknown cards despite retaining their order and kind. | **close-now** — render every current imported marker as a faithful typed notice using only the kind and source-speaker attestation the wire supplies. |
 | C14 | Medium   | Imported summaries whose protocol title state is `underivable` had no source-authored label for the unified list or detail navigation.                                                                        | **close-now** — provide a stable, visibly untitled imported-conversation label rather than presenting an empty title.                                 |
+| C15 | Medium   | Tool projection and timeline identity used a bare request UUID, so two source transcripts reusing one request token could overwrite a card or attach its result to the other tool.                            | **close-now** — correlate by source session and request while keying presentation by the source-qualified transcript entry.                           |
 
 ## Staged gaps
 
