@@ -641,6 +641,18 @@ impl VersionedSessionPlacement {
     ) -> Self;
     // accessors: version(), placement()
 }
+pub struct UpdateSessionPlacement { /* private */ }
+impl UpdateSessionPlacement {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_version: SessionPlacementVersion,
+        replacement: SessionPlacement,
+    ) -> Self;
+    // accessors: command_id(), session(), expected_version(), replacement()
+}
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
 pub enum SessionPlacementEventKind { Created, Updated }
 pub struct SessionPlacementEvent { /* private */ }
 impl SessionPlacementEvent {
@@ -656,6 +668,36 @@ impl SessionPlacementEvent {
         command_id: DurableCommandId,
     ) -> Option<Self>;
     // accessors: session(), kind(), placement(), prior_version(), command_id()
+}
+pub enum UpdateSessionPlacementResult {
+    Applied(UpdateSessionPlacementApplied),
+    Rejected(UpdateSessionPlacementRejection),
+}
+pub struct UpdateSessionPlacementApplied { /* private */ }
+impl UpdateSessionPlacementApplied {
+    pub fn try_new(
+        command: &UpdateSessionPlacement,
+        event: SessionPlacementEvent,
+    ) -> Option<Self>;
+    // accessors: event()
+}
+pub enum UpdateSessionPlacementRejectionKind {
+    SessionNotFound,
+    CurrentVersionMismatch,
+    VersionExhausted,
+}
+pub struct UpdateSessionPlacementRejection { /* private */ }
+impl UpdateSessionPlacementRejection {
+    pub const fn session_not_found(command: &UpdateSessionPlacement) -> Self;
+    pub const fn current_version_mismatch(
+        command: &UpdateSessionPlacement,
+        current: SessionPlacementVersion,
+    ) -> Option<Self>;
+    pub const fn version_exhausted(
+        command: &UpdateSessionPlacement,
+        current: SessionPlacementVersion,
+    ) -> Option<Self>;
+    // accessors: session(), expected_version(), current_version(), kind()
 }
 ```
 
@@ -8678,7 +8720,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: actor                                      | 1                    |
 | domain: imported_conversation                      | 32 (+5 free fn)      |
 | domain: session_template                           | 6                    |
-| domain: session_placement                          | 13                   |
+| domain: session_placement                          | 18                   |
 | domain: session                                    | 22                   |
 | domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
@@ -8709,7 +8751,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **705 (+7 free fn)** |
+| **signalbox-domain total**                         | **710 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

@@ -251,7 +251,9 @@ pub use session_placement::{
     RootPlacementGlobalReadIntent, SessionPlacement, SessionPlacementDirectory,
     SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
     SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
-    SessionReadScopeDecision, SessionReadScopeRefusal, VersionedSessionPlacement,
+    SessionReadScopeDecision, SessionReadScopeRefusal, UpdateSessionPlacement,
+    UpdateSessionPlacementApplied, UpdateSessionPlacementRejection,
+    UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
