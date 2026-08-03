@@ -953,6 +953,7 @@ impl SubmitInputTurnOriginAppliedResult {
                 .requested()
                 .per_call_model_settings(),
             self.origin_configuration.effective().model_settings(),
+            self.origin_configuration.model_settings_adjusted_from(),
             self.origin_configuration
                 .model_settings_adjustments()
                 .to_vec(),
