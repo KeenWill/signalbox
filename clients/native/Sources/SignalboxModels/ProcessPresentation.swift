@@ -457,6 +457,25 @@ public struct SignalboxProcessContextSummaryEvent: Codable, Equatable, Sendable 
     self.text = text
   }
 
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case text
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_context_summary" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not context-summary evidence."
+      )
+    }
+    self.kind = kind
+    self.text = try container.decode(String.self, forKey: .text)
+  }
+
   init(closedFrom decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     try payload.rejectUnadmittedFields(["kind", "text"], decoder: decoder)
@@ -682,13 +701,16 @@ public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable
     case sourceSpeaker = "source_speaker"
   }
 
-  init(closedFrom decoder: Decoder) throws {
-    let payload = try SignalboxUntaggedPayload(from: decoder)
-    try payload.rejectUnadmittedFields(
-      ["kind", "content_kind", "source_speaker"],
-      decoder: decoder
-    )
+  public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_imported_content" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not imported-content evidence."
+      )
+    }
     self.init(
       contentKind: try container.decode(
         SignalboxProcessImportedContentKind.self,
@@ -696,6 +718,15 @@ public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable
       ),
       sourceSpeaker: try container.decode(String.self, forKey: .sourceSpeaker)
     )
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["kind", "content_kind", "source_speaker"],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
   }
 }
 

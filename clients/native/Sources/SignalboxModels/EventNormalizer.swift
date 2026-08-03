@@ -1231,7 +1231,59 @@ public enum SignalboxEventNormalizer {
         _ type: Value.Type,
         from json: String
     ) -> Value? {
-        try? SignalboxJSONCoding.decoder().decode(type, from: Data(json.utf8))
+        guard planJSONUsesCanonicalUnsignedIntegerTokens(json) else {
+            return nil
+        }
+        return try? SignalboxJSONCoding.decoder().decode(type, from: Data(json.utf8))
+    }
+
+    private static func planJSONUsesCanonicalUnsignedIntegerTokens(_ json: String) -> Bool {
+        let bytes = Array(json.utf8)
+        var index = 0
+        var isInsideString = false
+        var isEscaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if isInsideString {
+                if isEscaped {
+                    isEscaped = false
+                } else if byte == 0x5C {
+                    isEscaped = true
+                } else if byte == 0x22 {
+                    isInsideString = false
+                }
+                index += 1
+                continue
+            }
+            if byte == 0x22 {
+                isInsideString = true
+                index += 1
+                continue
+            }
+            guard byte == 0x2D || (0x30...0x39).contains(byte) else {
+                index += 1
+                continue
+            }
+            let start = index
+            index += 1
+            while index < bytes.count {
+                let candidate = bytes[index]
+                guard (0x30...0x39).contains(candidate)
+                    || candidate == 0x2B || candidate == 0x2D
+                    || candidate == 0x2E || candidate == 0x45 || candidate == 0x65
+                else {
+                    break
+                }
+                index += 1
+            }
+            let token = bytes[start..<index]
+            guard token.allSatisfy({ (0x30...0x39).contains($0) }),
+                token.count == 1 || token.first != 0x30
+            else {
+                return false
+            }
+        }
+        return true
     }
 
     private static func yesNo(_ value: Bool) -> String {

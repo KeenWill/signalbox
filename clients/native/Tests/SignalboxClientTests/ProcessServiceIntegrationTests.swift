@@ -405,6 +405,25 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertTrue(projection.records.isEmpty)
   }
 
+  func testSideProjectionRejectsCompletionWithoutRequiredAssistantText() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithCompletionMarkerOnly()
+    let trigger = try ProcessProjectionFixture.completedTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(
+        snapshot,
+        attributableTo: trigger,
+        requiringAssistantText: true
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testSideProjectionRejectsReconciliationResultFromAnotherTurn() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCrossTurnReconciliationResult()
     let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
@@ -740,6 +759,28 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(
       tool.compactArgumentSummary,
       ProcessProjectionFixture.malformedPlanReadArguments
+    )
+  }
+
+  func testFloatingPlanReadIdentityKeepsRawArgumentsVisible() throws {
+    let record = ProcessProjectionFixture.floatingPlanReadIdentityToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.compactArgumentSummary,
+      ProcessProjectionFixture.floatingPlanReadArguments
+    )
+  }
+
+  func testExponentPlanOrdinalKeepsRawOutputVisible() throws {
+    let record = ProcessProjectionFixture.exponentPlanOrdinalToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(
+      tool.outputPreview,
+      ProcessProjectionFixture.exponentPlanOrdinalOutput
     )
   }
 
@@ -5558,6 +5599,8 @@ private enum ProcessProjectionFixture {
   static let malformedPlanReadOutput = #"{"entries":[{"entry_id":0,"text":"Audit protocol","status":"pending","dependencies":[],"readiness":"ready"}],"next_after_entry_id":null,"plan_truncated":false,"history":null,"history_truncated":false}"#
   static let expandedPlanWriteOutput = #"{"event":{"ordinal":1,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planWriteProvenanceJSON(requestID: planCreateRequestID))},"future_field":"retained"}"#
   static let contradictoryPlanReadCursorOutput = #"{"entries":[{"entry_id":1,"text":"Audit protocol","status":"in_progress","dependencies":[],"readiness":"ready"}],"next_after_entry_id":1,"plan_truncated":false,"history":null,"history_truncated":false}"#
+  static let floatingPlanReadArguments = #"{"after_entry_id":1.0,"include_history":false}"#
+  static let exponentPlanOrdinalOutput = #"{"event":{"ordinal":1e0,"kind":"created","entry_id":1,"text":"Draft protocol",\#(planWriteProvenanceJSON(requestID: planCreateRequestID))}}"#
   static let truncatedAbsentPlanHistoryOutput = rawPlanReadOutput(
     entries: "[]",
     history: "null",
@@ -7562,6 +7605,26 @@ private enum ProcessProjectionFixture {
       toolName: "plan_read",
       arguments: planReadArguments,
       output: output,
+      status: .completed
+    )
+  }
+
+  static func floatingPlanReadIdentityToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: floatingPlanReadArguments,
+      output: nil,
+      status: .proposed
+    )
+  }
+
+  static func exponentPlanOrdinalToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: exponentPlanOrdinalOutput,
       status: .completed
     )
   }

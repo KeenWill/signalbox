@@ -232,6 +232,56 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testContextSummaryDirectDecodeRejectsMismatchedKind() {
+        let data = Data(
+            #"{"kind":"\#(Self.futureProcessEvidenceKind)","text":"summary"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try SignalboxJSONCoding.decoder().decode(
+                SignalboxProcessContextSummaryEvent.self,
+                from: data
+            )
+        )
+    }
+
+    func testImportedContentDirectDecodeRejectsMismatchedKind() {
+        let data = Data(
+            #"{"kind":"\#(Self.futureProcessEvidenceKind)","content_kind":"\#(Self.importedContentKind)","source_speaker":"assistant"}"#.utf8
+        )
+
+        XCTAssertThrowsError(
+            try SignalboxJSONCoding.decoder().decode(
+                SignalboxProcessImportedContentEvent.self,
+                from: data
+            )
+        )
+    }
+
+    func testImportedContentDirectDecodeBoundsSourceSpeaker() throws {
+        let sourceSpeaker = String(
+            repeating: "x",
+            count: SignalboxProcessPresentation.maximumLabelUTF8Bytes + 1
+        )
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "kind": "process_imported_content",
+                "content_kind": Self.importedContentKind,
+                "source_speaker": sourceSpeaker,
+            ]
+        )
+
+        let event = try SignalboxJSONCoding.decoder().decode(
+            SignalboxProcessImportedContentEvent.self,
+            from: data
+        )
+
+        XCTAssertEqual(
+            event.sourceSpeaker,
+            SignalboxProcessPresentation.retainedLabel(sourceSpeaker)
+        )
+    }
+
     func testPartialUsageCostDegradesToPayloadPreservingUnknown() throws {
         let data = Data(
             #"{"event_id":9,"event":{"kind":"process_model_call_usage","turn_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","model_call_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","usage_provenance":"provider_reported","cost_amount_usd":"\#(Self.partialUsageCostAmount)"}}"#.utf8
@@ -463,6 +513,8 @@ final class SignalboxModelsTests: XCTestCase {
     }
 
     private static let expandedProcessEventFieldValue = "retained"
+    private static let futureProcessEvidenceKind = "fixture_future_evidence"
+    private static let importedContentKind = "thinking"
     private static let partialUsageCostAmount = "0.01"
     private static let invalidUsageCostAmount = "01"
     private static let unknownUsageProvenance = "fixture_future_provenance"

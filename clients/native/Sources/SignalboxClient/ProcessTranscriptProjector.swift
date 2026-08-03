@@ -94,10 +94,15 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   public mutating func projectSideSnapshot(
     _ snapshot: SignalboxSynchronizationSnapshot,
-    attributableTo trigger: SignalboxFollowedSessionEvent
+    attributableTo trigger: SignalboxFollowedSessionEvent,
+    requiringAssistantText: Bool = false
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
-    guard candidate.containsRequiredEvidence(in: snapshot, for: trigger.event) else {
+    guard candidate.containsRequiredEvidence(
+      in: snapshot,
+      for: trigger.event,
+      requiringAssistantText: requiringAssistantText
+    ) else {
       throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
     }
     let projection = try candidate.project(
@@ -928,7 +933,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func containsRequiredEvidence(
     in snapshot: SignalboxSynchronizationSnapshot,
-    for trigger: SignalboxProcessSessionEvent
+    for trigger: SignalboxProcessSessionEvent,
+    requiringAssistantText: Bool
   ) -> Bool {
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
@@ -985,7 +991,15 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryModelCallID == modelCallID
       }
-    case .turnCompleted(let turnID, _, let completionEntryID, _):
+    case .turnCompleted(let turnID, let modelCallID, let completionEntryID, _):
+      let hasAssistantText = snapshot.records.contains {
+        guard case .textEntry(let message) = $0,
+          case .assistant(let entryTurnID, let entryModelCallID) = message.entry
+        else {
+          return false
+        }
+        return entryTurnID == turnID && entryModelCallID == modelCallID
+      }
       let hasCompletionMarker = snapshot.records.contains {
         guard case .entry(let message) = $0,
           message.entryID == completionEntryID,
@@ -995,7 +1009,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID
       }
-      return hasCompletionMarker
+      return hasCompletionMarker && (!requiringAssistantText || hasAssistantText)
     case .turnFailed(let turnID, let failureEntryID, _):
       return snapshot.records.contains {
         guard case .entry(let message) = $0,
