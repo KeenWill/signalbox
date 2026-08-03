@@ -1480,6 +1480,94 @@ BEGIN
 END;
 $$;
 
+-- A descendant-scoped parent command takes the complete relationship frontier
+-- before its repository can allocate any outbox sequence. Spawn admission takes
+-- the same parent-session lock first, so the two writers never invert the
+-- session/outbox order. Re-evaluate after waits because each statement gets a
+-- fresh READ COMMITTED snapshot and may reveal a spawn that committed while a
+-- parent lock was being acquired.
+CREATE FUNCTION lock_delegation_termination_frontier(
+    checked_root_session uuid,
+    checked_root_kind text
+)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE
+    prior_edge_count bigint := -1;
+    current_edge_count bigint;
+BEGIN
+    LOOP
+        PERFORM 1
+          FROM session
+         WHERE session_id IN (
+            SELECT checked_root_session
+            UNION
+            SELECT frontier.parent_session_id
+              FROM delegation_cascade_expected_frontier(
+                    checked_root_session, checked_root_kind
+              ) AS frontier
+            UNION
+            SELECT frontier.child_session_id
+              FROM delegation_cascade_expected_frontier(
+                    checked_root_session, checked_root_kind
+              ) AS frontier
+         )
+         ORDER BY session_id
+         FOR NO KEY UPDATE;
+
+        SELECT count(*) INTO current_edge_count
+          FROM delegation_cascade_expected_frontier(
+                checked_root_session, checked_root_kind
+          );
+        EXIT WHEN current_edge_count = prior_edge_count;
+        prior_edge_count := current_edge_count;
+    END LOOP;
+
+    PERFORM 1
+      FROM session_delegation
+     WHERE spawning_tool_request_id IN (
+        SELECT frontier.spawning_tool_request_id
+          FROM delegation_cascade_expected_frontier(
+                checked_root_session, checked_root_kind
+          ) AS frontier
+     )
+     ORDER BY spawning_tool_request_id
+     FOR UPDATE;
+END;
+$$;
+
+CREATE FUNCTION lock_delegation_frontier_before_goal_stop()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.operation_kind = 'stop'
+        AND NEW.result_kind = 'applied'
+        AND NEW.descendant_scope = 'parent_and_descendants'
+    THEN
+        PERFORM lock_delegation_termination_frontier(NEW.session_id, 'stopped');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION lock_delegation_frontier_before_input_interrupt()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.delivery_kind = 'interrupt'
+        AND NEW.result_kind = 'applied'
+        AND NEW.descendant_scope = 'parent_and_descendants'
+    THEN
+        PERFORM lock_delegation_termination_frontier(NEW.session_id, 'cancelled');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER goal_command_locks_delegation_frontier
+BEFORE INSERT ON goal_command
+FOR EACH ROW EXECUTE FUNCTION lock_delegation_frontier_before_goal_stop();
+CREATE TRIGGER submit_input_command_locks_delegation_frontier
+BEFORE INSERT ON submit_input_command
+FOR EACH ROW EXECUTE FUNCTION lock_delegation_frontier_before_input_interrupt();
+
 CREATE FUNCTION require_delegation_cascade_disposition_count()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -2702,6 +2790,41 @@ BEGIN
     IF updated_definition = definition THEN
         RAISE EXCEPTION
             'delegation result extension could not find continued-call result arm';
+    END IF;
+    EXECUTE updated_definition;
+END;
+$migration$;
+
+-- A foreground child result closes one ordinary tool exchange for compaction.
+-- Background results remain inbox content and never satisfy a tool-use count.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    replacement_count bigint;
+BEGIN
+    SELECT pg_get_functiondef(
+        'require_context_compaction_exact_evidence()'::regprocedure
+    ) INTO definition;
+    updated_definition := regexp_replace(
+        definition,
+        'entry\.payload_kind IN \([[:space:]]*''tool_execution_result''[[:space:]]*,[[:space:]]*''tool_denied''[[:space:]]*,[[:space:]]*''tool_closed_by_turn_end''[[:space:]]*\)',
+        '(entry.payload_kind IN (''tool_execution_result'', ''tool_denied'', ''tool_closed_by_turn_end'') OR (entry.payload_kind = ''delegation_result'' AND entry.tool_result_request_id IS NOT NULL))',
+        'g'
+    );
+    IF updated_definition = definition THEN
+        RAISE EXCEPTION
+            'delegation result extension could not find compaction result counts';
+    END IF;
+    SELECT count(*) INTO replacement_count
+      FROM regexp_matches(
+            updated_definition,
+            'entry\.payload_kind = ''delegation_result'' AND entry\.tool_result_request_id IS NOT NULL',
+            'g'
+      );
+    IF replacement_count <> 2 THEN
+        RAISE EXCEPTION
+            'delegation result extension expected two compaction result counts';
     END IF;
     EXECUTE updated_definition;
 END;

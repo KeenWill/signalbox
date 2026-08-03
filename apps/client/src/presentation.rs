@@ -1705,6 +1705,20 @@ impl<'a> Output<'a> {
                 )?;
                 self.text(content.as_str())
             }
+            TurnState::QueuedDelegated {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=queued_delegated \
+                     spawning_request={spawning_request_id} \
+                     parent_session={parent_session_id} parent_turn={parent_turn_id}"
+                )?;
+                self.text(content.as_str())
+            }
             TurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -3438,6 +3452,24 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn snapshot_renders_queued_delegated_origin() {
+        let rendered = render_snapshot_turn(TurnState::QueuedDelegated {
+            spawning_request_id: wire_uuid(2),
+            parent_session_id: wire_uuid(3),
+            parent_turn_id: wire_uuid(4),
+            content: InputContent::new(String::from("delegated task")),
+        });
+
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegated spawning_request=00000000-0000-0000-0000-000000000002 parent_session=00000000-0000-0000-0000-000000000003 parent_turn=00000000-0000-0000-0000-000000000004
+            delegated task
             usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
