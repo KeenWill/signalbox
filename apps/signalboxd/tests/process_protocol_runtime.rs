@@ -5222,11 +5222,15 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
             },
         )
         .await?;
-    let ServerMessage::SessionCreated { session_id, .. } =
+    let ServerMessage::SessionCreated {
+        session_id,
+        model_settings,
+    } =
         *response_within(&mut connection).await?.message()
     else {
         panic!("prompted creation must return its session");
     };
+    assert_eq!(model_settings, provider_default_model_settings(selection));
 
     connection
         .request_version(
