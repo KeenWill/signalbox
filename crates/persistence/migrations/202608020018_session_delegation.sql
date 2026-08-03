@@ -303,6 +303,132 @@ AS $$
      LIMIT 1
 $$;
 
+-- Model-identity boundary validation must recognize the same closed origin
+-- families as configuration resolution. A delegated initial turn has no
+-- accepted-input origin row, so resolving it through queued_input_origin alone
+-- would make the otherwise-valid turn impossible to activate.
+CREATE OR REPLACE FUNCTION turn_start_model_identity_boundary_is_valid(
+    checked_turn_id uuid,
+    checked_frontier_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_defaults_version numeric(20, 0);
+    checked_selection uuid;
+    boundary_required boolean;
+    predecessor_turn uuid;
+    predecessor_selection uuid;
+    starting_member_count numeric(20, 0);
+    boundary_entry_count bigint;
+    boundary_member_count bigint;
+    boundary_member_position numeric(20, 0);
+BEGIN
+    SELECT lifecycle.session_id, lifecycle.model_identity_boundary_required
+      INTO checked_session, boundary_required
+      FROM turn_lifecycle AS lifecycle
+     WHERE lifecycle.turn_id = checked_turn_id
+       AND (
+            (
+                lifecycle.origin_kind = 'accepted_input'
+                AND EXISTS (
+                    SELECT 1
+                      FROM queued_input_origin AS origin
+                     WHERE origin.turn_id = lifecycle.turn_id
+                       AND origin.session_id = lifecycle.session_id
+                )
+            )
+            OR (
+                lifecycle.origin_kind = 'delegation'
+                AND EXISTS (
+                    SELECT 1
+                      FROM session_delegation_initial_task AS task
+                     WHERE task.turn_id = lifecycle.turn_id
+                       AND task.child_session_id = lifecycle.session_id
+                )
+            )
+       );
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    SELECT
+        effective.defaults_version,
+        effective.direct_selection_id
+      INTO checked_defaults_version, checked_selection
+      FROM turn_origin_effective_model_configuration(
+               checked_turn_id,
+               checked_session
+           ) AS effective;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    predecessor_turn := accepted_input_turn_queue_predecessor(
+        checked_session,
+        checked_turn_id
+    );
+    IF predecessor_turn IS NOT NULL THEN
+        SELECT effective.direct_selection_id
+          INTO predecessor_selection
+          FROM turn_origin_effective_model_configuration(
+                   predecessor_turn,
+                   checked_session
+               ) AS effective;
+        IF NOT FOUND THEN
+            RETURN false;
+        END IF;
+    END IF;
+
+    SELECT count(*)
+      INTO boundary_entry_count
+      FROM semantic_transcript_entry AS entry
+     WHERE entry.source_session_id = checked_session
+       AND entry.payload_kind = 'model_identity_changed'
+       AND entry.model_identity_turn_id = checked_turn_id
+       AND entry.model_identity_defaults_version = checked_defaults_version
+       AND entry.model_identity_direct_selection_id = checked_selection;
+
+    IF NOT boundary_required THEN
+        RETURN boundary_entry_count = 0;
+    END IF;
+
+    IF predecessor_turn IS NULL
+       OR predecessor_selection IS NOT DISTINCT FROM checked_selection
+    THEN
+        RETURN boundary_entry_count = 0;
+    END IF;
+
+    SELECT member_count
+      INTO starting_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_frontier_id;
+
+    SELECT count(*), max(member.member_position)
+      INTO boundary_member_count, boundary_member_position
+      FROM semantic_transcript_entry AS entry
+      JOIN context_frontier_member AS member
+        ON member.source_session_id = entry.source_session_id
+       AND member.semantic_entry_id = entry.semantic_entry_id
+     WHERE entry.source_session_id = checked_session
+       AND entry.payload_kind = 'model_identity_changed'
+       AND entry.model_identity_turn_id = checked_turn_id
+       AND member.owning_session_id = checked_session
+       AND member.context_frontier_id = checked_frontier_id;
+
+    RETURN boundary_entry_count = 1
+       AND boundary_member_count = 1
+       AND boundary_member_position IS NOT DISTINCT FROM
+           starting_member_count - 1;
+END;
+$$;
+
 CREATE FUNCTION require_delegation_initial_task_purpose()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -1881,6 +2007,48 @@ BEGIN
                 RAISE EXCEPTION 'parent disposition contradicts relationship policy'
                     USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
             END IF;
+            IF NEW.outcome_kind IN ('child_stopped', 'child_cancelled')
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM session_delegation_initial_task AS task
+                      JOIN turn_lifecycle AS lifecycle
+                        ON lifecycle.turn_id = task.turn_id
+                       AND lifecycle.session_id = task.child_session_id
+                       AND lifecycle.state_kind = 'terminal'
+                       AND lifecycle.terminal_disposition_kind = 'cancelled'
+                      JOIN semantic_transcript_entry AS marker
+                        ON marker.source_session_id = lifecycle.session_id
+                       AND marker.payload_kind = 'turn_cancelled'
+                       AND marker.cancelled_turn_id = lifecycle.turn_id
+                      JOIN context_frontier AS frontier
+                        ON frontier.owning_session_id = lifecycle.session_id
+                       AND frontier.context_frontier_id =
+                            lifecycle.terminal_frontier_id
+                      JOIN context_frontier_member AS terminal_member
+                        ON terminal_member.owning_session_id =
+                            frontier.owning_session_id
+                       AND terminal_member.context_frontier_id =
+                            frontier.context_frontier_id
+                       AND terminal_member.member_position = frontier.member_count
+                       AND terminal_member.source_session_id =
+                            marker.source_session_id
+                       AND terminal_member.semantic_entry_id =
+                            marker.semantic_entry_id
+                      JOIN turn_cancelled_outbox_event AS cancellation
+                        ON cancellation.session_id = lifecycle.session_id
+                       AND cancellation.turn_id = lifecycle.turn_id
+                       AND cancellation.cancellation_entry_id =
+                            marker.semantic_entry_id
+                       AND cancellation.terminal_frontier_id =
+                            lifecycle.terminal_frontier_id
+                     WHERE task.spawning_tool_request_id =
+                            NEW.spawning_tool_request_id
+                       AND task.child_session_id = relation_child
+                ) THEN
+                RAISE EXCEPTION 'parent disposition lacks exact child terminal evidence'
+                    USING ERRCODE = '23514',
+                        CONSTRAINT = 'session_delegation_event_semantics';
+            END IF;
         ELSE
             RAISE EXCEPTION 'outcome reason is not a delegation descendant event'
                 USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_event_semantics';
@@ -2223,8 +2391,11 @@ BEGIN
                  OR (payload_kind = ''delegation_result''
                     AND delegation_message_id IS NULL
                     AND delegation_result_awaiting_tool_request_id IS NOT NULL
-                    AND tool_result_request_id =
-                        delegation_result_awaiting_tool_request_id
+                    AND (
+                        tool_result_request_id IS NULL
+                        OR tool_result_request_id =
+                            delegation_result_awaiting_tool_request_id
+                    )
                     AND delegation_result_spawning_tool_request_id IS NOT NULL
                     AND %s)
                  OR (payload_kind NOT IN (
@@ -2309,6 +2480,46 @@ ALTER TABLE semantic_transcript_entry
             spawning_tool_request_id,
             parent_session_id
         ) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+-- Foreground delivery completes the exact await_session tool request. A
+-- background wait already completed with its registration receipt, so its
+-- later wake content retains the await identity only as delegation provenance
+-- and must not become a second logical tool result.
+CREATE FUNCTION require_semantic_delegation_result_delivery_mode()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM session_child_result_delivery AS delivery
+         WHERE delivery.awaiting_tool_request_id =
+                NEW.delegation_result_awaiting_tool_request_id
+           AND delivery.spawning_tool_request_id =
+                NEW.delegation_result_spawning_tool_request_id
+           AND delivery.parent_session_id = NEW.source_session_id
+           AND (
+                (
+                    delivery.delivery_sequence IS NULL
+                    AND NEW.tool_result_request_id =
+                        NEW.delegation_result_awaiting_tool_request_id
+                )
+                OR (
+                    delivery.delivery_sequence IS NOT NULL
+                    AND NEW.tool_result_request_id IS NULL
+                )
+           )
+    ) THEN
+        RAISE EXCEPTION 'delegation result correlation contradicts its delivery mode'
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'semantic_delegation_result_delivery_mode';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER semantic_delegation_result_delivery_mode
+AFTER INSERT ON semantic_transcript_entry
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW WHEN (NEW.payload_kind = 'delegation_result')
+EXECUTE FUNCTION require_semantic_delegation_result_delivery_mode();
 
 -- Delegation messages and results are authorized by their exact delivery
 -- foreign keys, not by a fabricated producing turn in the recipient session.

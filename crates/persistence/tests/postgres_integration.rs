@@ -6596,6 +6596,47 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     .await?;
     assert_eq!(extended_validator_count, 4);
 
+    let model_boundary: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'turn_start_model_identity_boundary_is_valid(uuid,uuid)'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_boundary.contains("origin_kind = 'delegation'"));
+    assert!(model_boundary.contains("session_delegation_initial_task"));
+
+    let event_semantics: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_session_delegation_event_payload()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(event_semantics.contains("NEW.outcome_kind IN ('child_stopped', 'child_cancelled')"));
+    assert!(event_semantics.contains("terminal_disposition_kind = 'cancelled'"));
+    assert!(event_semantics.contains("payload_kind = 'turn_cancelled'"));
+    assert!(event_semantics.contains("turn_cancelled_outbox_event"));
+
+    let result_shape: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = 'semantic_transcript_entry_payload_shape'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(result_shape.contains("tool_result_request_id IS NULL"));
+
+    let result_mode: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(
+            'require_semantic_delegation_result_delivery_mode()'::regprocedure
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(result_mode.contains("delivery.delivery_sequence IS NULL"));
+    assert!(result_mode.contains("NEW.tool_result_request_id IS NULL"));
+
     pool.close().await;
     drop(container);
     Ok(())
