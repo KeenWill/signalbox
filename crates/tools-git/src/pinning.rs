@@ -73,6 +73,8 @@ pub(super) struct RepositoryShell {
 pub(super) struct PinnedObjectDatabase {
     pub(super) directory: tempfile::TempDir,
     compressed_bytes: u64,
+    objects: OwnedFd,
+    pack: OwnedFd,
     objects_identity: FileIdentity,
     bindings: Vec<ObjectChildBinding>,
 }
@@ -529,6 +531,7 @@ impl PinnedObjectDatabase {
         let mut inspected = 0_usize;
         let mut captured_bytes = 0_u64;
         let mut pinned_children = Vec::new();
+        let mut pinned_pack = None;
         for entry in fs::read_dir(descriptor_path_from_fd(&objects))
             .map_err(|_| LocalGitFailure::Repository)?
         {
@@ -563,6 +566,7 @@ impl PinnedObjectDatabase {
                     identity,
                     leaves,
                 });
+                pinned_pack = Some(pack);
                 continue;
             }
             if bytes.len() != 2
@@ -605,6 +609,8 @@ impl PinnedObjectDatabase {
         let snapshot = Self {
             directory,
             compressed_bytes: captured_bytes,
+            objects: dup(&objects).map_err(|_| LocalGitFailure::Repository)?,
+            pack: pinned_pack.ok_or(LocalGitFailure::Repository)?,
             objects_identity,
             bindings: pinned_children,
         };
@@ -654,6 +660,14 @@ impl PinnedObjectDatabase {
             .map_err(|_| LocalGitFailure::Operation)
     }
 
+    pub(super) fn compressed_bytes(&self) -> u64 {
+        self.compressed_bytes
+    }
+
+    pub(super) fn pack_directory(&self) -> &OwnedFd {
+        &self.pack
+    }
+
     pub(super) fn validate_live(
         &self,
         authority: &PinnedRepository,
@@ -667,6 +681,9 @@ impl PinnedObjectDatabase {
         )
         .map_err(|_| LocalGitFailure::Repository)?;
         if owned_directory_identity(&objects)? != self.objects_identity {
+            return Err(LocalGitFailure::Repository);
+        }
+        if owned_directory_identity(&self.objects)? != self.objects_identity {
             return Err(LocalGitFailure::Repository);
         }
         validate_retained_object_child_bindings(&objects, &self.bindings)?;
@@ -810,12 +827,16 @@ fn insert_bounded_object_id(
     }
 }
 
-fn validate_pack_file(
+pub(super) fn validate_pack_file(
     bytes: &[u8],
     expected_checksum: git2::Oid,
     object_format: ObjectFormat,
 ) -> Result<usize, LocalGitFailure> {
     let object_id_bytes = object_id_bytes(object_format);
+    const PACK_HEADER_BYTES: usize = 12;
+    if bytes.len() < PACK_HEADER_BYTES + object_id_bytes {
+        return Err(LocalGitFailure::Repository);
+    }
     let trailer_start = bytes
         .len()
         .checked_sub(object_id_bytes)

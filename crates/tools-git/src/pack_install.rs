@@ -16,7 +16,7 @@ use rustix::{
 
 use crate::descriptor::{FileIdentity, file_identity};
 use crate::failure::LocalGitFailure;
-use crate::pinning::PinnedRepository;
+use crate::pinning::PinnedObjectDatabase;
 
 pub(super) const OBJECT_PUBLICATION_LOCK: &str = "signalbox-publication.lock";
 
@@ -27,21 +27,8 @@ pub(super) struct ObjectPublicationLock {
 }
 
 impl ObjectPublicationLock {
-    pub(super) fn acquire(authority: &PinnedRepository) -> Result<Self, LocalGitFailure> {
-        let objects = openat(
-            &authority.git_directory,
-            "objects",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
-        let directory = openat(
-            &objects,
-            "pack",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| LocalGitFailure::Repository)?;
+    pub(super) fn acquire(objects: &PinnedObjectDatabase) -> Result<Self, LocalGitFailure> {
+        let directory = dup(objects.pack_directory()).map_err(|_| LocalGitFailure::Operation)?;
         let descriptor = openat(
             &directory,
             OBJECT_PUBLICATION_LOCK,

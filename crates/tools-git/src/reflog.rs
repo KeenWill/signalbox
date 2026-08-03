@@ -32,7 +32,7 @@ pub(super) struct ReferenceLogLock {
     backup: Option<fs::File>,
     original_permissions: Option<fs::Permissions>,
     original_snapshot: Option<ReferenceLogSnapshot>,
-    _created_directories: CreatedReferenceDirectories,
+    created_directories: CreatedReferenceDirectories,
     committed: bool,
 }
 
@@ -101,7 +101,7 @@ impl ReferenceLogLock {
             backup: None,
             original_permissions: None,
             original_snapshot: None,
-            _created_directories: created_directories,
+            created_directories,
             committed: false,
         };
         guard
@@ -210,6 +210,7 @@ impl ReferenceLogLock {
         )
         .map_err(|_| LocalGitFailure::Operation)?;
         self.committed = true;
+        self.created_directories.keep();
         Ok(())
     }
 

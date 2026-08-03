@@ -97,9 +97,6 @@ pub(super) fn worktree_diff<FileSystem: WorkspaceFileSystem>(
     let mut truncated = false;
     let filemode = repository_filemode(repository)?;
     let mut worktree_bytes = 0_usize;
-    if truncated {
-        return render_patch_bytes(bytes, true);
-    }
     let paths = head_files
         .keys()
         .chain(diff_index_files.keys())
@@ -359,8 +356,12 @@ pub(super) fn render_diff(diff: &git2::Diff<'_>) -> Result<DiffResult, LocalGitF
         };
         let content = line.content();
         let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
-        if prefix.is_some_and(|_| remaining > 0) {
-            bytes.push(prefix.unwrap_or_default());
+        if let Some(origin) = prefix {
+            if remaining > 0 {
+                bytes.push(origin);
+            } else {
+                truncated = true;
+            }
         }
         let remaining = MAX_DIFF_BYTES.saturating_sub(bytes.len());
         if content.len() <= remaining {

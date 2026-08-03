@@ -28,6 +28,7 @@ pub(super) fn branch_create<ValidateRoot>(
     repository: &Repository,
     authority: &PinnedRepository,
     captured_objects: &Odb<'_>,
+    pinned_objects: &PinnedObjectDatabase,
     arguments: GitBranchCreateArguments,
     validate_root_before_publish: ValidateRoot,
 ) -> Result<BranchResult, LocalGitFailure>
@@ -50,6 +51,7 @@ where
         repository,
         &absent_objects,
         captured_objects,
+        pinned_objects,
         &[PackRoot::Commit(commit.id())],
     )?;
     if packed_reference_exists(authority, &reference_name)? {
@@ -189,6 +191,9 @@ where
         .unwrap_or(false);
     if outcome.is_err() && still_owned {
         let _ = unlinkat(&directory, &lock_name, AtFlags::empty());
+    }
+    if outcome.is_ok() {
+        created_directories.keep();
     }
     outcome
 }

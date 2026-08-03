@@ -13,6 +13,7 @@ use std::{
 
 use git2::{ObjectFormat, ObjectType};
 use rustix::fs::{AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, statat, symlinkat};
+use sha1::{Digest, Sha1};
 use signalbox_tools_workspace::{LocalWorkspaceFileSystem, WorkspaceRoot};
 
 use crate::construction::LocalGitToolsConstructionError;
@@ -26,7 +27,7 @@ use crate::layout::{
 use crate::limits::{MAX_BRANCH_BYTES, MAX_OBJECT_BYTES, MAX_REFERENCE_BYTES};
 use crate::pinning::{
     PinnedObjectDatabase, PinnedRepository, live_object_database_bytes_with_test_hook,
-    repository_filemode,
+    repository_filemode, validate_pack_file,
 };
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
@@ -409,6 +410,19 @@ fn object_capture_rejects_a_pack_file_rewritten_after_scan() {
     })
     .err()
     .expect("rewritten pack file rejects capture");
+
+    assert_eq!(failure, LocalGitFailure::Repository);
+}
+
+#[test]
+fn pack_validation_rejects_a_trailer_that_overlaps_the_header() {
+    let mut bytes = b"PACK\0\0\0\x02\0\0\0".to_vec();
+    let checksum = Sha1::digest(&bytes);
+    bytes.extend_from_slice(&checksum);
+    let expected = git2::Oid::from_bytes(&checksum).expect("fixture checksum parses");
+
+    let failure = validate_pack_file(&bytes, expected, ObjectFormat::Sha1)
+        .expect_err("overlapping pack trailer rejects");
 
     assert_eq!(failure, LocalGitFailure::Repository);
 }

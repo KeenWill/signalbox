@@ -197,8 +197,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &self.identity,
                     arguments,
                     &self.repository_authority,
-                    &persistent_object_database,
-                    &object_database,
+                    (
+                        &persistent_object_database,
+                        &object_database,
+                        &pinned_objects,
+                    ),
                     || {
                         before_commit_publish();
                         pinned_objects.validate_live(&self.repository_authority)?;
@@ -212,6 +215,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     &repository,
                     &self.repository_authority,
                     &object_database,
+                    &pinned_objects,
                     arguments,
                     || {
                         pinned_objects.validate_live(&self.repository_authority)?;
@@ -407,6 +411,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             persistent_object_database,
             object_database,
+            pinned_objects,
             &written_objects,
         )?;
         index_lock.write(&mut index)?;
@@ -906,13 +911,14 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 } else {
                     checkout_paths.clone()
                 };
-                paths.into_iter().all(|path| {
+                paths.into_iter().fold(true, |captured, path| {
                     updated_paths.borrow_mut().insert(path.clone());
-                    capture_rollback_identity(&self.repository_authority.root, &path)
+                    let current = capture_rollback_identity(&self.repository_authority.root, &path)
                         .map(|identity| {
                             updated_identities.borrow_mut().insert(path, identity);
                         })
-                        .is_ok()
+                        .is_ok();
+                    captured && current
                 })
             });
         checkout_tree_with_rollback(

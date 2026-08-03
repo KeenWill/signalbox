@@ -671,6 +671,10 @@ impl ReferenceParent {
 }
 
 impl CreatedReferenceDirectories {
+    pub(super) fn keep(&mut self) {
+        self.0.clear();
+    }
+
     pub(super) fn open_or_create(
         &mut self,
         parent: &OwnedFd,

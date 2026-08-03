@@ -20,7 +20,7 @@ use crate::limits::{
 };
 use crate::objects::{PackRoot, persist_objects};
 use crate::packed_reference::packed_reference_namespace_conflicts;
-use crate::pinning::PinnedRepository;
+use crate::pinning::{PinnedObjectDatabase, PinnedRepository};
 use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::reflog::ReferenceLogLock;
@@ -214,13 +214,13 @@ pub(super) fn commit<ValidateRoot>(
     identity: &GitIdentity,
     arguments: GitCommitArguments,
     authority: &PinnedRepository,
-    persistent_object_database: &Odb<'_>,
-    object_database: &Odb<'_>,
+    object_databases: (&Odb<'_>, &Odb<'_>, &PinnedObjectDatabase),
     validate_root_before_publish: ValidateRoot,
 ) -> Result<CommitResult, LocalGitFailure>
 where
     ValidateRoot: FnOnce() -> Result<(), LocalGitFailure>,
 {
+    let (persistent_object_database, object_database, pinned_objects) = object_databases;
     let (index_lock, mut index) = IndexLock::acquire_for_repository(authority)?;
     validate_index_objects(repository, &index)?;
     let state = RepositoryOperationState::capture(authority)?;
@@ -280,6 +280,7 @@ where
         repository,
         persistent_object_database,
         object_database,
+        pinned_objects,
         &[PackRoot::Commit(oid)],
     )?;
     let update_reference = locked_chain.last().ok_or(LocalGitFailure::Operation)?;

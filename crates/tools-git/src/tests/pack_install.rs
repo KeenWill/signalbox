@@ -17,8 +17,9 @@ fn packed_object_install_rejects_same_length_replacement_content() {
     let name = "pack-fixture.pack";
     let source_path = source.path().join(name);
     let destination_path = destination.path().join(name);
+    let replacement_content = b"hostile";
     fs::write(&source_path, b"trusted").expect("fixture source pack writes");
-    fs::write(&destination_path, b"hostile").expect("fixture replacement pack writes");
+    fs::write(&destination_path, replacement_content).expect("fixture replacement pack writes");
     let directory = openat(
         CWD,
         destination.path(),
@@ -34,7 +35,7 @@ fn packed_object_install_rejects_same_length_replacement_content() {
     assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
         fs::read(destination_path).expect("fixture replacement pack reads"),
-        b"hostile"
+        replacement_content
     );
 }
 

@@ -15,7 +15,9 @@ use rustix::{
 };
 
 use crate::failure::LocalGitFailure;
-use crate::limits::MAX_PACKED_REFS_BYTES;
+use crate::limits::{MAX_PACKED_REFS_BYTES, MAX_WORKTREE_INSPECTIONS};
+
+const MAX_QUARANTINE_DEPTH: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FileIdentity {
@@ -137,9 +139,25 @@ impl QuarantineDirectory {
 }
 
 fn clear_pinned_directory(directory: &OwnedFd) -> Result<(), LocalGitFailure> {
+    let mut inspections = 0_usize;
+    clear_pinned_directory_bounded(directory, 0, &mut inspections)
+}
+
+fn clear_pinned_directory_bounded(
+    directory: &OwnedFd,
+    depth: usize,
+    inspections: &mut usize,
+) -> Result<(), LocalGitFailure> {
+    if depth > MAX_QUARANTINE_DEPTH {
+        return Err(LocalGitFailure::Operation);
+    }
     let entries =
         fs::read_dir(descriptor_path_from_fd(directory)).map_err(|_| LocalGitFailure::Operation)?;
     for entry in entries {
+        *inspections = inspections
+            .checked_add(1)
+            .filter(|count| *count <= MAX_WORKTREE_INSPECTIONS)
+            .ok_or(LocalGitFailure::Operation)?;
         let name = entry.map_err(|_| LocalGitFailure::Operation)?.file_name();
         let status = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -152,7 +170,7 @@ fn clear_pinned_directory(directory: &OwnedFd) -> Result<(), LocalGitFailure> {
                 Mode::empty(),
             )
             .map_err(|_| LocalGitFailure::Operation)?;
-            clear_pinned_directory(&child)?;
+            clear_pinned_directory_bounded(&child, depth + 1, inspections)?;
             AtFlags::REMOVEDIR
         } else {
             AtFlags::empty()

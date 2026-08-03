@@ -27,6 +27,7 @@ use crate::limits::{
     GITLINK_MODE, INDEX_SKIP_WORKTREE, MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES,
     MAX_REVISION_BYTES, MAX_STAGE_PATHS,
 };
+use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
 use crate::pinning::{PinnedObjectDatabase, parse_pack_index};
 use crate::reflog::ReferenceLogLock;
 use crate::rollback::{
@@ -189,6 +190,7 @@ fn branch_create_rejects_a_start_reference_changed_before_publication() {
         &repository,
         &executor.repository_authority,
         &object_database,
+        &pinned_objects,
         GitBranchCreateArguments {
             name: FIX_BRANCH.to_owned(),
             start: "refs/heads/main".to_owned(),
@@ -205,7 +207,53 @@ fn branch_create_rejects_a_start_reference_changed_before_publication() {
     .expect_err("changed start reference rejects branch publication");
 
     assert_eq!(failure, LocalGitFailure::Operation);
-    assert!(!fixture.root().join(".git/refs/heads/agent/fix").exists());
+    assert!(
+        !fixture
+            .root()
+            .join(".git/refs/heads")
+            .join(FIX_BRANCH)
+            .exists()
+    );
+}
+
+#[test]
+fn object_publication_remains_bound_to_the_captured_pack_directory() {
+    let fixture = Fixture::new();
+    let executor = fixture.executor();
+    let pinned_objects = PinnedObjectDatabase::capture(&executor.repository_authority)
+        .expect("fixture object database pins");
+    let objects = fixture.root().join(".git/objects");
+    let captured_objects = fixture.root().join(".git/captured-objects");
+    let replacement_pack = objects.join("pack");
+    fs::rename(&objects, &captured_objects).expect("captured objects retire");
+    fs::create_dir(&objects).expect("replacement objects construct");
+    fs::create_dir(&replacement_pack).expect("replacement pack constructs");
+
+    let publication = ObjectPublicationLock::acquire(&pinned_objects)
+        .expect("captured pack publication lock acquires");
+
+    assert!(
+        !replacement_pack.join(OBJECT_PUBLICATION_LOCK).exists(),
+        "replacement object database must not receive the publication lock"
+    );
+    assert!(
+        captured_objects
+            .join("pack")
+            .join(OBJECT_PUBLICATION_LOCK)
+            .exists(),
+        "publication remains bound to the captured pack directory"
+    );
+    assert_eq!(
+        pinned_objects.validate_live(&executor.repository_authority),
+        Err(LocalGitFailure::Repository)
+    );
+    drop(publication);
+    assert!(
+        !captured_objects
+            .join("pack")
+            .join(OBJECT_PUBLICATION_LOCK)
+            .exists()
+    );
 }
 
 #[test]

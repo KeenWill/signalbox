@@ -144,9 +144,12 @@ pub(super) fn status<FileSystem: WorkspaceFileSystem>(
                 set_worktree_status(&mut raw, path, "deleted");
             }
             Err(WorkspaceResolveError::Rejected(_)) => return Err(LocalGitFailure::Path),
-            Err(WorkspaceResolveError::Io { .. }) => {
+            Err(WorkspaceResolveError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::IsADirectory =>
+            {
                 set_worktree_status(&mut raw, path, "type_changed");
             }
+            Err(WorkspaceResolveError::Io { .. }) => return Err(LocalGitFailure::Operation),
         }
     }
     for path in untracked {
