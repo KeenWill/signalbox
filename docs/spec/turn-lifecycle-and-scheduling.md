@@ -29,13 +29,15 @@ final-state gate was verified through PR #314
 `apps/signalboxd/src/{main,process_runtime}.rs`. The `signalboxd`
 composition-root name and that `apps/signalboxd` code home were verified through
 PR #258 (`agent/signalboxd-rename`); the additional daemon-held code-host
-credential path is verified through PR #270 (`agent/tool-batch-tier1`); and the
-user reconciliation decision that releases an ambiguity wait, together with the
-startup scan's separate report of sessions holding their slot for that decision,
-were verified through PR #281 (`agent/turn-reconciliation-recovery`). The finite
-startup scan and removal of the superseded steering blocker were verified
-through PR #291 (`agent/turn-control-verbs`). INV-tagged tests are the
-enforcement of record; tags below resolve through the generated
+credential path is verified through PR #270 (`agent/tool-batch-tier1`), and the
+Brave Search credential path is verified through PR #433
+(`agent/web-search-wiring`); the user reconciliation decision that releases an
+ambiguity wait, together with the startup scan's separate report of sessions
+holding their slot for that decision, were verified through PR #281
+(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
+the superseded steering blocker were verified through PR #291
+(`agent/turn-control-verbs`). INV-tagged tests are the enforcement of record;
+tags below resolve through the generated
 [invariant test index](../invariants.md). Designed lifecycle behavior that has
 no committed code path appears only under [Open edges](#open-edges). The
 registration-only runner-socket startup and supervision are verified by PR #376
@@ -733,10 +735,10 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Daemon runtime: startup order and shutdown
 
-signalboxd is the composition root. It reads the five unconditionally required
+signalboxd is the composition root. It reads the six unconditionally required
 values—`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
 naming provider targets, selections, and aliases),
-`SIGNALBOX_TEMPLATE_CONFIG_FILE`, `GITHUB_TOKEN_FILE`, and
+`SIGNALBOX_TEMPLATE_CONFIG_FILE`, `BRAVE_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 `SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
 `SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. It
 additionally requires `ANTHROPIC_API_KEY_FILE` when at least one static model
@@ -800,8 +802,16 @@ it retains the parent's sole progressing-turn slot, and survives restart
 unchanged until that relationship has one deliverable terminal result. Result
 consumption atomically appends the parent's delivered-result entry, returns the
 result as that tool request's content, and moves the same turn back to running
-with a fresh continuation attempt. A raw child identity or an unrelated result
-cannot release the wait.
+with a fresh continuation attempt. The scheduler routes that durable hint back
+through the tool loop: the exact parked batch is reconstituted first, then the
+fresh attempt and lifecycle transition commit before ordinary tool continuation
+runs. A raw child identity or an unrelated result cannot release the wait.
+
+A delegated-task or delegation-wake turn owns the same session-local active slot
+as an accepted-input turn. Input submission therefore uses that exact turn for
+active-turn mismatch, vacant-slot rejection, safe-point steering, and interrupt
+predecessor checks even though delegated origins do not fabricate an
+accepted-input scheduling row.
 
 A background await instead commits a delivery registration and returns its
 receipt immediately. It does not create `AwaitingChild` or retain the slot; the

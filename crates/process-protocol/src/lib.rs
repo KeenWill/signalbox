@@ -16,6 +16,7 @@ use serde::{
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::value::RawValue;
+use signalbox_domain::{ToolDecisionRationale, ToolDenialReason};
 use uuid::Uuid;
 
 /// The single admitted process-protocol version.
@@ -1176,6 +1177,8 @@ pub enum CanonicalValueError {
     /// A session system prompt was empty, contained U+0000, or exceeded its
     /// UTF-8 byte bound.
     SystemPrompt,
+    /// A dotted session placement or root-global-read decision was invalid.
+    Placement,
     /// Dollar amount was not canonical bounded nonnegative decimal text.
     DollarAmount,
     /// Billing rate version was empty, padded, NUL-bearing, or oversized.
@@ -1193,6 +1196,7 @@ impl fmt::Display for CanonicalValueError {
             Self::Metadata => "session metadata value is invalid",
             Self::Digest => "digest is not canonical lowercase 64-character hexadecimal text",
             Self::SystemPrompt => "session system prompt is empty, oversized, or contains U+0000",
+            Self::Placement => "session placement is invalid",
             Self::DollarAmount => "dollar amount is not canonical nonnegative decimal text",
             Self::RateVersion => "billing rate version is invalid",
         })
@@ -1343,6 +1347,86 @@ pub enum ModelSelection {
         /// Exact configured alias identity.
         alias_id: CanonicalUuid,
     },
+}
+
+/// Explicit acknowledgement carried by a root-placement creation or update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootPlacementGlobalReadIntent {
+    /// The caller explicitly accepts that root placement grants global read.
+    Acknowledged,
+}
+
+/// One session's opt-in dotted placement decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionPlacement {
+    /// Preserve legacy unrestricted conversation-read behavior.
+    Pathless {},
+    /// Place below root; the parent directory's subtree is readable.
+    Scoped { path: String },
+    /// Place at root with loud acknowledgement that this grants global read.
+    RootGlobalRead {
+        path: String,
+        intent: RootPlacementGlobalReadIntent,
+    },
+}
+
+impl SessionPlacement {
+    fn is_pathless(&self) -> bool {
+        matches!(self, Self::Pathless {})
+    }
+    /// Constructs and validates a non-root placement.
+    pub fn try_scoped(path: String) -> Result<Self, CanonicalValueError> {
+        let placement = Self::Scoped { path };
+        validate_session_placement_shape(&placement).map_err(|_| CanonicalValueError::Placement)?;
+        Ok(placement)
+    }
+
+    /// Constructs and validates the loud root-global-read decision.
+    pub fn try_root_global_read(path: String) -> Result<Self, CanonicalValueError> {
+        let placement = Self::RootGlobalRead {
+            path,
+            intent: RootPlacementGlobalReadIntent::Acknowledged,
+        };
+        validate_session_placement_shape(&placement).map_err(|_| CanonicalValueError::Placement)?;
+        Ok(placement)
+    }
+}
+
+impl Default for SessionPlacement {
+    fn default() -> Self {
+        Self::Pathless {}
+    }
+}
+
+fn validate_session_placement_shape(
+    placement: &SessionPlacement,
+) -> Result<(), FrameValidationError> {
+    let (path, root) = match placement {
+        SessionPlacement::Pathless {} => return Ok(()),
+        SessionPlacement::Scoped { path } => (path, false),
+        SessionPlacement::RootGlobalRead { path, .. } => (path, true),
+    };
+    if path.len() > 64 * 64 + 63 {
+        return Err(FrameValidationError::PlacementShape);
+    }
+    let segment_count = path.split('.').try_fold(0_usize, |count, segment| {
+        let next_count = count + 1;
+        (next_count <= 64
+            && !segment.is_empty()
+            && segment.len() <= 64
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        .then_some(next_count)
+    });
+    let shape_valid = segment_count.is_some_and(|count| (count == 1) == root);
+    if shape_valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::PlacementShape)
+    }
 }
 
 /// One exact complete session-metadata object.
@@ -1858,6 +1942,33 @@ impl ConversationSummary {
     }
 }
 
+fn validate_tool_approval_event_shape(
+    decision: &ToolApprovalEventDecision,
+    decider: &ToolApprovalEventDecider,
+    rationale: &Option<String>,
+) -> Result<(), FrameValidationError> {
+    let shape_matches = match decider {
+        ToolApprovalEventDecider::User { .. } => match decision {
+            ToolApprovalEventDecision::Approve {}
+            | ToolApprovalEventDecision::Deny { reason: None } => rationale.is_none(),
+            ToolApprovalEventDecision::Deny {
+                reason: Some(reason),
+            } => rationale.is_none() && ToolDenialReason::try_new(reason.clone()).is_ok(),
+        },
+        ToolApprovalEventDecider::Delegate { .. } => match decision {
+            ToolApprovalEventDecision::Approve {}
+            | ToolApprovalEventDecision::Deny { reason: None } => rationale
+                .as_ref()
+                .is_some_and(|rationale| ToolDecisionRationale::try_new(rationale.clone()).is_ok()),
+            ToolApprovalEventDecision::Deny { reason: Some(_) } => false,
+        },
+    };
+    if !shape_matches {
+        return Err(FrameValidationError::ToolApprovalShape);
+    }
+    Ok(())
+}
+
 /// Validates the wire restatement of the derived display-title shape:
 /// nonempty single-line text without U+0000, at most
 /// [`MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS`] Unicode scalars, and
@@ -2251,6 +2362,9 @@ pub enum ClientRequest {
         /// Optional initial system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
+        /// Explicit opt-in placement, defaulting to legacy pathless behavior.
+        #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
+        placement: SessionPlacement,
     },
     /// Create a user-initiated session from one daemon-held template.
     CreateSessionFromTemplate {
@@ -2258,11 +2372,21 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Validated static template name.
         template_name: String,
+        /// Explicit opt-in placement, defaulting to legacy pathless behavior.
+        #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
+        placement: SessionPlacement,
     },
     /// List available static templates by name and version.
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
+    /// Append one explicit immutable session-placement update event.
+    UpdateSessionPlacement {
+        command_id: CommandId,
+        session_id: CanonicalUuid,
+        expected_placement_version: CanonicalU64,
+        replacement: SessionPlacement,
+    },
     /// Attach one immutable commissioned goal statement.
     AttachGoal {
         /// Durable mutation identity.
@@ -2699,6 +2823,7 @@ impl ClientRequest {
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
             | Self::ListSessions {}
+            | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }
             | Self::StopGoal { .. }
@@ -2743,6 +2868,23 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. } => {}
+        }
+        match self {
+            Self::CreateSession { placement, .. }
+            | Self::CreateSessionFromTemplate { placement, .. }
+            | Self::UpdateSessionPlacement {
+                replacement: placement,
+                ..
+            } => validate_session_placement_shape(placement)?,
+            _ => {}
+        }
+        if let Self::UpdateSessionPlacement {
+            expected_placement_version,
+            ..
+        } = self
+            && expected_placement_version.value() == 0
+        {
+            return Err(FrameValidationError::PlacementShape);
         }
         if let Self::SubmitInput {
             expected_defaults_version,
@@ -3133,6 +3275,17 @@ pub enum RejectionDetail {
         /// Absent target.
         session_id: CanonicalUuid,
     },
+    /// The placement head advanced beyond the caller-observed version.
+    SessionPlacementCurrentVersionMismatch {
+        session_id: CanonicalUuid,
+        expected_placement_version: CanonicalU64,
+        current_placement_version: CanonicalU64,
+    },
+    /// The positive placement-version space was exhausted.
+    SessionPlacementVersionExhausted {
+        session_id: CanonicalUuid,
+        current_placement_version: CanonicalU64,
+    },
     /// A durable goal command was rejected by current goal state.
     GoalCommandRejected {
         /// Target session.
@@ -3321,6 +3474,8 @@ impl RejectionDetail {
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
             Self::SessionNotFound { .. }
+            | Self::SessionPlacementCurrentVersionMismatch { .. }
+            | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
             | Self::ActiveTurnMismatch { .. }
@@ -3593,6 +3748,13 @@ pub enum TurnState {
         /// Exact delegated task text.
         content: InputContent,
     },
+    /// Delivered delegation content is queued to wake an idle recipient.
+    QueuedDelegationWake {
+        /// First recipient-wide delivery sequence included by the wake.
+        first_delivery_sequence: CanonicalU64,
+        /// Last recipient-wide delivery sequence included by the wake.
+        through_delivery_sequence: CanonicalU64,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
@@ -3612,6 +3774,15 @@ pub enum TurnState {
     ActiveAwaitingToolApproval {
         /// Earliest undecided tool request.
         tool_request_id: CanonicalUuid,
+    },
+    /// The turn is parked on a foreground delegated-child result.
+    ActiveAwaitingChild {
+        /// Tool request that issued the await.
+        await_request_id: CanonicalUuid,
+        /// Spawn request naming the relationship.
+        spawning_request_id: CanonicalUuid,
+        /// Exact child whose result releases the turn.
+        child_session_id: CanonicalUuid,
     },
     /// The turn is parked on an ambiguous tool attempt.
     ActiveAwaitingToolRecovery {
@@ -3690,6 +3861,10 @@ enum RawTurnState {
         parent_turn_id: CanonicalUuid,
         content: InputContent,
     },
+    QueuedDelegationWake {
+        first_delivery_sequence: CanonicalU64,
+        through_delivery_sequence: CanonicalU64,
+    },
     ActiveRunning {
         current_attempt_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3701,6 +3876,11 @@ enum RawTurnState {
     },
     ActiveAwaitingToolApproval {
         tool_request_id: CanonicalUuid,
+    },
+    ActiveAwaitingChild {
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
     },
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
@@ -3765,6 +3945,22 @@ impl<'de> Deserialize<'de> for TurnState {
                 parent_turn_id,
                 content,
             },
+            RawTurnState::QueuedDelegationWake {
+                first_delivery_sequence,
+                through_delivery_sequence,
+            } => {
+                if first_delivery_sequence.value() == 0
+                    || first_delivery_sequence > through_delivery_sequence
+                {
+                    return Err(serde::de::Error::custom(
+                        "delegation wake requires a positive ordered delivery range",
+                    ));
+                }
+                Self::QueuedDelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                }
+            }
             RawTurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -3782,6 +3978,15 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
                 Self::ActiveAwaitingToolApproval { tool_request_id }
             }
+            RawTurnState::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            } => Self::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            },
             RawTurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
@@ -3857,6 +4062,15 @@ impl<'de> Deserialize<'de> for TurnState {
 
 impl TurnState {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        if let Self::QueuedDelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } = self
+            && (first_delivery_sequence.value() == 0
+                || first_delivery_sequence > through_delivery_sequence)
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
         if let Self::Failed {
             terminal_attempt_id: None,
             terminal_model_call: Some(_),
@@ -4080,6 +4294,13 @@ pub enum TranscriptEntry {
         tool_name: String,
         /// Exact normalized or scrubbed-undecodable arguments.
         arguments: String,
+        /// Explicit decision provenance, absent while pending and for automatic policy.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
+        approval: Option<TranscriptToolApproval>,
     },
     /// One physical tool attempt produced the logical result.
     ToolExecutionResult {
@@ -4336,6 +4557,51 @@ pub enum DelegationProvenance {
     },
 }
 
+/// Exact decision recorded for one explicit tool approval.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolApprovalEventDecision {
+    /// Execution is permitted subject to current aggregate guards.
+    Approve {},
+    /// Execution is permanently prohibited for this request.
+    Deny {
+        /// Exact user explanation, absent for a delegate denial.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        reason: Option<String>,
+    },
+}
+
+/// Exact actor provenance for one explicit tool approval decision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolApprovalEventDecider {
+    /// The user acted through the named durable command.
+    User {
+        /// Exact durable command provenance.
+        command_id: CanonicalUuid,
+    },
+    /// A configured model acted through the named dedicated judge call.
+    Delegate {
+        /// Exact direct model selection used by the judge.
+        model_selection_id: CanonicalUuid,
+        /// Exact recorded judge model call.
+        model_call_id: CanonicalUuid,
+    },
+}
+
+/// One explicit approval decision retained in an authoritative transcript.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptToolApproval {
+    /// Exact recorded decision.
+    pub decision: ToolApprovalEventDecision,
+    /// Exact user or delegate provenance.
+    pub decider: ToolApprovalEventDecider,
+    /// Exact judge rationale, absent for a user decision.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub rationale: Option<String>,
+}
+
 /// Closed durable update event family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -4382,6 +4648,20 @@ pub enum SessionEvent {
         model_call_id: CanonicalUuid,
         /// Exact committed batch state.
         state: ToolBatchState,
+    },
+    /// One explicit tool approval decision committed with full provenance.
+    ToolApprovalDecided {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Exact logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact recorded decision.
+        decision: ToolApprovalEventDecision,
+        /// Exact user or delegate decider.
+        decider: ToolApprovalEventDecider,
+        /// Exact judge rationale, absent for a user decision.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        rationale: Option<String>,
     },
     /// One append-only context compaction committed.
     ContextCompacted {
@@ -4730,6 +5010,12 @@ pub enum ServerMessage {
         /// Created session.
         session_id: CanonicalUuid,
     },
+    /// One immutable placement update was appended or equally replayed.
+    SessionPlacementUpdated {
+        session_id: CanonicalUuid,
+        placement_version: CanonicalU64,
+        placement: SessionPlacement,
+    },
     /// Input acceptance receipt.
     InputSubmitted {
         /// Owning session.
@@ -4799,6 +5085,10 @@ pub enum ServerMessage {
         defaults_version: CanonicalU64,
         /// Current model-selection request.
         model_selection: ModelSelection,
+        /// Current immutable placement-history version.
+        placement_version: CanonicalU64,
+        /// Current opt-in placement decision.
+        placement: SessionPlacement,
     },
     /// Completes a session-summary sequence.
     SessionsEnd {
@@ -5220,6 +5510,28 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::TranscriptEntry {
+                entry:
+                    TranscriptEntry::AssistantToolUse {
+                        approval: Some(approval),
+                        ..
+                    },
+                ..
+            } => validate_tool_approval_event_shape(
+                &approval.decision,
+                &approval.decider,
+                &approval.rationale,
+            )?,
+            Self::SessionEvent {
+                event:
+                    SessionEvent::ToolApprovalDecided {
+                        decision,
+                        decider,
+                        rationale,
+                        ..
+                    },
+                ..
+            } => validate_tool_approval_event_shape(decision, decider, rationale)?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -5300,6 +5612,26 @@ impl ServerMessage {
                     return Err(FrameValidationError::TemplateShape);
                 }
             }
+            Self::SessionSummary {
+                placement_version,
+                placement,
+                ..
+            } => {
+                if placement_version.value() == 0 {
+                    return Err(FrameValidationError::PlacementShape);
+                }
+                validate_session_placement_shape(placement)?;
+            }
+            Self::SessionPlacementUpdated {
+                placement_version,
+                placement,
+                ..
+            } => {
+                if placement_version.value() == 0 {
+                    return Err(FrameValidationError::PlacementShape);
+                }
+                validate_session_placement_shape(placement)?;
+            }
             Self::ConversationPageEnd {
                 conversation_count,
                 next_after,
@@ -5372,6 +5704,16 @@ where
     ValueT: Deserialize<'de>,
 {
     Option::<ValueT>::deserialize(deserializer)
+}
+
+fn deserialize_optional_non_null<'de, DeserializerT, ValueT>(
+    deserializer: DeserializerT,
+) -> Result<Option<ValueT>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+    ValueT: Deserialize<'de>,
+{
+    ValueT::deserialize(deserializer).map(Some)
 }
 
 /// One validated server frame.
@@ -5464,6 +5806,8 @@ impl ServerFrame {
                         validate_conversation_import_detail(detail)?;
                     } else if *code != ErrorCode::Rejected {
                         return Err(FrameValidationError::ErrorDetailShape);
+                    } else {
+                        validate_rejection_detail(detail)?;
                     }
                 } else if *code == ErrorCode::Rejected {
                     return Err(FrameValidationError::ErrorDetailShape);
@@ -5499,6 +5843,53 @@ impl<'de> Deserialize<'de> for ServerFrame {
         };
         frame.validate().map_err(serde::de::Error::custom)?;
         Ok(frame)
+    }
+}
+
+fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidationError> {
+    let valid = match detail {
+        RejectionDetail::SessionPlacementCurrentVersionMismatch {
+            expected_placement_version,
+            current_placement_version,
+            ..
+        } => {
+            expected_placement_version.value() > 0
+                && current_placement_version.value() > 0
+                && expected_placement_version != current_placement_version
+        }
+        RejectionDetail::SessionPlacementVersionExhausted {
+            current_placement_version,
+            ..
+        } => current_placement_version.value() == u64::MAX,
+        RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::GoalCommandRejected { .. }
+        | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::ActiveTurnMismatch { .. }
+        | RejectionDetail::NoActiveTurn { .. }
+        | RejectionDetail::TurnNotAwaitingReconciliation { .. }
+        | RejectionDetail::InterruptAlreadyApplied { .. }
+        | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
+        | RejectionDetail::SafePointUnavailableWhileStopping { .. }
+        | RejectionDetail::ToolRequestNotFound { .. }
+        | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
+        | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DefaultsVersionMismatch { .. }
+        | RejectionDetail::UnknownModelAlias { .. }
+        | RejectionDetail::AcceptancePositionExhausted { .. }
+        | RejectionDetail::DefaultsVersionExhausted { .. }
+        | RejectionDetail::ImportedConversationNotFound { .. }
+        | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => true,
+        RejectionDetail::ConversationImportAlreadyInProgress {}
+        | RejectionDetail::ConversationImportNotInProgress {}
+        | RejectionDetail::ConversationImportSourceTooLarge { .. }
+        | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
+        | RejectionDetail::ConversationImportConversionFailed { .. } => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::ErrorDetailShape)
     }
 }
 
@@ -5552,6 +5943,8 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
+        | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
@@ -5593,6 +5986,8 @@ pub enum FrameValidationError {
     ErrorDetailShape,
     /// A transcript turn carried an impossible correlated state shape.
     TurnStateShape,
+    /// A tool approval event carried inconsistent decision provenance.
+    ToolApprovalShape,
     /// A metadata request or response carried an invalid correlated shape.
     MetadataShape,
     /// A unified conversation-listing frame carried an invalid shape.
@@ -5624,6 +6019,8 @@ pub enum FrameValidationError {
     GoalShape,
     /// A delegation update carried an invalid correlated shape.
     DelegationShape,
+    /// A dotted placement or its root-global-read acknowledgement is invalid.
+    PlacementShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -5635,6 +6032,7 @@ impl fmt::Display for FrameValidationError {
             Self::UncorrelatedApplicationError => "application server error is uncorrelated",
             Self::ErrorDetailShape => "server error detail does not match its code",
             Self::TurnStateShape => "transcript turn state is inconsistent",
+            Self::ToolApprovalShape => "tool approval event shape is inconsistent",
             Self::MetadataShape => "session metadata frame shape is inconsistent",
             Self::ConversationListShape => {
                 "unified conversation-listing frame shape is inconsistent"
@@ -5654,6 +6052,7 @@ impl fmt::Display for FrameValidationError {
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
             Self::GoalShape => "commissioned-goal frame shape is inconsistent",
             Self::DelegationShape => "session-delegation frame shape is inconsistent",
+            Self::PlacementShape => "session-placement frame shape is inconsistent",
         })
     }
 }
@@ -6086,10 +6485,11 @@ mod tests {
         ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
         ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewTargetSubject, ServerFrame,
         ServerMessage, SessionEvent, SessionMetadata, SystemPromptMember, SystemPromptText,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-        UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
+        TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnState, UsageProvenance,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
+    use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
 
     fn command(value: u128) -> Result<CommandId, Box<dyn std::error::Error>> {
@@ -6185,6 +6585,42 @@ mod tests {
     fn assert_server_malformed(json: &str) {
         let error = decode_server_line(&line(json)).expect_err("server frame must be malformed");
         assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[track_caller]
+    fn assert_placement_version_mismatch_rejected(expected: u64, current: u64) {
+        let error = ServerFrame::try_new(
+            request(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("placement version mismatch"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                        session_id: uuid(2),
+                        expected_placement_version: CanonicalU64::new(expected),
+                        current_placement_version: CanonicalU64::new(current),
+                    },
+                ),
+            },
+        )
+        .expect_err("incoherent placement mismatch evidence is rejected");
+        assert_eq!(error, FrameValidationError::ErrorDetailShape);
+    }
+
+    fn placement_version_exhaustion_frame(
+        current: u64,
+    ) -> Result<ServerFrame, FrameValidationError> {
+        ServerFrame::try_new(
+            request(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("placement version exhausted"),
+                detail: ErrorDetail::rejected(RejectionDetail::SessionPlacementVersionExhausted {
+                    session_id: uuid(2),
+                    current_placement_version: CanonicalU64::new(current),
+                }),
+            },
+        )
     }
 
     #[track_caller]
@@ -6633,6 +7069,30 @@ mod tests {
     }
 
     #[test]
+    fn awaiting_child_turn_state_round_trips_exact_wait_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::ActiveAwaitingChild {
+            await_request_id: uuid(4),
+            spawning_request_id: uuid(5),
+            child_session_id: uuid(2),
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "active_awaiting_child",
+                "await_request_id": "00000000-0000-0000-0000-000000000004",
+                "spawning_request_id": "00000000-0000-0000-0000-000000000005",
+                "child_session_id": "00000000-0000-0000-0000-000000000002"
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn inv033_unknown_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions","extra":true}}"#,
@@ -6765,6 +7225,33 @@ mod tests {
             },
             r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued_delegated","spawning_request_id":"00000000-0000-0000-0000-000000000002","parent_session_id":"00000000-0000-0000-0000-000000000003","parent_turn_id":"00000000-0000-0000-0000-000000000004","content":"delegated task"}}"#,
         )
+    }
+
+    #[test]
+    fn delegation_wake_queued_turn_round_trips_exact_delivery_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(2),
+                state: TurnState::QueuedDelegationWake {
+                    first_delivery_sequence: CanonicalU64::new(3),
+                    through_delivery_sequence: CanonicalU64::new(5),
+                },
+            },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"3","through_delivery_sequence":"5"}}"#,
+        )
+    }
+
+    #[test]
+    fn delegation_wake_queued_turn_rejects_invalid_delivery_ranges() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"0","through_delivery_sequence":"5"}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"5","through_delivery_sequence":"3"}}}"#,
+        );
     }
 
     #[test]
@@ -7257,9 +7744,19 @@ mod tests {
                 command_id: command(4)?,
                 initial_model_selection: model,
                 system_prompt: SystemPromptMember::present(None),
+                placement: super::SessionPlacement::Pathless {},
             },
         )?;
         assert_client_request_current_version(request(2)?, ClientRequest::ListSessions {})?;
+        assert_client_request_current_version(
+            request(80)?,
+            ClientRequest::UpdateSessionPlacement {
+                command_id: command(81)?,
+                session_id: uuid(82),
+                expected_placement_version: CanonicalU64::new(1),
+                replacement: super::SessionPlacement::Pathless {},
+            },
+        )?;
         assert_client_request_current_version(
             request(3)?,
             ClientRequest::SubmitInput {
@@ -9046,6 +9543,7 @@ mod tests {
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
             )?)),
+            placement: super::SessionPlacement::Pathless {},
         };
         let frame = ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, create)?;
         let encoded = encode_client_line(&frame)?;
@@ -9065,6 +9563,7 @@ mod tests {
                 selection_id: uuid(4),
             },
             system_prompt: SystemPromptMember::present(None),
+            placement: super::SessionPlacement::Pathless {},
         };
         let promptless_frame =
             ClientFrame::try_new_for_version(ProtocolVersion::One, request_id, promptless_create)?;
@@ -9224,6 +9723,7 @@ mod tests {
             ClientRequest::CreateSessionFromTemplate {
                 command_id: command(2)?,
                 template_name: "reviewer".to_owned(),
+                placement: super::SessionPlacement::Pathless {},
             },
         )?;
         let encoded_create = encode_client_line(&create)?;
@@ -9268,6 +9768,116 @@ mod tests {
             r#"{"type":"templates_end","template_count":"1"}"#,
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn root_placement_creation_and_update_frames_record_global_read_intent_loudly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root_path = "operator";
+        let root = super::SessionPlacement::try_root_global_read(String::from(root_path))?;
+        let create = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(70)?,
+            ClientRequest::CreateSession {
+                command_id: command(71)?,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: uuid(72),
+                },
+                system_prompt: SystemPromptMember::present(None),
+                placement: root.clone(),
+            },
+        )?;
+        assert_eq!(
+            String::from_utf8(encode_client_line(&create)?)?,
+            r#"{"version":1,"request_id":"70","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"},"system_prompt":null,"placement":{"kind":"root_global_read","path":"operator","intent":"acknowledged"}}}
+"#
+        );
+        let update = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(73)?,
+            ClientRequest::UpdateSessionPlacement {
+                command_id: command(74)?,
+                session_id: uuid(75),
+                expected_placement_version: CanonicalU64::new(1),
+                replacement: root,
+            },
+        )?;
+        assert_eq!(decode_client_line(&encode_client_line(&update)?)?, update);
+        assert_eq!(
+            super::SessionPlacement::try_scoped(String::from(root_path)),
+            Err(super::CanonicalValueError::Placement)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_session_placement_constructor_rejects_paths_over_the_structural_byte_bound() {
+        let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
+        let frame_sized_empty_segments = ".".repeat(super::MAX_FRAME_BYTES - 1);
+
+        assert!(super::SessionPlacement::try_scoped(maximum_structural_path).is_ok());
+        assert_eq!(
+            super::SessionPlacement::try_scoped(frame_sized_empty_segments),
+            Err(super::CanonicalValueError::Placement)
+        );
+    }
+
+    #[test]
+    fn inv033_session_placement_frames_admit_the_complete_structural_range() {
+        let maximum_structural_path = vec!["x".repeat(64); 64].join(".");
+        let frame = format!(
+            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{maximum_structural_path}"}}}}}}
+"#
+        );
+
+        decode_client_line(frame.as_bytes()).expect("complete structural path is request-admitted");
+        let response = ServerFrame::try_new(
+            request(2).expect("fixture request identity is admitted"),
+            ServerMessage::SessionSummary {
+                session_id: uuid(3),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Alias { alias_id: uuid(4) },
+                placement_version: CanonicalU64::new(1),
+                placement: super::SessionPlacement::Scoped {
+                    path: maximum_structural_path,
+                },
+            },
+        )
+        .expect("legacy structural placement remains response-encodable");
+        let encoded = encode_server_line(&response).expect("response encoding succeeds");
+        assert_eq!(
+            decode_server_line(&encoded).expect("response decoding succeeds"),
+            response
+        );
+    }
+
+    #[test]
+    fn inv033_session_placement_rejection_versions_are_coherent() {
+        assert_placement_version_mismatch_rejected(0, 2);
+        assert_placement_version_mismatch_rejected(1, 0);
+        assert_placement_version_mismatch_rejected(2, 2);
+        assert_eq!(
+            placement_version_exhaustion_frame(1)
+                .expect_err("nonmaximum placement version cannot be exhausted"),
+            FrameValidationError::ErrorDetailShape
+        );
+        assert!(placement_version_exhaustion_frame(u64::MAX).is_ok());
+
+        let valid = ServerFrame::try_new(
+            request(1).expect("fixture request identity is admitted"),
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("placement version mismatch"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::SessionPlacementCurrentVersionMismatch {
+                        session_id: uuid(2),
+                        expected_placement_version: CanonicalU64::new(1),
+                        current_placement_version: CanonicalU64::new(2),
+                    },
+                ),
+            },
+        );
+        assert!(valid.is_ok());
     }
 
     /// INV-033: invalid template names or versions cannot enter admitted frames.
@@ -9496,6 +10106,147 @@ mod tests {
             r#"{"version":1,"request_id":"4","request":{"type":"decide_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"deny"}}}"#,
         );
         Ok(())
+    }
+
+    #[test]
+    fn inv033_tool_approval_user_approve_event_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(8),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Approve {},
+                    decider: ToolApprovalEventDecider::User {
+                        command_id: uuid(9),
+                    },
+                    rationale: None,
+                },
+            },
+            r#"{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_user_deny_event_round_trips_with_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(15)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Deny {
+                        reason: Some(String::from("user declined")),
+                    },
+                    decider: ToolApprovalEventDecider::User {
+                        command_id: uuid(9),
+                    },
+                    rationale: None,
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"user declined"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":null}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_delegate_deny_event_round_trips_with_rationale()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Deny { reason: None },
+                    decider: ToolApprovalEventDecider::Delegate {
+                        model_selection_id: uuid(10),
+                        model_call_id: uuid(11),
+                    },
+                    rationale: Some(String::from("request exceeds the stated scope")),
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_transcript_tool_approval_round_trips_historical_delegate_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(16)?,
+            ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(2),
+                source_session_id: uuid(6),
+                entry_id: uuid(7),
+                entry: TranscriptEntry::AssistantToolUse {
+                    turn_id: uuid(8),
+                    model_call_id: uuid(9),
+                    tool_request_id: uuid(10),
+                    tool_name: String::from("publish"),
+                    arguments: String::from("{}"),
+                    approval: Some(TranscriptToolApproval {
+                        decision: ToolApprovalEventDecision::Deny { reason: None },
+                        decider: ToolApprovalEventDecider::Delegate {
+                            model_selection_id: uuid(11),
+                            model_call_id: uuid(12),
+                        },
+                        rationale: Some(String::from("request exceeds the stated scope")),
+                    }),
+                },
+            },
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"request exceeds the stated scope"}}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_transcript_tool_approval_rejects_explicit_null() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"16","message":{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":null}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_tool_approval_delegate_decider_requires_rationale() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_tool_approval_delegate_denial_rejects_user_reason() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_tool_approval_delegate_rationale_rejects_oversize() {
+        const RATIONALE_FILLER: &str = "x";
+        let oversized_rationale =
+            RATIONALE_FILLER.repeat(ToolDecisionRationale::MAX_UTF8_BYTES + 1);
+        let oversized_frame = [
+            r#"{"version":1,"request_id":"10","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":""#,
+            oversized_rationale.as_str(),
+            r#""}}}"#,
+        ]
+        .concat();
+
+        assert_server_malformed(&oversized_frame);
     }
 
     /// INV-033: every stop rejection carries its exact closed wire shape.
@@ -10557,8 +11308,10 @@ mod tests {
                 session_id: uuid(1),
                 defaults_version: CanonicalU64::new(1),
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
+                placement_version: CanonicalU64::new(1),
+                placement: super::SessionPlacement::Pathless {},
             },
-            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"}}"#,
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"},"placement_version":"1","placement":{"kind":"pathless"}}"#,
         )?;
         assert_server_message_round_trip(
             request(5)?,

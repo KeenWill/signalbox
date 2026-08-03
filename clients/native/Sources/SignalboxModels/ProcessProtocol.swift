@@ -486,6 +486,88 @@ public enum SignalboxProcessToolDecision: Codable, Equatable, Sendable {
   }
 }
 
+public enum SignalboxToolApprovalEventDecision: Decodable, Equatable, Sendable {
+  case approve
+  case deny(reason: String?)
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "approve":
+      try tagged.rejectUnadmittedFields(["type"], decoder: decoder)
+      self = .approve
+    case "deny":
+      try tagged.rejectUnadmittedFields(["type", "reason"], decoder: decoder)
+      let reason: String? = try decoder.decode("reason")
+      self = .deny(reason: reason)
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown tool-approval event decision type."
+        )
+      )
+    }
+  }
+}
+
+public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
+  case user(commandID: SignalboxCanonicalUUID)
+  case delegate(
+    modelSelectionID: SignalboxCanonicalUUID,
+    modelCallID: SignalboxCanonicalUUID
+  )
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    switch tagged.kind {
+    case "user":
+      try tagged.rejectUnadmittedFields(["type", "command_id"], decoder: decoder)
+      self = .user(commandID: try decoder.decode("command_id"))
+    case "delegate":
+      try tagged.rejectUnadmittedFields(
+        ["type", "model_selection_id", "model_call_id"],
+        decoder: decoder
+      )
+      self = .delegate(
+        modelSelectionID: try decoder.decode("model_selection_id"),
+        modelCallID: try decoder.decode("model_call_id")
+      )
+    default:
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Unknown tool-approval event decider type."
+        )
+      )
+    }
+  }
+}
+
+public struct SignalboxTranscriptToolApproval: Decodable, Equatable, Sendable {
+  public let decision: SignalboxToolApprovalEventDecision
+  public let decider: SignalboxToolApprovalEventDecider
+  public let rationale: String?
+
+  public init(from decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["decision", "decider", "rationale"],
+      decoder: decoder
+    )
+    try payload.requireFields(["decision", "decider", "rationale"], decoder: decoder)
+    decision = try decoder.decode("decision")
+    decider = try decoder.decode("decider")
+    rationale = try decoder.decode("rationale")
+    try SignalboxProcessSessionEvent.validateToolApprovalDecision(
+      decision: decision,
+      decider: decider,
+      rationale: rationale,
+      decoder: decoder
+    )
+  }
+}
+
 public enum SignalboxConversationOriginFilter: String, Codable, Equatable, Sendable {
   case native
   case imported
@@ -1580,11 +1662,18 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
     parentSessionID: SignalboxCanonicalUUID,
     parentTurnID: SignalboxCanonicalUUID,
     content: String)
+  case queuedDelegationWake(
+    firstDeliverySequence: SignalboxCanonicalUInt64,
+    throughDeliverySequence: SignalboxCanonicalUInt64)
   case activeRunning(
     currentAttemptID: SignalboxCanonicalUUID, currentModelCall: SignalboxCurrentModelCall?)
   case activeAwaitingModelCallRecovery(
     endedAttemptID: SignalboxCanonicalUUID, recoveryModelCallID: SignalboxCanonicalUUID)
   case activeAwaitingToolApproval(toolRequestID: SignalboxCanonicalUUID)
+  case activeAwaitingChild(
+    awaitRequestID: SignalboxCanonicalUUID,
+    spawningRequestID: SignalboxCanonicalUUID,
+    childSessionID: SignalboxCanonicalUUID)
   case activeAwaitingToolRecovery(
     endedAttemptID: SignalboxCanonicalUUID, recoveryToolAttemptID: SignalboxCanonicalUUID)
   case failed(
@@ -1643,6 +1732,24 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           parentSessionID: try decoder.decode("parent_session_id"),
           parentTurnID: try decoder.decode("parent_turn_id"),
           content: try decoder.decode("content"))
+      case "queued_delegation_wake":
+        try tagged.rejectUnadmittedFields(
+          ["type", "first_delivery_sequence", "through_delivery_sequence"],
+          decoder: decoder
+        )
+        let first: SignalboxCanonicalUInt64 = try decoder.decode("first_delivery_sequence")
+        let through: SignalboxCanonicalUInt64 = try decoder.decode("through_delivery_sequence")
+        guard first.rawValue > 0, first <= through else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath,
+              debugDescription: "A delegation wake requires a positive ordered delivery range."
+            )
+          )
+        }
+        self = .queuedDelegationWake(
+          firstDeliverySequence: first,
+          throughDeliverySequence: through)
       case "active_running":
         try tagged.rejectUnadmittedFields(
           ["type", "current_attempt_id", "current_model_call"],
@@ -1668,6 +1775,16 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .activeAwaitingToolApproval(toolRequestID: try decoder.decode("tool_request_id"))
+      case "active_awaiting_child":
+        try tagged.rejectUnadmittedFields(
+          ["type", "await_request_id", "spawning_request_id", "child_session_id"],
+          decoder: decoder
+        )
+        self = .activeAwaitingChild(
+          awaitRequestID: try decoder.decode("await_request_id"),
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          childSessionID: try decoder.decode("child_session_id")
+        )
       case "active_awaiting_tool_recovery":
         try tagged.rejectUnadmittedFields(
           ["type", "ended_attempt_id", "recovery_tool_attempt_id"],
@@ -1991,7 +2108,8 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
   )
   case assistantToolUse(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
-    toolRequestID: SignalboxCanonicalUUID, toolName: String, arguments: String)
+    toolRequestID: SignalboxCanonicalUUID, toolName: String, arguments: String,
+    approval: SignalboxTranscriptToolApproval?)
   case toolExecutionResult(
     toolRequestID: SignalboxCanonicalUUID, toolAttemptID: SignalboxCanonicalUUID, content: String)
   case toolDenied(toolRequestID: SignalboxCanonicalUUID, content: String)
@@ -2048,11 +2166,20 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           "delivery_sequence")
         let outcome: SignalboxDelegationOutcome = try decoder.decode("outcome")
         let content: String? = try decoder.decodeIfPresent("content")
+        let childSessionID: SignalboxCanonicalUUID = try decoder.decode("child_session_id")
+        let reason: SignalboxDelegationReason = try decoder.decode("reason")
+        let provenance: SignalboxDelegationProvenance = try decoder.decode("provenance")
         guard
           (mode == .foreground && deliverySequence == nil)
             || (mode == .background && (deliverySequence?.rawValue ?? 0) > 0),
           (outcome == .returned && content != nil)
-            || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil)
+            || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil),
+          Self.delegationResultShapeIsValid(
+            childSessionID: childSessionID,
+            outcome: outcome,
+            content: content,
+            reason: reason,
+            provenance: provenance)
         else {
           throw DecodingError.dataCorrupted(
             .init(
@@ -2064,13 +2191,13 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         self = .delegationResult(
           awaitRequestID: try decoder.decode("await_request_id"),
           spawningRequestID: try decoder.decode("spawning_request_id"),
-          childSessionID: try decoder.decode("child_session_id"),
+          childSessionID: childSessionID,
           mode: mode,
           deliverySequence: deliverySequence,
           outcome: outcome,
           content: content,
-          reason: try decoder.decode("reason"),
-          provenance: try decoder.decode("provenance"))
+          reason: reason,
+          provenance: provenance)
       case "model_identity_changed":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "defaults_version", "selected_model_id"],
@@ -2092,15 +2219,28 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         )
       case "assistant_tool_use":
         try tagged.rejectUnadmittedFields(
-          ["type", "turn_id", "model_call_id", "tool_request_id", "tool_name", "arguments"],
+          [
+            "type", "turn_id", "model_call_id", "tool_request_id", "tool_name", "arguments",
+            "approval",
+          ],
           decoder: decoder
         )
+        guard tagged.payload["approval"] != .null else {
+          throw DecodingError.valueNotFound(
+            SignalboxTranscriptToolApproval.self,
+            .init(
+              codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("approval")],
+              debugDescription: "Tool approval provenance must be absent or a typed decision."
+            )
+          )
+        }
         self = .assistantToolUse(
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           toolRequestID: try decoder.decode("tool_request_id"),
           toolName: try decoder.decode("tool_name"),
-          arguments: try decoder.decode("arguments")
+          arguments: try decoder.decode("arguments"),
+          approval: try decoder.decodeIfPresent("approval")
         )
       case "tool_execution_result":
         try tagged.rejectUnadmittedFields(
@@ -2160,6 +2300,36 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         payload: tagged.payload,
         decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
       )
+    }
+  }
+
+  private static func delegationResultShapeIsValid(
+    childSessionID: SignalboxCanonicalUUID,
+    outcome: SignalboxDelegationOutcome,
+    content: String?,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance
+  ) -> Bool {
+    switch (outcome, reason, provenance, content) {
+    case (.returned, .childCompleted, .childTurn(let provenanceChild, _), .some):
+      return provenanceChild == childSessionID
+    case (.failed, .childExecutionFailed, .childTurn(let provenanceChild, _), .none),
+      (.failed, .childResultUnavailable, .childTurn(let provenanceChild, _), .none),
+      (.cancelled, .childCancelled, .childTurn(let provenanceChild, _), .none):
+      return provenanceChild == childSessionID
+    case (.stopped, .parentStopped, let provenance, .none),
+      (.stopped, .parentCancelled, let provenance, .none),
+      (.cancelled, .parentStopped, let provenance, .none),
+      (.cancelled, .parentCancelled, let provenance, .none):
+      switch provenance {
+      case .parentTurnCommand(_, _, _, .parentAndDescendants),
+        .parentGoalCommand(_, _, _, .parentAndDescendants):
+        return true
+      case .childTurn, .parentTurnCommand, .parentGoalCommand:
+        return false
+      }
+    default:
+      return false
     }
   }
 }
@@ -2375,6 +2545,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
   case toolBatchTransition(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     state: SignalboxToolBatchState)
+  case toolApprovalDecided(
+    turnID: SignalboxCanonicalUUID,
+    toolRequestID: SignalboxCanonicalUUID,
+    decision: SignalboxToolApprovalEventDecision,
+    decider: SignalboxToolApprovalEventDecider,
+    rationale: String?
+  )
   case contextCompacted(
     contextCompactionID: SignalboxCanonicalUUID,
     modelCallID: SignalboxCanonicalUUID,
@@ -2449,6 +2626,27 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
           turnID: try decoder.decode("turn_id"),
           modelCallID: try decoder.decode("model_call_id"),
           state: try decoder.decode("state")
+        )
+      case "tool_approval_decided":
+        try tagged.rejectUnadmittedFields(
+          ["type", "turn_id", "tool_request_id", "decision", "decider", "rationale"],
+          decoder: decoder
+        )
+        let decision: SignalboxToolApprovalEventDecision = try decoder.decode("decision")
+        let decider: SignalboxToolApprovalEventDecider = try decoder.decode("decider")
+        let rationale: String? = try decoder.decode("rationale")
+        try Self.validateToolApprovalDecision(
+          decision: decision,
+          decider: decider,
+          rationale: rationale,
+          decoder: decoder
+        )
+        self = .toolApprovalDecided(
+          turnID: try decoder.decode("turn_id"),
+          toolRequestID: try decoder.decode("tool_request_id"),
+          decision: decision,
+          decider: decider,
+          rationale: rationale
         )
       case "context_compacted":
         try tagged.rejectUnadmittedFields(
@@ -2536,6 +2734,57 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
       )
     }
+  }
+
+  fileprivate static func validateToolApprovalDecision(
+    decision: SignalboxToolApprovalEventDecision,
+    decider: SignalboxToolApprovalEventDecider,
+    rationale: String?,
+    decoder: Decoder
+  ) throws {
+    let shapeMatches: Bool
+    switch decider {
+    case .user:
+      switch decision {
+      case .approve:
+        shapeMatches = rationale == nil
+      case .deny(let reason):
+        shapeMatches = rationale == nil && (reason.map(validDenialReason) ?? true)
+      }
+    case .delegate:
+      switch decision {
+      case .approve:
+        shapeMatches = rationale.map(validRationale) ?? false
+      case .deny(let reason):
+        shapeMatches = reason == nil && (rationale.map(validRationale) ?? false)
+      }
+    }
+    guard shapeMatches else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Tool-approval event carries inconsistent decision provenance."
+        )
+      )
+    }
+  }
+
+  private static func validDenialReason(_ reason: String) -> Bool {
+    !reason.isEmpty
+      && reason.utf8.count <= 1_024
+      && reason.unicodeScalars.allSatisfy { $0.properties.generalCategory != .control }
+      && reason.unicodeScalars.first.map { !isPOSIXWhitespace($0) } == true
+      && reason.unicodeScalars.last.map { !isPOSIXWhitespace($0) } == true
+  }
+
+  private static func isPOSIXWhitespace(_ scalar: Unicode.Scalar) -> Bool {
+    scalar.value == 0x20 || (0x09...0x0D).contains(scalar.value)
+  }
+
+  private static func validRationale(_ rationale: String) -> Bool {
+    !rationale.isEmpty
+      && rationale.utf8.count <= 4_096
+      && rationale.unicodeScalars.allSatisfy { $0.value != 0 }
   }
 }
 

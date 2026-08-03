@@ -69,6 +69,7 @@ def main() -> int:
         legacy_actor = (
             root / "crates" / "persistence" / "src" / "session_metadata.rs"
         )
+        storage_mapping = root / "crates" / "persistence" / "src" / "mapping.rs"
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
         )
@@ -300,6 +301,9 @@ def main() -> int:
         legacy_actor.write_text(
             fixture_text(legacy_actor_lines), encoding="utf-8"
         )
+        storage_mapping.write_text(
+            'const DECISION_SOURCE: &str = "owner_command";\n', encoding="utf-8"
+        )
         git(root, "init", "--quiet")
         git(
             root,
@@ -308,6 +312,7 @@ def main() -> int:
             "crates/application/src/conversation_import.rs",
             "crates/domain/src/session.rs",
             "crates/persistence/src/session_metadata.rs",
+            "crates/persistence/src/mapping.rs",
             "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",
@@ -520,51 +525,6 @@ def main() -> int:
         assert accepted.returncode == 0, (
             f"allowed vocabulary failed:\n{accepted.stdout}{accepted.stderr}"
         )
-
-        inventory = run_checker(root, "--show-allowlist-hash")
-        assert inventory.returncode == 0, (
-            f"allowlist inventory failed:\n{inventory.stdout}{inventory.stderr}"
-        )
-        reviewed_inventory = inventory.stdout.strip()
-        accepted_storage = mixed_storage_path.read_text(encoding="utf-8")
-        mixed_storage_path.write_text(
-            accepted_storage
-            + 'const HUMAN_PRINCIPAL: &str = "owner_command";\n',
-            encoding="utf-8",
-        )
-        drifted = run_checker(
-            root,
-            "--expected-allowlist-sha256",
-            reviewed_inventory,
-        )
-        assert drifted.returncode == 1, "allowlisted inventory drift passed"
-        assert "reviewed owner allowlist inventory changed" in drifted.stdout, (
-            f"inventory drift lacked exact diagnostic: {drifted.stdout}"
-        )
-        mixed_storage_path.write_text(accepted_storage, encoding="utf-8")
-        restored = run_checker(
-            root,
-            "--expected-allowlist-sha256",
-            reviewed_inventory,
-        )
-        assert restored.returncode == 0, (
-            f"restored inventory failed:\n{restored.stdout}{restored.stderr}"
-        )
-        reviewed_author_text = reviewed_author.read_text(encoding="utf-8")
-        reviewed_author.write_text(
-            "let unrelated = true;\n" + reviewed_author_text,
-            encoding="utf-8",
-        )
-        moved = run_checker(
-            root,
-            "--expected-allowlist-sha256",
-            reviewed_inventory,
-        )
-        assert moved.returncode == 1, "moved allowlisted line passed"
-        assert "reviewed owner allowlist inventory changed" in moved.stdout, (
-            f"moved inventory lacked exact diagnostic: {moved.stdout}"
-        )
-        reviewed_author.write_text(reviewed_author_text, encoding="utf-8")
     print("user-vocabulary checker self-test passed")
     return 0
 

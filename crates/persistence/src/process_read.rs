@@ -12,13 +12,18 @@ use signalbox_domain::{
     ImportedConversationId, ImportedSourceAttestation, ImportedTranscriptContent,
     ImportedTranscriptEntryId, ModelAlias, ModelCallId, ProviderModelIdentity,
     ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+    SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
+    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
+    VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
-    mapping::{session_id_from_uuid, session_id_to_uuid},
+    mapping::{
+        ToolApprovalDecisionSourceStorageKind, durable_command_id_from_uuid, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str,
+    },
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
         DispatchedDelegationWaitMode, decode_delegation_outcome, decode_delegation_provenance,
@@ -38,11 +43,12 @@ pub enum ProcessModelSelection {
 }
 
 /// One current session summary read from a shared transaction snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessSessionSummary {
     session: SessionId,
     defaults_version: u64,
     model_selection: ProcessModelSelection,
+    placement: signalbox_domain::VersionedSessionPlacement,
 }
 
 impl ProcessSessionSummary {
@@ -59,6 +65,11 @@ impl ProcessSessionSummary {
     /// Returns the current model-selection request.
     pub const fn model_selection(&self) -> ProcessModelSelection {
         self.model_selection
+    }
+
+    /// Borrows the current immutable placement epoch.
+    pub const fn placement(&self) -> &signalbox_domain::VersionedSessionPlacement {
+        &self.placement
     }
 }
 
@@ -97,6 +108,17 @@ pub enum ProcessSessionDefaultsRead {
     SessionNotFound,
     /// The session exists but the named epoch was never installed.
     VersionNotFound,
+}
+
+/// Typed outcome of the path-scoped native transcript-open boundary.
+#[derive(Debug)]
+pub enum ProcessScopedTranscriptRead {
+    /// The target exists and its transcript cursor is open in the checked snapshot.
+    Opened(Box<ProcessTranscriptReader>),
+    /// The selected target session does not exist in the checked snapshot.
+    TargetNotFound,
+    /// The requesting placement's parent directory does not contain the target.
+    Refused(SessionReadScopeRefusal),
 }
 
 fn decode_session_defaults_value(
@@ -185,7 +207,7 @@ impl ProcessSessionSummaryReader {
         let row = sqlx::query(
             "SELECT
                 session_row.session_id,
-                current_defaults.current_version,
+                current_defaults.current_version AS defaults_version,
                 selected_defaults.model_selection_kind,
                 selected_defaults.direct_model_selection_id,
                 selected_defaults.model_alias_id
@@ -204,7 +226,11 @@ impl ProcessSessionSummaryReader {
         .await?;
 
         if let Some(row) = row {
-            let summary = decode_session_summary(&row)?;
+            let session = session_id_from_uuid(required(&row, "session_id")?);
+            let placement = load_process_session_placement(transaction, session)
+                .await?
+                .ok_or(ProcessReadCorruption::Missing("session placement"))?;
+            let summary = decode_session_summary(&row, placement)?;
             self.next_session_after = Some(session_id_to_uuid(summary.session()));
             self.summary_count =
                 self.summary_count
@@ -356,6 +382,14 @@ pub enum ProcessTurnState {
         /// Exact delegated task text.
         content: String,
     },
+    /// A contiguous range of delivered delegation content is waiting to wake
+    /// an otherwise idle recipient.
+    QueuedDelegationWake {
+        /// First recipient-wide delivery sequence included by the wake.
+        first_delivery_sequence: u64,
+        /// Last recipient-wide delivery sequence included by the wake.
+        through_delivery_sequence: u64,
+    },
     /// The current attempt is running.
     ActiveRunning {
         /// Current live attempt.
@@ -374,6 +408,15 @@ pub enum ProcessTurnState {
     ActiveAwaitingToolApproval {
         /// Earliest undecided tool request.
         request: ToolRequestId,
+    },
+    /// The yielded foreground await is parked on one exact delegated child.
+    ActiveAwaitingChild {
+        /// Tool request that issued the foreground await.
+        awaiting_request: ToolRequestId,
+        /// Spawn request naming the relationship.
+        spawning_request: ToolRequestId,
+        /// Exact child whose terminal result releases this turn.
+        child: SessionId,
     },
     /// The yielded tool batch is parked on an ambiguous external effect.
     ActiveAwaitingToolRecovery {
@@ -779,6 +822,8 @@ pub enum ProcessTranscriptEntry {
         name: String,
         /// Exact stored normalized or scrubbed undecodable arguments.
         arguments: String,
+        /// Explicit decision provenance, absent while pending and for automatic policy.
+        approval: Option<ProcessToolApproval>,
     },
     /// Executed tool result reference.
     ToolExecutionResult {
@@ -888,6 +933,31 @@ pub enum ProcessTranscriptEntry {
         /// Conservative normalized content kind.
         content_kind: ProcessImportedContentKind,
     },
+}
+
+/// One explicit approval decision projected with an assistant tool proposal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessToolApproval {
+    decision: ToolApprovalDecision,
+    decider: ToolApprovalDecider,
+    rationale: Option<ToolDecisionRationale>,
+}
+
+impl ProcessToolApproval {
+    /// Borrows the exact recorded decision.
+    pub const fn decision(&self) -> &ToolApprovalDecision {
+        &self.decision
+    }
+
+    /// Returns the exact user or delegate provenance.
+    pub const fn decider(&self) -> ToolApprovalDecider {
+        self.decider
+    }
+
+    /// Borrows the delegate rationale, absent for a user decision.
+    pub const fn rationale(&self) -> Option<&ToolDecisionRationale> {
+        self.rationale.as_ref()
+    }
 }
 
 /// One complete transcript and cursor observation.
@@ -1611,7 +1681,12 @@ impl ProcessReadRepository {
                 result_attempt.error_kind AS result_error_kind,
                 result_attempt.error_detail AS result_error_detail,
                 transcript_approval.decision_kind AS transcript_decision_kind,
-                transcript_approval.denial_reason AS transcript_denial_reason
+                transcript_approval.decision_source AS transcript_decision_source,
+                transcript_approval.denial_reason AS transcript_denial_reason,
+                transcript_approval.owner_command_id AS transcript_user_command_id,
+                transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
+                transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
+                transcript_approval.rationale AS transcript_decision_rationale
                FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
                     WITH ORDINALITY AS selected(
                         member_position,
@@ -1780,49 +1855,120 @@ impl ProcessReadRepository {
             return Ok(None);
         }
 
-        let stored_cursor: Option<Decimal> = sqlx::query_scalar(
-            "SELECT last_sequence
+        Ok(Some(
+            open_transcript_in_transaction(transaction, requested_session).await?,
+        ))
+    }
+
+    /// Checks one requester's parent-directory scope and opens the target
+    /// transcript within the same repeatable-read snapshot.
+    pub async fn open_scoped_transcript(
+        &self,
+        requesting_session: SessionId,
+        target_session: SessionId,
+    ) -> Result<ProcessScopedTranscriptRead, ProcessReadError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(REPEATABLE_READ_ONLY)
+            .execute(&mut *transaction)
+            .await?;
+        let Some(requesting_placement) =
+            load_process_session_placement(&mut transaction, requesting_session).await?
+        else {
+            return Err(ProcessReadCorruption::Missing("requesting session placement").into());
+        };
+        let Some(target_placement) =
+            load_process_session_placement(&mut transaction, target_session).await?
+        else {
+            transaction.commit().await?;
+            return Ok(ProcessScopedTranscriptRead::TargetNotFound);
+        };
+        match requesting_placement
+            .placement()
+            .decide_cross_session_read(target_placement.placement())
+        {
+            SessionReadScopeDecision::Allowed => Ok(ProcessScopedTranscriptRead::Opened(Box::new(
+                open_transcript_in_transaction(transaction, target_session).await?,
+            ))),
+            SessionReadScopeDecision::Refused(refusal) => {
+                transaction.commit().await?;
+                Ok(ProcessScopedTranscriptRead::Refused(refusal))
+            }
+        }
+    }
+}
+
+async fn load_process_session_placement(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<Option<VersionedSessionPlacement>, ProcessReadError> {
+    crate::session_placement::load_current(transaction, session)
+        .await
+        .map_err(map_session_placement_read_error)
+}
+
+fn map_session_placement_read_error(
+    error: crate::session_placement::SessionPlacementRepositoryError,
+) -> ProcessReadError {
+    use crate::session_placement::SessionPlacementRepositoryError;
+
+    match error {
+        SessionPlacementRepositoryError::Database(error)
+        | SessionPlacementRepositoryError::CommitAmbiguous(error) => {
+            ProcessReadError::Database(error)
+        }
+        SessionPlacementRepositoryError::InvalidCommandId
+        | SessionPlacementRepositoryError::Corruption(_) => {
+            ProcessReadCorruption::Inconsistent("session placement").into()
+        }
+    }
+}
+
+async fn open_transcript_in_transaction(
+    mut transaction: Transaction<'static, Postgres>,
+    requested_session: SessionId,
+) -> Result<ProcessTranscriptReader, ProcessReadError> {
+    let stored_cursor: Option<Decimal> = sqlx::query_scalar(
+        "SELECT last_sequence
                FROM outbox_sequence_state
               WHERE singleton",
-        )
-        .fetch_optional(&mut *transaction)
-        .await?;
-        let cursor = decode_nonnegative(
-            stored_cursor.ok_or(ProcessReadCorruption::Missing("outbox sequence state"))?,
-            "outbox cursor",
-        )?;
-        let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
-        // INV-039 remains fail-closed on every transcript open: native lineage
-        // supersedes the seed as the rendered frontier, not as an integrity fact.
-        let imported_seed =
-            load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
-        let expected_turn_count =
-            load_transcript_turn_count(&mut transaction, requested_session).await?;
-        let expected_model_call_count =
-            load_terminal_model_call_count(&mut transaction, requested_session).await?;
-        Ok(Some(ProcessTranscriptReader {
-            transaction: Some(transaction),
-            session: requested_session,
-            cursor,
-            lineage_tip,
-            latest_frontier: if lineage_tip.is_none() {
-                imported_seed
-            } else {
-                None
-            },
-            expected_turn_count,
-            turn_count: 0,
-            next_turn_after: None,
-            turns_complete: false,
-            expected_model_call_count,
-            model_call_count: 0,
-            next_model_call_after: None,
-            model_calls_complete: false,
-            entry_count: None,
-            next_entry_index: 0,
-            summary: None,
-        }))
-    }
+    )
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let cursor = decode_nonnegative(
+        stored_cursor.ok_or(ProcessReadCorruption::Missing("outbox sequence state"))?,
+        "outbox cursor",
+    )?;
+    let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
+    // INV-039 remains fail-closed on every transcript open: native lineage
+    // supersedes the seed as the rendered frontier, not as an integrity fact.
+    let imported_seed =
+        load_checked_imported_seed_frontier(&mut transaction, requested_session).await?;
+    let expected_turn_count =
+        load_transcript_turn_count(&mut transaction, requested_session).await?;
+    let expected_model_call_count =
+        load_terminal_model_call_count(&mut transaction, requested_session).await?;
+    Ok(ProcessTranscriptReader {
+        transaction: Some(transaction),
+        session: requested_session,
+        cursor,
+        lineage_tip,
+        latest_frontier: if lineage_tip.is_none() {
+            imported_seed
+        } else {
+            None
+        },
+        expected_turn_count,
+        turn_count: 0,
+        next_turn_after: None,
+        turns_complete: false,
+        expected_model_call_count,
+        model_call_count: 0,
+        next_model_call_after: None,
+        model_calls_complete: false,
+        entry_count: None,
+        next_entry_index: 0,
+        summary: None,
+    })
 }
 
 fn decode_process_session_ancestry(
@@ -1887,10 +2033,13 @@ fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
     }
 }
 
-fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessReadError> {
+fn decode_session_summary(
+    row: &PgRow,
+    placement: VersionedSessionPlacement,
+) -> Result<ProcessSessionSummary, ProcessReadError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let defaults_version = decode_positive(
-        required(row, "current_version")?,
+        required(row, "defaults_version")?,
         "current defaults version",
     )?;
     let kind: String = required(row, "model_selection_kind")?;
@@ -1916,6 +2065,7 @@ fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessR
         session,
         defaults_version,
         model_selection,
+        placement,
     })
 }
 
@@ -1936,6 +2086,10 @@ enum DecodedTurnOrigin {
         parent_session: SessionId,
         parent_turn: TurnId,
         content: String,
+    },
+    DelegationWake {
+        first_delivery_sequence: u64,
+        through_delivery_sequence: u64,
     },
 }
 
@@ -2222,6 +2376,7 @@ async fn load_next_transcript_turn(
             turn.starting_frontier_id,
             turn.terminal_frontier_id,
             turn.active_phase_kind,
+            turn.child_wait_request_id,
             turn.current_attempt_id,
             turn.terminal_disposition_kind,
             turn.recovery_model_call_id,
@@ -2243,6 +2398,10 @@ async fn load_next_transcript_turn(
             task.task_content AS delegated_task_content,
             relation.parent_session_id AS delegated_parent_session_id,
             relation.parent_turn_id AS delegated_parent_turn_id,
+            wake.first_delivery_sequence AS delegated_wake_first_delivery_sequence,
+            wake.through_delivery_sequence AS delegated_wake_through_delivery_sequence,
+            child_wait.spawning_tool_request_id AS child_wait_spawning_request_id,
+            child_wait.child_session_id AS child_wait_child_session_id,
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
@@ -2255,9 +2414,18 @@ async fn load_next_transcript_turn(
            LEFT JOIN session_delegation_initial_task AS task
              ON task.turn_id = turn.turn_id
             AND task.child_session_id = turn.session_id
+           LEFT JOIN session_delegation_wake_turn_origin AS wake
+             ON wake.turn_id = turn.turn_id
+            AND wake.recipient_session_id = turn.session_id
+            AND wake.admission_position = turn.acceptance_position
            LEFT JOIN session_delegation AS relation
              ON relation.spawning_tool_request_id = task.spawning_tool_request_id
             AND relation.child_session_id = task.child_session_id
+           LEFT JOIN session_delegation_wait AS child_wait
+             ON child_wait.awaiting_tool_request_id = turn.child_wait_request_id
+            AND child_wait.parent_turn_id = turn.turn_id
+            AND child_wait.parent_session_id = turn.session_id
+            AND child_wait.wait_mode = 'foreground'
            LEFT JOIN model_call AS current_call
              ON current_call.turn_attempt_id = turn.current_attempt_id
             AND current_call.turn_id = turn.turn_id
@@ -2336,6 +2504,8 @@ fn decode_transcript_turn_origin(
     delegated_parent_session: Option<Uuid>,
     delegated_parent_turn: Option<Uuid>,
     delegated_task_content: Option<String>,
+    delegated_wake_first: Option<Decimal>,
+    delegated_wake_through: Option<Decimal>,
     turn: TurnId,
     acceptance_position: u64,
 ) -> Result<DecodedTurnOrigin, ProcessReadError> {
@@ -2350,6 +2520,8 @@ fn decode_transcript_turn_origin(
         delegated_parent_session,
         delegated_parent_turn,
         delegated_task_content,
+        delegated_wake_first,
+        delegated_wake_through,
     ) {
         (
             "accepted_input",
@@ -2358,6 +2530,8 @@ fn decode_transcript_turn_origin(
             Some(accepted_position),
             Some(accepted_origin),
             Some(content),
+            None,
+            None,
             None,
             None,
             None,
@@ -2389,12 +2563,40 @@ fn decode_transcript_turn_origin(
             Some(parent_session),
             Some(parent_turn),
             Some(content),
+            None,
+            None,
         ) if !content.is_empty() => Ok(DecodedTurnOrigin::DelegatedTask {
             spawning_request: ToolRequestId::from_uuid(spawning_request),
             parent_session: SessionId::from_uuid(parent_session),
             parent_turn: TurnId::from_uuid(parent_turn),
             content,
         }),
+        (
+            "delegation",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(first),
+            Some(through),
+        ) => {
+            let first = decode_positive(first, "delegation wake first delivery sequence")?;
+            let through = decode_positive(through, "delegation wake through delivery sequence")?;
+            if first > through {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("delegation wake delivery range").into(),
+                );
+            }
+            Ok(DecodedTurnOrigin::DelegationWake {
+                first_delivery_sequence: first,
+                through_delivery_sequence: through,
+            })
+        }
         ("accepted_input" | "delegation", ..) => {
             Err(ProcessReadCorruption::Inconsistent("turn origin correlation").into())
         }
@@ -2424,6 +2626,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("delegated_parent_session_id")?,
         row.try_get("delegated_parent_turn_id")?,
         row.try_get("delegated_task_content")?,
+        row.try_get("delegated_wake_first_delivery_sequence")?,
+        row.try_get("delegated_wake_through_delivery_sequence")?,
         turn,
         acceptance_position,
     )?;
@@ -2459,6 +2663,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
     let active_phase: Option<String> = row.try_get("active_phase_kind")?;
     let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
+    let child_wait_request: Option<Uuid> = row.try_get("child_wait_request_id")?;
+    let child_wait_spawning_request: Option<Uuid> =
+        row.try_get("child_wait_spawning_request_id")?;
+    let child_wait_child: Option<Uuid> = row.try_get("child_wait_child_session_id")?;
     let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
     let recovery_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
     let active_tool_round_call: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
@@ -2500,6 +2708,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             "running"
                 | "awaiting_model_call_recovery"
                 | "awaiting_tool_approval"
+                | "awaiting_child"
                 | "awaiting_tool_recovery"
         )
     {
@@ -2563,6 +2772,60 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     };
     let recovery_model_call_frontier =
         recovery_model_call_frontier.map(ContextFrontierId::from_uuid);
+
+    if matches!(active_phase.as_deref(), Some("awaiting_child")) {
+        let (
+            Some(starting_frontier),
+            Some(awaiting_request),
+            Some(spawning_request),
+            Some(child),
+            Some(_producing_call),
+            Some(tool_frontier),
+        ) = (
+            starting_frontier,
+            child_wait_request,
+            child_wait_spawning_request,
+            child_wait_child,
+            active_tool_round_call,
+            active_tool_round_frontier,
+        )
+        else {
+            return Err(ProcessReadCorruption::Inconsistent("child wait shape").into());
+        };
+        if state_kind != "active"
+            || terminal_frontier.is_some()
+            || current_attempt.is_some()
+            || terminal_disposition.is_some()
+            || approval_tool_request.is_some()
+            || recovery_call.is_some()
+            || recovery_tool_attempt.is_some()
+            || terminal_attempt.is_some()
+            || terminal_call.is_some()
+            || terminal_tool_attempt.is_some()
+            || current_model_call.is_some()
+            || current_model_call_frontier.is_some()
+            || recovery_model_call_frontier.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent("child wait shape").into());
+        }
+        let latest_frontier = ContextFrontierId::from_uuid(tool_frontier);
+        if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
+            return Err(ProcessReadCorruption::Inconsistent("child wait frontier").into());
+        }
+        return Ok(DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state: ProcessTurnState::ActiveAwaitingChild {
+                    awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+                    spawning_request: ToolRequestId::from_uuid(spawning_request),
+                    child: SessionId::from_uuid(child),
+                },
+            },
+            start_lineage,
+            latest_frontier: Some(latest_frontier),
+        });
+    }
 
     if matches!(active_phase.as_deref(), Some("awaiting_tool_approval")) {
         let (Some(starting_frontier), Some(_producing_call), Some(request), Some(tool_frontier)) = (
@@ -2776,6 +3039,13 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     parent_session,
                     parent_turn,
                     content,
+                },
+                DecodedTurnOrigin::DelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
+                } => ProcessTurnState::QueuedDelegationWake {
+                    first_delivery_sequence,
+                    through_delivery_sequence,
                 },
             };
             (state, None)
@@ -3108,7 +3378,12 @@ async fn open_transcript_entry_cursor(
             result_attempt.error_kind AS result_error_kind,
             result_attempt.error_detail AS result_error_detail,
             transcript_approval.decision_kind AS transcript_decision_kind,
-            transcript_approval.denial_reason AS transcript_denial_reason
+            transcript_approval.decision_source AS transcript_decision_source,
+            transcript_approval.denial_reason AS transcript_denial_reason,
+            transcript_approval.owner_command_id AS transcript_user_command_id,
+            transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
+            transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
+            transcript_approval.rationale AS transcript_decision_rationale
            FROM (
                 SELECT
                     resolved.*,
@@ -3475,6 +3750,8 @@ fn decode_transcript_entry(
         );
     }
 
+    let transcript_approval = decode_process_tool_approval(row)?;
+
     if payload_kind == "context_summary" {
         let (
             Some(content),
@@ -3622,6 +3899,7 @@ fn decode_transcript_entry(
             request: ToolRequestId::from_uuid(request),
             name,
             arguments,
+            approval: transcript_approval,
         });
     }
 
@@ -3954,6 +4232,102 @@ fn decode_transcript_entry(
     Ok(projected)
 }
 
+fn decode_process_tool_approval(
+    row: &PgRow,
+) -> Result<Option<ProcessToolApproval>, ProcessReadError> {
+    let decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
+    let source: Option<String> = row.try_get("transcript_decision_source")?;
+    let denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+    let user_command: Option<Uuid> = row.try_get("transcript_user_command_id")?;
+    let delegate_model: Option<Uuid> = row.try_get("transcript_delegate_model_selection_id")?;
+    let delegate_call: Option<Uuid> = row.try_get("transcript_delegate_model_call_id")?;
+    let rationale: Option<String> = row.try_get("transcript_decision_rationale")?;
+    let Some(source) = source else {
+        if decision_kind.is_some()
+            || denial_reason.is_some()
+            || user_command.is_some()
+            || delegate_model.is_some()
+            || delegate_call.is_some()
+            || rationale.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "tool approval projection without source",
+            )
+            .into());
+        }
+        return Ok(None);
+    };
+    let source_kind = tool_approval_decision_source_from_str(&source).ok_or_else(|| {
+        ProcessReadError::from(ProcessReadCorruption::Unsupported {
+            field: "tool approval decision source",
+            value: source,
+        })
+    })?;
+    let decision = match decision_kind.as_deref() {
+        Some("approve") if denial_reason.is_none() => ToolApprovalDecision::Approve,
+        Some("deny") => ToolApprovalDecision::Deny {
+            reason: denial_reason
+                .map(ToolDenialReason::try_new)
+                .transpose()
+                .map_err(|_| ProcessReadCorruption::Inconsistent("tool denial reason"))?,
+        },
+        _ => {
+            return Err(ProcessReadCorruption::Inconsistent("tool approval decision kind").into());
+        }
+    };
+    match (
+        source_kind,
+        user_command,
+        delegate_model,
+        delegate_call,
+        rationale,
+    ) {
+        (
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            | ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+            None,
+            None,
+            None,
+            None,
+        ) if decision == ToolApprovalDecision::Approve => Ok(None),
+        (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
+            Ok(Some(ProcessToolApproval {
+                decision,
+                decider: ToolApprovalDecider::User {
+                    command: durable_command_id_from_uuid(command).map_err(|_| {
+                        ProcessReadCorruption::Inconsistent("tool approval user command")
+                    })?,
+                },
+                rationale: None,
+            }))
+        }
+        (
+            ToolApprovalDecisionSourceStorageKind::Delegate,
+            None,
+            Some(model),
+            Some(call),
+            Some(rationale),
+        ) => Ok(Some(ProcessToolApproval {
+            decision,
+            decider: ToolApprovalDecider::Delegate {
+                model: DirectModelSelection::from_uuid(model),
+                call: ModelCallId::from_uuid(call),
+            },
+            rationale: Some(
+                ToolDecisionRationale::try_new(rationale)
+                    .map_err(|_| ProcessReadCorruption::Inconsistent("tool decision rationale"))?,
+            ),
+        })),
+        (
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            | ToolApprovalDecisionSourceStorageKind::SessionBlanket
+            | ToolApprovalDecisionSourceStorageKind::UserCommand
+            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            ..,
+        ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
+    }
+}
+
 fn decode_imported_source_speaker(
     value: String,
 ) -> Result<ProcessImportedSourceSpeaker, ProcessReadError> {
@@ -4049,6 +4423,7 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
     use signalbox_domain::{SessionId, ToolRequestId, TurnId};
     use sqlx::types::Uuid;
 
@@ -4099,6 +4474,8 @@ mod tests {
             Some(parent_session),
             Some(parent_turn),
             Some(content.clone()),
+            None,
+            None,
             current_turn,
             1,
         )
@@ -4131,11 +4508,65 @@ mod tests {
             Some(Uuid::from_u128(3)),
             Some(Uuid::from_u128(4)),
             Some(String::from("delegated task")),
+            None,
+            None,
             turn(1),
             1,
         )
         .expect_err("delegated origin provenance is all-or-nothing");
         assert!(error.to_string().contains("turn origin correlation"));
+    }
+
+    #[test]
+    fn delegation_wake_origin_retains_exact_delivery_range() {
+        let decoded = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Decimal::from(2)),
+            Some(Decimal::from(4)),
+            turn(1),
+            2,
+        )
+        .expect("a complete delegation wake origin is readable");
+        let DecodedTurnOrigin::DelegationWake {
+            first_delivery_sequence,
+            through_delivery_sequence,
+        } = decoded
+        else {
+            panic!("the wake fixture retains its origin family")
+        };
+        assert_eq!(first_delivery_sequence, 2);
+        assert_eq!(through_delivery_sequence, 4);
+    }
+
+    #[test]
+    fn delegation_wake_origin_rejects_reversed_delivery_range() {
+        let error = decode_transcript_turn_origin(
+            String::from("delegation"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Decimal::from(4)),
+            Some(Decimal::from(2)),
+            turn(1),
+            2,
+        )
+        .expect_err("a delegation wake range cannot run backward");
+        assert!(error.to_string().contains("delegation wake delivery range"));
     }
 
     #[test]

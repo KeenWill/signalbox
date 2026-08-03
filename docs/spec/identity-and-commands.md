@@ -24,12 +24,11 @@ were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
 current command/telemetry identity-generation, command-family, and
 ambiguity-ownership inventory was verified through PR #288
 (`agent/audit-fix-docs-coherence`); the context-compaction command lifecycle was
-verified through PR #314 (`agent/context-compaction-protocol`). The runner
-recovery command families are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests. The
-path-scoped placement command family is likewise a foundation proposal at the
-bottom of its implementing stack and becomes verified with its child pull
-request.
+verified through PR #314 (`agent/context-compaction-protocol`). The checked
+placement-update request boundary and path-scoped placement command family were
+verified through PR #400 (`agent/scoped-visibility-wiring`). The runner recovery
+command families are the foundation proposal at the bottom of their implementing
+stack and become verified only with those child pull requests.
 
 ## Identity model
 
@@ -88,8 +87,9 @@ The nil and max UUIDs are rejected as `DurableCommandId` values at two
 boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
 `ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`, and
-`SubmitInputRequest` in `crates/application`, plus `DecideToolRequest` in
-`crates/domain`) and persistence decoding (`durable_command_id_from_uuid` in
+`SubmitInputRequest` and `UpdateSessionPlacementRequest` in
+`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
+persistence decoding (`durable_command_id_from_uuid` in
 `crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
 command can reach a transaction and claims no identifier. Why: sentinel-like
 values are common accidental defaults and would otherwise become permanent

@@ -1074,6 +1074,20 @@ impl DelegationProvenance {
     // accessors: tool_request(), child_turn(), parent_command() returning the sealed authority
 }
 
+pub enum DelegationProvenanceReconstitutionInput {
+    ChildTurn { session: SessionId, turn: TurnId },
+    ParentTurnCommand {
+        session: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: SessionId,
+        generation: GoalGeneration,
+        command: DurableCommandId,
+    },
+}
+
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
 // sealed: SessionDelegation::deliver_message
@@ -1100,7 +1114,13 @@ pub struct DelegationOutcome { /* private validated kind + content + reason + pr
 impl DelegationOutcome {
     pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
         -> Option<Self>;
-    // accessors: kind(), content(), reason(), provenance()
+    pub fn reconstitute(
+        kind: DelegationOutcomeKind,
+        content: Option<DelegationContent>,
+        reason: DelegationOutcomeReason,
+        provenance: DelegationProvenanceReconstitutionInput,
+    ) -> Option<Self>;
+    // accessors: kind(), content(), reason(), provenance(), reconstitution_provenance()
 }
 pub struct ChildWait { /* private awaiting request + spawning request + child */ }
 // sealed: DelegationWait::foreground_subject
@@ -1768,6 +1788,17 @@ impl SubmitInput {
     pub fn prepare_with_active_turn(
         self,
         scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_delegated_active_turn(
+        self,
+        session: &Session,
+        actual_active_turn: TurnId,
+        previous_position: Option<SessionInputPosition>,
+        existing_interrupt: Option<DurableCommandId>,
+        awaiting_approval: bool,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
@@ -2469,8 +2500,12 @@ impl ContinuationRoundReconstitutionInput {
 }
 
 pub struct PendingSteeringInput { /* private */ }
-// sealed: checked AcceptedInputSchedulingProjection::active_turn_execution
 impl PendingSteeringInput {
+    pub fn reconstitute(
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
+        source_turn: TurnId,
+    ) -> Option<Self>;
     // accessors: accepted_input(), lifecycle(), acceptance_position()
 }
 
@@ -2762,6 +2797,88 @@ pub struct ActivatedAcceptedInputTurn { /* private */ }
 impl ActivatedAcceptedInputTurn {
     // accessors: session(), turn(), accepted_input(), order(), configuration(),
     // configuration_provenance(), start(), phase(), pending_steering(), consumed_steering()
+}
+
+pub struct ActivatedDelegatedTurn { /* private */ }
+// sealed: PreparedDelegatedTurnActivation
+impl ActivatedDelegatedTurn {
+    pub fn with_pending_steering(
+        self,
+        pending_steering: Vec<PendingSteeringInput>,
+    ) -> Option<Self>;
+    // accessors: session(), turn(), spawning_request(), task(), configuration(),
+    // delivery_range(), start(), phase(), pending_steering()
+}
+
+pub enum ActivatedTurn {
+    Accepted(ActivatedAcceptedInputTurn),
+    Delegated(ActivatedDelegatedTurn),
+}
+impl ActivatedTurn {
+    pub const fn accepted_input(&self) -> Option<&AcceptedInputLifecycle>;
+    pub const fn delegated(&self) -> Option<&ActivatedDelegatedTurn>;
+    pub fn reconstitute_frontier_entries(
+        &self,
+        entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Option<Vec<SemanticTranscriptEntry>>;
+    // accessors: session(), turn(), configuration(), configuration_provenance(),
+    // start(), phase(), pending_steering(), consumed_steering()
+}
+
+pub struct DelegatedTurnActivationInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub spawning_request: ToolRequestId,
+    pub task: DelegationContent,
+    pub task_entry: SemanticTranscriptEntryReconstitutionInput,
+    pub configuration: OriginConfiguration,
+    pub starting_frontier: ContextFrontierId,
+    pub initial_attempt: TurnAttemptId,
+}
+
+pub struct DelegatedWakeTurnActivationInput {
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub first_delivery_sequence: NonZeroU64,
+    pub through_delivery_sequence: NonZeroU64,
+    pub deliveries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    pub predecessor: TurnId,
+    pub predecessor_snapshot: ResolvedContextFrontierSnapshot,
+    pub configuration: OriginConfiguration,
+    pub starting_frontier: ContextFrontierId,
+    pub initial_attempt: TurnAttemptId,
+}
+
+pub struct PreparedDelegatedTurnActivation { /* private */ }
+// sealed: PreparedDelegatedTurnActivation::prepare
+impl PreparedDelegatedTurnActivation {
+    pub fn prepare(input: DelegatedTurnActivationInput) -> Option<Self>;
+    pub fn prepare_wake(input: DelegatedWakeTurnActivationInput) -> Option<Self>;
+    pub fn into_parts(
+        self,
+    ) -> (
+        ActivatedDelegatedTurn,
+        Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    );
+    pub fn with_reconstituted_phase(
+        self,
+        phase: ActiveTurnSchedulingReconstitutionInput,
+    ) -> Option<(
+        ActivatedDelegatedTurn,
+        Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    )>;
+}
+
+pub enum PreparedTurnActivation {
+    Accepted(Box<PreparedAcceptedInputTurnActivation>),
+    Delegated(Box<PreparedDelegatedTurnActivation>),
+}
+impl PreparedTurnActivation {
+    pub fn turn(&self) -> ActivatedTurn;
+    pub fn starting_entries(&self) -> &[SemanticTranscriptEntry];
+    pub const fn starting_snapshot(&self) -> &ResolvedContextFrontierSnapshot;
 }
 
 pub struct PreparedAcceptedInputTurnActivation { /* private */ }
@@ -3065,6 +3182,10 @@ pub struct ResolvedModelSelection { /* private */ }
 pub struct ModelTargetResolutionError { /* private */ }
 pub struct ModelCallOriginContent { /* private */ }
 impl ModelCallOriginContent {
+    pub fn from_pending_steering(
+        pending: &PendingSteeringInput,
+        content: UserContent,
+    ) -> Self;
     pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self>;
     pub fn from_reconstituted_turn_origin(
         origin: &SubmitInputTurnOriginReconstitutionInput,
@@ -3075,7 +3196,7 @@ impl ModelCallOriginContent {
 pub struct ModelCallExecutionReconstitutionInput { /* private */ }
 impl ModelCallExecutionReconstitutionInput {
     pub fn new(
-        active_turn: ActivatedAcceptedInputTurn,
+        active_turn: impl Into<ActivatedTurn>,
         targets: ModelTargetCatalog,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         frontier_entries: Vec<SemanticTranscriptEntry>,
@@ -3603,6 +3724,28 @@ pub enum SemanticTranscriptEntryPayload {
         accepted_input: AcceptedInputId,
         source_turn: TurnId,
     },
+    DelegatedTask {
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    DelegationMessage {
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    DelegationResult {
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        mode: DelegationWaitMode,
+        delivery_sequence: Option<NonZeroU64>,
+        outcome: Box<DelegationOutcome>,
+    },
     ModelIdentityChanged {
         turn: TurnId,
         defaults_version: SessionConfigurationDefaultsVersion,
@@ -3764,6 +3907,7 @@ pub enum ToolApprovalDecider {
 
 pub struct ToolDecisionRationale(/* private */);
 impl ToolDecisionRationale {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
@@ -3792,6 +3936,7 @@ pub struct DelegateToolApprovalError { /* private */ }
 
 pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
@@ -3968,6 +4113,10 @@ pub enum CurrentToolAttemptState {
 pub enum ToolAttemptEnd {
     Completed { result: ToolResultContent },
     KnownFailed { error: ToolExecutionError },
+    AwaitingChild {
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
     Ambiguous,
 }
 impl ToolAttemptEnd {
@@ -3976,6 +4125,7 @@ impl ToolAttemptEnd {
 pub enum ToolAttemptDisposition {
     Completed,
     KnownFailed,
+    AwaitingChild,
     Ambiguous,
 }
 pub enum ToolAttemptObservation {
@@ -4076,6 +4226,11 @@ pub enum ToolBatchPhaseReconstitutionInput {
     AwaitingApproval { request: ToolRequestId },
     Executing { turn_attempt: TurnAttemptId },
     AwaitingRecovery { attempt: ToolAttemptId },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
 }
 pub struct ToolBatchReconstitutionInput { /* private */ }
 impl ToolBatchReconstitutionInput {
@@ -4113,6 +4268,7 @@ pub enum ToolBatchReconstitutionFailure {
     ApprovalPhaseMismatch,
     ExecutionPhaseMismatch,
     RecoveryPhaseMismatch,
+    ChildWaitPhaseMismatch,
 }
 pub struct ToolBatchReconstitutionError { /* private */ }
 // accessors: input(), failure(), into_parts()
@@ -4120,6 +4276,11 @@ pub enum ToolBatchPhase {
     AwaitingApproval { request: ToolRequestId },
     Executing { turn_attempt: TurnAttemptId },
     AwaitingRecovery { attempt: ToolAttemptId },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
 }
 
 pub struct ToolBatch { /* private */ }
@@ -4174,6 +4335,12 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_delegation_result_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        continuation_frontier: ContextFrontierId,
+        outcome: DelegationOutcome,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -4183,6 +4350,12 @@ impl ToolBatch {
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_delegation_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        outcome: DelegationOutcome,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_reconciliation_projection(
         &self,
@@ -4602,6 +4775,18 @@ impl ReconstitutedReplaceSessionMetadata {
 }
 ```
 
+## application: approval_judge
+
+```rust
+pub trait ApprovalJudgeAuthorization {
+    fn request(&self) -> &ToolRequest;
+    fn call(&self) -> ModelCallId;
+    fn selection(&self) -> DirectModelSelection;
+    fn target(&self) -> ResolvedProviderTarget;
+    fn credential_reference(&self) -> &str;
+}
+```
+
 ## application: conversation_import
 
 ```rust
@@ -4789,7 +4974,8 @@ impl CreateSessionRequest {
         template_provenance: SessionTemplateProvenance,
         resolved_configuration_defaults: SessionConfigurationDefaults,
     ) -> Result<Self, InvalidDurableCommandId>;
-    // accessors: command_id(), initial_configuration_defaults(), template_provenance()
+    pub fn with_placement(self, placement: SessionPlacement) -> Self;
+    // accessors: command_id(), initial_configuration_defaults(), template_provenance(), placement()
 }
 
 pub trait SessionIdGenerator {
@@ -4830,6 +5016,46 @@ impl<Generator: SessionIdGenerator, Transaction: CreateSessionTransaction>
         &mut self,
         request: CreateSessionRequest,
     ) -> Result<CreateSessionOutcome, CreateSessionError<Transaction::Error>>;
+}
+```
+
+## application: update_session_placement
+
+```rust
+pub struct UpdateSessionPlacementRequest { /* private */ }
+impl UpdateSessionPlacementRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_version: SessionPlacementVersion,
+        replacement: SessionPlacement,
+    ) -> Result<Self, InvalidDurableCommandId>;
+}
+
+pub trait UpdateSessionPlacementTransaction {
+    type Error;
+    fn handle(
+        &mut self,
+        command: UpdateSessionPlacement,
+    ) -> impl Future<Output = Result<UpdateSessionPlacementOutcome, Self::Error>> + Send;
+}
+
+pub enum UpdateSessionPlacementOutcome {
+    Recorded(UpdateSessionPlacementResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+
+pub struct UpdateSessionPlacementService<Transaction> { /* private */ }
+impl<Transaction> UpdateSessionPlacementService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: UpdateSessionPlacementTransaction>
+    UpdateSessionPlacementService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: UpdateSessionPlacementRequest,
+    ) -> Result<UpdateSessionPlacementOutcome, Transaction::Error>;
 }
 ```
 
@@ -5047,6 +5273,30 @@ pub enum ModelConversationMessage {
         accepted_input: AcceptedInputId,
         content: UserContent,
     },
+    DelegatedTask {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    DelegationMessage {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    BackgroundDelegationResult {
+        source: SemanticTranscriptEntryRef,
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        delivery_sequence: NonZeroU64,
+        outcome: DelegationOutcome,
+    },
     Assistant {
         source: SemanticTranscriptEntryRef,
         producing_call: ModelCallId,
@@ -5079,6 +5329,7 @@ pub enum ModelToolResultContent {
     ExecutionError(ToolExecutionError),
     Denied { reason: Option<ToolDenialReason> },
     ClosedByTurnEnd,
+    Delegation(DelegationOutcome),
 }
 
 pub struct PreparedModelOperation { /* private */ }
@@ -5103,6 +5354,7 @@ pub enum ModelFrontierRenderingError {
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
     UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
     MissingProjectedEntry { entry: SemanticTranscriptEntryRef },
+    InvalidDelegationDelivery { entry: SemanticTranscriptEntryRef },
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure
@@ -5529,6 +5781,7 @@ pub trait ToolApprovalIdGenerator {
 }
 
 pub trait ToolExecutionIdGenerator {
+    fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId;
     fn next_tool_attempt_id(&mut self) -> ToolAttemptId;
     fn next_tool_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_tool_context_frontier_id(&mut self) -> ContextFrontierId;
@@ -5559,6 +5812,7 @@ pub enum ToolExecutionServiceOutcome {
     NoWork,
     AwaitingApproval(ToolRequestId),
     AwaitingRecovery(ToolAttemptId),
+    ChildWaitResumed(TurnAttemptId),
     AttemptCheckpointed(ToolAttemptId),
     PreflightFailed(Box<EndedToolAttempt>),
     ObservationCommitted(Box<EndedToolAttempt>),
@@ -6349,7 +6603,7 @@ pub struct UuidV7StartEligibleTurnIdGenerator;
 
 pub enum StartEligibleTurnOutcome {
     NoEligibleTurn,
-    Activated(Box<ActivatedAcceptedInputTurn>),
+    Activated(Box<ActivatedTurn>),
 }
 
 pub trait StartEligibleTurnTransaction {
@@ -6779,6 +7033,12 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
     ) -> impl Future<Output = Result<Option<ToolBatch>, Self::Error>> + Send;
+    fn resume_child_wait(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        continuation: TurnAttemptId,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     fn prepare_next_attempt(
         &mut self,
         session: SessionId,
@@ -8729,7 +8989,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                    |
 | domain: session_placement                          | 18                   |
 | domain: session                                    | 22                   |
-| domain: session_delegation                         | 31                   |
+| domain: session_delegation                         | 32                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 23                   |
 | domain: accepted_input                             | 5                    |
@@ -8739,7 +8999,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: queue_order                                | 5 (+1 free fn)       |
 | domain: repo_watch                                 | 47                   |
 | domain: turn_lifecycle                             | 10                   |
-| domain: turn_eligibility                           | 29                   |
+| domain: turn_eligibility                           | 35                   |
 | domain: turn_attempt                               | 13                   |
 | domain: model_call                                 | 12                   |
 | domain: context_compaction                         | 12                   |
@@ -8758,9 +9018,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **710 (+7 free fn)** |
+| **signalbox-domain total**                         | **717 (+7 free fn)** |
+| application: approval_judge                        | 1 (incl. 1 trait)    |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
+| application: update_session_placement              | 4 (incl. 1 trait)    |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
 | application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
@@ -8777,4 +9039,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **200**              |
+| **signalbox-application total**                    | **205**              |
