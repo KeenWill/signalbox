@@ -853,7 +853,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
     try await mutation(
       creation.request,
       success: { message in
-        guard case .sessionCreated(let sessionID) = message else {
+        guard case .sessionCreated(let sessionID, _) = message else {
           return nil
         }
         return sessionID
@@ -895,7 +895,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
       creation.request,
       success: { message in
         switch message {
-        case .sessionCreated(let sessionID):
+        case .sessionCreated(let sessionID, _):
           return sessionID
         case .inputSubmitted, .toolRequestDecided, .sessionDefaults,
           .sessionsStart, .sessionSummary, .sessionsEnd, .sessionMetadataPageStart,

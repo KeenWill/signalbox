@@ -9090,7 +9090,7 @@ where
                 let message = ServerMessage::SessionEvent {
                     cursor: CanonicalU64::new(cursor),
                     session_id,
-                    event: event.wire(),
+                    event: event.wire()?,
                 };
                 let Some(event_write) = run_until_shutdown(
                     &mut shutdown,
@@ -11610,11 +11610,14 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
 }
 
 impl ProcessUpdateEvent {
-    fn wire(&self) -> SessionEvent {
-        match self {
+    fn wire(&self) -> Result<SessionEvent, ProcessConnectionError> {
+        let event = match self {
             Self::SessionCreated => SessionEvent::SessionCreated {},
             Self::SessionModelSettingsChanged(event) => SessionEvent::SessionModelSettingsChanged {
-                command_id: wire_uuid(event.command_id().into_uuid()),
+                command_id: signalbox_process_protocol::CommandId::try_from_uuid(
+                    event.command_id().into_uuid(),
+                )
+                .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
                 prior_defaults_version: CanonicalU64::new(event.prior_defaults_version().as_u64()),
                 installed_defaults_version: CanonicalU64::new(
                     event.installed_defaults_version().as_u64(),
@@ -11766,7 +11769,8 @@ impl ProcessUpdateEvent {
                     }
                 }
             },
-        }
+        };
+        Ok(event)
     }
 }
 
@@ -11938,7 +11942,7 @@ impl Error for ProcessRuntimeError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeSet, VecDeque},
         error::Error,
         io::{self, Write},
         sync::{Arc, Mutex, mpsc},
@@ -11950,16 +11954,18 @@ mod tests {
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
         AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
-        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay, ReasoningLevel,
-        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
-        ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
-        ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
-        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId,
-        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
-        SessionModelSettingsChanged, SubmitInputRejectedResult, ToolApprovalDecision,
-        ToolAttemptId, TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
+        FastModeOverlay, FastModeSupport, FrozenModelSelection, Goal, GoalStatement,
+        GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelCapabilities,
+        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+        ModelSettingsPrecedence, ReasoningLevel, ReviewPass, ReviewPassAcceptedInputEvidence,
+        ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
+        ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
+        ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewWorkflowKind,
+        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
+        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, TurnAttemptId, TurnId,
+        TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
@@ -14285,7 +14291,7 @@ context_window_tokens = 200000
         let update = ProcessUpdateEvent::from(&DispatchedOutboxEventKind::GoalTurnRetired { turn });
 
         assert_eq!(
-            update.wire(),
+            update.wire().expect("the fixture event is representable"),
             SessionEvent::GoalTurnRetired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
             }
@@ -14322,9 +14328,14 @@ context_window_tokens = 200000
         );
 
         assert_eq!(
-            changed_update.wire(),
+            changed_update
+                .wire()
+                .expect("the fixture event is representable"),
             SessionEvent::SessionModelSettingsChanged {
-                command_id: CanonicalUuid::from_uuid(command.into_uuid()),
+                command_id: signalbox_process_protocol::CommandId::try_from_uuid(
+                    command.into_uuid(),
+                )
+                .expect("fixture command identity is admitted"),
                 prior_defaults_version: CanonicalU64::new(prior_version.as_u64()),
                 installed_defaults_version: CanonicalU64::new(installed_version.as_u64()),
                 prior_model: signalbox_process_protocol::ModelSelection::Direct {
@@ -14348,7 +14359,24 @@ context_window_tokens = 200000
         let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
         let installed_version = SessionConfigurationDefaultsVersion::first();
         let caller_override = ModelSettingsOverlay::inherit_all();
-        let settings = ValidatedModelSettings::provider_defaults();
+        let session_settings = ModelSettingsOverlay::new(
+            SettingOverlay::ProviderDefault,
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            caller_override,
+            session_settings,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let settings = ModelCapabilities::new(
+            BTreeSet::new(),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(installed_selection, precedence)
+        .expect("the explicit provider default is supported");
         let resolved = TurnModelSettingsResolved::try_new(
             accepted_input,
             turn,
@@ -14366,7 +14394,9 @@ context_window_tokens = 200000
         );
 
         assert_eq!(
-            resolved_update.wire(),
+            resolved_update
+                .wire()
+                .expect("the fixture event is representable"),
             SessionEvent::TurnModelSettingsResolved {
                 accepted_input_id: CanonicalUuid::from_uuid(accepted_input.into_uuid()),
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
@@ -14425,7 +14455,9 @@ context_window_tokens = 200000
             terminal_frontier: frontier,
         });
         assert_eq!(
-            cancelled.wire(),
+            cancelled
+                .wire()
+                .expect("the fixture event is representable"),
             SessionEvent::TurnCancelled {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 cancellation_entry_id: CanonicalUuid::from_uuid(entry.into_uuid()),
@@ -14439,7 +14471,9 @@ context_window_tokens = 200000
                 terminal_frontier: frontier,
             });
         assert_eq!(
-            reconciliation.wire(),
+            reconciliation
+                .wire()
+                .expect("the fixture event is representable"),
             SessionEvent::TurnReconciliationRequired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
@@ -14455,7 +14489,7 @@ context_window_tokens = 200000
             },
         });
         assert_eq!(
-            recovery.wire(),
+            recovery.wire().expect("the fixture event is representable"),
             SessionEvent::ToolBatchTransition {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),

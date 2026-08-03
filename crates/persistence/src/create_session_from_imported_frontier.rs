@@ -1315,12 +1315,17 @@ fn decode_selection(
         .transpose()?;
     let model_settings = model_settings_from_json(model_settings)
         .map_err(|_| ImportedSessionCorruption::Inconsistent("model settings"))?;
-    Ok(SessionConfigurationDefaults::complete_with_model_settings(
+    SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
         model_settings,
-    ))
+    )
+    .ok_or_else(|| {
+        ImportedSessionRepositoryError::from(ImportedSessionCorruption::Inconsistent(
+            "model settings validation selection",
+        ))
+    })
 }
 
 struct StoredVersionedConfigurationFields {

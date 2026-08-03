@@ -2996,7 +2996,20 @@ private enum ProcessSubmissionFixture {
           "session_id":"\(sessionID.rawValue)",
           "accepted_input_id":"\(acceptedInputID)",
           "acceptance_position":"1",
-          "turn_id":"\(acceptedTurnID)"
+          "turn_id":"\(acceptedTurnID)",
+          "model_settings":{
+            "precedence":{
+              "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+              "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+            },
+            "effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},
+            "reasoning_source":null,
+            "fast_mode_source":null,
+            "service_tier_source":null,
+            "validated_for_selection_id":null
+          }
         }
         """.utf8
       )
@@ -4762,7 +4775,20 @@ private enum ProcessDriverFixture {
         "session_id":"\(sessionID)",
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "acceptance_position":"1",
-        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)"
+        "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)",
+        "model_settings":{
+          "precedence":{
+            "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+          },
+          "effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},
+          "reasoning_source":null,
+          "fast_mode_source":null,
+          "service_tier_source":null,
+          "validated_for_selection_id":null
+        }
       }
       """
     )

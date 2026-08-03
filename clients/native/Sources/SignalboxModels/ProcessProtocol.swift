@@ -649,7 +649,10 @@ private struct SignalboxProcessServerWireFrame: Decodable {
 }
 
 public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
-  case sessionCreated(sessionID: SignalboxCanonicalUUID)
+  case sessionCreated(
+    sessionID: SignalboxCanonicalUUID,
+    modelSettings: SignalboxModelSettingsSnapshot
+  )
   case inputSubmitted(SignalboxInputSubmitted)
   case toolRequestDecided(SignalboxToolRequestDecided)
   case sessionDefaults(SignalboxSessionDefaultsRead)
@@ -715,7 +718,14 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "session_created":
-        self = .sessionCreated(sessionID: try decoder.decode("session_id"))
+        try tagged.rejectUnadmittedFields(
+          ["type", "session_id", "model_settings"],
+          decoder: decoder
+        )
+        self = .sessionCreated(
+          sessionID: try decoder.decode("session_id"),
+          modelSettings: try decoder.decode("model_settings")
+        )
       case "input_submitted":
         self = .inputSubmitted(try SignalboxInputSubmitted(from: decoder))
       case "tool_request_decided":
@@ -907,44 +917,73 @@ public struct SignalboxModelSettingsSnapshot: Decodable, Equatable, Sendable {
     ]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
     try payload.requireFields(fields, decoder: decoder)
-    let _: SignalboxModelSettingsPrecedenceShape = try decoder.decode("precedence")
-    let _: SignalboxEffectiveModelSettingsShape = try decoder.decode("effective")
-    let _: SignalboxModelSettingSourceShape? = try decoder.decodeIfPresent("reasoning_source")
-    let _: SignalboxModelSettingSourceShape? = try decoder.decodeIfPresent("fast_mode_source")
-    let _: SignalboxModelSettingSourceShape? = try decoder.decodeIfPresent("service_tier_source")
-    let _: SignalboxCanonicalUUID? = try decoder.decodeIfPresent("validated_for_selection_id")
+    let precedence: SignalboxModelSettingsPrecedenceShape = try decoder.decode("precedence")
+    let effective: SignalboxEffectiveModelSettingsShape = try decoder.decode("effective")
+    let reasoningSource: SignalboxModelSettingSourceShape? =
+      try decoder.decodeIfPresent("reasoning_source")
+    let fastModeSource: SignalboxModelSettingSourceShape? =
+      try decoder.decodeIfPresent("fast_mode_source")
+    let serviceTierSource: SignalboxModelSettingSourceShape? =
+      try decoder.decodeIfPresent("service_tier_source")
+    let validatedFor: SignalboxCanonicalUUID? =
+      try decoder.decodeIfPresent("validated_for_selection_id")
+    let resolved = precedence.resolve()
+    let modelIndependentProviderDefaults =
+      precedence == .providerDefaults
+      && effective == .providerDefaults
+      && reasoningSource == nil
+      && fastModeSource == nil
+      && serviceTierSource == nil
+    guard
+      resolved.effective == effective,
+      resolved.reasoningSource == reasoningSource,
+      resolved.fastModeSource == fastModeSource,
+      resolved.serviceTierSource == serviceTierSource,
+      validatedFor != nil || modelIndependentProviderDefaults
+    else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Model settings snapshot is internally inconsistent."
+        )
+      )
+    }
     rawValue = payload.payload
   }
 }
 
-private enum SignalboxReasoningLevelShape: String, Decodable {
+private enum SignalboxReasoningLevelShape: String, Decodable, Equatable {
   case none, minimal, low, medium, high, xhigh, max, ultra
 }
 
-private enum SignalboxFastModeShape: String, Decodable {
+private enum SignalboxFastModeShape: String, Decodable, Equatable {
   case disabled, enabled
 }
 
-private enum SignalboxModelSettingSourceShape: String, Decodable {
+private enum SignalboxModelSettingSourceShape: String, Decodable, Equatable {
   case perCall = "per_call"
   case session, profile
   case globalDefault = "global_default"
 }
 
-private enum SignalboxAnthropicServiceTierShape: String, Decodable {
+private enum SignalboxAnthropicServiceTierShape: String, Decodable, Equatable {
   case auto
   case standardOnly = "standard_only"
 }
 
-private enum SignalboxOpenAIServiceTierShape: String, Decodable {
+private enum SignalboxOpenAIServiceTierShape: String, Decodable, Equatable {
   case auto, `default`, flex, scale, priority, fast
 }
 
-private enum SignalboxCodexCLIServiceTierShape: String, Decodable {
+private enum SignalboxCodexCLIServiceTierShape: String, Decodable, Equatable {
   case `default`, priority, flex
 }
 
-private struct SignalboxServiceTierShape: Decodable {
+private enum SignalboxServiceTierShape: Decodable, Equatable {
+  case anthropic(SignalboxAnthropicServiceTierShape)
+  case openAI(SignalboxOpenAIServiceTierShape)
+  case codexCLI(SignalboxCodexCLIServiceTierShape)
+
   init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["provider", "value"]
@@ -952,11 +991,11 @@ private struct SignalboxServiceTierShape: Decodable {
     try payload.requireFields(fields, decoder: decoder)
     switch try decoder.decode("provider") as String {
     case "anthropic":
-      let _: SignalboxAnthropicServiceTierShape = try decoder.decode("value")
+      self = .anthropic(try decoder.decode("value"))
     case "open_ai":
-      let _: SignalboxOpenAIServiceTierShape = try decoder.decode("value")
+      self = .openAI(try decoder.decode("value"))
     case "codex_cli":
-      let _: SignalboxCodexCLIServiceTierShape = try decoder.decode("value")
+      self = .codexCLI(try decoder.decode("value"))
     default:
       throw DecodingError.dataCorrupted(
         .init(
@@ -968,17 +1007,22 @@ private struct SignalboxServiceTierShape: Decodable {
   }
 }
 
-private struct SignalboxSettingOverlayShape<Value: Decodable>: Decodable {
+private enum SignalboxSettingOverlayShape<Value: Decodable & Equatable>: Decodable, Equatable {
+  case inherit
+  case providerDefault
+  case value(Value)
+
   init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let kind: String = try decoder.decode("kind")
     switch kind {
     case "inherit", "provider_default":
       try payload.rejectUnadmittedFields(["kind"], decoder: decoder)
+      self = kind == "inherit" ? .inherit : .providerDefault
     case "value":
       try payload.rejectUnadmittedFields(["kind", "value"], decoder: decoder)
       try payload.requireFields(["kind", "value"], decoder: decoder)
-      let _: Value = try decoder.decode("value")
+      self = .value(try decoder.decode("value"))
     default:
       throw DecodingError.dataCorrupted(
         .init(
@@ -990,17 +1034,21 @@ private struct SignalboxSettingOverlayShape<Value: Decodable>: Decodable {
   }
 }
 
-private struct SignalboxFastModeOverlayShape: Decodable {
+private enum SignalboxFastModeOverlayShape: Decodable, Equatable {
+  case inherit
+  case value(SignalboxFastModeShape)
+
   init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let kind: String = try decoder.decode("kind")
     switch kind {
     case "inherit":
       try payload.rejectUnadmittedFields(["kind"], decoder: decoder)
+      self = .inherit
     case "value":
       try payload.rejectUnadmittedFields(["kind", "value"], decoder: decoder)
       try payload.requireFields(["kind", "value"], decoder: decoder)
-      let _: SignalboxFastModeShape = try decoder.decode("value")
+      self = .value(try decoder.decode("value"))
     default:
       throw DecodingError.dataCorrupted(
         .init(
@@ -1012,43 +1060,162 @@ private struct SignalboxFastModeOverlayShape: Decodable {
   }
 }
 
-private struct SignalboxModelSettingsOverlayShape: Decodable {
+private struct SignalboxModelSettingsOverlayShape: Decodable, Equatable {
+  let reasoningLevel: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>
+  let fastMode: SignalboxFastModeOverlayShape
+  let serviceTier: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
+
   init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["reasoning_level", "fast_mode", "service_tier"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
     try payload.requireFields(fields, decoder: decoder)
-    let _: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape> =
-      try decoder.decode("reasoning_level")
-    let _: SignalboxFastModeOverlayShape = try decoder.decode("fast_mode")
-    let _: SignalboxSettingOverlayShape<SignalboxServiceTierShape> =
-      try decoder.decode("service_tier")
+    reasoningLevel = try decoder.decode("reasoning_level")
+    fastMode = try decoder.decode("fast_mode")
+    serviceTier = try decoder.decode("service_tier")
+  }
+
+  static let inheritAll = SignalboxModelSettingsOverlayShape(
+    reasoningLevel: .inherit,
+    fastMode: .inherit,
+    serviceTier: .inherit
+  )
+
+  private init(
+    reasoningLevel: SignalboxSettingOverlayShape<SignalboxReasoningLevelShape>,
+    fastMode: SignalboxFastModeOverlayShape,
+    serviceTier: SignalboxSettingOverlayShape<SignalboxServiceTierShape>
+  ) {
+    self.reasoningLevel = reasoningLevel
+    self.fastMode = fastMode
+    self.serviceTier = serviceTier
   }
 }
 
-private struct SignalboxModelSettingsPrecedenceShape: Decodable {
+private struct SignalboxModelSettingsPrecedenceShape: Decodable, Equatable {
+  let perCall: SignalboxModelSettingsOverlayShape
+  let session: SignalboxModelSettingsOverlayShape
+  let profile: SignalboxModelSettingsOverlayShape
+  let globalDefault: SignalboxModelSettingsOverlayShape
+
   init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["per_call", "session", "profile", "global_default"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
     try payload.requireFields(fields, decoder: decoder)
-    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("per_call")
-    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("session")
-    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("profile")
-    let _: SignalboxModelSettingsOverlayShape = try decoder.decode("global_default")
+    perCall = try decoder.decode("per_call")
+    session = try decoder.decode("session")
+    profile = try decoder.decode("profile")
+    globalDefault = try decoder.decode("global_default")
+  }
+
+  static let providerDefaults = SignalboxModelSettingsPrecedenceShape(
+    perCall: .inheritAll,
+    session: .inheritAll,
+    profile: .inheritAll,
+    globalDefault: .inheritAll
+  )
+
+  private init(
+    perCall: SignalboxModelSettingsOverlayShape,
+    session: SignalboxModelSettingsOverlayShape,
+    profile: SignalboxModelSettingsOverlayShape,
+    globalDefault: SignalboxModelSettingsOverlayShape
+  ) {
+    self.perCall = perCall
+    self.session = session
+    self.profile = profile
+    self.globalDefault = globalDefault
+  }
+
+  func resolve() -> SignalboxResolvedModelSettingsShape {
+    let layers: [(SignalboxModelSettingSourceShape, SignalboxModelSettingsOverlayShape)] = [
+      (.perCall, perCall), (.session, session), (.profile, profile),
+      (.globalDefault, globalDefault),
+    ]
+    let reasoning = resolveSetting(layers.map { ($0.0, $0.1.reasoningLevel) })
+    let fastMode = resolveFastMode(layers.map { ($0.0, $0.1.fastMode) })
+    let serviceTier = resolveSetting(layers.map { ($0.0, $0.1.serviceTier) })
+    return SignalboxResolvedModelSettingsShape(
+      effective: SignalboxEffectiveModelSettingsShape(
+        reasoningLevel: reasoning.0,
+        fastMode: fastMode.0,
+        serviceTier: serviceTier.0
+      ),
+      reasoningSource: reasoning.1,
+      fastModeSource: fastMode.1,
+      serviceTierSource: serviceTier.1
+    )
   }
 }
 
-private struct SignalboxEffectiveModelSettingsShape: Decodable {
+private struct SignalboxEffectiveModelSettingsShape: Decodable, Equatable {
+  let reasoningLevel: SignalboxReasoningLevelShape?
+  let fastMode: SignalboxFastModeShape
+  let serviceTier: SignalboxServiceTierShape?
+
   init(from decoder: Decoder) throws {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     let fields: Set<String> = ["reasoning_level", "fast_mode", "service_tier"]
     try payload.rejectUnadmittedFields(fields, decoder: decoder)
     try payload.requireFields(fields, decoder: decoder)
-    let _: SignalboxReasoningLevelShape? = try decoder.decodeIfPresent("reasoning_level")
-    let _: SignalboxFastModeShape = try decoder.decode("fast_mode")
-    let _: SignalboxServiceTierShape? = try decoder.decodeIfPresent("service_tier")
+    reasoningLevel = try decoder.decodeIfPresent("reasoning_level")
+    fastMode = try decoder.decode("fast_mode")
+    serviceTier = try decoder.decodeIfPresent("service_tier")
   }
+
+  static let providerDefaults = SignalboxEffectiveModelSettingsShape(
+    reasoningLevel: nil,
+    fastMode: .disabled,
+    serviceTier: nil
+  )
+
+  init(
+    reasoningLevel: SignalboxReasoningLevelShape?,
+    fastMode: SignalboxFastModeShape,
+    serviceTier: SignalboxServiceTierShape?
+  ) {
+    self.reasoningLevel = reasoningLevel
+    self.fastMode = fastMode
+    self.serviceTier = serviceTier
+  }
+}
+
+private struct SignalboxResolvedModelSettingsShape {
+  let effective: SignalboxEffectiveModelSettingsShape
+  let reasoningSource: SignalboxModelSettingSourceShape?
+  let fastModeSource: SignalboxModelSettingSourceShape?
+  let serviceTierSource: SignalboxModelSettingSourceShape?
+}
+
+private func resolveSetting<Value: Decodable & Equatable>(
+  _ layers: [(SignalboxModelSettingSourceShape, SignalboxSettingOverlayShape<Value>)]
+) -> (Value?, SignalboxModelSettingSourceShape?) {
+  for (source, overlay) in layers {
+    switch overlay {
+    case .inherit:
+      continue
+    case .providerDefault:
+      return (nil, source)
+    case .value(let value):
+      return (value, source)
+    }
+  }
+  return (nil, nil)
+}
+
+private func resolveFastMode(
+  _ layers: [(SignalboxModelSettingSourceShape, SignalboxFastModeOverlayShape)]
+) -> (SignalboxFastModeShape, SignalboxModelSettingSourceShape?) {
+  for (source, overlay) in layers {
+    switch overlay {
+    case .inherit:
+      continue
+    case .value(let value):
+      return (value, source)
+    }
+  }
+  return (.disabled, nil)
 }
 
 public struct SignalboxSessionDefaultsRead: Decodable, Equatable, Sendable {
@@ -1495,12 +1662,40 @@ public struct SignalboxInputSubmitted: Decodable, Equatable, Sendable {
   public let acceptedInputID: SignalboxCanonicalUUID
   public let acceptancePosition: SignalboxCanonicalUInt64
   public let turnID: SignalboxCanonicalUUID
+  public let modelSettings: SignalboxModelSettingsSnapshot
+
+  public init(from decoder: Decoder) throws {
+    let tagged = try SignalboxTaggedPayload(from: decoder)
+    try tagged.rejectUnadmittedFields(
+      [
+        "type", "session_id", "accepted_input_id", "acceptance_position", "turn_id",
+        "model_settings",
+      ],
+      decoder: decoder
+    )
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    sessionID = try container.decode(SignalboxCanonicalUUID.self, forKey: .sessionID)
+    acceptedInputID = try container.decode(
+      SignalboxCanonicalUUID.self,
+      forKey: .acceptedInputID
+    )
+    acceptancePosition = try container.decode(
+      SignalboxCanonicalUInt64.self,
+      forKey: .acceptancePosition
+    )
+    turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+    modelSettings = try container.decode(
+      SignalboxModelSettingsSnapshot.self,
+      forKey: .modelSettings
+    )
+  }
 
   private enum CodingKeys: String, CodingKey {
     case sessionID = "session_id"
     case acceptedInputID = "accepted_input_id"
     case acceptancePosition = "acceptance_position"
     case turnID = "turn_id"
+    case modelSettings = "model_settings"
   }
 }
 

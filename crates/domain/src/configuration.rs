@@ -437,18 +437,33 @@ impl SessionConfigurationDefaults {
     }
 
     /// Creates complete defaults including validated model settings.
-    pub const fn complete_with_model_settings(
+    ///
+    /// A direct model can carry only settings validated for that same direct
+    /// selection. Provider defaults remain model-independent, while an alias
+    /// retains the direct validation identity needed to detect a later
+    /// retarget. A defaults epoch cannot carry a per-call contribution.
+    pub fn complete_with_model_settings(
         model: ModelSelectionRequest,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
         model_settings: ValidatedModelSettings,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let selection_matches = match (model, model_settings.validated_for()) {
+            (ModelSelectionRequest::Direct(expected), Some(validated)) => expected == validated,
+            (ModelSelectionRequest::Direct(_), None)
+            | (ModelSelectionRequest::Alias(_), Some(_) | None) => true,
+        };
+        let per_call_inherits =
+            model_settings.precedence().per_call() == ModelSettingsOverlay::inherit_all();
+        if !selection_matches || !per_call_inherits {
+            return None;
+        }
+        Some(Self {
             model,
             dangerous_tool_auto_approval,
             system_prompt,
             model_settings,
-        }
+        })
     }
 
     /// Returns the default model-selection request.
@@ -1082,6 +1097,77 @@ mod tests {
         assert_eq!(prompted.model(), model);
     }
 
+    /// INV-003 / INV-051: a direct default cannot carry settings admitted for
+    /// a different direct selection.
+    #[test]
+    fn inv003_inv051_defaults_reject_crosswired_direct_settings() {
+        let validated_selection = direct(1);
+        let configured_selection = direct(2);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            validated_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture level is supported");
+
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(configured_selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        );
+
+        assert_eq!(defaults, None);
+    }
+
+    /// INV-003 / INV-051: a durable defaults epoch cannot retain a per-call
+    /// contribution that belongs only to one origin request.
+    #[test]
+    fn inv003_inv051_defaults_reject_per_call_settings_provenance() {
+        let selection = direct(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture level is supported");
+
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        );
+
+        assert_eq!(defaults, None);
+    }
+
     #[test]
     fn selection_keys_expose_their_uuid_values() {
         let selection_uuid = Uuid::from_u128(1);
@@ -1141,7 +1227,8 @@ mod tests {
             DangerousToolAutoApproval::Disabled,
             None,
             prior_settings,
-        );
+        )
+        .expect("an alias retains its prior direct validation identity");
         let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
         let checked = versioned
             .derive_request_with_model_settings(
@@ -1229,7 +1316,8 @@ mod tests {
             DangerousToolAutoApproval::Disabled,
             None,
             high,
-        );
+        )
+        .expect("the settings were validated for the direct default");
         let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
         let checked = versioned
             .derive_request_with_model_settings(

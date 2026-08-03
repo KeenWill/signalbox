@@ -6615,12 +6615,17 @@ fn decode_defaults(
         })?;
     let model_settings = model_settings_from_json(model_settings)
         .map_err(|_| SubmitInputCorruption::Inconsistent("model settings"))?;
-    Ok(SessionConfigurationDefaults::complete_with_model_settings(
+    SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         None,
         model_settings,
-    ))
+    )
+    .ok_or_else(|| {
+        SubmitInputRepositoryError::from(SubmitInputCorruption::Inconsistent(
+            "model settings validation selection",
+        ))
+    })
 }
 
 fn decode_dangerous_tool_auto_approval(

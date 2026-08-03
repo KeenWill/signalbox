@@ -66,6 +66,32 @@ enum MockProcessProtocolFixtures {
   static let failedAcceptedInputID = "eeeeeeee-0000-4000-8000-000000000003"
   static let failedTurnID = "ffffffff-0000-4000-8000-000000000003"
   static let failedFrontierID = "13131313-0000-4000-8000-000000000001"
+
+  static func providerDefaultModelSettings() -> [String: Any] {
+    let inherit: [String: Any] = ["kind": "inherit"]
+    let overlay: [String: Any] = [
+      "reasoning_level": inherit,
+      "fast_mode": inherit,
+      "service_tier": inherit,
+    ]
+    return [
+      "precedence": [
+        "per_call": overlay,
+        "session": overlay,
+        "profile": overlay,
+        "global_default": overlay,
+      ],
+      "effective": [
+        "reasoning_level": NSNull(),
+        "fast_mode": "disabled",
+        "service_tier": NSNull(),
+      ],
+      "reasoning_source": NSNull(),
+      "fast_mode_source": NSNull(),
+      "service_tier_source": NSNull(),
+      "validated_for_selection_id": NSNull(),
+    ]
+  }
 }
 
 private actor MockProcessProtocolConnection: SignalboxProcessConnection {
@@ -239,6 +265,7 @@ private actor MockProcessProtocolState {
           [
             "type": "session_created",
             "session_id": MockProcessProtocolFixtures.createdSessionID,
+            "model_settings": MockProcessProtocolFixtures.providerDefaultModelSettings(),
           ]
         ]
       )
@@ -317,6 +344,7 @@ private actor MockProcessProtocolState {
           [
             "type": "session_created",
             "session_id": MockProcessProtocolFixtures.continuedSessionID,
+            "model_settings": MockProcessProtocolFixtures.providerDefaultModelSettings(),
           ]
         ]
       )
@@ -400,6 +428,7 @@ private actor MockProcessProtocolState {
               "kind": "direct",
               "selection_id": MockProcessProtocolFixtures.selectionID,
             ],
+            "model_settings": MockProcessProtocolFixtures.providerDefaultModelSettings(),
             "dangerous_tool_auto_approval": false,
             "system_prompt": NSNull(),
           ]
@@ -426,6 +455,7 @@ private actor MockProcessProtocolState {
             "accepted_input_id": MockProcessProtocolFixtures.submittedAcceptedInputID,
             "acceptance_position": MockProcessProtocolFixtures.submittedAcceptancePosition,
             "turn_id": MockProcessProtocolFixtures.submittedTurnID,
+            "model_settings": MockProcessProtocolFixtures.providerDefaultModelSettings(),
           ]
         ]
       )

@@ -947,12 +947,18 @@ mod tests {
             DangerousToolAutoApproval::Disabled,
             None,
             low,
-        );
+        )
+        .expect("the low settings match the direct replacement");
         let high_replacement = SessionConfigurationDefaults::complete_with_model_settings(
             ModelSelectionRequest::Direct(selection),
             DangerousToolAutoApproval::Disabled,
             None,
             high,
+        )
+        .expect("the high settings match the direct replacement");
+        assert_ne!(
+            low_replacement.model_settings(),
+            high_replacement.model_settings(),
         );
         let caller = ModelSettingsOverlay::inherit_all();
         let recorded = ReplaceSessionDefaults::with_model_settings(

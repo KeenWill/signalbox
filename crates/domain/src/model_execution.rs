@@ -6170,6 +6170,8 @@ mod tests {
         );
     }
 
+    /// S37: a resumed prepared request carries the turn's exact frozen
+    /// validated model settings.
     #[test]
     fn prepared_request_carries_the_turns_exact_validated_model_settings() {
         let execution = prepared_execution();

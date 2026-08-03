@@ -1567,12 +1567,12 @@ impl SessionConfigurationDefaults {
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
     ) -> Self;
-    pub const fn complete_with_model_settings(
+    pub fn complete_with_model_settings(
         model: ModelSelectionRequest,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
         model_settings: ValidatedModelSettings,
-    ) -> Self;
+    ) -> Option<Self>;
     // accessors: model(), dangerous_tool_auto_approval(), system_prompt(), model_settings()
 }
 
@@ -1731,13 +1731,15 @@ impl EffectiveModelSettings {
 pub enum ModelSettingSource { PerCall, Session, Profile, GlobalDefault }
 
 pub struct ResolvedModelSettings { /* private */ }
-// sealed: ModelSettingsPrecedence::resolve
+// sealed: ModelSettingsPrecedence::resolve or ValidatedModelSettings::resolved
 impl ResolvedModelSettings {
     // accessors: effective(), reasoning_source(), fast_mode_source(), service_tier_source()
 }
 
 pub struct ValidatedModelSettings { /* private */ }
-// sealed: provider_defaults or ModelCapabilities::validate_precedence
+// sealed: provider_defaults, reconstitute, ModelCapabilities::validate_precedence,
+// or ModelCapabilities::validate_model_change via AdjustedModelSettings::settings
+// and AdjustedModelSettings::into_parts
 impl ValidatedModelSettings {
     pub const fn provider_defaults() -> Self;
     pub fn reconstitute(

@@ -71,6 +71,111 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testSessionCreatedRequiresTheModelSettingsSnapshot() throws {
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)"
+      }
+      """.utf8
+    )
+
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: encoded
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: message))
+  }
+
+  func testSessionCreatedRejectsMalformedModelSettings() throws {
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)",
+        "model_settings":{}
+      }
+      """.utf8
+    )
+
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: encoded
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: message))
+  }
+
+  func testModelSettingsSnapshotRejectsContradictoryEffectiveValue() {
+    let encoded = ProcessProtocolFixture.modelSettingsSnapshot(
+      effectiveReasoning: "\"high\"",
+      reasoningSource: "null",
+      validatedForSelectionID: "null"
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxModelSettingsSnapshot.self,
+        from: encoded
+      )
+    )
+  }
+
+  func testModelSettingsSnapshotRequiresValidationForNondefaultValue() {
+    let encoded = ProcessProtocolFixture.modelSettingsSnapshot(
+      sessionReasoning: #"{"kind":"value","value":"high"}"#,
+      effectiveReasoning: "\"high\"",
+      reasoningSource: "\"session\"",
+      validatedForSelectionID: "null"
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxModelSettingsSnapshot.self,
+        from: encoded
+      )
+    )
+  }
+
+  func testInputSubmittedRequiresTheModelSettingsSnapshot() {
+    let encoded = Data(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(sessionID)",
+        "accepted_input_id":"\(turnID)",
+        "acceptance_position":"1",
+        "turn_id":"\(turnID)"
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxInputSubmitted.self, from: encoded)
+    )
+  }
+
+  func testInputSubmittedRejectsMalformedModelSettings() {
+    let encoded = Data(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(sessionID)",
+        "accepted_input_id":"\(turnID)",
+        "acceptance_position":"1",
+        "turn_id":"\(turnID)",
+        "model_settings":{}
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxInputSubmitted.self, from: encoded)
+    )
+  }
+
   /// INV-033: imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
@@ -1407,6 +1512,31 @@ private enum ProcessProtocolFixture {
     Data(
       repeating: 0x20,
       count: SignalboxProcessProtocol.maximumFrameBytes + 1
+    )
+  }
+
+  static func modelSettingsSnapshot(
+    sessionReasoning: String = #"{"kind":"inherit"}"#,
+    effectiveReasoning: String = "null",
+    reasoningSource: String = "null",
+    validatedForSelectionID: String = "null"
+  ) -> Data {
+    Data(
+      """
+      {
+        "precedence":{
+          "per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+          "session":{"reasoning_level":\(sessionReasoning),"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+          "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+          "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+        },
+        "effective":{"reasoning_level":\(effectiveReasoning),"fast_mode":"disabled","service_tier":null},
+        "reasoning_source":\(reasoningSource),
+        "fast_mode_source":null,
+        "service_tier_source":null,
+        "validated_for_selection_id":\(validatedForSelectionID)
+      }
+      """.utf8
     )
   }
 
