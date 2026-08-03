@@ -37,7 +37,8 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles, migrate,
-    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    model_execution::PostgresModelCallRepository,
+    repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
@@ -1233,6 +1234,32 @@ async fn run_hub(
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let configured_repositories =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                configuration
+                    .repositories()
+                    .iter()
+                    .map(|repository| repository.repository().clone())
+                    .collect()
+            });
+    let repository_watch_store = PostgresRepoWatchDispatchStore::new(
+        pool.clone(),
+        model_configuration.session_credential_pin(),
+    );
+    if repository_watch_store
+        .deactivate_unconfigured_repositories(&configured_repositories)
+        .await
+        .is_err()
+    {
+        let failure = erase_startup_cause(
+            RuntimePhase::StartupScan,
+            SanitizedStartupCause::Static("repository_watch_configuration_reconciliation_failed"),
+        );
+        let _ = database.close().await;
+        return Err(failure);
+    }
     let repository_watch_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match RepositoryWatchRuntime::try_new(
             pool.clone(),

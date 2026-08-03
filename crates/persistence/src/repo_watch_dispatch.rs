@@ -827,7 +827,7 @@ async fn singleton_is_cooling_down(
                AND batch.singleton_repository IS NOT DISTINCT FROM $4
                AND batch.singleton_pull_request_number IS NOT DISTINCT FROM $5
                AND batch.singleton_stack_root_pull_request_number IS NOT DISTINCT FROM $6
-               AND extract(epoch FROM (transaction_timestamp() - released.released_at))
+               AND extract(epoch FROM (clock_timestamp() - released.released_at))
                     < batch.cooldown_seconds
         )",
     )

@@ -143,6 +143,9 @@ CREATE TABLE repo_watch_dispatch_action (
     CHECK (octet_length(template_content_digest) = 32)
 );
 
+CREATE INDEX repo_watch_dispatch_action_session
+    ON repo_watch_dispatch_action (session_id);
+
 CREATE TABLE repo_watch_dispatch_delivery_intent (
     dispatch_id uuid NOT NULL,
     action_ordinal integer NOT NULL,
@@ -223,40 +226,52 @@ CREATE FUNCTION repo_watch_release_completed_dispatch_batches_for_turn(
 RETURNS void
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    candidate_dispatch_id uuid;
 BEGIN
-    INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
-    SELECT batch.dispatch_id, completed_at
-      FROM repo_watch_dispatch_action AS changed_action
-      JOIN repo_watch_dispatch_batch AS batch
-        ON batch.dispatch_id = changed_action.dispatch_id
-     WHERE changed_action.session_id = completed_session_id
-       AND NOT EXISTS (
-            SELECT 1
-              FROM repo_watch_dispatch_release AS released
-             WHERE released.dispatch_id = batch.dispatch_id
-       )
-       AND batch.action_count = (
-            SELECT count(*)
-              FROM repo_watch_dispatch_action AS action
-              JOIN repo_watch_dispatch_delivery AS delivery
-                ON delivery.dispatch_id = action.dispatch_id
-               AND delivery.action_ordinal = action.action_ordinal
-              JOIN turn_lifecycle AS turn
-                ON turn.turn_id = delivery.turn_id
-               AND (
-                    turn.state_kind = 'terminal'
-                    OR turn.turn_id = completed_turn_id
-               )
-             WHERE action.dispatch_id = batch.dispatch_id
-               AND NOT EXISTS (
-                    SELECT 1
-                     FROM turn_lifecycle AS live_turn
-                     WHERE live_turn.session_id = action.session_id
-                       AND live_turn.state_kind <> 'terminal'
-                       AND live_turn.turn_id <> completed_turn_id
-               )
-       )
-    ON CONFLICT DO NOTHING;
+    FOR candidate_dispatch_id IN
+        SELECT DISTINCT action.dispatch_id
+          FROM repo_watch_dispatch_action AS action
+         WHERE action.session_id = completed_session_id
+         ORDER BY action.dispatch_id
+    LOOP
+        PERFORM 1
+          FROM repo_watch_dispatch_batch AS locked_batch
+         WHERE locked_batch.dispatch_id = candidate_dispatch_id
+           FOR UPDATE;
+
+        INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+        SELECT batch.dispatch_id, completed_at
+          FROM repo_watch_dispatch_batch AS batch
+         WHERE batch.dispatch_id = candidate_dispatch_id
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_dispatch_release AS released
+                 WHERE released.dispatch_id = batch.dispatch_id
+           )
+           AND batch.action_count = (
+                SELECT count(*)
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_dispatch_delivery AS delivery
+                    ON delivery.dispatch_id = action.dispatch_id
+                   AND delivery.action_ordinal = action.action_ordinal
+                  JOIN turn_lifecycle AS turn
+                    ON turn.turn_id = delivery.turn_id
+                   AND (
+                        turn.state_kind = 'terminal'
+                        OR turn.turn_id = completed_turn_id
+                   )
+                 WHERE action.dispatch_id = batch.dispatch_id
+                   AND NOT EXISTS (
+                        SELECT 1
+                         FROM turn_lifecycle AS live_turn
+                         WHERE live_turn.session_id = action.session_id
+                           AND live_turn.state_kind <> 'terminal'
+                           AND live_turn.turn_id <> completed_turn_id
+                   )
+           )
+        ON CONFLICT DO NOTHING;
+    END LOOP;
 END;
 $$;
 

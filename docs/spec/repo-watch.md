@@ -356,12 +356,14 @@ evaluation outcome are append-only. Restart resumes the oldest unevaluated fact
 for that rule version; it neither redispatches an evaluated fact nor treats
 pre-activation history as a new live signal. Reconciliation records an
 append-only deactivation when a configured identity or its repository
-disappears. Configuration reconciliation and evaluation are serialized per
-repository: an evaluation already committed may replay, but an already-loaded
-event cannot create a dispatch after deactivation commits. A deactivated rule
-identity and version cannot be configured again; the replacement uses a new
-identity so no events observed during its absence can be consumed through the
-old activation.
+disappears. Guarded daemon startup reconciles the complete repository set before
+any watch task starts, including the empty set when the repository-watch section
+is absent; the absent section still starts no watch runtime or polling task.
+Configuration reconciliation and evaluation are serialized per repository: an
+evaluation already committed may replay, but an already-loaded event cannot
+create a dispatch after deactivation commits. A deactivated rule identity and
+version cannot be configured again; the replacement uses a new identity so no
+events observed during its absence can be consumed through the old activation.
 
 ## First live rule
 

@@ -161,6 +161,15 @@ fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     )
 }
 
+fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_with_actions_and_cooldown(
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        cooldown,
+    )
+}
+
 struct TemplateResolver;
 
 impl RepoWatchTemplateResolver for TemplateResolver {
@@ -227,6 +236,53 @@ fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
 
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
     matches!(outcome, RepoWatchRuleEvaluationOutcome::Dispatched { .. })
+}
+
+async fn wait_for_backend_lock(pool: &PgPool, backend: i32) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM pg_stat_activity
+                     WHERE pid = $1
+                       AND wait_event_type = 'Lock'
+                )",
+            )
+            .bind(backend)
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+async fn wait_for_advisory_lock(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1
+                      FROM pg_locks
+                     WHERE locktype = 'advisory'
+                       AND NOT granted
+                )",
+            )
+            .fetch_one(pool)
+            .await?;
+            if waiting {
+                return Ok::<(), sqlx::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
 }
 
 struct DispatchFixture {
@@ -532,6 +588,96 @@ async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time
     let outcome = evaluate_second_conflict(&fixture).await?;
 
     assert!(release_age_seconds >= 7_199.0);
+    assert!(outcome_is_dispatched(&outcome));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    let turns: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM repo_watch_dispatch_delivery
+          WHERE dispatch_id = $1
+          ORDER BY action_ordinal",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    let mut first = fixture.pool.begin().await?;
+    sqlx::query(
+        "SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2, clock_timestamp())",
+    )
+    .bind(turns[0])
+    .bind(fixture.sessions[0].as_uuid())
+    .execute(&mut *first)
+    .await?;
+    let mut second = fixture.pool.acquire().await?;
+    let second_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *second)
+        .await?;
+    let second_check = tokio::spawn(async move {
+        sqlx::query(
+            "SELECT repo_watch_release_completed_dispatch_batches_for_turn(
+                $1, $2, clock_timestamp())",
+        )
+        .bind(turns[1])
+        .bind(fixture.sessions[1].as_uuid())
+        .execute(&mut *second)
+        .await
+    });
+
+    wait_for_backend_lock(&fixture.pool, second_backend).await?;
+    first.commit().await?;
+    second_check.await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cooldown_clock_is_sampled_after_singleton_lock_wait() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let turn: Uuid = sqlx::query_scalar(
+        "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "SELECT repo_watch_release_completed_dispatch_batches_for_turn(
+            $1, $2, clock_timestamp() + interval '2 seconds')",
+    )
+    .bind(turn)
+    .bind(fixture.sessions[0].as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    let (loaded, observation) = load_second_conflict(&fixture).await?;
+    let mut repository_lock = fixture.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(fixture.repository.as_str())
+        .execute(&mut *repository_lock)
+        .await?;
+    let store = fixture.store.clone();
+    let rule = fixture.rule.clone();
+    let evaluation = tokio::spawn(async move {
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, store)
+            .evaluate(
+                loaded,
+                &rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await
+    });
+
+    wait_for_advisory_lock(&fixture.pool).await?;
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    repository_lock.commit().await?;
+    let outcome = evaluation.await??;
+
     assert!(outcome_is_dispatched(&outcome));
     Ok(())
 }
