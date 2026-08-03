@@ -794,7 +794,10 @@ impl OriginConfiguration {
             return None;
         }
         let selected = frozen_model.selected_direct();
-        if stored_settings.validated_for() != Some(selected) {
+        if stored_settings
+            .validated_for()
+            .is_some_and(|validated| validated != selected)
+        {
             return None;
         }
         let precedence = request
@@ -1236,6 +1239,33 @@ mod tests {
         )
         .expect("stored resolution evidence reconstructs without the live catalog");
         assert_eq!(reconstituted, origin);
+    }
+
+    /// INV-003 / INV-053: model-independent provider defaults remain valid
+    /// durable evidence when an origin is reconstituted.
+    #[test]
+    fn inv003_inv053_origin_reconstitutes_provider_default_settings() {
+        let selection = direct(1);
+        let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection));
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+        let expected = OriginConfiguration::freeze(checked, |_| None)
+            .expect("a direct model does not require alias resolution");
+
+        let reconstituted = OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            FrozenModelSelection::Direct(selection),
+            ValidatedModelSettings::provider_defaults(),
+            Vec::new(),
+        );
+
+        assert_eq!(reconstituted, Some(expected));
     }
 
     /// INV-008: comparison uses constructible semantic values; a direct
