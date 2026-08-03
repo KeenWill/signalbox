@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `a7347fbe` on 2026-08-03.
+Verified against repository head `8540c68c` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 13 close-now, 14 staged, and 1 report-only.
+variants: 13 close-now, 15 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -76,6 +76,7 @@ variants: 13 close-now, 14 staged, and 1 report-only.
 | S12 | Medium   | Imported detail reads retain and project the entire transcript before publishing it, so latency and memory grow linearly toward the 50,000-entry application cap.                                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — see [conversation import](../../../docs/open-questions.md#conversation-import).                                                       |
 | S13 | High     | Added members on known version-one frames, messages, nested states, errors, or details invalidate the closed wire shape and therefore erase the known projection.                                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — changing that rule requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                             |
 | S14 | High     | Native can encode only the single-frame `import_conversation` write. It lacks the four current chunked-import requests, their three acknowledgements, and typed import-rejection details, so larger sources have no native write path and import refusals degrade to a visibly unknown server message.                                                                                                                                                                                                                                                                                                     | **staged** — add transport and error presentation with a future [conversation-import](../../../docs/open-questions.md#conversation-import) UI.     |
+| S15 | Medium   | A `model_identity_changed` boundary is visible after an authoritative transcript read, but the current side-reread contract admits neither `turn_activated` as a trigger nor model-identity evidence as attributable side-read material, so a live turn may not show its model boundary until a later authoritative resynchronization.                                                                                                                                                                                                                                                                     | **staged** — changing live eligibility requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                      |
 
 ## Report-only gap
 
