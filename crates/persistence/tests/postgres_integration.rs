@@ -5194,6 +5194,60 @@ async fn explicit_tool_decision_dispatches_full_user_provenance() -> Result<(), 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn explicit_tool_decision_rejects_sentinel_user_provenance() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(APPROVAL_COMMAND_SEED)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(APPROVAL_NEXT_ATTEMPT_SEED)),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_approval_decision
+            SET owner_command_id = $1
+          WHERE request_id = $2",
+    )
+    .bind(Uuid::nil())
+    .bind(request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let error = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await
+        .expect_err("sentinel command provenance fails closed");
+    let ProcessReadError::Corruption(corruption) = error else {
+        panic!("sentinel command provenance is projection corruption")
+    };
+    assert_eq!(
+        corruption,
+        ProcessReadCorruption::Inconsistent("tool approval user command")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 fn process_tool_approval(
     snapshot: &ProcessTranscriptSnapshot,
     request: ToolRequestId,

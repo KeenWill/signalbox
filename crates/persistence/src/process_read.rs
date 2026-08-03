@@ -8,19 +8,18 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-    ImportedConversationId, ImportedSourceAttestation, ImportedTranscriptContent,
-    ImportedTranscriptEntryId, ModelAlias, ModelCallId, ProviderModelIdentity,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
-    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
-    VersionedSessionPlacement,
+    AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
+    ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
+    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision, SessionReadScopeRefusal,
+    ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId, ToolDecisionRationale,
+    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
-    mapping::{session_id_from_uuid, session_id_to_uuid},
+    mapping::{durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid},
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -3608,7 +3607,9 @@ fn decode_process_tool_approval(
         ("owner_command", Some(command), None, None, None) => Ok(Some(ProcessToolApproval {
             decision,
             decider: ToolApprovalDecider::User {
-                command: DurableCommandId::from_uuid(command),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    ProcessReadCorruption::Inconsistent("tool approval user command")
+                })?,
             },
             rationale: None,
         })),
