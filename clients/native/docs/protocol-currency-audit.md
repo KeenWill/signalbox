@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `8540c68c` on 2026-08-03.
+Verified against repository head `27dc2ff3` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 13 close-now, 15 staged, and 1 report-only.
+variants: 13 close-now, 16 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -77,6 +77,7 @@ variants: 13 close-now, 15 staged, and 1 report-only.
 | S13 | High     | Added members on known version-one frames, messages, nested states, errors, or details invalidate the closed wire shape and therefore erase the known projection.                                                                                                                                                                                                                                                                                                                                                                                                                                          | **staged** — changing that rule requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                             |
 | S14 | High     | Native can encode only the single-frame `import_conversation` write. It lacks the four current chunked-import requests, their three acknowledgements, and typed import-rejection details, so larger sources have no native write path and import refusals degrade to a visibly unknown server message.                                                                                                                                                                                                                                                                                                     | **staged** — add transport and error presentation with a future [conversation-import](../../../docs/open-questions.md#conversation-import) UI.     |
 | S15 | Medium   | A `model_identity_changed` boundary is visible after an authoritative transcript read, but the current side-reread contract admits neither `turn_activated` as a trigger nor model-identity evidence as attributable side-read material, so a live turn may not show its model boundary until a later authoritative resynchronization.                                                                                                                                                                                                                                                                     | **staged** — changing live eligibility requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                      |
+| S16 | High     | Native omits the current session-placement member when creating a session, drops placement and its version from `session_summary`, and has no `update_session_placement` request, `session_placement_updated` receipt, or typed placement-rejection details. Native creation therefore remains explicitly pathless and cannot inspect or change scoped conversation-read visibility.                                                                                                                                                                                                                       | **staged** — add placement controls and presentation with a future [client-scope](../../../docs/open-questions.md#client-scope) surface.           |
 
 ## Report-only gap
 
@@ -91,14 +92,14 @@ The current daemon-side finding is S08 in the staged inventory. It is outside
 
 ## Current shape catalog
 
-The 34 request verbs absent from native are the five non-review verbs in S01
-through S05, the 20 review verbs in S06 and S07, the five goal verbs in S09, and
-the four chunked-import verbs in S14. The 31 named server kinds absent before
-this work are `steering_submitted`; the three template sequence kinds;
-`session_defaults_replaced`; `session_compacted`; the three chunked-import
-acknowledgements `conversation_import_begun`, `conversation_import_appended`,
-and `conversation_import_aborted`; the five goal kinds
-`goal_transition_applied`, `goal_history_start`, `goal_history_state`,
+The 35 request verbs absent from native are the six non-review verbs in S01
+through S05 and S16, the 20 review verbs in S06 and S07, the five goal verbs in
+S09, and the four chunked-import verbs in S14. The 32 named server kinds absent
+before this work are `steering_submitted`; the three template sequence kinds;
+`session_defaults_replaced`; `session_compacted`; `session_placement_updated`;
+the three chunked-import acknowledgements `conversation_import_begun`,
+`conversation_import_appended`, and `conversation_import_aborted`; the five goal
+kinds `goal_transition_applied`, `goal_history_start`, `goal_history_state`,
 `goal_history_item`, and `goal_history_end`; and these 17 review kinds:
 `review_target_created`, `review_run_started`, `review_pass_activated`,
 `review_pass_completed`, `review_findings_recorded`,
