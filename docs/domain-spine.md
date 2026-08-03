@@ -1785,6 +1785,17 @@ impl SubmitInput {
         turn: Option<TurnId>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_delegated_active_turn(
+        self,
+        session: &Session,
+        actual_active_turn: TurnId,
+        previous_position: Option<SessionInputPosition>,
+        existing_interrupt: Option<DurableCommandId>,
+        awaiting_approval: bool,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
 }
 // Eq/Hash exclude command_id; all other fields participate
@@ -2482,8 +2493,12 @@ impl ContinuationRoundReconstitutionInput {
 }
 
 pub struct PendingSteeringInput { /* private */ }
-// sealed: checked AcceptedInputSchedulingProjection::active_turn_execution
 impl PendingSteeringInput {
+    pub fn reconstitute(
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
+        source_turn: TurnId,
+    ) -> Option<Self>;
     // accessors: accepted_input(), lifecycle(), acceptance_position()
 }
 
@@ -2780,8 +2795,12 @@ impl ActivatedAcceptedInputTurn {
 pub struct ActivatedDelegatedTurn { /* private */ }
 // sealed: PreparedDelegatedTurnActivation
 impl ActivatedDelegatedTurn {
+    pub fn with_pending_steering(
+        self,
+        pending_steering: Vec<PendingSteeringInput>,
+    ) -> Option<Self>;
     // accessors: session(), turn(), spawning_request(), task(), configuration(),
-    // delivery_range(), start(), phase()
+    // delivery_range(), start(), phase(), pending_steering()
 }
 
 pub enum ActivatedTurn {
@@ -3156,6 +3175,10 @@ pub struct ResolvedModelSelection { /* private */ }
 pub struct ModelTargetResolutionError { /* private */ }
 pub struct ModelCallOriginContent { /* private */ }
 impl ModelCallOriginContent {
+    pub fn from_pending_steering(
+        pending: &PendingSteeringInput,
+        content: UserContent,
+    ) -> Self;
     pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self>;
     pub fn from_reconstituted_turn_origin(
         origin: &SubmitInputTurnOriginReconstitutionInput,
@@ -4081,6 +4104,10 @@ pub enum CurrentToolAttemptState {
 pub enum ToolAttemptEnd {
     Completed { result: ToolResultContent },
     KnownFailed { error: ToolExecutionError },
+    AwaitingChild {
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
     Ambiguous,
 }
 impl ToolAttemptEnd {
@@ -4089,6 +4116,7 @@ impl ToolAttemptEnd {
 pub enum ToolAttemptDisposition {
     Completed,
     KnownFailed,
+    AwaitingChild,
     Ambiguous,
 }
 pub enum ToolAttemptObservation {
@@ -4189,6 +4217,11 @@ pub enum ToolBatchPhaseReconstitutionInput {
     AwaitingApproval { request: ToolRequestId },
     Executing { turn_attempt: TurnAttemptId },
     AwaitingRecovery { attempt: ToolAttemptId },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
 }
 pub struct ToolBatchReconstitutionInput { /* private */ }
 impl ToolBatchReconstitutionInput {
@@ -4226,6 +4259,7 @@ pub enum ToolBatchReconstitutionFailure {
     ApprovalPhaseMismatch,
     ExecutionPhaseMismatch,
     RecoveryPhaseMismatch,
+    ChildWaitPhaseMismatch,
 }
 pub struct ToolBatchReconstitutionError { /* private */ }
 // accessors: input(), failure(), into_parts()
@@ -4233,6 +4267,11 @@ pub enum ToolBatchPhase {
     AwaitingApproval { request: ToolRequestId },
     Executing { turn_attempt: TurnAttemptId },
     AwaitingRecovery { attempt: ToolAttemptId },
+    AwaitingChild {
+        request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    },
 }
 
 pub struct ToolBatch { /* private */ }
@@ -4287,6 +4326,12 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_delegation_result_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        continuation_frontier: ContextFrontierId,
+        outcome: DelegationOutcome,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_failure_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
@@ -4296,6 +4341,12 @@ impl ToolBatch {
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_delegation_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        outcome: DelegationOutcome,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_reconciliation_projection(
         &self,
@@ -5721,6 +5772,7 @@ pub trait ToolApprovalIdGenerator {
 }
 
 pub trait ToolExecutionIdGenerator {
+    fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId;
     fn next_tool_attempt_id(&mut self) -> ToolAttemptId;
     fn next_tool_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_tool_context_frontier_id(&mut self) -> ContextFrontierId;
@@ -5751,6 +5803,7 @@ pub enum ToolExecutionServiceOutcome {
     NoWork,
     AwaitingApproval(ToolRequestId),
     AwaitingRecovery(ToolAttemptId),
+    ChildWaitResumed(TurnAttemptId),
     AttemptCheckpointed(ToolAttemptId),
     PreflightFailed(Box<EndedToolAttempt>),
     ObservationCommitted(Box<EndedToolAttempt>),
@@ -6971,6 +7024,12 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
     ) -> impl Future<Output = Result<Option<ToolBatch>, Self::Error>> + Send;
+    fn resume_child_wait(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        continuation: TurnAttemptId,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     fn prepare_next_attempt(
         &mut self,
         session: SessionId,

@@ -149,6 +149,17 @@ impl ModelCallOriginContent {
         }
     }
 
+    /// Binds content for one checked pending-steering tail member.
+    pub fn from_pending_steering(
+        pending: &crate::PendingSteeringInput,
+        content: UserContent,
+    ) -> Self {
+        Self {
+            accepted_input: pending.accepted_input(),
+            content,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn from_validated_parts(
         accepted_input: AcceptedInputId,

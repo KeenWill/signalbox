@@ -79,8 +79,9 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
         load_active_batch_from_connection, load_continuation_round_evidence,
-        load_recovery_batch_by_attempt, load_steering_continuation_round_evidence,
-        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
+        load_foreground_delegation_outcome, load_recovery_batch_by_attempt,
+        load_steering_continuation_round_evidence, load_terminal_result_attempts,
+        load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -784,28 +785,19 @@ where
         | SubmitInputResult::Rejected(_) => None,
     };
     let interrupt_outcome = if let Some(interrupt) = interrupt {
-        let active_turn = scheduling
-            .as_ref()
-            .and_then(AcceptedInputSchedulingProjection::active_turn_execution);
-        let executing_tool_batch = match active_turn {
-            Some(active)
-                if matches!(
-                    active.phase(),
-                    signalbox_domain::ActiveTurnPhase::Running { .. }
-                ) =>
-            {
-                load_active_batch_from_connection(connection, interrupt.session(), active.turn())
-                    .await
-                    .map_err(map_tool_loop_error)?
-                    .filter(|batch| {
-                        matches!(
-                            batch.phase(),
-                            signalbox_domain::ToolBatchPhase::Executing { .. }
-                        )
-                    })
-            }
-            Some(_) | None => None,
-        };
+        let executing_tool_batch = load_active_batch_from_connection(
+            connection,
+            interrupt.session(),
+            interrupt.proof().predecessor(),
+        )
+        .await
+        .map_err(map_tool_loop_error)?
+        .filter(|batch| {
+            matches!(
+                batch.phase(),
+                signalbox_domain::ToolBatchPhase::Executing { .. }
+            )
+        });
         if let Some(mut batch) = executing_tool_batch {
             if let Some(current) =
                 batch
@@ -851,45 +843,99 @@ where
                 .map(signalbox_domain::ToolRequest::id)
                 .collect::<Vec<_>>();
             let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-            let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
-                "applied interrupt lacks active scheduling state",
-            ))?;
-            let active_turn =
-                scheduling
-                    .active_turn_execution()
-                    .ok_or(SubmitInputCorruption::Inconsistent(
-                        "applied interrupt lacks active turn execution",
-                    ))?;
-            let identities = attach_interrupt_reclassification_candidates_for_active(
-                cancellation_identities,
-                &active_turn,
-                &mut next_reclassified_turn,
-            )
-            .map_err(|_| {
-                SubmitInputCorruption::Inconsistent("tool interrupt reclassification candidates")
-            })?;
-            Some(ModelCallInterruptOutcome::Cancelled(
-                scheduling
-                    .apply_interrupt_to_tool_batch(
-                        batch,
-                        result_entries,
-                        result_frontier,
-                        interrupt,
-                        identities,
+            let child_wait =
+                batch
+                    .requests()
+                    .iter()
+                    .find_map(|request| match batch.attempt(request.id()) {
+                        Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt)) => {
+                            match attempt.end() {
+                                signalbox_domain::ToolAttemptEnd::AwaitingChild {
+                                    spawning_request,
+                                    child,
+                                } => Some((request.id(), *spawning_request, *child)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    });
+            if child_wait.is_none() && scheduling.is_some() {
+                let Some(scheduling) = scheduling else {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "tool interrupt scheduling projection",
                     )
-                    .map_err(|error| {
-                        let context = match error {
-                            signalbox_domain::ModelCallClosureError::InterruptCorrelationMismatch => {
-                                "applied interrupt does not correlate with executing tool batch"
-                            }
-                            signalbox_domain::ModelCallClosureError::AttemptStateMismatch => {
-                                "applied interrupt does not match executing tool attempt state"
-                            }
-                            _ => "applied interrupt cannot close executing tool batch",
-                        };
-                        SubmitInputCorruption::Inconsistent(context)
-                    })?,
-            ))
+                    .into());
+                };
+                let active_turn = scheduling.active_turn_execution().ok_or(
+                    SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ),
+                )?;
+                let identities = attach_interrupt_reclassification_candidates_for_active(
+                    cancellation_identities,
+                    &active_turn,
+                    &mut next_reclassified_turn,
+                )
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "tool interrupt reclassification candidates",
+                    )
+                })?;
+                Some(ModelCallInterruptOutcome::Cancelled(
+                    scheduling
+                        .apply_interrupt_to_tool_batch(
+                            batch,
+                            result_entries,
+                            result_frontier,
+                            interrupt,
+                            identities,
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt cannot close executing tool batch",
+                            )
+                        })?,
+                ))
+            } else {
+                let projection = match child_wait {
+                    Some((awaiting_request, spawning_request, child)) => batch
+                        .prepare_delegation_cancellation_projection(
+                            result_entries,
+                            result_frontier,
+                            load_foreground_delegation_outcome(
+                                connection,
+                                interrupt.session(),
+                                awaiting_request,
+                                spawning_request,
+                                child,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?,
+                        ),
+                    None => batch.prepare_cancellation_projection(result_entries, result_frontier),
+                }
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "executing tool batch cannot project cancellation",
+                    )
+                })?;
+                let execution =
+                    require_live_execution_for_restart(connection, interrupt.session()).await?;
+                let identities = attach_interrupt_reclassification_candidates(
+                    cancellation_identities,
+                    &execution,
+                    &mut next_reclassified_turn,
+                )?;
+                Some(ModelCallInterruptOutcome::Cancelled(
+                    execution
+                        .apply_interrupt_to_tool_batch(interrupt, projection, identities)
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt cannot close executing tool batch",
+                            )
+                        })?,
+                ))
+            }
         } else {
             let recovery_operation = scheduling
                 .as_ref()
@@ -1201,15 +1247,35 @@ async fn prepare_against_locked_state(
     let prepared = if active_turn_id.is_some() {
         command.prepare_with_active_turn(&scheduling, accepted_input, turn, select_definition)
     } else {
-        let previous_position = sqlx::query_scalar::<_, Decimal>(
-            "SELECT acceptance_position
-               FROM accepted_input
-              WHERE session_id = $1
-              ORDER BY acceptance_position DESC
-              LIMIT 1",
+        let delegated_active = sqlx::query(
+            "SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
+                    attempt.interrupt_command_id
+               FROM turn_lifecycle AS lifecycle
+               LEFT JOIN turn_attempt AS attempt
+                 ON attempt.turn_attempt_id = lifecycle.current_attempt_id
+                AND attempt.turn_id = lifecycle.turn_id
+                AND attempt.session_id = lifecycle.session_id
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.origin_kind = 'delegation'
+                AND lifecycle.state_kind = 'active'",
         )
         .bind(session_id_to_uuid(command.session()))
         .fetch_optional(&mut *connection)
+        .await?;
+        let previous_position = sqlx::query_scalar::<_, Option<Decimal>>(
+            "SELECT max(accepted_position)
+               FROM (
+                    SELECT acceptance_position AS accepted_position
+                      FROM accepted_input
+                     WHERE session_id = $1
+                    UNION ALL
+                    SELECT acceptance_position AS accepted_position
+                      FROM turn_lifecycle
+                     WHERE session_id = $1
+               ) AS session_positions",
+        )
+        .bind(session_id_to_uuid(command.session()))
+        .fetch_one(&mut *connection)
         .await?
         .map(|value| {
             input_position_from_numeric(value).map_err(|reason| {
@@ -1220,13 +1286,50 @@ async fn prepare_against_locked_state(
             })
         })
         .transpose()?;
-        command.prepare_when_no_active_turn(
-            &session,
-            accepted_input,
-            turn,
-            previous_position,
-            select_definition,
-        )
+        match delegated_active {
+            Some(active) => {
+                let active_turn = turn_id_from_uuid(required(&active, "turn_id")?);
+                let phase: String = required(&active, "active_phase_kind")?;
+                let awaiting_approval = match phase.as_str() {
+                    "running"
+                    | "awaiting_child"
+                    | "awaiting_model_call_recovery"
+                    | "awaiting_tool_recovery" => false,
+                    "awaiting_tool_approval" => true,
+                    value => {
+                        return Err(SubmitInputCorruption::Unsupported {
+                            field: "delegated active phase",
+                            value: value.to_owned(),
+                        }
+                        .into());
+                    }
+                };
+                let existing_interrupt = active
+                    .try_get::<Option<Uuid>, _>("interrupt_command_id")?
+                    .map(durable_command_id_from_uuid)
+                    .transpose()
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent("delegated active interrupt command")
+                    })?;
+                command.prepare_with_delegated_active_turn(
+                    &session,
+                    active_turn,
+                    previous_position,
+                    existing_interrupt,
+                    awaiting_approval,
+                    accepted_input,
+                    turn,
+                    select_definition,
+                )
+            }
+            None => command.prepare_when_no_active_turn(
+                &session,
+                accepted_input,
+                turn,
+                previous_position,
+                select_definition,
+            ),
+        }
     };
 
     prepared

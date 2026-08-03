@@ -802,8 +802,16 @@ it retains the parent's sole progressing-turn slot, and survives restart
 unchanged until that relationship has one deliverable terminal result. Result
 consumption atomically appends the parent's delivered-result entry, returns the
 result as that tool request's content, and moves the same turn back to running
-with a fresh continuation attempt. A raw child identity or an unrelated result
-cannot release the wait.
+with a fresh continuation attempt. The scheduler routes that durable hint back
+through the tool loop: the exact parked batch is reconstituted first, then the
+fresh attempt and lifecycle transition commit before ordinary tool continuation
+runs. A raw child identity or an unrelated result cannot release the wait.
+
+A delegated-task or delegation-wake turn owns the same session-local active slot
+as an accepted-input turn. Input submission therefore uses that exact turn for
+active-turn mismatch, vacant-slot rejection, safe-point steering, and interrupt
+predecessor checks even though delegated origins do not fabricate an
+accepted-input scheduling row.
 
 A background await instead commits a delivery registration and returns its
 receipt immediately. It does not create `AwaitingChild` or retain the slot; the

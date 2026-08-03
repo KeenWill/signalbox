@@ -7629,8 +7629,9 @@ async fn delegation_semantic_entries_decode_exact_delivered_content() -> Result<
         "INSERT INTO session_delegation_initial_task
             (spawning_tool_request_id, child_session_id, turn_id,
              semantic_entry_id, admission_position, defaults_version,
-             frozen_direct_model_selection_id, task_content)
-         VALUES ($1, $2, $3, $4, 1, 1, $5, $6)",
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, 'direct', $5, 'direct', $5, $6)",
     )
     .bind(spawning_request_uuid)
     .bind(child_uuid)
@@ -15083,7 +15084,7 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
         .handle(prepared(0xd401, 0xd402, direct(0xd403)))
         .await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(0xd404, 0xd405, direct(0xd403)))
+        .handle(prepared(0xd404, 0xd405, direct(0xd450)))
         .await?;
     let parent = Uuid::from_u128(0xd402);
     let child = Uuid::from_u128(0xd405);
@@ -15096,8 +15097,21 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     let mut fixture = pool.begin().await?;
     sqlx::raw_sql(
         "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
-         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;",
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;",
     )
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request)
+    .bind(parent)
+    .bind(parent_turn)
     .execute(&mut *fixture)
     .await?;
     sqlx::query(
@@ -15126,8 +15140,9 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
         "INSERT INTO session_delegation_initial_task
             (spawning_tool_request_id, child_session_id, turn_id,
              semantic_entry_id, admission_position, defaults_version,
-             frozen_direct_model_selection_id, task_content)
-         VALUES ($1, $2, $3, $4, 1, 1, $5, $6)",
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, 'direct', $5, 'direct', $5, $6)",
     )
     .bind(spawning_request)
     .bind(child)
@@ -15150,7 +15165,8 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     .await?;
     sqlx::raw_sql(
         "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
-         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;",
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;",
     )
     .execute(&mut *fixture)
     .await?;
@@ -15216,6 +15232,77 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     );
     assert_eq!(delegated.start().frontier().snapshot(), starting_frontier);
     assert_eq!(activated.accepted_input(), None);
+
+    let submit = SubmitInputRepository::new(pool.clone());
+    let blocked_start = submit
+        .handle(
+            start_input(
+                0xd410,
+                0xd405,
+                "must not steal the delegated slot",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xd411)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xd412))),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent { active_turn, .. },
+    )) = blocked_start
+    else {
+        panic!("the delegated task must retain the active slot");
+    };
+    assert_eq!(active_turn, TurnId::from_uuid(child_turn));
+
+    let safe_point = submit
+        .handle(
+            input_with_delivery(
+                0xd413,
+                0xd405,
+                "steer the delegated child",
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: TurnId::from_uuid(child_turn),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xd414)),
+            None,
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(steering),
+    )) = safe_point
+    else {
+        panic!("safe-point steering must bind to the delegated task");
+    };
+    assert_eq!(
+        steering.binding().source_turn(),
+        TurnId::from_uuid(child_turn)
+    );
+
+    let interrupt = submit
+        .handle(
+            input_with_delivery(
+                0xd415,
+                0xd405,
+                "interrupt the delegated child",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: TurnId::from_uuid(child_turn),
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xd416)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xd417))),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = interrupt
+    else {
+        panic!("the delegated task must accept a correlated interrupt");
+    };
+    assert!(origin.applied_interrupt().is_some());
 
     pool.close().await;
     drop(container);
@@ -15391,6 +15478,241 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
         .into_parts();
     assert!(!continuation);
     assert_eq!(candidates, vec![SessionId::from_uuid(session_uuid)]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-005 / INV-032: a durable foreground result reopens its exact
+/// parked tool batch under a fresh continued attempt after restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv005_inv032_foreground_delegation_result_resumes_parked_tool_batch()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xab00;
+    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+        &pool,
+        seed,
+        &[("spawn_session", "{}"), ("await_session", "{}")],
+    )
+    .await?;
+    let [spawning_request, awaiting_request] = requests.as_slice() else {
+        panic!("the foreground fixture has spawn and await requests")
+    };
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 0x100, seed + 0x101, direct(seed + 5)))
+        .await?;
+    let child = Uuid::from_u128(seed + 0x101);
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *spawning_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the first approval does not start execution"),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let spawn_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            spawn_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved spawn request prepares one attempt");
+    let authorized_spawn = repository
+        .authorize_attempt(fixture.session, fixture.turn, spawn_attempt)
+        .await?;
+    repository
+        .commit_observation(authorized_spawn.executor_fence().bind(
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(child.to_string()).expect("bounded child identity"),
+                ),
+            },
+        ))
+        .await?;
+    let await_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe2));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            await_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved await request prepares one attempt");
+
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned',
+                 'child_completed', 'child_turn', $2, $3)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(Uuid::from_u128(seed + 0x102))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 2, 'outcome_recorded', 'result_returned', $2)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind("delivered foreground result")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($1, $2, $3, NULL, NULL)",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'awaiting_child',
+                wait_spawning_request_id = $1,
+                wait_child_session_id = $2
+          WHERE attempt_id = $3",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(await_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(issuing_attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_child', current_attempt_id = NULL,
+                child_wait_request_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert_eq!(
+        repository.find_resumable_turn(fixture.session).await?,
+        Some(fixture.turn)
+    );
+    let continuation = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe3));
+    assert!(
+        PostgresToolLoopRepository::new(pool.clone())
+            .resume_child_wait(fixture.session, fixture.turn, continuation)
+            .await?
+    );
+    let resumed = repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the resumed tool batch reconstitutes after restart");
+    let signalbox_domain::ToolBatchPhase::Executing { turn_attempt } = resumed.phase() else {
+        panic!("the delivered foreground result must resume execution");
+    };
+    assert_eq!(turn_attempt, continuation);
 
     pool.close().await;
     drop(container);

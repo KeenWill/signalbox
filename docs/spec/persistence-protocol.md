@@ -998,13 +998,17 @@ Initial task work is one delegated-task origin row plus its semantic entry and
 first queued turn. The origin references the spawning request and repeats no
 independent actor claim; deferred checks resolve that request's checked task,
 parent session and turn, child relationship, semantic entry, and turn starting
-frontier as one closed shape. No accepted-input row is inserted. The ordinary
-eligibility pass recognizes that typed origin directly, activates it without
-fabricating an accepted input, and starts model execution from the existing
-delegated-task semantic entry as the child's one-member initial frontier. The
-same typed path activates an idle recipient's delivery-range wake after its
-exact terminal predecessor, appending the contiguous checked message or
-background-result entries to that predecessor frontier.
+frontier as one closed shape. It stores the exact requested and frozen model
+configuration inherited from the parent turn, including a direct override or a
+frozen alias definition and its selected direct model; an equal effective model
+does not authorize reconstructing the request as a session default. No
+accepted-input row is inserted. The ordinary eligibility pass recognizes that
+typed origin directly, activates it without fabricating an accepted input, and
+starts model execution from the existing delegated-task semantic entry as the
+child's one-member initial frontier. The same typed path activates an idle
+recipient's delivery-range wake after its exact terminal predecessor, appending
+the contiguous checked message or background-result entries to that predecessor
+frontier.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
@@ -1049,13 +1053,14 @@ as neither one.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous
-recipient delivery range and a frozen direct model selection. While the turn is
-queued, later deliveries may only extend that range; activation freezes it. The
-selection and defaults version must equal the exact terminal predecessor's
-effective configuration. The starting frontier extends that predecessor with
-every typed message or background-result semantic entry in delivery order, with
-the final delivery as the lifecycle origin entry. The schema admits at most one
-queued delegation-origin turn per recipient.
+recipient delivery range and the terminal predecessor's exact requested and
+frozen model configuration. While the turn is queued, later deliveries may only
+extend that range; activation freezes it. The requested selection, frozen
+selection, and defaults version must equal the exact terminal predecessor's
+configuration. The starting frontier extends that predecessor with every typed
+message or background-result semantic entry in delivery order, with the final
+delivery as the lifecycle origin entry. The schema admits at most one queued
+delegation-origin turn per recipient.
 
 Parent-and-descendants termination locks the root and complete reachable session
 frontier before inserting the applied parent command and therefore before any
@@ -1081,7 +1086,11 @@ in the same transaction. When a foreground wait is registered after its result
 and original wake already committed, the wait transaction writes a fresh result
 wake keyed by the awaiting request and ordered after the wait update. The
 ordinary nudge remains best effort and the durable predicate is authoritative
-after restart.
+after restart. A foreground hit does not try to activate a new turn: it locks
+and reconstitutes the exact `awaiting_child` tool batch, consumes the matching
+typed result into a `DelegationResult` semantic entry, and reopens the same turn
+under a fresh continued turn attempt. The tool loop then performs its ordinary
+serialized continuation from that checked frontier.
 
 ## Transactional outbox
 

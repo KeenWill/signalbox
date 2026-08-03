@@ -955,6 +955,12 @@ this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
 
+The delegated-task turn nevertheless retains its parent's exact requested and
+frozen model configuration as turn-origin provenance. A direct override remains
+an override, and an alias retains both its frozen definition and selected direct
+model; reconstitution does not replace either form with the copied child default
+merely because both resolve to the same effective model.
+
 The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
 referencing the exact spawning request and its parent session and turn. It is
 model/tool-authored delegation work, not accepted input and not `Actor::User`;

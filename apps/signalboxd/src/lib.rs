@@ -1205,6 +1205,7 @@ where
                     };
                     match tool_outcome {
                         ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+                        | ToolExecutionServiceOutcome::ChildWaitResumed(_)
                         | ToolExecutionServiceOutcome::PreflightFailed(_)
                         | ToolExecutionServiceOutcome::ObservationCommitted(_)
                         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)

@@ -516,13 +516,13 @@ async fn prepare_delegated_preview(
             defaults.direct_model_selection_id AS goal_defaults_direct_id,
             defaults.model_alias_id AS goal_defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
-            defaults.model_selection_kind AS requested_model_kind,
-            defaults.direct_model_selection_id AS requested_direct_model_selection_id,
-            defaults.model_alias_id AS requested_model_alias_id,
-            'direct'::text AS frozen_model_kind,
+            task.requested_model_kind,
+            task.requested_direct_model_selection_id,
+            task.requested_model_alias_id,
+            task.frozen_model_kind,
             task.frozen_direct_model_selection_id,
-            NULL::uuid AS frozen_model_alias_id,
-            NULL::uuid AS frozen_alias_selected_direct_id
+            task.frozen_model_alias_id,
+            task.frozen_alias_selected_direct_id
          FROM session_delegation_initial_task AS task
          JOIN session_delegation AS relation
            ON relation.spawning_tool_request_id = task.spawning_tool_request_id
@@ -635,13 +635,13 @@ async fn prepare_delegated_wake_preview(
             defaults.direct_model_selection_id AS goal_defaults_direct_id,
             defaults.model_alias_id AS goal_defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
-            defaults.model_selection_kind AS requested_model_kind,
-            defaults.direct_model_selection_id AS requested_direct_model_selection_id,
-            defaults.model_alias_id AS requested_model_alias_id,
-            'direct'::text AS frozen_model_kind,
+            wake.requested_model_kind,
+            wake.requested_direct_model_selection_id,
+            wake.requested_model_alias_id,
+            wake.frozen_model_kind,
             wake.frozen_direct_model_selection_id,
-            NULL::uuid AS frozen_model_alias_id,
-            NULL::uuid AS frozen_alias_selected_direct_id
+            wake.frozen_model_alias_id,
+            wake.frozen_alias_selected_direct_id
          FROM session_delegation_wake_turn_origin AS wake
          JOIN turn_lifecycle AS lifecycle
            ON lifecycle.turn_id = wake.turn_id

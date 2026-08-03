@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
     fmt,
+    num::NonZeroU64,
 };
 
 use rust_decimal::Decimal;
@@ -21,7 +22,9 @@ use signalbox_domain::{
     ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DecideToolRequestRejectedResult,
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegateToolApproval,
-    DirectModelSelection, DurableCommandId, EndedToolAttempt, NormalizedToolArguments,
+    DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
     PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
@@ -277,6 +280,28 @@ impl PostgresToolLoopRepository {
                 AND (
                     active_phase_kind = 'running'
                     OR (
+                        active_phase_kind = 'awaiting_child'
+                        AND EXISTS (
+                            SELECT 1
+                              FROM session_delegation_wait AS waiting
+                              JOIN session_child_result_delivery AS delivery
+                                ON delivery.awaiting_tool_request_id =
+                                   waiting.awaiting_tool_request_id
+                               AND delivery.spawning_tool_request_id =
+                                   waiting.spawning_tool_request_id
+                               AND delivery.parent_session_id =
+                                   waiting.parent_session_id
+                               AND delivery.delivery_sequence IS NULL
+                             WHERE waiting.awaiting_tool_request_id =
+                                   turn_lifecycle.child_wait_request_id
+                               AND waiting.parent_session_id =
+                                   turn_lifecycle.session_id
+                               AND waiting.parent_turn_id =
+                                   turn_lifecycle.turn_id
+                               AND waiting.wait_mode = 'foreground'
+                        )
+                    )
+                    OR (
                         active_phase_kind = 'awaiting_tool_approval'
                         AND EXISTS (
                             SELECT 1
@@ -299,6 +324,89 @@ impl PostgresToolLoopRepository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(turn.map(turn_id_from_uuid))
+    }
+
+    /// Atomically reopens one delivered foreground child wait as a fresh turn attempt.
+    pub async fn resume_child_wait(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        continuation: signalbox_domain::TurnAttemptId,
+    ) -> Result<bool, ToolLoopRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_tool_session(&mut transaction, session).await?;
+            let predecessor = sqlx::query_scalar::<_, Uuid>(
+                "SELECT attempt.issuing_turn_attempt_id
+                   FROM turn_lifecycle AS lifecycle
+                   JOIN session_delegation_wait AS waiting
+                     ON waiting.awaiting_tool_request_id =
+                        lifecycle.child_wait_request_id
+                    AND waiting.parent_session_id = lifecycle.session_id
+                    AND waiting.parent_turn_id = lifecycle.turn_id
+                    AND waiting.wait_mode = 'foreground'
+                   JOIN session_child_result_delivery AS delivery
+                     ON delivery.awaiting_tool_request_id =
+                        waiting.awaiting_tool_request_id
+                    AND delivery.spawning_tool_request_id =
+                        waiting.spawning_tool_request_id
+                    AND delivery.parent_session_id = waiting.parent_session_id
+                    AND delivery.delivery_sequence IS NULL
+                   JOIN tool_attempt AS attempt
+                     ON attempt.request_id = waiting.awaiting_tool_request_id
+                    AND attempt.session_id = lifecycle.session_id
+                    AND attempt.turn_id = lifecycle.turn_id
+                    AND attempt.state_kind = 'terminal'
+                    AND attempt.terminal_disposition_kind = 'awaiting_child'
+                    AND attempt.wait_spawning_request_id =
+                        waiting.spawning_tool_request_id
+                    AND attempt.wait_child_session_id = waiting.child_session_id
+                  WHERE lifecycle.session_id = $1
+                    AND lifecycle.turn_id = $2
+                    AND lifecycle.state_kind = 'active'
+                    AND lifecycle.active_phase_kind = 'awaiting_child'",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(predecessor) = predecessor else {
+                return Ok(false);
+            };
+            sqlx::query(
+                "INSERT INTO turn_attempt
+                    (turn_attempt_id, turn_id, session_id,
+                     continued_from_attempt_id, state_kind)
+                 VALUES ($1, $2, $3, $4, 'prepared')",
+            )
+            .bind(continuation.into_uuid())
+            .bind(turn_id_to_uuid(turn))
+            .bind(session_id_to_uuid(session))
+            .bind(predecessor)
+            .execute(&mut *transaction)
+            .await?;
+            let rows = sqlx::query(
+                "UPDATE turn_lifecycle
+                    SET active_phase_kind = 'running',
+                        current_attempt_id = $1,
+                        child_wait_request_id = NULL
+                  WHERE session_id = $2
+                    AND turn_id = $3
+                    AND state_kind = 'active'
+                    AND active_phase_kind = 'awaiting_child'
+                    AND current_attempt_id IS NULL",
+            )
+            .bind(continuation.into_uuid())
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
+            require_single(rows, "foreground child-wait continuation")?;
+            Ok(true)
+        }
+        .await;
+        finish_commit(transaction, result).await
     }
 
     /// Loads one recorded decision handling, or `None` only for an unseen
@@ -863,16 +971,46 @@ impl PostgresToolLoopRepository {
                 }
                 _ => return Ok(PrepareToolContinuationOutcome::NoWork),
             };
-            let projection = batch
-                .prepare_result_projection(
+            let child_wait =
+                batch
+                    .requests()
+                    .iter()
+                    .find_map(|request| match batch.attempt(request.id()) {
+                        Some(ReconstitutedToolAttempt::Ended(attempt)) => match attempt.end() {
+                            ToolAttemptEnd::AwaitingChild {
+                                spawning_request,
+                                child,
+                            } => Some((request.id(), *spawning_request, *child)),
+                            ToolAttemptEnd::Completed { .. }
+                            | ToolAttemptEnd::KnownFailed { .. }
+                            | ToolAttemptEnd::Ambiguous => None,
+                        },
+                        Some(ReconstitutedToolAttempt::Current(_)) | None => None,
+                    });
+            let projection = match child_wait {
+                Some((awaiting_request, spawning_request, child)) => batch
+                    .prepare_delegation_result_projection(
+                        identities.result_entries().to_vec(),
+                        identities.result_frontier(),
+                        load_foreground_delegation_outcome(
+                            &mut transaction,
+                            session,
+                            awaiting_request,
+                            spawning_request,
+                            child,
+                        )
+                        .await?,
+                    ),
+                None => batch.prepare_result_projection(
                     identities.result_entries().to_vec(),
                     identities.result_frontier(),
+                ),
+            }
+            .map_err(|_| {
+                ToolLoopRepositoryError::InvalidTransition(
+                    "tool batch is not ready for continuation",
                 )
-                .map_err(|_| {
-                    ToolLoopRepositoryError::InvalidTransition(
-                        "tool batch is not ready for continuation",
-                    )
-                })?;
+            })?;
             persist_result_entries(&mut transaction, &projection).await?;
             insert_snapshot(&mut transaction, projection.snapshot())
                 .await
@@ -958,6 +1096,15 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         turn: TurnId,
     ) -> Result<Option<ToolBatch>, Self::Error> {
         PostgresToolLoopRepository::load_active_batch(self, session, turn).await
+    }
+
+    async fn resume_child_wait(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        continuation: signalbox_domain::TurnAttemptId,
+    ) -> Result<bool, Self::Error> {
+        PostgresToolLoopRepository::resume_child_wait(self, session, turn, continuation).await
     }
 
     async fn prepare_next_attempt(
@@ -1088,7 +1235,7 @@ pub(crate) async fn load_active_batch_from_connection(
     let lifecycle = sqlx::query(
         "SELECT active_phase_kind, current_attempt_id,
                 active_tool_round_call_id, approval_tool_request_id,
-                recovery_tool_attempt_id
+                recovery_tool_attempt_id, child_wait_request_id
            FROM turn_lifecycle
           WHERE session_id = $1
             AND turn_id = $2
@@ -1146,6 +1293,31 @@ pub(crate) async fn load_active_batch_from_connection(
         "awaiting_tool_recovery" => ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
             attempt: tool_attempt_id_from_uuid(required(&lifecycle, "recovery_tool_attempt_id")?),
         },
+        "awaiting_child" => {
+            let request = tool_request_id_from_uuid(required(&lifecycle, "child_wait_request_id")?);
+            let wait = sqlx::query(
+                "SELECT spawning_tool_request_id, child_session_id
+                   FROM session_delegation_wait
+                  WHERE awaiting_tool_request_id = $1
+                    AND parent_session_id = $2
+                    AND parent_turn_id = $3
+                    AND wait_mode = 'foreground'",
+            )
+            .bind(tool_request_id_to_uuid(request))
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_optional(&mut *connection)
+            .await?
+            .ok_or(ToolLoopCorruption::Missing("foreground child wait"))?;
+            ToolBatchPhaseReconstitutionInput::AwaitingChild {
+                request,
+                spawning_request: tool_request_id_from_uuid(required(
+                    &wait,
+                    "spawning_tool_request_id",
+                )?),
+                child: session_id_from_uuid(required(&wait, "child_session_id")?),
+            }
+        }
         value => {
             return Err(ToolLoopCorruption::Unsupported {
                 field: "active_phase_kind",
@@ -2111,6 +2283,10 @@ fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryE
                 error: ToolExecutionError::new(kind, detail),
             })
         }
+        "awaiting_child" => Ok(ToolAttemptEnd::AwaitingChild {
+            spawning_request: tool_request_id_from_uuid(required(row, "wait_spawning_request_id")?),
+            child: session_id_from_uuid(required(row, "wait_child_session_id")?),
+        }),
         "ambiguous" => Ok(ToolAttemptEnd::Ambiguous),
         value => Err(ToolLoopCorruption::Unsupported {
             field: "terminal_disposition_kind",
@@ -2216,8 +2392,15 @@ pub(crate) async fn persist_ended_attempt(
     connection: &mut PgConnection,
     attempt: &EndedToolAttempt,
 ) -> Result<(), ToolLoopRepositoryError> {
-    let (disposition, result_kind, result_text, error_kind, error_detail) =
-        encode_attempt_end(attempt.end());
+    let (
+        disposition,
+        result_kind,
+        result_text,
+        error_kind,
+        error_detail,
+        wait_spawning_request,
+        wait_child,
+    ) = encode_attempt_end(attempt.end());
     let rows = sqlx::query(
         "UPDATE tool_attempt
             SET state_kind = 'terminal',
@@ -2225,13 +2408,15 @@ pub(crate) async fn persist_ended_attempt(
                 result_content_kind = $2,
                 result_text = $3,
                 error_kind = $4,
-                error_detail = $5
-          WHERE attempt_id = $6
-            AND request_id = $7
-            AND session_id = $8
-            AND turn_id = $9
-            AND issuing_turn_attempt_id = $10
-            AND dispatch_generation = $11
+                error_detail = $5,
+                wait_spawning_request_id = $6,
+                wait_child_session_id = $7
+          WHERE attempt_id = $8
+            AND request_id = $9
+            AND session_id = $10
+            AND turn_id = $11
+            AND issuing_turn_attempt_id = $12
+            AND dispatch_generation = $13
             AND state_kind IN ('prepared', 'in_flight')
             AND terminal_disposition_kind IS NULL",
     )
@@ -2240,6 +2425,8 @@ pub(crate) async fn persist_ended_attempt(
     .bind(result_text)
     .bind(error_kind)
     .bind(error_detail)
+    .bind(wait_spawning_request)
+    .bind(wait_child)
     .bind(tool_attempt_id_to_uuid(attempt.attempt()))
     .bind(tool_request_id_to_uuid(attempt.request()))
     .bind(session_id_to_uuid(attempt.session()))
@@ -2281,21 +2468,45 @@ type EncodedToolAttemptEnd<'a> = (
     Option<&'a str>,
     Option<&'static str>,
     Option<&'a str>,
+    Option<Uuid>,
+    Option<Uuid>,
 );
 
 fn encode_attempt_end(end: &ToolAttemptEnd) -> EncodedToolAttemptEnd<'_> {
     match end {
         ToolAttemptEnd::Completed {
             result: ToolResultContent::Text(text),
-        } => ("completed", Some("text"), Some(text.as_str()), None, None),
+        } => (
+            "completed",
+            Some("text"),
+            Some(text.as_str()),
+            None,
+            None,
+            None,
+            None,
+        ),
         ToolAttemptEnd::KnownFailed { error } => (
             "known_failed",
             None,
             None,
             Some(encode_error_kind(error.kind())),
             error.detail().map(ToolExecutionErrorDetail::as_str),
+            None,
+            None,
         ),
-        ToolAttemptEnd::Ambiguous => ("ambiguous", None, None, None, None),
+        ToolAttemptEnd::AwaitingChild {
+            spawning_request,
+            child,
+        } => (
+            "awaiting_child",
+            None,
+            None,
+            None,
+            None,
+            Some(tool_request_id_to_uuid(*spawning_request)),
+            Some(session_id_to_uuid(*child)),
+        ),
+        ToolAttemptEnd::Ambiguous => ("ambiguous", None, None, None, None, None, None),
     }
 }
 
@@ -2724,40 +2935,185 @@ pub(crate) async fn persist_result_entries(
     persist_result_entry_slice(connection, projection.entries()).await
 }
 
+pub(crate) async fn load_foreground_delegation_outcome(
+    connection: &mut PgConnection,
+    parent: SessionId,
+    awaiting_request: ToolRequestId,
+    spawning_request: ToolRequestId,
+    child: SessionId,
+) -> Result<DelegationOutcome, ToolLoopRepositoryError> {
+    let row = sqlx::query(
+        "SELECT result.outcome_kind, result.content_text,
+                event.reason_kind, event.provenance_kind,
+                event.provenance_session_id, event.provenance_turn_id,
+                event.provenance_goal_generation, event.provenance_command_id
+           FROM session_child_result_delivery AS delivery
+           JOIN session_delegation_wait AS waiting
+             ON waiting.awaiting_tool_request_id = delivery.awaiting_tool_request_id
+            AND waiting.spawning_tool_request_id = delivery.spawning_tool_request_id
+            AND waiting.parent_session_id = delivery.parent_session_id
+            AND waiting.child_session_id = $4
+            AND waiting.wait_mode = 'foreground'
+           JOIN session_child_result AS result
+             ON result.spawning_tool_request_id = delivery.spawning_tool_request_id
+           JOIN session_delegation_event AS event
+             ON event.spawning_tool_request_id = result.spawning_tool_request_id
+            AND event.event_ordinal = result.event_ordinal
+            AND event.event_kind = result.event_kind
+          WHERE delivery.awaiting_tool_request_id = $1
+            AND delivery.spawning_tool_request_id = $2
+            AND delivery.parent_session_id = $3
+            AND delivery.delivery_sequence IS NULL",
+    )
+    .bind(tool_request_id_to_uuid(awaiting_request))
+    .bind(tool_request_id_to_uuid(spawning_request))
+    .bind(session_id_to_uuid(parent))
+    .bind(session_id_to_uuid(child))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ToolLoopCorruption::Missing("foreground child result"))?;
+    let kind = match required::<String>(&row, "outcome_kind")?.as_str() {
+        "result_returned" => DelegationOutcomeKind::ResultReturned,
+        "child_failed" => DelegationOutcomeKind::ChildFailed,
+        "child_stopped" => DelegationOutcomeKind::ChildStopped,
+        "child_cancelled" => DelegationOutcomeKind::ChildCancelled,
+        value => {
+            return Err(ToolLoopCorruption::Unsupported {
+                field: "delegation outcome",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
+    let content = row
+        .try_get::<Option<String>, _>("content_text")?
+        .map(DelegationContent::try_new)
+        .transpose()
+        .map_err(|_| ToolLoopCorruption::Inconsistent("delegation result content"))?;
+    let reason = match required::<String>(&row, "reason_kind")?.as_str() {
+        "child_completed" => DelegationOutcomeReason::ChildCompleted,
+        "child_execution_failed" => DelegationOutcomeReason::ChildExecutionFailed,
+        "child_result_unavailable" => DelegationOutcomeReason::ChildResultUnavailable,
+        "child_cancelled" => DelegationOutcomeReason::ChildCancelled,
+        "parent_stopped_parent_and_descendants" => DelegationOutcomeReason::ParentStopped {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+        "parent_cancelled_parent_and_descendants" => DelegationOutcomeReason::ParentCancelled {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        },
+        value => {
+            return Err(ToolLoopCorruption::Unsupported {
+                field: "delegation outcome reason",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
+    let provenance_session = session_id_from_uuid(required(&row, "provenance_session_id")?);
+    let provenance = match (
+        required::<String>(&row, "provenance_kind")?.as_str(),
+        row.try_get::<Option<Uuid>, _>("provenance_turn_id")?,
+        row.try_get::<Option<Decimal>, _>("provenance_goal_generation")?,
+        row.try_get::<Option<Uuid>, _>("provenance_command_id")?,
+    ) {
+        ("child_turn", Some(turn), None, None) => {
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: provenance_session,
+                turn: turn_id_from_uuid(turn),
+            }
+        }
+        ("parent_turn_command", Some(turn), None, Some(command)) => {
+            DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                session: provenance_session,
+                turn: turn_id_from_uuid(turn),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    ToolLoopCorruption::Inconsistent("delegation provenance command")
+                })?,
+            }
+        }
+        ("parent_goal_command", None, Some(generation), Some(command)) => {
+            let generation = crate::mapping::positive_u64_from_numeric(generation)
+                .ok()
+                .and_then(NonZeroU64::new)
+                .ok_or(ToolLoopCorruption::Inconsistent(
+                    "delegation provenance generation",
+                ))?;
+            DelegationProvenanceReconstitutionInput::ParentGoalCommand {
+                session: provenance_session,
+                generation: GoalGeneration::new(generation),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    ToolLoopCorruption::Inconsistent("delegation provenance command")
+                })?,
+            }
+        }
+        _ => {
+            return Err(ToolLoopCorruption::Inconsistent("delegation result provenance").into());
+        }
+    };
+    DelegationOutcome::reconstitute(kind, content, reason, provenance)
+        .ok_or_else(|| ToolLoopCorruption::Inconsistent("delegation result outcome").into())
+}
+
 pub(crate) async fn persist_result_entry_slice(
     connection: &mut PgConnection,
     entries: &[signalbox_domain::SemanticTranscriptEntry],
 ) -> Result<(), ToolLoopRepositoryError> {
     for entry in entries {
-        let (kind, request, attempt) = match entry.payload() {
-            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => (
-                "tool_execution_result",
-                None,
-                Some(tool_attempt_id_to_uuid(*attempt)),
-            ),
-            SemanticTranscriptEntryPayload::ToolDenied { request } => {
-                ("tool_denied", Some(tool_request_id_to_uuid(*request)), None)
-            }
-            SemanticTranscriptEntryPayload::ToolClosed { request } => (
-                "tool_closed_by_turn_end",
-                Some(tool_request_id_to_uuid(*request)),
-                None,
-            ),
-            _ => {
-                return Err(ToolLoopCorruption::Inconsistent("tool result payload").into());
-            }
-        };
+        let (kind, request, attempt, delegation_awaiting, delegation_spawning) =
+            match entry.payload() {
+                SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => (
+                    "tool_execution_result",
+                    None,
+                    Some(tool_attempt_id_to_uuid(*attempt)),
+                    None,
+                    None,
+                ),
+                SemanticTranscriptEntryPayload::ToolDenied { request } => (
+                    "tool_denied",
+                    Some(tool_request_id_to_uuid(*request)),
+                    None,
+                    None,
+                    None,
+                ),
+                SemanticTranscriptEntryPayload::ToolClosed { request } => (
+                    "tool_closed_by_turn_end",
+                    Some(tool_request_id_to_uuid(*request)),
+                    None,
+                    None,
+                    None,
+                ),
+                SemanticTranscriptEntryPayload::DelegationResult {
+                    awaiting_request,
+                    spawning_request,
+                    mode: signalbox_domain::DelegationWaitMode::Foreground,
+                    delivery_sequence: None,
+                    ..
+                } => (
+                    "delegation_result",
+                    Some(tool_request_id_to_uuid(*awaiting_request)),
+                    None,
+                    Some(tool_request_id_to_uuid(*awaiting_request)),
+                    Some(tool_request_id_to_uuid(*spawning_request)),
+                ),
+                _ => {
+                    return Err(ToolLoopCorruption::Inconsistent("tool result payload").into());
+                }
+            };
         sqlx::query(
             "INSERT INTO semantic_transcript_entry
                 (source_session_id, semantic_entry_id, payload_kind,
-                 tool_result_request_id, tool_result_attempt_id)
-             VALUES ($1, $2, $3, $4, $5)",
+                 tool_result_request_id, tool_result_attempt_id,
+                 delegation_result_awaiting_tool_request_id,
+                 delegation_result_spawning_tool_request_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(session_id_to_uuid(entry.source_session()))
         .bind(entry.identity().into_uuid())
         .bind(kind)
         .bind(request)
         .bind(attempt)
+        .bind(delegation_awaiting)
+        .bind(delegation_spawning)
         .execute(&mut *connection)
         .await?;
     }

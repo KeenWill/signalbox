@@ -622,6 +622,293 @@ impl SubmitInput {
             }),
         }
     }
+
+    /// Prepares input control while a delegation-origin turn owns the session slot.
+    ///
+    /// The active turn has no accepted-input identity, so its authoritative
+    /// lifecycle and the complete session acceptance tail are supplied
+    /// separately. `awaiting_approval` preserves the one parked phase whose
+    /// approval obligation forbids an immediate interrupt transition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_delegated_active_turn(
+        self,
+        session: &Session,
+        actual_active_turn: TurnId,
+        previous_position: Option<SessionInputPosition>,
+        existing_interrupt: Option<DurableCommandId>,
+        awaiting_approval: bool,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        if session.id() != self.session {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::SessionMismatch {
+                    provided_session: session.id(),
+                },
+            });
+        }
+        if delivery_creates_turn(self.delivery) != turn.is_some() {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+            });
+        }
+        let expected = match self.delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => None,
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                ..
+            }
+            | DeliveryRequest::NextSafePoint {
+                expected_active_turn,
+            }
+            | DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn,
+                ..
+            } => Some(expected_active_turn),
+        };
+        if let Some(expected_active_turn) = expected
+            && expected_active_turn != actual_active_turn
+        {
+            let target_session = self.session;
+            return Ok(PreparedSubmitInput {
+                command: self,
+                result: SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::ActiveTurnMismatch {
+                        session: target_session,
+                        expected_active_turn,
+                        actual_active_turn,
+                    },
+                ),
+            });
+        }
+        let target_session = self.session;
+        match self.delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => Ok(PreparedSubmitInput {
+                command: self,
+                result: SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+                    session: target_session,
+                    active_turn: actual_active_turn,
+                }),
+            }),
+            DeliveryRequest::NextSafePoint { .. } => {
+                if let Some(existing) = existing_interrupt {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                                existing_command: existing,
+                            },
+                        ),
+                    });
+                }
+                let acceptance_position = match next_acceptance_position(previous_position) {
+                    Ok(position) => position,
+                    Err(last) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                                    session: target_session,
+                                    last,
+                                },
+                            ),
+                        });
+                    }
+                };
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
+                        SubmitInputPendingSteeringAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            binding: SteeringBinding::new(actual_active_turn),
+                        },
+                    )),
+                })
+            }
+            DeliveryRequest::Interrupt { configuration, .. } => {
+                if let Some(existing) = existing_interrupt {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptAlreadyApplied {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                                existing_command: existing,
+                            },
+                        ),
+                    });
+                }
+                if awaiting_approval {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                            },
+                        ),
+                    });
+                }
+                let turn = turn.ok_or_else(|| SubmitInputPreparationError {
+                    command: Box::new(self.clone()),
+                    failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                })?;
+                let prepared = prepare_delegated_successor(
+                    &self,
+                    session,
+                    configuration,
+                    previous_position,
+                    select_definition,
+                );
+                let (origin_configuration, acceptance_position) = match prepared {
+                    DelegatedSuccessorPreparation::Prepared {
+                        origin_configuration,
+                        acceptance_position,
+                    } => (origin_configuration, acceptance_position),
+                    DelegatedSuccessorPreparation::Rejected(result) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(result),
+                        });
+                    }
+                };
+                let queue_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+                    acceptance_position,
+                    actual_active_turn,
+                );
+                let applied_interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+                    self.command_id,
+                    target_session,
+                    actual_active_turn,
+                    accepted_input,
+                    turn,
+                    queue_order,
+                )
+                .ok_or_else(|| SubmitInputPreparationError {
+                    command: Box::new(self.clone()),
+                    failure: SubmitInputPreparationFailure::InterruptQueueOrderInvalid,
+                })?;
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                        SubmitInputTurnOriginAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            turn,
+                            queue_order,
+                            origin_configuration,
+                            applied_interrupt: Some(Box::new(applied_interrupt)),
+                        },
+                    )),
+                })
+            }
+            DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
+                let turn = turn.ok_or_else(|| SubmitInputPreparationError {
+                    command: Box::new(self.clone()),
+                    failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                })?;
+                let prepared = prepare_delegated_successor(
+                    &self,
+                    session,
+                    configuration,
+                    previous_position,
+                    select_definition,
+                );
+                let (origin_configuration, acceptance_position) = match prepared {
+                    DelegatedSuccessorPreparation::Prepared {
+                        origin_configuration,
+                        acceptance_position,
+                    } => (origin_configuration, acceptance_position),
+                    DelegatedSuccessorPreparation::Rejected(result) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(result),
+                        });
+                    }
+                };
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                        SubmitInputTurnOriginAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            turn,
+                            queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
+                            origin_configuration,
+                            applied_interrupt: None,
+                        },
+                    )),
+                })
+            }
+        }
+    }
+}
+
+enum DelegatedSuccessorPreparation {
+    Prepared {
+        origin_configuration: OriginConfiguration,
+        acceptance_position: SessionInputPosition,
+    },
+    Rejected(SubmitInputRejectedResult),
+}
+
+fn prepare_delegated_successor(
+    command: &SubmitInput,
+    session: &Session,
+    configuration: PerInputConfigurationChoices,
+    previous_position: Option<SessionInputPosition>,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+) -> DelegatedSuccessorPreparation {
+    let checked = match session.current_configuration_defaults().derive_request(
+        configuration.expected_session_defaults_version(),
+        configuration.model(),
+    ) {
+        Ok(checked) => checked,
+        Err(mismatch) => {
+            return DelegatedSuccessorPreparation::Rejected(
+                SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                    session: command.session,
+                    expected: mismatch.expected(),
+                    current: mismatch.current(),
+                },
+            );
+        }
+    };
+    let origin_configuration = match OriginConfiguration::freeze(checked, select_definition) {
+        Ok(configuration) => configuration,
+        Err(unknown) => {
+            return DelegatedSuccessorPreparation::Rejected(
+                SubmitInputRejectedResult::UnknownModelAlias {
+                    session: command.session,
+                    alias: unknown.alias(),
+                },
+            );
+        }
+    };
+    let acceptance_position = match next_acceptance_position(previous_position) {
+        Ok(position) => position,
+        Err(last) => {
+            return DelegatedSuccessorPreparation::Rejected(
+                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                    session: command.session,
+                    last,
+                },
+            );
+        }
+    };
+    DelegatedSuccessorPreparation::Prepared {
+        origin_configuration,
+        acceptance_position,
+    }
 }
 
 fn delivery_creates_turn(delivery: DeliveryRequest) -> bool {
@@ -4149,6 +4436,102 @@ mod tests {
                 active_turn: recorded_active_turn,
             }) if *session == current.id() && *recorded_active_turn == active_turn
         ));
+    }
+
+    #[test]
+    fn delegated_active_turn_blocks_vacant_slot_start() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let delegated_turn = turn_id(7);
+        let prepared = start_command(1, "hello", 1)
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                |_| None,
+            )
+            .expect("delegated slot ownership is authoritative");
+
+        let SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+            active_turn,
+            ..
+        }) = prepared.result()
+        else {
+            panic!("the delegated turn must retain the active slot");
+        };
+        assert_eq!(*active_turn, delegated_turn);
+    }
+
+    #[test]
+    fn delegated_active_turn_accepts_safe_point_steering() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let delegated_turn = turn_id(7);
+        let prepared = safe_point_command(2, delegated_turn)
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(3),
+                None,
+                |_| None,
+            )
+            .expect("safe-point input binds to the delegated active turn");
+        let steering = prepared.result();
+        let steering = applied_result(steering)
+            .pending_steering()
+            .expect("the delegated turn receives pending steering");
+
+        assert_eq!(steering.binding().source_turn(), delegated_turn);
+        assert_eq!(
+            steering.acceptance_position(),
+            SessionInputPosition::first()
+                .checked_next()
+                .expect("the second position exists")
+        );
+    }
+
+    #[test]
+    fn delegated_active_turn_accepts_correlated_interrupt_successor() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let delegated_turn = turn_id(7);
+        let successor = turn_id(8);
+        let prepared = interrupt_command(3, delegated_turn)
+            .prepare_with_delegated_active_turn(
+                &current,
+                delegated_turn,
+                Some(SessionInputPosition::first()),
+                None,
+                false,
+                accepted_input_id(3),
+                Some(successor),
+                |_| None,
+            )
+            .expect("the interrupt correlates to the delegated active turn");
+        let origin = prepared.result();
+        let origin = applied_result(origin)
+            .turn_origin()
+            .expect("the interrupt creates an immediate successor");
+
+        assert_eq!(origin.turn(), successor);
+        assert_eq!(
+            origin.queue_order().priority(),
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: delegated_turn,
+            }
+        );
+        assert_eq!(
+            origin
+                .applied_interrupt()
+                .expect("the interrupt carries proof")
+                .proof()
+                .predecessor(),
+            delegated_turn
+        );
     }
 
     /// S07 / S08 / S09 / INV-012 / INV-028: every active-work delivery mode

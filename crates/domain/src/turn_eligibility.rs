@@ -492,7 +492,8 @@ impl ActiveTurnSchedulingReconstitutionInput {
             batch_attempt: match batch.phase() {
                 crate::ToolBatchPhase::Executing { turn_attempt } => Some(turn_attempt),
                 crate::ToolBatchPhase::AwaitingApproval { .. }
-                | crate::ToolBatchPhase::AwaitingRecovery { .. } => None,
+                | crate::ToolBatchPhase::AwaitingRecovery { .. }
+                | crate::ToolBatchPhase::AwaitingChild { .. } => None,
             },
             awaiting_request: None,
             requests: batch
@@ -1062,6 +1063,23 @@ impl ConsumedSteeringInput {
 }
 
 impl PendingSteeringInput {
+    /// Reconstitutes one pending tail member bound to its exact active turn.
+    pub fn reconstitute(
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
+        source_turn: TurnId,
+    ) -> Option<Self> {
+        matches!(
+            accepted_input.disposition(),
+            AcceptedInputDisposition::PendingSteering { binding }
+                if binding.source_turn() == source_turn
+        )
+        .then_some(Self {
+            accepted_input,
+            acceptance_position,
+        })
+    }
+
     /// Returns the accepted input awaiting disposition.
     pub const fn accepted_input(&self) -> AcceptedInputId {
         self.accepted_input.id()
@@ -2552,6 +2570,7 @@ pub struct ActivatedDelegatedTurn {
     configuration: OriginConfiguration,
     start: AcceptedInputTurnStart,
     phase: ActiveTurnPhase,
+    pending_steering: Box<[PendingSteeringInput]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2610,6 +2629,28 @@ impl ActivatedDelegatedTurn {
 
     pub const fn phase(&self) -> &ActiveTurnPhase {
         &self.phase
+    }
+
+    /// Attaches the complete accepted-input steering tail targeting this turn.
+    pub fn with_pending_steering(
+        mut self,
+        pending_steering: Vec<PendingSteeringInput>,
+    ) -> Option<Self> {
+        if pending_steering.iter().any(|pending| {
+            !matches!(
+                pending.lifecycle().disposition(),
+                AcceptedInputDisposition::PendingSteering { binding }
+                    if binding.source_turn() == self.turn
+            )
+        }) {
+            return None;
+        }
+        self.pending_steering = pending_steering.into_boxed_slice();
+        Some(self)
+    }
+
+    pub fn pending_steering(&self) -> &[PendingSteeringInput] {
+        &self.pending_steering
     }
 }
 
@@ -2715,7 +2756,7 @@ impl ActivatedTurn {
     pub fn pending_steering(&self) -> &[PendingSteeringInput] {
         match self {
             Self::Accepted(turn) => turn.pending_steering(),
-            Self::Delegated(_) => &[],
+            Self::Delegated(turn) => turn.pending_steering(),
         }
     }
 
@@ -2757,7 +2798,28 @@ impl ActivatedTurn {
     ) -> Self {
         match self {
             Self::Accepted(turn) => Self::Accepted(turn.with_pending_steering_for_test(pending)),
-            Self::Delegated(_) => panic!("delegated turns do not carry pending accepted input"),
+            Self::Delegated(turn) => {
+                let pending = pending
+                    .into_vec()
+                    .into_iter()
+                    .map(
+                        |(accepted_input, acceptance_position)| PendingSteeringInput {
+                            accepted_input: AcceptedInputLifecycle::new(
+                                accepted_input,
+                                AcceptedInputDisposition::PendingSteering {
+                                    binding: crate::SteeringBinding::new(turn.turn),
+                                },
+                            ),
+                            acceptance_position,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                Self::Delegated(
+                    turn.clone()
+                        .with_pending_steering(pending)
+                        .expect("the test steering targets the delegated turn"),
+                )
+            }
         }
     }
 
@@ -2852,6 +2914,7 @@ impl PreparedDelegatedTurnActivation {
                 configuration: input.configuration,
                 start,
                 phase,
+                pending_steering: Box::new([]),
             },
             starting_entries: vec![task_entry],
             starting_snapshot,
@@ -2915,6 +2978,7 @@ impl PreparedDelegatedTurnActivation {
                 phase: ActiveTurnPhase::Running {
                     current_attempt: CurrentTurnAttempt::prepared(input.initial_attempt),
                 },
+                pending_steering: Box::new([]),
             },
             starting_entries: entries,
             starting_snapshot,
@@ -6801,6 +6865,7 @@ fn tool_round_producing_call_in_window(
                 crate::ToolAttemptEnd::KnownFailed { error } => {
                     error.kind() == crate::ToolExecutionErrorKind::CrashLost
                 }
+                crate::ToolAttemptEnd::AwaitingChild { .. } => false,
                 crate::ToolAttemptEnd::Ambiguous => true,
             })
     {

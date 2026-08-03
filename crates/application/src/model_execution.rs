@@ -389,7 +389,7 @@ fn render_frontier_messages<'a>(
                     ToolAttemptEnd::KnownFailed { error } => {
                         ModelToolResultContent::ExecutionError(error.clone())
                     }
-                    ToolAttemptEnd::Ambiguous => {
+                    ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => {
                         return Err(ModelFrontierRenderingError::UnrenderableToolResult {
                             entry: source,
                         });
