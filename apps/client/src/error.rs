@@ -5,8 +5,9 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    ConversationImportRejectionClass, ErrorCode, ErrorDetail, FailedModelCallCause,
-    FrameDecodeError, FrameEncodeError, GoalCommandRejection, RejectionDetail,
+    AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
+    ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
+    OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
 };
 
 #[derive(Debug)]
@@ -283,6 +284,25 @@ struct RejectionDisplay(RejectionDetail);
 impl fmt::Display for RejectionDisplay {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            RejectionDetail::UnsupportedReasoningLevel {
+                selection_id,
+                requested,
+            } => write!(
+                formatter,
+                "unsupported_reasoning_level selection={selection_id} reasoning_level={}",
+                reasoning_level_name(requested)
+            ),
+            RejectionDetail::UnsupportedFastMode { selection_id } => {
+                write!(formatter, "unsupported_fast_mode selection={selection_id}")
+            }
+            RejectionDetail::UnsupportedServiceTier {
+                selection_id,
+                requested,
+            } => write!(
+                formatter,
+                "unsupported_service_tier selection={selection_id} service_tier={}",
+                service_tier_name(requested)
+            ),
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
@@ -478,6 +498,35 @@ impl fmt::Display for RejectionDisplay {
                 record_ordinal.value()
             ),
         }
+    }
+}
+
+const fn reasoning_level_name(value: ReasoningLevel) -> &'static str {
+    match value {
+        ReasoningLevel::None => "none",
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh => "xhigh",
+        ReasoningLevel::Max => "max",
+        ReasoningLevel::Ultra => "ultra",
+    }
+}
+
+const fn service_tier_name(value: ServiceTier) -> &'static str {
+    match value {
+        ServiceTier::Anthropic(AnthropicServiceTier::Auto) => "anthropic:auto",
+        ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly) => "anthropic:standard_only",
+        ServiceTier::OpenAi(OpenAiServiceTier::Auto) => "openai:auto",
+        ServiceTier::OpenAi(OpenAiServiceTier::Default) => "openai:default",
+        ServiceTier::OpenAi(OpenAiServiceTier::Flex) => "openai:flex",
+        ServiceTier::OpenAi(OpenAiServiceTier::Scale) => "openai:scale",
+        ServiceTier::OpenAi(OpenAiServiceTier::Priority) => "openai:priority",
+        ServiceTier::OpenAi(OpenAiServiceTier::Fast) => "openai:fast",
+        ServiceTier::CodexCli(CodexCliServiceTier::Default) => "codex_cli:default",
+        ServiceTier::CodexCli(CodexCliServiceTier::Priority) => "codex_cli:priority",
+        ServiceTier::CodexCli(CodexCliServiceTier::Flex) => "codex_cli:flex",
     }
 }
 

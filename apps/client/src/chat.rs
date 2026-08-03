@@ -8,7 +8,7 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent, ModelSelection,
-    ServerMessage, SessionEvent, SystemPromptMember, ToolDecision, TurnState,
+    ModelSettingsOverlay, ServerMessage, SessionEvent, SystemPromptMember, ToolDecision, TurnState,
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf},
@@ -1118,6 +1118,7 @@ async fn replace_model(
             session_id,
             expected_defaults_version: observed.version,
             model_selection: selection,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
             system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
         })
@@ -1129,6 +1130,7 @@ async fn replace_model(
             model_selection,
             dangerous_tool_auto_approval,
             system_prompt: receipt_system_prompt,
+            ..
         } if replaced_session == session_id
             && model_selection == selection
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
@@ -1192,6 +1194,8 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
             }
         }
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::ContextCompacted { .. } => TurnEventEffect::None,

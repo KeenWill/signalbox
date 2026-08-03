@@ -1,7 +1,7 @@
 //! Deployment-owned model mappings and credential delivery.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -11,8 +11,10 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
+    AnthropicServiceTier, CodexCliServiceTier, DirectModelSelection, FastModeSupport,
+    FrozenAliasDefinition, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityDefinition, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    ProviderModelIdentity, ReasoningLevel, ResolvedProviderTarget, ServiceTier,
     ToolApprovalPosture, ToolName,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
@@ -253,6 +255,7 @@ pub struct HubModelConfiguration {
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    model_capabilities: ModelCapabilityCatalog,
     billing_kinds: HashMap<Arc<str>, BillingKind>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
@@ -487,6 +490,7 @@ impl HubModelConfiguration {
 
         let mut domain_definitions = Vec::with_capacity(models.len());
         let mut runtime_definitions = Vec::with_capacity(models.len());
+        let mut capability_definitions = Vec::with_capacity(models.len());
         let mut direct_selections = HashSet::with_capacity(models.len());
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
@@ -507,6 +511,10 @@ impl HubModelConfiguration {
                     "output_usd_per_million_tokens",
                     "cache_creation_input_usd_per_million_tokens",
                     "cache_read_input_usd_per_million_tokens",
+                    "reasoning_levels",
+                    "fast_mode",
+                    "fast_target_id",
+                    "service_tiers",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -526,6 +534,7 @@ impl HubModelConfiguration {
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
+            let capabilities = parse_model_capabilities(model, mapping.adapter)?;
             let rates = parse_model_billing_rates(model)?;
             if let Some(previous) = target_billing_rates.insert(target, rates.clone())
                 && previous != rates
@@ -553,6 +562,7 @@ impl HubModelConfiguration {
                 },
             );
             domain_definitions.push(ModelTargetDefinition::new(selection, target));
+            capability_definitions.push(ModelCapabilityDefinition::new(selection, capabilities));
             runtime_definitions.push(
                 RuntimeModelDefinition::try_new(
                     target,
@@ -598,6 +608,9 @@ impl HubModelConfiguration {
 
         let targets = ModelTargetCatalog::try_from_definitions(domain_definitions)
             .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
+        let model_capabilities =
+            ModelCapabilityCatalog::try_from_definitions(capability_definitions)
+                .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let billing_rates = target_billing_rates
@@ -621,6 +634,7 @@ impl HubModelConfiguration {
             direct_selections,
             aliases,
             routes,
+            model_capabilities,
             billing_kinds,
             billing_rates,
             target_adapters,
@@ -641,6 +655,11 @@ impl HubModelConfiguration {
     /// Returns the immutable domain target catalog used by persistence.
     pub fn target_catalog(&self) -> ModelTargetCatalog {
         self.targets.clone()
+    }
+
+    /// Returns the complete per-direct-selection settings capability catalog.
+    pub fn model_capability_catalog(&self) -> ModelCapabilityCatalog {
+        self.model_capabilities.clone()
     }
 
     /// Returns the exact runtime delivery catalog used by the provider bridge.
@@ -672,6 +691,22 @@ impl HubModelConfiguration {
         self.routes
             .get(&direct)
             .ok_or(UnknownSessionModel { selection })
+    }
+
+    /// Resolves a direct or current alias request to its selected direct key.
+    pub fn resolve_direct_selection(
+        &self,
+        selection: ModelSelectionRequest,
+    ) -> Option<DirectModelSelection> {
+        match selection {
+            ModelSelectionRequest::Direct(direct) => {
+                self.direct_selections.contains(&direct).then_some(direct)
+            }
+            ModelSelectionRequest::Alias(alias) => self
+                .aliases
+                .get(&alias)
+                .map(|definition| definition.selected()),
+        }
     }
 
     /// Returns the adapter selected for an exact provider-native model name.
@@ -1115,6 +1150,97 @@ fn required_positive_u32(table: &Table, key: &str) -> Result<u32, HubModelConfig
     }
 }
 
+fn parse_model_capabilities(
+    model: &Table,
+    adapter: ModelAdapter,
+) -> Result<ModelCapabilities, HubModelConfigurationError> {
+    let reasoning_levels = optional_string_array(model, "reasoning_levels")?
+        .into_iter()
+        .map(parse_reasoning_level)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let fast_mode = match (
+        model.get("fast_mode").and_then(Item::as_str),
+        model.get("fast_target_id"),
+    ) {
+        (None | Some("unsupported"), None) => FastModeSupport::Unsupported,
+        (Some("request_control"), None) => FastModeSupport::RequestControl,
+        (Some("alternate_target"), Some(_)) => {
+            FastModeSupport::AlternateTarget(ResolvedProviderTarget::naming(
+                ProviderModelIdentity::from_uuid(required_uuid(model, "fast_target_id")?),
+            ))
+        }
+        _ => return Err(HubModelConfigurationError::InvalidModelCapabilities),
+    };
+    let service_tiers = optional_string_array(model, "service_tiers")?
+        .into_iter()
+        .map(|value| parse_service_tier(adapter, value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(ModelCapabilities::new(
+        reasoning_levels,
+        fast_mode,
+        service_tiers,
+    ))
+}
+
+fn optional_string_array<'a>(
+    table: &'a Table,
+    key: &str,
+) -> Result<Vec<&'a str>, HubModelConfigurationError> {
+    let Some(item) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let array = item
+        .as_array()
+        .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
+    let values = array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique = values.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != values.len() {
+        return Err(HubModelConfigurationError::InvalidModelCapabilities);
+    }
+    Ok(values)
+}
+
+fn parse_reasoning_level(value: &str) -> Result<ReasoningLevel, HubModelConfigurationError> {
+    match value {
+        "none" => Ok(ReasoningLevel::None),
+        "minimal" => Ok(ReasoningLevel::Minimal),
+        "low" => Ok(ReasoningLevel::Low),
+        "medium" => Ok(ReasoningLevel::Medium),
+        "high" => Ok(ReasoningLevel::High),
+        "xhigh" => Ok(ReasoningLevel::XHigh),
+        "max" => Ok(ReasoningLevel::Max),
+        "ultra" => Ok(ReasoningLevel::Ultra),
+        _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
+    }
+}
+
+fn parse_service_tier(
+    adapter: ModelAdapter,
+    value: &str,
+) -> Result<ServiceTier, HubModelConfigurationError> {
+    match (adapter, value) {
+        (ModelAdapter::Anthropic, "auto") => Ok(ServiceTier::Anthropic(AnthropicServiceTier::Auto)),
+        (ModelAdapter::Anthropic, "standard_only") => {
+            Ok(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))
+        }
+        (ModelAdapter::CodexCli, "default") => {
+            Ok(ServiceTier::CodexCli(CodexCliServiceTier::Default))
+        }
+        (ModelAdapter::CodexCli, "priority") => {
+            Ok(ServiceTier::CodexCli(CodexCliServiceTier::Priority))
+        }
+        (ModelAdapter::CodexCli, "flex") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Flex)),
+        _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
+    }
+}
+
 /// Sanitized static-configuration failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HubModelConfigurationError {
@@ -1201,6 +1327,8 @@ pub enum HubModelConfigurationError {
     InvalidWebFetchPolicy,
     /// One direct selection appeared more than once.
     DuplicateSelection,
+    /// One per-model settings capability record was malformed.
+    InvalidModelCapabilities,
     /// One target was assigned conflicting runtime meanings.
     ConflictingTarget,
     /// The aliases field was not an array of tables.
@@ -1287,6 +1415,9 @@ impl fmt::Display for HubModelConfigurationError {
                 "model configuration contains an invalid web_fetch egress policy"
             }
             Self::DuplicateSelection => "model configuration repeats a direct selection",
+            Self::InvalidModelCapabilities => {
+                "model configuration contains invalid model capabilities"
+            }
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
             Self::InvalidAliases => "model aliases are not an array of tables",
             Self::TooManyAliases => "model configuration contains too many aliases",

@@ -40,14 +40,17 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal, GoalBlockProvenance,
-    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
-    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
-    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
-    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
+    DirectModelSelection, DurableCommandId, FastMode as DomainFastMode, FrozenModelSelection, Goal,
+    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection,
+    GoalCommandResult, GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement,
+    GoalUserAction, GoalUserCommand, ImportedConversation, ImportedConversationFormat,
+    ImportedConversationId, ImportedSessionRelationship as DomainImportedSessionRelationship,
+    ImportedSourceAttestation, ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
+    ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
+    ModelSettingsOverlay as DomainModelSettingsOverlay,
+    ModelSettingsPrecedence as DomainModelSettingsPrecedence, PerInputConfigurationChoices,
+    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
     ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
     ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
@@ -61,11 +64,13 @@ use signalbox_domain::{
     ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult,
-    SubmitInputResult, ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UserContent,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, ServiceTier as DomainServiceTier,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot,
+    SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
+    SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
+    ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId, UnsupportedModelSetting,
+    UserContent, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
@@ -114,23 +119,29 @@ use signalbox_process_protocol::{
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
-    ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-    FailedTerminalModelCall, FrameDecodeErrorKind, FrameEncodeError,
+    EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
+    FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
+    FastMode as WireFastMode, FrameDecodeErrorKind, FrameEncodeError,
     GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
     GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
     ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
-    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelSelection as WireModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ReviewDiffSide as WireReviewDiffSide,
-    ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+    ModelCapabilities as WireModelCapabilities, ModelSelection as WireModelSelection,
+    ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
+    ModelSettingsPrecedence as WireModelSettingsPrecedence,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot, ProtocolVersion,
+    ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
+    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
-    ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
+    ServerFrame, ServerMessage, ServiceTier as WireServiceTier, SessionEvent,
+    SessionMetadata as WireSessionMetadata, SettingOverlay as WireSettingOverlay,
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TranscriptEntry,
     TranscriptTextEntry, TurnState, UsageProvenance, content_fragments, decode_client_line,
     encode_server_line, recover_bounded_client_protocol_version, recover_bounded_client_request_id,
@@ -808,6 +819,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::ListSessionMetadata { .. }
         | ClientRequest::ListConversations { .. }
         | ClientRequest::ListModelAliases {}
+        | ClientRequest::ListModelCapabilities {}
         | ClientRequest::ReadSessionMetadata { .. }
         | ClientRequest::ReplaceSessionMetadata { .. }
         | ClientRequest::ReplaceSessionDefaults { .. }
@@ -1069,6 +1081,7 @@ where
         ClientRequest::CreateSession {
             command_id,
             initial_model_selection,
+            model_settings,
             system_prompt,
         } => {
             handle_create_session(
@@ -1077,6 +1090,7 @@ where
                 request_id,
                 command_id.into_uuid(),
                 initial_model_selection,
+                model_settings,
                 system_prompt,
                 services,
             )
@@ -1102,6 +1116,7 @@ where
             through_position,
             relationship,
             initial_model_selection,
+            model_settings,
         } => {
             handle_create_session_from_imported_frontier(
                 writer,
@@ -1113,6 +1128,7 @@ where
                     through_position,
                     relationship,
                     initial_model_selection,
+                    model_settings,
                 },
                 &services.pool,
                 services.model_configuration.as_ref(),
@@ -1290,6 +1306,7 @@ where
             session_id,
             content,
             expected_defaults_version,
+            model_settings,
             delivery,
         } => {
             handle_submit_input(
@@ -1300,6 +1317,7 @@ where
                 session_id,
                 content,
                 expected_defaults_version,
+                model_settings,
                 delivery,
                 &services.pool,
                 &services.eligibility_nudge,
@@ -1444,6 +1462,15 @@ where
             )
             .await
         }
+        ClientRequest::ListModelCapabilities {} => {
+            handle_list_model_capabilities(
+                writer,
+                version,
+                request_id,
+                services.model_configuration.as_ref(),
+            )
+            .await
+        }
         ClientRequest::ReadSessionMetadata { session_id } => {
             handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
                 .await
@@ -1469,6 +1496,7 @@ where
             session_id,
             expected_defaults_version,
             model_selection,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt,
         } => {
@@ -1480,6 +1508,7 @@ where
                 session_id,
                 expected_defaults_version,
                 model_selection,
+                model_settings,
                 dangerous_tool_auto_approval,
                 system_prompt,
                 &services.pool,
@@ -4516,6 +4545,7 @@ struct WireImportedContinuationRequest {
     through_position: CanonicalU64,
     relationship: WireImportedSessionRelationship,
     initial_model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
 }
 
 async fn handle_create_session_from_imported_frontier<Writer>(
@@ -4533,7 +4563,28 @@ where
     let conversation_id = ImportedConversationId::from_uuid(wire_request.conversation.into_uuid());
     let relationship = domain_imported_relationship(wire_request.relationship);
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
-    let defaults = SessionConfigurationDefaults::new(model_selection);
+    let model_settings = match validate_session_model_settings(
+        model_configuration,
+        model_selection,
+        wire_request.model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
+    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        model_selection,
+        DangerousToolAutoApproval::Disabled,
+        None,
+        model_settings,
+    );
     let through_position = wire_request.through_position;
     let repository =
         ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
@@ -4553,6 +4604,12 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: wire_model_settings(
+                            recorded
+                                .command()
+                                .initial_configuration_defaults()
+                                .model_settings(),
+                        ),
                     },
                 )
                 .await;
@@ -4712,6 +4769,7 @@ where
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
+                    model_settings: wire_model_settings(model_settings),
                 },
             )
             .await
@@ -6195,6 +6253,7 @@ async fn handle_create_session<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     initial_model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
     system_prompt: SystemPromptMember,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
@@ -6211,12 +6270,29 @@ where
         .await;
     };
     let model_selection = domain_model_selection(initial_model_selection);
+    let model_settings = match validate_session_model_settings(
+        services.model_configuration.as_ref(),
+        model_selection,
+        model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
     let request = CreateSessionRequest::try_new(
         DurableCommandId::from_uuid(command_id),
-        SessionConfigurationDefaults::complete(
+        SessionConfigurationDefaults::complete_with_model_settings(
             model_selection,
             DangerousToolAutoApproval::Disabled,
             system_prompt,
+            model_settings,
         ),
     );
     let Ok(request) = request else {
@@ -6277,6 +6353,12 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: wire_model_settings(
+                            recorded
+                                .command()
+                                .initial_configuration_defaults()
+                                .model_settings(),
+                        ),
                     },
                 )
                 .await;
@@ -6431,6 +6513,12 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: wire_model_settings(
+                            recorded
+                                .command()
+                                .initial_configuration_defaults()
+                                .model_settings(),
+                        ),
                     },
                 )
                 .await;
@@ -6498,6 +6586,7 @@ where
         .await;
     }
 
+    let model_settings = request.initial_configuration_defaults().model_settings();
     let mut service = CreateSessionService::new(UuidV7SessionIdGenerator, repository);
     match service.execute(request).await {
         Ok(CreateSessionOutcome::Applied(result)) => {
@@ -6507,6 +6596,7 @@ where
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
+                    model_settings: wire_model_settings(model_settings),
                 },
             )
             .await
@@ -6625,6 +6715,67 @@ where
                 u64::try_from(aliases.len())
                     .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
             ),
+        },
+    )
+    .await
+}
+
+async fn handle_list_model_capabilities<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    configuration: &HubModelConfiguration,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let catalog = configuration.model_capability_catalog();
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ModelCapabilitiesStart {},
+    )
+    .await?;
+    let mut capability_count = 0_u64;
+    for (selection, capabilities) in catalog.iter() {
+        capability_count = capability_count
+            .checked_add(1)
+            .ok_or(ProcessConnectionError::EncodeInvariant)?;
+        write_message(
+            writer,
+            version,
+            request_id,
+            ServerMessage::ModelCapabilityItem {
+                selection_id: wire_uuid(selection.into_uuid()),
+                capabilities: WireModelCapabilities {
+                    reasoning_levels: capabilities
+                        .reasoning_levels()
+                        .iter()
+                        .copied()
+                        .map(wire_reasoning_level)
+                        .collect(),
+                    fast_mode_supported: !matches!(
+                        capabilities.fast_mode(),
+                        signalbox_domain::FastModeSupport::Unsupported
+                    ),
+                    service_tiers: capabilities
+                        .service_tiers()
+                        .iter()
+                        .copied()
+                        .map(wire_service_tier)
+                        .collect(),
+                },
+            },
+        )
+        .await?;
+    }
+    write_message(
+        writer,
+        version,
+        request_id,
+        ServerMessage::ModelCapabilitiesEnd {
+            capability_count: CanonicalU64::new(capability_count),
         },
     )
     .await
@@ -7212,6 +7363,7 @@ where
                     session_id,
                     defaults_version: CanonicalU64::new(read.version().as_u64()),
                     model_selection: wire_domain_model_selection(read.defaults().model()),
+                    model_settings: wire_model_settings(read.defaults().model_settings()),
                     dangerous_tool_auto_approval: matches!(
                         read.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
@@ -7378,6 +7530,7 @@ async fn handle_replace_session_defaults<Writer>(
     session_id: CanonicalUuid,
     expected_defaults_version: CanonicalU64,
     model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
     dangerous_tool_auto_approval: bool,
     system_prompt: SystemPromptMember,
     pool: &PgPool,
@@ -7408,7 +7561,23 @@ where
         .await;
     };
     let replacement_model = domain_model_selection(model_selection);
-    let replacement = SessionConfigurationDefaults::complete(
+    let model_settings = match validate_session_model_settings(
+        model_configuration,
+        replacement_model,
+        model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
+    let replacement = SessionConfigurationDefaults::complete_with_model_settings(
         replacement_model,
         if dangerous_tool_auto_approval {
             DangerousToolAutoApproval::ApproveAll
@@ -7416,6 +7585,7 @@ where
             DangerousToolAutoApproval::Disabled
         },
         system_prompt,
+        model_settings,
     );
     let durable_command_id = DurableCommandId::from_uuid(command_id);
     // A member the frame could not state must not silently clear a prompt
@@ -7497,6 +7667,7 @@ where
                     session_id,
                     defaults_version: CanonicalU64::new(installed.version().as_u64()),
                     model_selection: wire_domain_model_selection(installed.defaults().model()),
+                    model_settings: wire_model_settings(installed.defaults().model_settings()),
                     dangerous_tool_auto_approval: matches!(
                         installed.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
@@ -7685,6 +7856,7 @@ async fn handle_submit_input<Writer>(
     session_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: Option<CanonicalU64>,
+    model_settings: WireModelSettingsOverlay,
     delivery: Option<InputDelivery>,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
@@ -7708,9 +7880,14 @@ where
     let repository = SubmitInputRepository::new(pool.clone());
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
+    let model_settings = domain_model_settings_overlay(model_settings);
     let configuration = || {
         expected_version.map(|version| {
-            PerInputConfigurationChoices::new(version, ModelSelectionOverride::UseSessionDefault)
+            PerInputConfigurationChoices::with_model_settings(
+                version,
+                ModelSelectionOverride::UseSessionDefault,
+                model_settings,
+            )
         })
     };
     let delivery = match delivery {
@@ -8049,6 +8226,9 @@ where
                     accepted_input_id: wire_uuid(result.accepted_input().into_uuid()),
                     acceptance_position: CanonicalU64::new(result.acceptance_position().as_u64()),
                     turn_id: wire_uuid(result.turn().into_uuid()),
+                    model_settings: wire_model_settings(
+                        result.origin_configuration().effective().model_settings(),
+                    ),
                 },
             )
             .await
@@ -9446,6 +9626,271 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
         ModelSelectionRequest::Alias(alias) => WireModelSelection::Alias {
             alias_id: wire_uuid(alias.into_uuid()),
         },
+    }
+}
+
+fn domain_model_settings_overlay(value: WireModelSettingsOverlay) -> DomainModelSettingsOverlay {
+    DomainModelSettingsOverlay::new(
+        domain_setting_overlay(value.reasoning_level, domain_reasoning_level),
+        domain_setting_overlay(value.fast_mode, domain_fast_mode),
+        domain_setting_overlay(value.service_tier, domain_service_tier),
+    )
+}
+
+fn validate_session_model_settings(
+    configuration: &HubModelConfiguration,
+    selection: ModelSelectionRequest,
+    value: WireModelSettingsOverlay,
+) -> Result<ValidatedModelSettings, ModelSettingsAdmissionError> {
+    let direct = configuration
+        .resolve_direct_selection(selection)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    let catalog = configuration.model_capability_catalog();
+    let capabilities = catalog
+        .resolve(direct)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    capabilities
+        .validate_precedence(
+            direct,
+            DomainModelSettingsPrecedence::new(
+                DomainModelSettingsOverlay::inherit_all(),
+                domain_model_settings_overlay(value),
+                DomainModelSettingsOverlay::inherit_all(),
+                DomainModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .map_err(|error| {
+            ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
+        })
+}
+
+enum ModelSettingsAdmissionError {
+    UnknownModel,
+    Unsupported(RejectionDetail),
+}
+
+fn model_settings_protocol_error(error: ModelSettingsAdmissionError) -> ProtocolError {
+    match error {
+        ModelSettingsAdmissionError::UnknownModel => {
+            ProtocolError::without_detail(ErrorCode::InvalidRequest)
+        }
+        ModelSettingsAdmissionError::Unsupported(detail) => ProtocolError::rejected(detail),
+    }
+}
+
+fn wire_unsupported_model_setting(value: UnsupportedModelSetting) -> RejectionDetail {
+    match value {
+        UnsupportedModelSetting::ReasoningLevel {
+            selection,
+            requested,
+        } => RejectionDetail::UnsupportedReasoningLevel {
+            selection_id: wire_uuid(selection.into_uuid()),
+            requested: wire_reasoning_level(requested),
+        },
+        UnsupportedModelSetting::FastMode { selection } => RejectionDetail::UnsupportedFastMode {
+            selection_id: wire_uuid(selection.into_uuid()),
+        },
+        UnsupportedModelSetting::ServiceTier {
+            selection,
+            requested,
+        } => RejectionDetail::UnsupportedServiceTier {
+            selection_id: wire_uuid(selection.into_uuid()),
+            requested: wire_service_tier(requested),
+        },
+    }
+}
+
+fn domain_setting_overlay<WireT, DomainT>(
+    value: WireSettingOverlay<WireT>,
+    map: impl FnOnce(WireT) -> DomainT,
+) -> DomainSettingOverlay<DomainT> {
+    match value {
+        WireSettingOverlay::Inherit => DomainSettingOverlay::Inherit,
+        WireSettingOverlay::ProviderDefault => DomainSettingOverlay::ProviderDefault,
+        WireSettingOverlay::Value(value) => DomainSettingOverlay::Value(map(value)),
+    }
+}
+
+const fn domain_reasoning_level(value: WireReasoningLevel) -> DomainReasoningLevel {
+    match value {
+        WireReasoningLevel::None => DomainReasoningLevel::None,
+        WireReasoningLevel::Minimal => DomainReasoningLevel::Minimal,
+        WireReasoningLevel::Low => DomainReasoningLevel::Low,
+        WireReasoningLevel::Medium => DomainReasoningLevel::Medium,
+        WireReasoningLevel::High => DomainReasoningLevel::High,
+        WireReasoningLevel::XHigh => DomainReasoningLevel::XHigh,
+        WireReasoningLevel::Max => DomainReasoningLevel::Max,
+        WireReasoningLevel::Ultra => DomainReasoningLevel::Ultra,
+    }
+}
+
+const fn wire_reasoning_level(value: DomainReasoningLevel) -> WireReasoningLevel {
+    match value {
+        DomainReasoningLevel::None => WireReasoningLevel::None,
+        DomainReasoningLevel::Minimal => WireReasoningLevel::Minimal,
+        DomainReasoningLevel::Low => WireReasoningLevel::Low,
+        DomainReasoningLevel::Medium => WireReasoningLevel::Medium,
+        DomainReasoningLevel::High => WireReasoningLevel::High,
+        DomainReasoningLevel::XHigh => WireReasoningLevel::XHigh,
+        DomainReasoningLevel::Max => WireReasoningLevel::Max,
+        DomainReasoningLevel::Ultra => WireReasoningLevel::Ultra,
+    }
+}
+
+const fn domain_fast_mode(value: WireFastMode) -> DomainFastMode {
+    match value {
+        WireFastMode::Disabled => DomainFastMode::Disabled,
+        WireFastMode::Enabled => DomainFastMode::Enabled,
+    }
+}
+
+const fn wire_fast_mode(value: DomainFastMode) -> WireFastMode {
+    match value {
+        DomainFastMode::Disabled => WireFastMode::Disabled,
+        DomainFastMode::Enabled => WireFastMode::Enabled,
+    }
+}
+
+const fn domain_service_tier(value: WireServiceTier) -> DomainServiceTier {
+    match value {
+        WireServiceTier::Anthropic(value) => DomainServiceTier::Anthropic(match value {
+            signalbox_process_protocol::AnthropicServiceTier::Auto => {
+                signalbox_domain::AnthropicServiceTier::Auto
+            }
+            signalbox_process_protocol::AnthropicServiceTier::StandardOnly => {
+                signalbox_domain::AnthropicServiceTier::StandardOnly
+            }
+        }),
+        WireServiceTier::OpenAi(value) => DomainServiceTier::OpenAi(match value {
+            signalbox_process_protocol::OpenAiServiceTier::Auto => {
+                signalbox_domain::OpenAiServiceTier::Auto
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Default => {
+                signalbox_domain::OpenAiServiceTier::Default
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Flex => {
+                signalbox_domain::OpenAiServiceTier::Flex
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Scale => {
+                signalbox_domain::OpenAiServiceTier::Scale
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Priority => {
+                signalbox_domain::OpenAiServiceTier::Priority
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Fast => {
+                signalbox_domain::OpenAiServiceTier::Fast
+            }
+        }),
+        WireServiceTier::CodexCli(value) => DomainServiceTier::CodexCli(match value {
+            signalbox_process_protocol::CodexCliServiceTier::Default => {
+                signalbox_domain::CodexCliServiceTier::Default
+            }
+            signalbox_process_protocol::CodexCliServiceTier::Priority => {
+                signalbox_domain::CodexCliServiceTier::Priority
+            }
+            signalbox_process_protocol::CodexCliServiceTier::Flex => {
+                signalbox_domain::CodexCliServiceTier::Flex
+            }
+        }),
+    }
+}
+
+const fn wire_service_tier(value: DomainServiceTier) -> WireServiceTier {
+    match value {
+        DomainServiceTier::Anthropic(value) => WireServiceTier::Anthropic(match value {
+            signalbox_domain::AnthropicServiceTier::Auto => {
+                signalbox_process_protocol::AnthropicServiceTier::Auto
+            }
+            signalbox_domain::AnthropicServiceTier::StandardOnly => {
+                signalbox_process_protocol::AnthropicServiceTier::StandardOnly
+            }
+        }),
+        DomainServiceTier::OpenAi(value) => WireServiceTier::OpenAi(match value {
+            signalbox_domain::OpenAiServiceTier::Auto => {
+                signalbox_process_protocol::OpenAiServiceTier::Auto
+            }
+            signalbox_domain::OpenAiServiceTier::Default => {
+                signalbox_process_protocol::OpenAiServiceTier::Default
+            }
+            signalbox_domain::OpenAiServiceTier::Flex => {
+                signalbox_process_protocol::OpenAiServiceTier::Flex
+            }
+            signalbox_domain::OpenAiServiceTier::Scale => {
+                signalbox_process_protocol::OpenAiServiceTier::Scale
+            }
+            signalbox_domain::OpenAiServiceTier::Priority => {
+                signalbox_process_protocol::OpenAiServiceTier::Priority
+            }
+            signalbox_domain::OpenAiServiceTier::Fast => {
+                signalbox_process_protocol::OpenAiServiceTier::Fast
+            }
+        }),
+        DomainServiceTier::CodexCli(value) => WireServiceTier::CodexCli(match value {
+            signalbox_domain::CodexCliServiceTier::Default => {
+                signalbox_process_protocol::CodexCliServiceTier::Default
+            }
+            signalbox_domain::CodexCliServiceTier::Priority => {
+                signalbox_process_protocol::CodexCliServiceTier::Priority
+            }
+            signalbox_domain::CodexCliServiceTier::Flex => {
+                signalbox_process_protocol::CodexCliServiceTier::Flex
+            }
+        }),
+    }
+}
+
+fn wire_model_settings(settings: ValidatedModelSettings) -> WireModelSettingsSnapshot {
+    let precedence = settings.precedence();
+    let resolved = settings.resolved();
+    let effective = resolved.effective();
+    WireModelSettingsSnapshot {
+        precedence: WireModelSettingsPrecedence {
+            per_call: wire_model_settings_overlay(precedence.per_call()),
+            session: wire_model_settings_overlay(precedence.session()),
+            profile: wire_model_settings_overlay(precedence.profile()),
+            global_default: wire_model_settings_overlay(precedence.global_default()),
+        },
+        effective: WireEffectiveModelSettings {
+            reasoning_level: effective.reasoning_level().map(wire_reasoning_level),
+            fast_mode: wire_fast_mode(effective.fast_mode()),
+            service_tier: effective.service_tier().map(wire_service_tier),
+        },
+        reasoning_source: resolved.reasoning_source().map(wire_model_setting_source),
+        fast_mode_source: resolved.fast_mode_source().map(wire_model_setting_source),
+        service_tier_source: resolved
+            .service_tier_source()
+            .map(wire_model_setting_source),
+        validated_for_selection_id: settings
+            .validated_for()
+            .map(|selection| wire_uuid(selection.into_uuid())),
+    }
+}
+
+fn wire_model_settings_overlay(value: DomainModelSettingsOverlay) -> WireModelSettingsOverlay {
+    WireModelSettingsOverlay {
+        reasoning_level: wire_setting_overlay(value.reasoning_level(), wire_reasoning_level),
+        fast_mode: wire_setting_overlay(value.fast_mode(), wire_fast_mode),
+        service_tier: wire_setting_overlay(value.service_tier(), wire_service_tier),
+    }
+}
+
+fn wire_setting_overlay<DomainT, WireT>(
+    value: DomainSettingOverlay<DomainT>,
+    map: impl FnOnce(DomainT) -> WireT,
+) -> WireSettingOverlay<WireT> {
+    match value {
+        DomainSettingOverlay::Inherit => WireSettingOverlay::Inherit,
+        DomainSettingOverlay::ProviderDefault => WireSettingOverlay::ProviderDefault,
+        DomainSettingOverlay::Value(value) => WireSettingOverlay::Value(map(value)),
+    }
+}
+
+const fn wire_model_setting_source(value: DomainModelSettingSource) -> WireModelSettingSource {
+    match value {
+        DomainModelSettingSource::PerCall => WireModelSettingSource::PerCall,
+        DomainModelSettingSource::Session => WireModelSettingSource::Session,
+        DomainModelSettingSource::Profile => WireModelSettingSource::Profile,
+        DomainModelSettingSource::GlobalDefault => WireModelSettingSource::GlobalDefault,
     }
 }
 
