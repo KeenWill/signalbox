@@ -951,11 +951,10 @@ fn derive_workflow_events(
     events: &mut Vec<RepoWatchEvent>,
 ) {
     for run in current.workflow_runs() {
-        let already_observed = previous.workflow_runs().iter().any(|prior| {
-            prior.branch() == run.branch()
-                && prior.workflow_id() == run.workflow_id()
-                && prior.id() == run.id()
-        });
+        let already_observed = previous
+            .workflow_runs()
+            .iter()
+            .any(|prior| prior.branch() == run.branch() && prior.id() == run.id());
         if !already_observed {
             events.push(RepoWatchEvent::branch_workflow(
                 ids.next_event_id(),
@@ -1764,6 +1763,38 @@ mod tests {
                 WORKFLOW_RUN_ID,
                 WORKFLOW_ID,
                 RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert!(events.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_workflow_identity_upgrade_does_not_reemit_an_existing_run()
+    -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_RUN_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
                 CheckConclusion::Success,
             )?],
             Vec::new(),

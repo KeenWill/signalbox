@@ -30,7 +30,9 @@ polling interval, and its own credential file reference. Duplicate repositories,
 shared or missing credential-file references, unknown keys, unsupported
 versions, zero intervals, malformed values, and invalid entries fail
 configuration before any watch task starts. Other daemon GitHub credentials do
-not substitute for a missing repository-watch credential reference.
+not substitute for a missing repository-watch credential reference. Credential
+paths are absolute and cannot contain parent-directory components, so a lexical
+alias cannot bypass duplicate-reference validation.
 
 **Committed unimplemented functionality.** Slice 4 adds versioned structured
 rules to this same section and makes invalid rules a startup configuration
@@ -75,6 +77,11 @@ unparseable poll submits no persistence candidate. The next poll occurs after
 the per-repository interval; version one has no webhook fallback and no
 speculative second polling transport.
 
+**Implemented behavior.** Check-suite and check-run requests explicitly select
+all attempts and follow bounded result pages. Every completed provider identity
+returned by that projection enters the comparison baseline; the provider's
+latest-attempt default cannot silently discard a completion between polls.
+
 **Implemented behavior.** Daemon shutdown wins a race with a repository task's
 clean exit. Once shutdown is observable, the supervisor drains every watch task
 and reports a clean stop; a task that exits cleanly before shutdown remains a
@@ -90,6 +97,13 @@ rolls back the whole batch on failure, reports a stale generation as conflict,
 and recognizes only an exact candidate-and-event replay. An unchanged candidate
 with no events does not advance the cursor; an unchanged candidate carrying
 events is rejected.
+
+**Implemented behavior.** The version-one cursor reader remains compatible with
+the earlier version-one workflow record that lacked a workflow-definition ID. It
+admits only the otherwise-canonical legacy shape, uses the retained run ID as
+the definition-identity sentinel, suppresses the same completed run by branch
+and run identity, and writes the complete current shape on the next successful
+commit. A legacy cursor therefore cannot permanently block its repository.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities,
@@ -172,7 +186,9 @@ kind is constructible.
 
 **Implemented behavior.** The differ emits `ReviewSubmitted` only for a newly
 submitted review. A later GitHub dismissal is not a version-one fact and emits
-no event.
+no event. When GitHub returns a null author for a historical review whose
+account was deleted, normalization reuses the prior reviewer only for the same
+provider review identity; a new identity-less review is omitted.
 
 **Implemented behavior.** Reaction ingestion includes only reactions by a login
 in the configured signal-reviewer list. Reactions from every other actor are

@@ -405,15 +405,17 @@ impl GitHubRepositoryPoller {
         }
         let mut pull_requests = Vec::with_capacity(pull_numbers.len());
         for number in pull_numbers {
-            let previous_context = previous.and_then(|observation| {
+            let previous_pull_request = previous.and_then(|observation| {
                 observation
                     .state()
                     .pull_requests()
                     .iter()
                     .find(|pull_request| pull_request.context().number().get() == number)
-                    .map(RepoWatchPullRequestState::context)
             });
-            pull_requests.push(self.fetch_pull_request(number, previous_context).await?);
+            pull_requests.push(
+                self.fetch_pull_request(number, previous_pull_request)
+                    .await?,
+            );
         }
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
@@ -469,7 +471,7 @@ impl GitHubRepositoryPoller {
     async fn fetch_pull_request(
         &mut self,
         number: u64,
-        previous_context: Option<&PullRequestEventContext>,
+        previous_pull_request: Option<&RepoWatchPullRequestState>,
     ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
         let number_text = number.to_string();
         let detail: PullResponse = self
@@ -485,10 +487,19 @@ impl GitHubRepositoryPoller {
         }
         let head_sha = CommitSha::try_new(detail.head.sha.clone())
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        let context = normalize_pull_request_context(&detail, head_sha.clone(), previous_context)?;
+        let context = normalize_pull_request_context(
+            &detail,
+            head_sha.clone(),
+            previous_pull_request.map(RepoWatchPullRequestState::context),
+        )?;
         let completed_check_suites = self.fetch_check_suites(&head_sha).await?;
         let completed_check_runs = self.fetch_check_runs(&head_sha).await?;
-        let reviews = self.fetch_reviews(number).await?;
+        let reviews = self
+            .fetch_reviews(
+                number,
+                previous_pull_request.map(RepoWatchPullRequestState::reviews),
+            )
+            .await?;
         let threads = self.fetch_threads(number).await?;
         let reactions = self.fetch_reactions(number).await?;
         RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
@@ -522,6 +533,7 @@ impl GitHubRepositoryPoller {
                     self.repository_url(
                         &["commits", head.as_str(), "check-suites"],
                         &[
+                            ("filter", "all".to_owned()),
                             ("per_page", PAGE_SIZE.to_string()),
                             ("page", page.to_string()),
                         ],
@@ -559,6 +571,7 @@ impl GitHubRepositoryPoller {
                     self.repository_url(
                         &["commits", head.as_str(), "check-runs"],
                         &[
+                            ("filter", "all".to_owned()),
                             ("per_page", PAGE_SIZE.to_string()),
                             ("page", page.to_string()),
                         ],
@@ -587,6 +600,7 @@ impl GitHubRepositoryPoller {
     async fn fetch_reviews(
         &mut self,
         number: u64,
+        previous: Option<&[RepoWatchReviewObservation]>,
     ) -> Result<Vec<RepoWatchReviewObservation>, RepositoryWatchAttemptError> {
         let mut observations = Vec::new();
         let number_text = number.to_string();
@@ -613,10 +627,22 @@ impl GitHubRepositoryPoller {
                     ProviderReviewState::Dismissed => None,
                     ProviderReviewState::Pending => continue,
                 };
-                observations.push(RepoWatchReviewObservation::new(
-                    object_id(review.id)?,
-                    RepoWatchAuthorLogin::try_new(review.user.login)
+                let id = object_id(review.id)?;
+                let reviewer = match review.user {
+                    Some(user) => RepoWatchAuthorLogin::try_new(user.login)
                         .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                    None => {
+                        let Some(previous) = previous.and_then(|reviews| {
+                            reviews.iter().find(|candidate| candidate.id() == id)
+                        }) else {
+                            continue;
+                        };
+                        previous.reviewer().clone()
+                    }
+                };
+                observations.push(RepoWatchReviewObservation::new(
+                    id,
+                    reviewer,
                     state,
                     CommitSha::try_new(review.commit_id)
                         .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
@@ -1438,7 +1464,7 @@ struct CheckRunResponse {
 #[derive(Clone, Deserialize)]
 struct ReviewResponse {
     id: u64,
-    user: UserResponse,
+    user: Option<UserResponse>,
     state: String,
     commit_id: String,
 }
@@ -1567,9 +1593,9 @@ mod tests {
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchThreadState, RepositorySlug,
-        RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError, ResourceKey,
-        ReviewState, Url, WorkflowResponse, normalize_pull_request_context, object_id,
+        RepoWatchPullRequestLifecycle, RepoWatchReviewObservation, RepoWatchThreadState,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
+        ResourceKey, ReviewState, Url, WorkflowResponse, normalize_pull_request_context, object_id,
         supervise_repository_tasks,
     };
     use signalbox_domain::{BranchName, CommitSha, ReactionSubject};
@@ -1586,8 +1612,8 @@ mod tests {
     const SECOND_WORKFLOWS_PAGE_TARGET: &str =
         "/repos/namespace/project/actions/workflows?per_page=100&page=2";
     const PULL_DETAIL_TARGET: &str = "/repos/namespace/project/pulls/7";
-    const CHECK_SUITES_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-suites?per_page=100&page=1";
-    const CHECK_RUNS_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?per_page=100&page=1";
+    const CHECK_SUITES_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-suites?filter=all&per_page=100&page=1";
+    const CHECK_RUNS_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&per_page=100&page=1";
     const REVIEWS_TARGET: &str = "/repos/namespace/project/pulls/7/reviews?per_page=100&page=1";
     const THREADS_TARGET: &str = "/graphql";
     const PULL_REACTIONS_TARGET: &str =
@@ -1754,6 +1780,16 @@ mod tests {
         .to_string()
     }
 
+    fn identity_less_review(id: u64) -> String {
+        serde_json::json!([{
+            "id": id,
+            "user": null,
+            "state": "APPROVED",
+            "commit_id": HEAD_SHA
+        }])
+        .to_string()
+    }
+
     fn threads() -> String {
         serde_json::json!({
             "data": {
@@ -1884,6 +1920,16 @@ mod tests {
         RepoWatchBranchHead::new(
             BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is valid"),
             CommitSha::try_new(String::from(BASE_SHA)).expect("fixture commit is valid"),
+        )
+    }
+
+    fn submitted_review(id: u64) -> RepoWatchReviewObservation {
+        RepoWatchReviewObservation::new(
+            object_id(id).expect("fixture review identity is positive"),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+                .expect("fixture reviewer is valid"),
+            EXPECTED_REVIEW_STATE,
+            CommitSha::try_new(String::from(HEAD_SHA)).expect("fixture review commit is valid"),
         )
     }
 
@@ -2417,6 +2463,45 @@ mod tests {
         let pull = &observation.state().pull_requests()[0];
 
         assert_eq!(pull.reviews().len(), RETAINED_REVIEW_IDS.len());
+    }
+
+    #[tokio::test]
+    async fn a_deleted_review_author_reuses_the_prior_review_identity() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            REVIEWS_TARGET,
+            identity_less_review(RETAINED_REVIEW_IDS[0]),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let previous = submitted_review(RETAINED_REVIEW_IDS[0]);
+
+        let reviews = fixture
+            .poller
+            .fetch_reviews(PULL_NUMBER, Some(std::slice::from_ref(&previous)))
+            .await
+            .expect("identity-less historical review is retained");
+        server.finish().await;
+
+        assert_eq!(reviews[0].reviewer(), previous.reviewer());
+    }
+
+    #[tokio::test]
+    async fn a_new_review_without_an_author_identity_is_omitted() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            REVIEWS_TARGET,
+            identity_less_review(RETAINED_REVIEW_IDS[0]),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let reviews = fixture
+            .poller
+            .fetch_reviews(PULL_NUMBER, None)
+            .await
+            .expect("identity-less new review is safely omitted");
+        server.finish().await;
+
+        assert!(reviews.is_empty());
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -982,6 +982,12 @@ fn parse_repository_watch_configuration(
         if !credential_file.is_absolute() {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
+        if credential_file
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
         if !credential_file_set.insert(credential_file.clone()) {
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
@@ -1647,6 +1653,8 @@ mod tests {
     const SECOND_WATCH_REPOSITORY: &str = "namespace/second";
     const WATCH_CREDENTIAL_FILE: &str = "/run/credentials/repository-watch-token";
     const SECOND_WATCH_CREDENTIAL_FILE: &str = "/run/credentials/second-watch-token";
+    const PARENT_COMPONENT_WATCH_CREDENTIAL_FILE: &str =
+        "/run/credentials/alias/../repository-watch-token";
     const WATCH_CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
@@ -2057,6 +2065,19 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_parent_components_in_credential_paths() {
+        let configured = configuration_with_repository_watch().replace(
+            SECOND_WATCH_CREDENTIAL_FILE,
+            PARENT_COMPONENT_WATCH_CREDENTIAL_FILE,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
         );
     }
 

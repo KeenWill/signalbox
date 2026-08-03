@@ -694,10 +694,18 @@ struct ReactionRecord {
 #[serde(deny_unknown_fields)]
 struct WorkflowRunRecord {
     id: u64,
-    workflow_id: u64,
+    #[serde(default, deserialize_with = "deserialize_optional_workflow_id")]
+    workflow_id: Option<u64>,
     branch: String,
     workflow: String,
     conclusion: String,
+}
+
+fn deserialize_optional_workflow_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u64::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -738,7 +746,7 @@ fn repository_state_record(state: &RepoWatchRepositoryState) -> RepositoryStateR
             .iter()
             .map(|run| WorkflowRunRecord {
                 id: run.id().get(),
-                workflow_id: run.workflow_id().get(),
+                workflow_id: Some(run.workflow_id().get()),
                 branch: run.branch().as_str().to_owned(),
                 workflow: run.workflow().as_str().to_owned(),
                 conclusion: repo_watch_check_conclusion_to_str(run.conclusion()).to_owned(),
@@ -829,12 +837,19 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
 }
 
 fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, RepoWatchStoreError> {
-    let record: CursorRecord = serde_json::from_value(value.clone()).map_err(|_| {
+    let mut record: CursorRecord = serde_json::from_value(value).map_err(|_| {
         RepoWatchStoreError::Corruption(RepoWatchPersistenceCorruption::MalformedCursorDocument)
     })?;
     if record.storage_version != CURSOR_STORAGE_VERSION {
         return Err(RepoWatchPersistenceCorruption::UnsupportedCursorVersion.into());
     }
+    for run in &mut record.state.workflow_runs {
+        if run.workflow_id.is_none() {
+            run.workflow_id = Some(run.id);
+        }
+    }
+    let canonical_input =
+        serde_json::to_value(&record).map_err(RepoWatchStoreError::CursorEncoding)?;
     let signal_reviewers = record
         .signal_reviewers
         .into_iter()
@@ -843,7 +858,7 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
     let state = decode_repository_state(record.state)?;
     let candidate =
         RepoWatchCursorCandidate::new(RepoWatchObservation::new(signal_reviewers, state));
-    if encode_cursor_candidate(&candidate)? != value {
+    if encode_cursor_candidate(&candidate)? != canonical_input {
         return Err(RepoWatchPersistenceCorruption::NonCanonicalCursor.into());
     }
     Ok(candidate)
@@ -863,7 +878,13 @@ fn decode_repository_state(
         .map(|run| {
             Ok(RepoWatchWorkflowRunObservation::new(
                 github_object_id(run.id, "workflow_run.id")?,
-                github_object_id(run.workflow_id, "workflow_run.workflow_id")?,
+                github_object_id(
+                    run.workflow_id
+                        .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                            "workflow_run.workflow_id",
+                        ))?,
+                    "workflow_run.workflow_id",
+                )?,
                 BranchName::try_new(run.branch)?,
                 WorkflowName::try_new(run.workflow)?,
                 repo_watch_check_conclusion_from_str(&run.conclusion).ok_or(
@@ -1681,6 +1702,25 @@ mod tests {
         GitHubObjectId::new(NonZeroU64::new(value).expect("fixture object identity is positive"))
     }
 
+    fn workflow_candidate() -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+        let workflow_run = RepoWatchWorkflowRunObservation::new(
+            github_object_id(WORKFLOW_RUN_ID),
+            github_object_id(WORKFLOW_ID),
+            BranchName::try_new(String::from(BRANCH))?,
+            WorkflowName::try_new(String::from(WORKFLOW))?,
+            CheckConclusion::Success,
+        );
+        let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![workflow_run],
+            branch_heads: Vec::new(),
+        })?;
+        Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+            Vec::new(),
+            state,
+        )))
+    }
+
     #[test]
     fn event_page_size_has_a_fixed_upper_bound() -> Result<(), Box<dyn Error>> {
         let admitted = RepoWatchEventPageSize::try_new(
@@ -1697,19 +1737,7 @@ mod tests {
 
     #[test]
     fn cursor_round_trip_retains_provider_workflow_identity() -> Result<(), Box<dyn Error>> {
-        let workflow_run = RepoWatchWorkflowRunObservation::new(
-            github_object_id(WORKFLOW_RUN_ID),
-            github_object_id(WORKFLOW_ID),
-            BranchName::try_new(String::from(BRANCH))?,
-            WorkflowName::try_new(String::from(WORKFLOW))?,
-            CheckConclusion::Success,
-        );
-        let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests: Vec::new(),
-            workflow_runs: vec![workflow_run],
-            branch_heads: Vec::new(),
-        })?;
-        let candidate = RepoWatchCursorCandidate::new(RepoWatchObservation::new(Vec::new(), state));
+        let candidate = workflow_candidate()?;
 
         let encoded = encode_cursor_candidate(&candidate)?;
         let decoded = decode_cursor_candidate(encoded)?;
@@ -1718,6 +1746,29 @@ mod tests {
         assert_eq!(
             decoded.observation().state().workflow_runs()[0].workflow_id(),
             github_object_id(WORKFLOW_ID)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn version_one_cursor_without_workflow_identity_remains_readable() -> Result<(), Box<dyn Error>>
+    {
+        let candidate = workflow_candidate()?;
+        let mut encoded = encode_cursor_candidate(&candidate)?;
+        let workflow_run = encoded
+            .get_mut("state")
+            .and_then(|state| state.get_mut("workflow_runs"))
+            .and_then(Value::as_array_mut)
+            .and_then(|runs| runs.first_mut())
+            .and_then(Value::as_object_mut)
+            .ok_or("fixture workflow cursor shape is present")?;
+        workflow_run.remove("workflow_id");
+
+        let decoded = decode_cursor_candidate(encoded)?;
+
+        assert_eq!(
+            decoded.observation().state().workflow_runs()[0].workflow_id(),
+            github_object_id(WORKFLOW_RUN_ID)
         );
         Ok(())
     }
