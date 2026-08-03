@@ -1172,6 +1172,9 @@ async fn prepare_against_locked_state(
             SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
                 SubmitInputCorruption::Inconsistent("interrupt queue order").into()
             }
+            SubmitInputPreparationFailure::ModelSettingsResolution(_) => {
+                SubmitInputCorruption::Inconsistent("model settings resolution").into()
+            }
         })
 }
 
