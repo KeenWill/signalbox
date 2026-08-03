@@ -490,8 +490,8 @@ The optional `[approval_judge]` table has exactly one `selection_id`, and the
 configuration parser requires it to name a configured direct selection. The
 daemon uses that selection through the ordinary adapter, credential-profile,
 target-resolution, and usage-limit machinery. When the table is absent, the
-judge call uses the request-producing call's direct selection unchanged, never
-a hardcoded lower tier.
+judge call uses the request-producing call's direct selection unchanged, never a
+hardcoded lower tier.
 
 When no explicit posture is configured, composition preserves each compiled
 declaration's permission default and feeds it unchanged into the existing
