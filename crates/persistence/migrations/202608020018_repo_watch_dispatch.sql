@@ -63,7 +63,7 @@ CREATE TABLE repo_watch_dispatch_batch (
     singleton_scope text NOT NULL,
     singleton_repository text,
     singleton_pull_request_number numeric(20, 0),
-    singleton_stack_root text,
+    singleton_stack_root_pull_request_number numeric(20, 0),
     cooldown_seconds bigint NOT NULL,
     action_count integer NOT NULL,
     admitted_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
@@ -85,24 +85,30 @@ CREATE TABLE repo_watch_dispatch_batch (
             AND singleton_pull_request_number <= 18446744073709551615
         )
     ),
-    CHECK (singleton_stack_root IS NULL OR repo_watch_branch_is_valid(singleton_stack_root)),
+    CHECK (
+        singleton_stack_root_pull_request_number IS NULL
+        OR (
+            singleton_stack_root_pull_request_number > 0
+            AND singleton_stack_root_pull_request_number <= 18446744073709551615
+        )
+    ),
     CHECK (
         (singleton_scope = 'pull_request'
             AND singleton_repository IS NOT NULL
             AND singleton_pull_request_number IS NOT NULL
-            AND singleton_stack_root IS NULL)
+            AND singleton_stack_root_pull_request_number IS NULL)
         OR (singleton_scope = 'stack'
             AND singleton_repository IS NOT NULL
             AND singleton_pull_request_number IS NULL
-            AND singleton_stack_root IS NOT NULL)
+            AND singleton_stack_root_pull_request_number IS NOT NULL)
         OR (singleton_scope = 'rule'
             AND singleton_repository IS NULL
             AND singleton_pull_request_number IS NULL
-            AND singleton_stack_root IS NULL)
+            AND singleton_stack_root_pull_request_number IS NULL)
         OR (singleton_scope = 'repo'
             AND singleton_repository IS NOT NULL
             AND singleton_pull_request_number IS NULL
-            AND singleton_stack_root IS NULL)
+            AND singleton_stack_root_pull_request_number IS NULL)
     ),
     CHECK (cooldown_seconds >= 0),
     CHECK (action_count BETWEEN 1 AND 32)
@@ -317,7 +323,7 @@ CREATE INDEX repo_watch_dispatch_singleton_lookup
         singleton_scope,
         singleton_repository,
         singleton_pull_request_number,
-        singleton_stack_root,
+        singleton_stack_root_pull_request_number,
         admitted_at DESC
     );
 

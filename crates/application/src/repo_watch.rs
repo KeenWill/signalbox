@@ -1132,7 +1132,7 @@ pub enum RepoWatchSingletonKey {
     },
     Stack {
         repository: RepositorySlug,
-        root_branch: BranchName,
+        root_pull_request: PullRequestNumber,
     },
     Rule,
     Repository {
@@ -1203,9 +1203,10 @@ pub enum RepoWatchRuleEvaluation {
     },
 }
 
-/// Durable result of one event/rule evaluation.
+/// Result of one event/rule evaluation at the durability boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchRuleEvaluationOutcome {
+    Inactive,
     NotMatched,
     Occupied,
     Cooldown,
@@ -1443,19 +1444,22 @@ fn singleton_key(
             };
             Some(RepoWatchSingletonKey::Stack {
                 repository: event.repository().clone(),
-                root_branch: stack_root(event.repository(), context, observation),
+                root_pull_request: stack_root_pull_request(
+                    event.repository(),
+                    context,
+                    observation,
+                ),
             })
         }
     }
 }
 
-fn stack_root(
+fn stack_root_pull_request(
     repository: &RepositorySlug,
     context: &PullRequestEventContext,
     observation: &RepoWatchObservation,
-) -> BranchName {
-    let mut frontier =
-        BTreeSet::from([(context.base_branch().clone(), context.head_branch().clone())]);
+) -> PullRequestNumber {
+    let mut frontier = BTreeSet::from([(context.base_branch().clone(), context.number())]);
     let mut visited = BTreeSet::new();
     let mut roots = BTreeSet::new();
     while let Some((branch, root)) = frontier.pop_first() {
@@ -1474,7 +1478,7 @@ fn stack_root(
             .map(|parent| {
                 (
                     parent.context().base_branch().clone(),
-                    parent.context().head_branch().clone(),
+                    parent.context().number(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1484,10 +1488,7 @@ fn stack_root(
             frontier.extend(parents);
         }
     }
-    roots
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| context.head_branch().clone())
+    roots.into_iter().next().unwrap_or_else(|| context.number())
 }
 
 /// Display and error forwarding for repository-watch dispatch service failures.
@@ -1543,6 +1544,13 @@ mod tests {
     const OTHER_REACTION_CONTENT: &str = "eyes";
     const PULL_REQUEST_NUMBER: u64 = 17;
     const OTHER_PULL_REQUEST_NUMBER: u64 = 3;
+    const FIRST_FORK_REPOSITORY: &str = "first/project";
+    const SECOND_FORK_REPOSITORY: &str = "second/project";
+    const FIRST_STACK_BRANCH: &str = "feature/first";
+    const SECOND_STACK_BRANCH: &str = "feature/second";
+    const SHARED_STACK_BRANCH: &str = "feature/shared";
+    const BOTTOM_STACK_BRANCH: &str = "stack/bottom";
+    const TOP_STACK_BRANCH: &str = "stack/top";
     const CHECK_SUITE_ID: u64 = 101;
     const CHECK_RUN_ID: u64 = 102;
     const REVIEW_ID: u64 = 103;
@@ -1720,10 +1728,19 @@ mod tests {
         base_branch: &str,
         head_branch: &str,
     ) -> Result<PullRequestEventContext, Box<dyn Error>> {
+        stack_context_from(number, repository()?, base_branch, head_branch)
+    }
+
+    fn stack_context_from(
+        number: u64,
+        head_repository: RepositorySlug,
+        base_branch: &str,
+        head_branch: &str,
+    ) -> Result<PullRequestEventContext, Box<dyn Error>> {
         Ok(PullRequestEventContext::new(PullRequestEventContextInput {
             number: pull_request_number(number),
             head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
-            head_repository: repository()?,
+            head_repository,
             base_branch: BranchName::try_new(String::from(base_branch))?,
             head_branch: BranchName::try_new(String::from(head_branch))?,
             title: PullRequestTitle::try_new(String::from(TITLE))?,
@@ -1764,10 +1781,10 @@ mod tests {
     }
 
     #[test]
-    fn independent_pull_requests_to_one_base_have_distinct_stack_roots()
+    fn independent_pull_requests_to_one_base_have_distinct_stack_root_pull_requests()
     -> Result<(), Box<dyn Error>> {
-        let first = stack_context(17, "main", "feature/first")?;
-        let second = stack_context(18, "main", "feature/second")?;
+        let first = stack_context(PULL_REQUEST_NUMBER, BASE_BRANCH, FIRST_STACK_BRANCH)?;
+        let second = stack_context(OTHER_PULL_REQUEST_NUMBER, BASE_BRANCH, SECOND_STACK_BRANCH)?;
         let state = observation(
             vec![
                 stack_pull_request(first.clone())?,
@@ -1779,20 +1796,61 @@ mod tests {
         )?;
 
         assert_eq!(
-            stack_root(&repository()?, &first, &state),
-            first.head_branch().clone()
+            stack_root_pull_request(&repository()?, &first, &state),
+            first.number()
         );
         assert_eq!(
-            stack_root(&repository()?, &second, &state),
-            second.head_branch().clone()
+            stack_root_pull_request(&repository()?, &second, &state),
+            second.number()
         );
         Ok(())
     }
 
     #[test]
-    fn chained_pull_requests_share_the_bottom_head_as_stack_root() -> Result<(), Box<dyn Error>> {
-        let bottom = stack_context(17, "main", "stack/bottom")?;
-        let top = stack_context(18, "stack/bottom", "stack/top")?;
+    fn fork_pull_requests_with_equal_head_branch_have_distinct_stack_root_pull_requests()
+    -> Result<(), Box<dyn Error>> {
+        let first = stack_context_from(
+            PULL_REQUEST_NUMBER,
+            RepositorySlug::try_new(String::from(FIRST_FORK_REPOSITORY))?,
+            BASE_BRANCH,
+            SHARED_STACK_BRANCH,
+        )?;
+        let second = stack_context_from(
+            OTHER_PULL_REQUEST_NUMBER,
+            RepositorySlug::try_new(String::from(SECOND_FORK_REPOSITORY))?,
+            BASE_BRANCH,
+            SHARED_STACK_BRANCH,
+        )?;
+        let state = observation(
+            vec![
+                stack_pull_request(first.clone())?,
+                stack_pull_request(second.clone())?,
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &first, &state),
+            first.number()
+        );
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &second, &state),
+            second.number()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chained_pull_requests_share_the_bottom_pull_request_as_stack_root()
+    -> Result<(), Box<dyn Error>> {
+        let bottom = stack_context(PULL_REQUEST_NUMBER, BASE_BRANCH, BOTTOM_STACK_BRANCH)?;
+        let top = stack_context(
+            OTHER_PULL_REQUEST_NUMBER,
+            BOTTOM_STACK_BRANCH,
+            TOP_STACK_BRANCH,
+        )?;
         let state = observation(
             vec![
                 stack_pull_request(bottom.clone())?,
@@ -1804,8 +1862,8 @@ mod tests {
         )?;
 
         assert_eq!(
-            stack_root(&repository()?, &top, &state),
-            bottom.head_branch().clone()
+            stack_root_pull_request(&repository()?, &top, &state),
+            bottom.number()
         );
         Ok(())
     }

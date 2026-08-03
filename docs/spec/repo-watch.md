@@ -329,9 +329,10 @@ repository equals the prospective child's event repository (its base repository)
 and its head branch equals the child's base branch. Rule scope keys only by rule
 identity and version; repository scope adds repository. Branch events cannot
 satisfy pull-request or stack scope and make such a rule invalid rather than
-silently changing its key. The component identity is the bottom open PR's head
-branch, so independent PRs that both target the same destination branch do not
-share a singleton.
+silently changing its key. The component identity is the bottom open PR's number
+in the watched repository, so independent PRs do not share a singleton even when
+forks reuse the same head-branch name or both target the same destination
+branch.
 
 **Implemented behavior.** One event/rule match admits its complete ordered
 action list as one singleton batch. Admission, creation of every dispatched
@@ -354,8 +355,11 @@ later events in cursor and event-ordinal order. Activation and each terminal
 evaluation outcome are append-only. Restart resumes the oldest unevaluated fact
 for that rule version; it neither redispatches an evaluated fact nor treats
 pre-activation history as a new live signal. Reconciliation records an
-append-only deactivation when a configured identity disappears. A deactivated
-rule identity and version cannot be configured again; the replacement uses a new
+append-only deactivation when a configured identity or its repository
+disappears. Configuration reconciliation and evaluation are serialized per
+repository: an evaluation already committed may replay, but an already-loaded
+event cannot create a dispatch after deactivation commits. A deactivated rule
+identity and version cannot be configured again; the replacement uses a new
 identity so no events observed during its absence can be consumed through the
 old activation.
 

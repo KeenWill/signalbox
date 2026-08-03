@@ -94,6 +94,7 @@ impl Error for RepositoryWatchRuntimeConstructionError {}
 /// Why the repository-watch supervisor ended before daemon shutdown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepositoryWatchRuntimeError {
+    Persistence,
     RepositoryTaskExited,
     RepositoryTaskPanicked,
     TaskSetEmpty,
@@ -102,6 +103,7 @@ pub enum RepositoryWatchRuntimeError {
 impl fmt::Display for RepositoryWatchRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Persistence => "repository-watch configuration reconciliation failed",
             Self::RepositoryTaskExited => "repository-watch task exited before shutdown",
             Self::RepositoryTaskPanicked => "repository-watch task panicked",
             Self::TaskSetEmpty => "repository-watch task set became empty",
@@ -113,6 +115,8 @@ impl Error for RepositoryWatchRuntimeError {}
 
 /// Supervisor for one independent polling task per configured repository.
 pub struct RepositoryWatchRuntime {
+    configured_repositories: Vec<RepositorySlug>,
+    dispatch_store: PostgresRepoWatchDispatchStore,
     tasks: Vec<RepositoryWatchTask>,
 }
 
@@ -126,6 +130,11 @@ impl RepositoryWatchRuntime {
         credential_pin: signalbox_persistence::SessionCredentialPin,
         eligibility_nudge: InProcessEligibilityNudge,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
+        let configured_repositories = configuration
+            .repositories()
+            .iter()
+            .map(|repository| repository.repository().clone())
+            .collect();
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         for repository in configuration.repositories() {
             tasks.push(RepositoryWatchTask::try_new(
@@ -141,7 +150,11 @@ impl RepositoryWatchRuntime {
                 },
             )?);
         }
-        Ok(Self { tasks })
+        Ok(Self {
+            configured_repositories,
+            dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
+            tasks,
+        })
     }
 
     /// Runs every repository task until the daemon broadcasts shutdown.
@@ -149,6 +162,13 @@ impl RepositoryWatchRuntime {
         self,
         shutdown: watch::Receiver<bool>,
     ) -> Result<(), RepositoryWatchRuntimeError> {
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        self.dispatch_store
+            .deactivate_unconfigured_repositories(&self.configured_repositories)
+            .await
+            .map_err(|_| RepositoryWatchRuntimeError::Persistence)?;
         let mut tasks = JoinSet::new();
         for task in self.tasks {
             tasks.spawn(task.run(shutdown.clone()));
@@ -364,6 +384,7 @@ impl RepositoryWatchTask {
                 }
             }
             RepoWatchRuleEvaluationOutcome::NotMatched
+            | RepoWatchRuleEvaluationOutcome::Inactive
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }

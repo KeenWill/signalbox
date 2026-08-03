@@ -5899,7 +5899,7 @@ pub trait RepoWatchTemplateResolver {
 
 pub enum RepoWatchSingletonKey {
     PullRequest { repository: RepositorySlug, number: PullRequestNumber },
-    Stack { repository: RepositorySlug, root_branch: BranchName },
+    Stack { repository: RepositorySlug, root_pull_request: PullRequestNumber },
     Rule,
     Repository { repository: RepositorySlug },
 }
@@ -5938,6 +5938,7 @@ pub enum RepoWatchRuleEvaluation {
 }
 
 pub enum RepoWatchRuleEvaluationOutcome {
+    Inactive,
     NotMatched,
     Occupied,
     Cooldown,

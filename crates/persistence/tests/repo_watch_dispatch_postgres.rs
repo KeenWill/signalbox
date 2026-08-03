@@ -308,6 +308,23 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
 async fn evaluate_second_conflict(
     fixture: &DispatchFixture,
 ) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let (loaded, observation) = load_second_conflict(fixture).await?;
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
+async fn load_second_conflict(
+    fixture: &DispatchFixture,
+) -> Result<(RepoWatchEvent, RepoWatchObservation), Box<dyn Error>> {
     let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
     let cursor = event_store
         .load_cursor(&fixture.repository)
@@ -334,17 +351,7 @@ async fn evaluate_second_conflict(
         )
         .await?
         .expect("second conflict remains unevaluated");
-    Ok(
-        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
-            .evaluate(
-                loaded,
-                &fixture.rule,
-                &observation,
-                &TemplateResolver,
-                dispatch_context(),
-            )
-            .await?,
-    )
+    Ok((loaded, observation))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -439,6 +446,59 @@ async fn retired_rule_identity_cannot_resume_from_its_old_activation() -> Result
         .expect_err("retired rule identity must not reactivate");
 
     assert!(reused_rule_identity(&error));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let no_configured_repositories = [];
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&no_configured_repositories)
+        .await?;
+    let error = fixture
+        .store
+        .reconcile_rules(
+            &fixture.repository,
+            &[(fixture.rule.id().clone(), fixture.rule.version())],
+        )
+        .await
+        .expect_err("a rule from a removed repository must be retired");
+
+    assert!(reused_rule_identity(&error));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deactivated_rule_cannot_dispatch_an_already_loaded_event() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let (loaded, observation) = load_second_conflict(&fixture).await?;
+    let batches_before: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, &[])
+        .await?;
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    let batches_after: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Inactive);
+    assert_eq!(batches_after, batches_before);
     Ok(())
 }
 

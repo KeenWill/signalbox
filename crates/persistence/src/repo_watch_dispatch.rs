@@ -17,6 +17,8 @@ use crate::{
     commit_failure_is_ambiguous, create_session::insert_fresh_prepared, mapping::session_id_to_uuid,
 };
 
+const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
+
 /// Database or durable-shape failure while evaluating one repository-watch rule.
 #[derive(Debug)]
 pub enum RepoWatchDispatchRepositoryError {
@@ -98,6 +100,58 @@ impl PostgresRepoWatchDispatchStore {
         }
     }
 
+    /// Deactivates rules belonging to repositories absent from configuration.
+    pub async fn deactivate_unconfigured_repositories(
+        &self,
+        configured: &[RepositorySlug],
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        let configured = configured
+            .iter()
+            .map(|repository| repository.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
+        let active_repositories: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT activation.repository
+               FROM repo_watch_rule_activation AS activation
+              WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+              )
+              ORDER BY activation.repository",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        for repository in active_repositories {
+            if configured.contains(repository.as_str()) {
+                continue;
+            }
+            lock_text(&mut transaction, &repository).await?;
+            sqlx::query(
+                "INSERT INTO repo_watch_rule_deactivation
+                    (repository, rule_id, rule_version)
+                 SELECT activation.repository, activation.rule_id, activation.rule_version
+                   FROM repo_watch_rule_activation AS activation
+                  WHERE activation.repository = $1
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_rule_deactivation AS deactivation
+                         WHERE deactivation.repository = activation.repository
+                           AND deactivation.rule_id = activation.rule_id
+                           AND deactivation.rule_version = activation.rule_version
+                    )
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(repository)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        commit(transaction).await
+    }
+
     /// Reconciles the configured rule set before its repository task polls.
     pub async fn reconcile_rules(
         &self,
@@ -105,6 +159,7 @@ impl PostgresRepoWatchDispatchStore {
         configured: &[(RepoWatchRuleId, RepoWatchRuleVersion)],
     ) -> Result<(), RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
         lock_text(&mut transaction, repository.as_str()).await?;
         let configured = configured
             .iter()
@@ -269,6 +324,7 @@ impl PostgresRepoWatchDispatchStore {
             } => {
                 let mut transaction = self.pool.begin().await?;
                 let singleton = StoredSingletonKey::from_domain(&singleton);
+                lock_text(&mut transaction, event.repository().as_str()).await?;
                 lock_text(
                     &mut transaction,
                     &singleton.lock_key(&rule_id, rule_version),
@@ -280,6 +336,10 @@ impl PostgresRepoWatchDispatchStore {
                 {
                     transaction.rollback().await?;
                     return Ok(outcome);
+                }
+                if !rule_is_active(&mut transaction, &event, &rule_id, rule_version).await? {
+                    transaction.rollback().await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
                 if singleton_is_occupied(&mut transaction, &rule_id, rule_version, &singleton)
                     .await?
@@ -465,11 +525,16 @@ impl PostgresRepoWatchDispatchStore {
         outcome: &'static str,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, event.repository().as_str()).await?;
         if let Some(recorded) =
             load_recorded_evaluation(&mut transaction, event.id(), rule_id, rule_version).await?
         {
             transaction.rollback().await?;
             return Ok(recorded);
+        }
+        if !rule_is_active(&mut transaction, event, rule_id, rule_version).await? {
+            transaction.rollback().await?;
+            return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
         }
         insert_evaluation(
             &mut transaction,
@@ -490,7 +555,7 @@ struct StoredSingletonKey {
     scope: &'static str,
     repository: Option<String>,
     pull_request: Option<Decimal>,
-    stack_root: Option<String>,
+    stack_root_pull_request: Option<Decimal>,
 }
 
 impl StoredSingletonKey {
@@ -500,28 +565,28 @@ impl StoredSingletonKey {
                 scope: "pull_request",
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: Some(Decimal::from(number.get())),
-                stack_root: None,
+                stack_root_pull_request: None,
             },
             RepoWatchSingletonKey::Stack {
                 repository,
-                root_branch,
+                root_pull_request,
             } => Self {
                 scope: "stack",
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: None,
-                stack_root: Some(root_branch.as_str().to_owned()),
+                stack_root_pull_request: Some(Decimal::from(root_pull_request.get())),
             },
             RepoWatchSingletonKey::Rule => Self {
                 scope: "rule",
                 repository: None,
                 pull_request: None,
-                stack_root: None,
+                stack_root_pull_request: None,
             },
             RepoWatchSingletonKey::Repository { repository } => Self {
                 scope: "repo",
                 repository: Some(repository.as_str().to_owned()),
                 pull_request: None,
-                stack_root: None,
+                stack_root_pull_request: None,
             },
         }
     }
@@ -535,7 +600,8 @@ impl StoredSingletonKey {
             self.repository.as_deref().unwrap_or(""),
             self.pull_request
                 .map_or(String::new(), |value| value.to_string()),
-            self.stack_root.as_deref().unwrap_or("")
+            self.stack_root_pull_request
+                .map_or(String::new(), |value| value.to_string())
         )
     }
 }
@@ -569,7 +635,7 @@ async fn insert_batch(
         "INSERT INTO repo_watch_dispatch_batch
             (dispatch_id, event_id, rule_id, rule_version, singleton_scope,
              singleton_repository, singleton_pull_request_number,
-             singleton_stack_root, cooldown_seconds, action_count)
+             singleton_stack_root_pull_request_number, cooldown_seconds, action_count)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     )
     .bind(batch.dispatch_id.as_uuid())
@@ -581,12 +647,41 @@ async fn insert_batch(
     .bind(batch.singleton.scope)
     .bind(batch.singleton.repository.as_deref())
     .bind(batch.singleton.pull_request)
-    .bind(batch.singleton.stack_root.as_deref())
+    .bind(batch.singleton.stack_root_pull_request)
     .bind(batch.cooldown_seconds)
     .bind(batch.action_count)
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+async fn rule_is_active(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+    rule_id: &RepoWatchRuleId,
+    rule_version: RepoWatchRuleVersion,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_rule_activation AS activation
+             WHERE activation.repository = $1
+               AND activation.rule_id = $2
+               AND activation.rule_version = $3
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+               )
+        )",
+    )
+    .bind(event.repository().as_str())
+    .bind(rule_id.as_str())
+    .bind(stored_rule_version(rule_version)?)
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
 async fn insert_evaluation(
@@ -695,7 +790,7 @@ async fn singleton_is_occupied(
                AND batch.singleton_scope = $3
                AND batch.singleton_repository IS NOT DISTINCT FROM $4
                AND batch.singleton_pull_request_number IS NOT DISTINCT FROM $5
-               AND batch.singleton_stack_root IS NOT DISTINCT FROM $6
+               AND batch.singleton_stack_root_pull_request_number IS NOT DISTINCT FROM $6
                AND NOT EXISTS (
                     SELECT 1 FROM repo_watch_dispatch_release AS released
                      WHERE released.dispatch_id = batch.dispatch_id
@@ -709,7 +804,7 @@ async fn singleton_is_occupied(
     .bind(key.scope)
     .bind(key.repository.as_deref())
     .bind(key.pull_request)
-    .bind(key.stack_root.as_deref())
+    .bind(key.stack_root_pull_request)
     .fetch_one(&mut **transaction)
     .await?)
 }
@@ -731,7 +826,7 @@ async fn singleton_is_cooling_down(
                AND batch.singleton_scope = $3
                AND batch.singleton_repository IS NOT DISTINCT FROM $4
                AND batch.singleton_pull_request_number IS NOT DISTINCT FROM $5
-               AND batch.singleton_stack_root IS NOT DISTINCT FROM $6
+               AND batch.singleton_stack_root_pull_request_number IS NOT DISTINCT FROM $6
                AND extract(epoch FROM (transaction_timestamp() - released.released_at))
                     < batch.cooldown_seconds
         )",
@@ -743,7 +838,7 @@ async fn singleton_is_cooling_down(
     .bind(key.scope)
     .bind(key.repository.as_deref())
     .bind(key.pull_request)
-    .bind(key.stack_root.as_deref())
+    .bind(key.stack_root_pull_request)
     .fetch_one(&mut **transaction)
     .await?)
 }
