@@ -29,9 +29,9 @@ another contract are summarized, the owning sibling page is linked inline.
 
 The path-scoped session-placement domain and persistence paragraphs were
 verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
-current-head authentication was additionally verified through PR #395
+current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
-verified through this PR (`agent/scoped-visibility-wiring`).
+verified against this PR (`agent/scoped-visibility-wiring`).
 
 ## Session identity and creation provenance
 
