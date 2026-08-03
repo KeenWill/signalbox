@@ -7,19 +7,6 @@ restarts, disconnects, and device switches; terminal, web, macOS, and iOS
 clients connect to it from anywhere, and runners you operate execute tools on
 your own machines.
 
-What it is being built to do:
-
-- **Sessions you can shape.** Steer a running turn mid-flight, fork a
-  conversation from any earlier point, and delegate work into sub-sessions.
-- **Tools where the work lives.** Outbound-connected runners execute tools on
-  your workstations, servers, and sandboxes — the machine that holds the files,
-  not necessarily the one you are typing on.
-- **Approvals you can inspect.** Risky tool use waits for an explicit decision
-  bound to exactly the action requested.
-- **Honest reliability.** Reconnecting never presents a draft as final;
-  interrupted work is recorded as what actually happened, ambiguity included,
-  with provenance for who or what caused each change.
-
 The [vision](docs/vision.md) and [target model](docs/target-model.md) describe
 the purpose, deployment shape, and destination in full; the target model details
 these capabilities directionally — accepted records decide them — and several
@@ -27,10 +14,7 @@ these capabilities directionally — accepted records decide them — and severa
 [open decisions](docs/open-questions.md).
 
 > **Status:** early implementation phase; APIs, protocols, and storage details
-> are not yet stable. The initial domain and persistence slices now support a
-> local daemon process protocol, terminal client, scheduler, and offline and
-> Anthropic model-call paths. Remote runners and graphical clients remain future
-> milestones.
+> are not yet stable. 
 
 ```text
  Terminal       Web       macOS / iOS
