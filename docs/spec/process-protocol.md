@@ -260,12 +260,12 @@ nullable defaults member are malformed.
 
 The session-placement object is exactly `pathless {}`, `scoped { path }`, or
 `root_global_read { path, intent: "acknowledged" }`. A path is one through 64
-nonempty dot-separated ASCII label segments; each segment is at most 64 bytes
-and admits only letters, digits, hyphen, and underscore. `scoped` requires at
-least two segments. A one-segment root path is legal only in the loud
-`root_global_read` variant: its explicit intent records that the session gains
-global conversation read. Creation defaults an omitted object to `pathless`;
-updates always carry the complete replacement object.
+nonempty dot-separated ASCII label segments, at most 4,000 bytes total; each
+segment is at most 64 bytes and admits only letters, digits, hyphen, and
+underscore. `scoped` requires at least two segments. A one-segment root path is
+legal only in the loud `root_global_read` variant: its explicit intent records
+that the session gains global conversation read. Creation defaults an omitted
+object to `pathless`; updates always carry the complete replacement object.
 
 The review-workflow requests have these shapes. Every `*_id` is a canonical UUID
 string, ordinal and count values are canonical decimal strings, and every

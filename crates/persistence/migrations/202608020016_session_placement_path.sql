@@ -44,7 +44,7 @@ ALTER TABLE create_session_command
     ),
     ADD CONSTRAINT create_session_command_placement_path_shape CHECK (
         placement_path IS NULL
-        OR (octet_length(placement_path) BETWEEN 1 AND 4159
+        OR (octet_length(placement_path) BETWEEN 1 AND 4000
             AND placement_path ~ '^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,63}$')
     );
 
@@ -63,7 +63,7 @@ CREATE TABLE session_placement_event (
         REFERENCES session_placement_event(session_id, version) ON DELETE RESTRICT,
     CHECK (
         placement_path IS NULL
-        OR (octet_length(placement_path) BETWEEN 1 AND 4159
+        OR (octet_length(placement_path) BETWEEN 1 AND 4000
             AND placement_path ~ '^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,63}$')
     ),
     CHECK (
@@ -108,7 +108,7 @@ CREATE TABLE update_session_placement_command (
     ),
     CHECK (
         replacement_path IS NULL
-        OR (octet_length(replacement_path) BETWEEN 1 AND 4159
+        OR (octet_length(replacement_path) BETWEEN 1 AND 4000
             AND replacement_path ~ '^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,63}$')
     ),
     CHECK (

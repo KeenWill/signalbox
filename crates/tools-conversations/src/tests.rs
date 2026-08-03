@@ -326,8 +326,16 @@ fn selected_native_read_forwards_the_model_named_target() {
 fn selected_native_read_returns_typed_out_of_scope_evidence() {
     let invoking = session(11);
     let selected = session(22);
+    let mut requester_segments = vec!["x".repeat(63); 62];
+    requester_segments.push("y".repeat(30));
+    requester_segments.push(String::from("z"));
+    let requester_path = requester_segments.join(".");
+    assert_eq!(
+        requester_path.len(),
+        signalbox_domain::SessionPlacementPath::MAX_BYTES
+    );
     let requester = signalbox_domain::SessionPlacement::scoped(
-        signalbox_domain::SessionPlacementPath::try_new(String::from("projects.foo.reviews.pr123"))
+        signalbox_domain::SessionPlacementPath::try_new(requester_path)
             .expect("fixture path is admitted"),
     )
     .expect("fixture path is non-root");

@@ -156,20 +156,20 @@ Path placement is opt-in. `Pathless` is the compatibility value and preserves
 today's cross-session read behavior exactly. A placed session carries one
 validated dotted path whose nonempty ASCII label segments admit letters, digits,
 hyphen, and underscore; each segment is at most 64 bytes and a path is at most
-64 segments. The initial value is pinned by creation. Only the explicit
-`UpdateSessionPlacement` durable command changes it, appending a versioned
-`Updated` event that names its predecessor and command identity; creation itself
-appends version-one `Created`, so no update rewrites history. Every
-current-placement load authenticates the contiguous history from version one
-through the selected head against each event's typed receipt and durable-command
-registry claim and rejects a head when immutable history contains a later event.
-Equal native and imported-frontier creation replay likewise rejects a missing or
-lagging current head while reconstituting its immutable creation receipt. A
-placement-update replay authenticates the current head event and rejects either
-a head that selects no authenticated event or a head that lags later history
-before reconstituting applied or stateful-rejection evidence. A missing or
-lagging head, cross-wired history, or invalid command fact fails closed as typed
-storage corruption.
+64 segments and 4,000 bytes. The initial value is pinned by creation. Only the
+explicit `UpdateSessionPlacement` durable command changes it, appending a
+versioned `Updated` event that names its predecessor and command identity;
+creation itself appends version-one `Created`, so no update rewrites history.
+Every current-placement load authenticates the contiguous history from version
+one through the selected head against each event's typed receipt and
+durable-command registry claim and rejects a head when immutable history
+contains a later event. Equal native and imported-frontier creation replay
+likewise rejects a missing or lagging current head while reconstituting its
+immutable creation receipt. A placement-update replay authenticates the current
+head event and rejects either a head that selects no authenticated event or a
+head that lags later history before reconstituting applied or stateful-rejection
+evidence. A missing or lagging head, cross-wired history, or invalid command
+fact fails closed as typed storage corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one

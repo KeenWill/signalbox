@@ -13,6 +13,8 @@ use crate::{DurableCommandId, SessionId};
 const MAX_SESSION_PLACEMENT_DEPTH: usize = 64;
 /// Maximum ASCII bytes in one placement segment.
 const MAX_SESSION_PLACEMENT_SEGMENT_BYTES: usize = 64;
+/// Maximum ASCII bytes in one complete dotted placement path.
+const MAX_SESSION_PLACEMENT_PATH_BYTES: usize = 4000;
 
 /// One validated dotted placement path.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -23,11 +25,16 @@ impl SessionPlacementPath {
     pub const MAX_DEPTH: usize = MAX_SESSION_PLACEMENT_DEPTH;
     /// Maximum admitted ASCII bytes per segment.
     pub const MAX_SEGMENT_BYTES: usize = MAX_SESSION_PLACEMENT_SEGMENT_BYTES;
+    /// Maximum admitted ASCII bytes in the complete dotted path.
+    pub const MAX_BYTES: usize = MAX_SESSION_PLACEMENT_PATH_BYTES;
 
     /// Validates a nonempty dotted path of bounded ASCII label segments.
     pub fn try_new(value: String) -> Result<Self, SessionPlacementPathError> {
         if value.is_empty() {
             return Err(SessionPlacementPathError::Empty);
+        }
+        if value.len() > MAX_SESSION_PLACEMENT_PATH_BYTES {
+            return Err(SessionPlacementPathError::PathTooLong);
         }
         for (index, segment) in value.split('.').enumerate() {
             if index == MAX_SESSION_PLACEMENT_DEPTH {
@@ -74,6 +81,7 @@ pub enum SessionPlacementPathError {
     EmptySegment,
     MalformedSegment,
     SegmentTooLong,
+    PathTooLong,
     TooDeep,
 }
 
@@ -84,6 +92,7 @@ impl fmt::Display for SessionPlacementPathError {
             Self::EmptySegment => "session placement path contains an empty segment",
             Self::MalformedSegment => "session placement segment is not an ASCII label",
             Self::SegmentTooLong => "session placement segment exceeds 64 bytes",
+            Self::PathTooLong => "session placement path exceeds 4000 bytes",
             Self::TooDeep => "session placement path exceeds 64 segments",
         })
     }
@@ -572,6 +581,16 @@ mod tests {
         assert_eq!(
             SessionPlacementPath::try_new("x".repeat(65)),
             Err(SessionPlacementPathError::SegmentTooLong)
+        );
+    }
+
+    #[test]
+    fn placement_path_rejects_overlong_total_length() {
+        let valid_segments_over_total_bound = vec!["x".repeat(64); 63].join(".");
+
+        assert_eq!(
+            SessionPlacementPath::try_new(valid_segments_over_total_bound),
+            Err(SessionPlacementPathError::PathTooLong)
         );
     }
 

@@ -937,7 +937,7 @@ struct PlaceArguments {
     #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
     session_id: CanonicalUuid,
     /// Caller-observed current positive placement version.
-    #[arg(long, value_name = "DECIMAL", value_parser = canonical_u64)]
+    #[arg(long, value_name = "DECIMAL", value_parser = positive_canonical_u64)]
     expected_placement_version: CanonicalU64,
     /// Replacement dotted placement path.
     #[arg(long, value_name = "PATH")]
@@ -3372,6 +3372,25 @@ mod tests {
             SessionPlacement::Scoped {
                 path: String::from(replacement_path),
             }
+        );
+    }
+
+    #[test]
+    fn place_rejects_zero_expected_placement_version() {
+        let session = "00000000-0000-0000-0000-000000000001";
+
+        assert!(
+            parse(
+                [
+                    "place",
+                    session,
+                    "--expected-placement-version",
+                    "0",
+                    "--pathless",
+                ]
+                .map(Into::into),
+            )
+            .is_err()
         );
     }
 
