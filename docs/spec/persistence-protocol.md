@@ -32,16 +32,16 @@ PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 and the session-placement event, current head, and creation transaction were
 verified through PR #415 (`agent/scoped-visibility-creation`); and the exact
-stop-command descendant scopes were verified through this PR
-(`agent/delegation`). This page covers the Postgres representation in
-`crates/persistence` (source and migrations), migration discipline, durable
-command storage and replay equality, the fail-closed reconstitution boundary,
-the lock protocol, pending-steering durable state, the corruption taxonomy,
-commit-ambiguity handling, and the transactional outbox. Session aggregate
-semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
-and attempt lifecycle in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
-kinds and command construction in
+stop-command descendant scopes and typed delegation wake origins were verified
+through this PR (`agent/delegation`). This page covers the Postgres
+representation in `crates/persistence` (source and migrations), migration
+discipline, durable command storage and replay equality, the fail-closed
+reconstitution boundary, the lock protocol, pending-steering durable state, the
+corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
+Session aggregate semantics live in
+[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
+lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
+identity kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -1029,6 +1029,16 @@ and do not consume an inbox sequence. Their semantic entry repeats that awaiting
 request as the ordinary logical tool-result correlation, so the unchanged
 proposal-order and single-result checks admit it as the `await_session` result
 without admitting a second result for the same request.
+
+`session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
+the delegated child's initial task. It binds the queued turn to one contiguous
+recipient delivery range and a frozen direct model selection. While the turn is
+queued, later deliveries may only extend that range; activation freezes it. The
+selection and defaults version must equal the exact terminal predecessor's
+effective configuration. The starting frontier extends that predecessor with
+every typed message or background-result semantic entry in delivery order, with
+the final delivery as the lifecycle origin entry. The schema admits at most one
+queued delegation-origin turn per recipient.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated

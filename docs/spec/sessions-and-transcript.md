@@ -1017,16 +1017,23 @@ scope; a turn interrupt additionally names its exact turn, while a goal stop
 names the exact goal generation and carries no turn. Raw identities cannot
 construct that authority, `parent_alone` authority cannot produce a child
 disposition, and the recorded outcome reason must match its command kind and
-scope. `ChildStopped` is produced only by a parent-policy stop; the existing
-proof-bearing failed, refused, and cancelled model-call turn candidates can name
-any turn origin, including the delegated-task origin, but do not fabricate a
-distinct stopped outcome from that evidence. Delivery appends a
-`DelegationResult` semantic entry only to the target parent, names the exact
-awaiting request that receives the result, and is idempotent by that awaiting
-request. The immutable child result remains keyed by the spawning request. A
-detached child may return after the parent has stopped or cancelled; the result
-remains durable and independently inspectable even when no parent turn can
-consume it.
+scope. Parent-policy stop and cancellation both terminalize the exact delegated
+child turn through its existing cancelled-turn lifecycle state and exact
+cancellation marker; the relationship outcome preserves whether the chosen
+policy action was `ChildStopped` or `ChildCancelled`. `ChildStopped` is produced
+only by a parent-policy stop; the existing proof-bearing failed, refused, and
+cancelled model-call turn candidates can name any turn origin, including the
+delegated-task origin, but do not fabricate a distinct stopped outcome from that
+evidence. Delivery appends a `DelegationResult` semantic entry only to the
+target parent, names the exact awaiting request that receives the result, and is
+idempotent by that awaiting request. A foreground delivery correlates that entry
+as the logical result of its still-open `await_session` request. A background
+delivery retains the awaiting request only as delegation provenance, without a
+tool-result correlation, because that request already completed with its
+registration receipt; the result instead arrives as wake content. The immutable
+child result remains keyed by the spawning request. A detached child may return
+after the parent has stopped or cancelled; the result remains durable and
+independently inspectable even when no parent turn can consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or
