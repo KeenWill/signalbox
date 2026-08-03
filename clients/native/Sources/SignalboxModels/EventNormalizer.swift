@@ -761,7 +761,7 @@ public enum SignalboxEventNormalizer {
                     validPlanReadResponse(arguments: arguments, output: output)
                         && validPlanHistoryCorrelation(
                             output.history,
-                            owningTurnID: tool.turnID
+                            sessionTurnIDs: tool.sessionTurnIDs
                         )
                         ? formattedPlanReadOutput(output)
                         : nil
@@ -1058,15 +1058,16 @@ public enum SignalboxEventNormalizer {
 
     private static func validPlanHistoryCorrelation(
         _ history: [PlanEvent]?,
-        owningTurnID: SignalboxCanonicalUUID?
+        sessionTurnIDs: [SignalboxCanonicalUUID]?
     ) -> Bool {
         guard let history, !history.isEmpty else {
             return true
         }
-        guard let owningTurnID else {
+        guard let sessionTurnIDs, !sessionTurnIDs.isEmpty else {
             return false
         }
-        return history.allSatisfy { $0.provenance.turnID == owningTurnID }
+        let admittedTurnIDs = Set(sessionTurnIDs)
+        return history.allSatisfy { admittedTurnIDs.contains($0.provenance.turnID) }
     }
 
     private static func foldedPlanHistory(_ history: [PlanEvent]) -> [PlanEntry]? {

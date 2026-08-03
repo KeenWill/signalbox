@@ -743,6 +743,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
   public let kind: String
   public let toolRequestID: SignalboxToolInvocationID
   public let turnID: SignalboxCanonicalUUID?
+  public let sessionTurnIDs: [SignalboxCanonicalUUID]?
   public let toolAttemptID: SignalboxCanonicalUUID?
   public let toolName: String
   public let arguments: String?
@@ -752,6 +753,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
   public init(
     toolRequestID: SignalboxToolInvocationID,
     turnID: SignalboxCanonicalUUID? = nil,
+    sessionTurnIDs: [SignalboxCanonicalUUID]? = nil,
     toolAttemptID: SignalboxCanonicalUUID? = nil,
     toolName: String,
     arguments: String?,
@@ -761,6 +763,7 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     self.kind = "process_tool"
     self.toolRequestID = toolRequestID
     self.turnID = turnID
+    self.sessionTurnIDs = sessionTurnIDs ?? turnID.map { [$0] }
     self.toolAttemptID = toolAttemptID
     self.toolName = toolName
     self.arguments = arguments
@@ -772,8 +775,8 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     let payload = try SignalboxUntaggedPayload(from: decoder)
     try payload.rejectUnadmittedFields(
       [
-        "kind", "toolRequestID", "turnID", "toolAttemptID", "toolName", "arguments", "output",
-        "status",
+        "kind", "toolRequestID", "turnID", "sessionTurnIDs", "toolAttemptID", "toolName",
+        "arguments", "output", "status",
       ],
       decoder: decoder
     )

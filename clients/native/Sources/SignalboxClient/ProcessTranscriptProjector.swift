@@ -200,6 +200,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var awaitingToolDecisionRequestID: String?
     let modelCallAnchors = modelCallAnchors(in: snapshot.records)
     let turnEntryAnchors = turnEntryAnchors(in: snapshot.records)
+    let sessionTurnIDs = sessionTurnIDs(in: snapshot.records)
     let trailingModelCallUsageIDs = trailingModelCallUsageIDs(in: snapshot.records)
     var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
     var unanchoredUsage: [SignalboxStoredEvent] = []
@@ -297,6 +298,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         let projected = try projectEntry(
           message,
           awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
+          sessionTurnIDs: sessionTurnIDs,
           selection: selection
         )
         if let projected {
@@ -443,6 +445,17 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return anchors
   }
 
+  private func sessionTurnIDs(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> [SignalboxCanonicalUUID] {
+    records.compactMap { record in
+      guard case .turn(let turn) = record else {
+        return nil
+      }
+      return turn.turnID
+    }
+  }
+
   private func transcriptMarkerTerminalModelCallID(
     for state: SignalboxTranscriptTurnState
   ) -> SignalboxCanonicalUUID? {
@@ -530,6 +543,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private mutating func projectEntry(
     _ message: SignalboxTranscriptEntryMessage,
     awaitingToolDecisionRequestID: String?,
+    sessionTurnIDs: [SignalboxCanonicalUUID],
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
     guard entryIsSelected(message, selection: selection) else {
@@ -558,6 +572,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let event = SignalboxProcessToolEvent(
         toolRequestID: SignalboxToolInvocationID(rawValue: request),
         turnID: turnID,
+        sessionTurnIDs: sessionTurnIDs,
         toolName: toolName,
         arguments: arguments,
         output: nil,
@@ -665,6 +680,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let updated = SignalboxProcessToolEvent(
       toolRequestID: prior.toolRequestID,
       turnID: prior.turnID,
+      sessionTurnIDs: prior.sessionTurnIDs,
       toolAttemptID: toolAttemptID,
       toolName: prior.toolName,
       arguments: prior.arguments,
@@ -687,6 +703,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let presented = SignalboxProcessToolEvent(
       toolRequestID: event.toolRequestID,
       turnID: event.turnID,
+      sessionTurnIDs: event.sessionTurnIDs,
       toolAttemptID: event.toolAttemptID,
       toolName: event.toolName,
       arguments: event.arguments,
