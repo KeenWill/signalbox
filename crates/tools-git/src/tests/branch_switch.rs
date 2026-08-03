@@ -354,6 +354,88 @@ fn branch_switch_preserves_an_untracked_file_inside_a_replaced_directory() {
 }
 
 #[test]
+fn failed_branch_switch_retains_every_obstructed_directory_quarantine() {
+    let fixture = Fixture::new();
+    let alpha_content = b"alpha original\n";
+    let omega_content = b"omega original\n";
+    let foreign_content = b"foreign alpha\n";
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    fs::create_dir(fixture.root().join("alpha")).expect("alpha fixture directory creates");
+    fs::write(fixture.root().join("alpha/main.txt"), alpha_content)
+        .expect("alpha fixture file writes");
+    fs::create_dir(fixture.root().join("omega")).expect("omega fixture directory creates");
+    fs::write(fixture.root().join("omega/main.txt"), omega_content)
+        .expect("omega fixture file writes");
+    let current = commit_all(&repository, "directory source");
+    let current_tree = repository
+        .find_commit(current)
+        .expect("current fixture commit exists")
+        .tree()
+        .expect("current fixture tree opens");
+    let alpha_target = repository
+        .blob(b"alpha target\n")
+        .expect("alpha target blob writes");
+    let omega_target = repository
+        .blob(b"omega target\n")
+        .expect("omega target blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&current_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("alpha", alpha_target, 0o100644)
+        .expect("alpha target file inserts");
+    target_builder
+        .insert("omega", omega_target, 0o100644)
+        .expect("omega target file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, current);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    let executor = fixture.executor();
+    let merge_head = format!("{current}\n");
+
+    let failure = executor
+        .branch_switch_with_quarantine_hook(
+            GitBranchSwitchArguments {
+                name: FIX_BRANCH.to_owned(),
+            },
+            || {
+                fs::write(fixture.root().join("alpha"), foreign_content)
+                    .expect("foreign alpha obstruction writes");
+                fs::write(fixture.root().join(".git/MERGE_HEAD"), merge_head)
+                    .expect("concurrent merge state writes");
+            },
+        )
+        .expect_err("concurrent operation state rejects checkout");
+    fs::remove_file(fixture.root().join(".git/MERGE_HEAD"))
+        .expect("concurrent merge state removes");
+    let retained_alpha = fs::read_dir(fixture.root())
+        .expect("fixture root reads")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("entry/main.txt"))
+        .find(|path| path.is_file())
+        .expect("obstructed alpha quarantine remains");
+
+    assert_eq!(failure, LocalGitFailure::Operation);
+    assert_eq!(
+        fs::read(fixture.root().join("alpha")).expect("foreign alpha obstruction reads"),
+        foreign_content
+    );
+    assert_eq!(
+        fs::read(retained_alpha).expect("retained alpha original reads"),
+        alpha_content
+    );
+    assert_eq!(
+        fs::read(fixture.root().join("omega/main.txt")).expect("restored omega original reads"),
+        omega_content
+    );
+}
+
+#[test]
 fn branch_switch_checks_out_exact_blob_bytes_without_attribute_filtering() {
     let fixture = Fixture::new();
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");

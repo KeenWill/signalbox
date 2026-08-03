@@ -880,32 +880,34 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         quarantined: &mut [QuarantinedCheckoutDirectory],
         updated_paths: &BTreeSet<PathBuf>,
     ) -> Result<(), LocalGitFailure> {
+        let mut first_failure = None;
         for transition in quarantined {
             if updated_paths.iter().any(|updated| {
                 updated.starts_with(&transition.path) || transition.path.starts_with(updated)
             }) {
                 continue;
             }
-            let (parent, leaf) =
-                open_worktree_parent(&self.repository_authority.root, &transition.path)?;
-            if descriptor_entry_exists(&parent, &leaf)? {
+            let restoration = (|| {
+                let (parent, leaf) =
+                    open_worktree_parent(&self.repository_authority.root, &transition.path)?;
+                if descriptor_entry_exists(&parent, &leaf)? {
+                    return Err(LocalGitFailure::Operation);
+                }
+                renameat_with(
+                    transition.quarantine.descriptor(),
+                    OsStr::new("entry"),
+                    &parent,
+                    &leaf,
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(|_| LocalGitFailure::Operation)
+            })();
+            if let Err(failure) = restoration {
                 transition.quarantine.keep();
-                return Err(LocalGitFailure::Operation);
-            }
-            if renameat_with(
-                transition.quarantine.descriptor(),
-                OsStr::new("entry"),
-                &parent,
-                &leaf,
-                RenameFlags::NOREPLACE,
-            )
-            .is_err()
-            {
-                transition.quarantine.keep();
-                return Err(LocalGitFailure::Operation);
+                first_failure.get_or_insert(failure);
             }
         }
-        Ok(())
+        first_failure.map_or(Ok(()), Err)
     }
 
     pub(super) fn branch_switch(
@@ -918,7 +920,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, || {}),
+            (|| {}, || {}, || {}, || {}, || {}),
         )
     }
 
@@ -932,7 +934,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, || {}),
+            (|| {}, || {}, || {}, || {}, || {}),
         )
     }
 
@@ -955,7 +957,30 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &repository,
             &pinned_objects,
             arguments,
-            (|| {}, post_checkout, || {}, || {}),
+            (|| {}, || {}, post_checkout, || {}, || {}),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn branch_switch_with_quarantine_hook<Hook: FnOnce()>(
+        &self,
+        arguments: GitBranchSwitchArguments,
+        post_quarantine: Hook,
+    ) -> Result<BranchResult, LocalGitFailure> {
+        self.validate_current_repository()?;
+        let repository = self.repository_authority.repository()?;
+        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
+        let object_database = Odb::new_ext(self.repository_authority.object_format)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        pinned_objects.add_to(&object_database)?;
+        repository
+            .set_odb(&object_database)
+            .map_err(|_| LocalGitFailure::Operation)?;
+        self.branch_switch_with_hooks(
+            &repository,
+            &pinned_objects,
+            arguments,
+            (|| {}, post_quarantine, || {}, || {}, || {}),
         )
     }
 
@@ -971,7 +996,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             &pinned_objects,
             arguments,
-            (before_reference_locks, || {}, || {}, || {}),
+            (before_reference_locks, || {}, || {}, || {}, || {}),
         )
     }
 
@@ -987,7 +1012,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, post_index_publish, || {}),
+            (|| {}, || {}, || {}, post_index_publish, || {}),
         )
     }
 
@@ -1010,12 +1035,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, before_head_publish),
+            (|| {}, || {}, || {}, || {}, before_head_publish),
         )
     }
 
     fn branch_switch_with_hooks<
         BeforeLocks: FnOnce(),
+        PostQuarantine: FnOnce(),
         PostCheckout: FnOnce(),
         PostIndexPublish: FnOnce(),
         BeforeHeadPublish: FnOnce(),
@@ -1026,13 +1052,19 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         arguments: GitBranchSwitchArguments,
         hooks: (
             BeforeLocks,
+            PostQuarantine,
             PostCheckout,
             PostIndexPublish,
             BeforeHeadPublish,
         ),
     ) -> Result<BranchResult, LocalGitFailure> {
-        let (before_reference_locks, post_checkout, post_index_publish, before_head_publish) =
-            hooks;
+        let (
+            before_reference_locks,
+            post_quarantine,
+            post_checkout,
+            post_index_publish,
+            before_head_publish,
+        ) = hooks;
         let mut index_lock = self.bind_locked_index(repository)?;
         let operation_state = RepositoryOperationState::capture(&self.repository_authority)?;
         operation_state.require_clean()?;
@@ -1224,6 +1256,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &current_index,
             &target_tree,
         )?;
+        post_quarantine();
         let checkout_result = checkout_tree_with_rollback(
             repository,
             current_tree.as_ref(),
