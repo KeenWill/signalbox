@@ -51,6 +51,10 @@ const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
 const ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED: u128 = 0x223;
 const ARBITRARY_APPLIED_REPLAY_CREATION_COMMAND_ID_SEED: u128 = 0x125;
 const ARBITRARY_APPLIED_REPLAY_UPDATE_COMMAND_ID_SEED: u128 = 0x126;
+const ARBITRARY_REJECTED_REPLAY_SESSION_ID_SEED: u128 = 0x226;
+const ARBITRARY_REJECTED_REPLAY_CREATION_COMMAND_ID_SEED: u128 = 0x12a;
+const ARBITRARY_REJECTED_REPLAY_UPDATE_COMMAND_ID_SEED: u128 = 0x12b;
+const ARBITRARY_REJECTED_REPLAY_REJECTION_COMMAND_ID_SEED: u128 = 0x12c;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_SESSION_ID_SEED: u128 = 0x208;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_COMMAND_ID_SEED: u128 = 0x114;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_SESSION_ID_SEED: u128 = 0x209;
@@ -1226,10 +1230,10 @@ async fn s36_inv002_inv012_creation_replay_rejects_a_placement_head_behind_event
 async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x226);
+    let session_id = session(ARBITRARY_REJECTED_REPLAY_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x12a),
+            command(ARBITRARY_REJECTED_REPLAY_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
@@ -1237,14 +1241,14 @@ async fn s36_inv012_rejected_update_replay_requires_the_reported_version_to_reac
     let repository = SessionPlacementRepository::new(pool.clone());
     repository
         .handle(UpdateSessionPlacement::new(
-            command(0x12b),
+            command(ARBITRARY_REJECTED_REPLAY_UPDATE_COMMAND_ID_SEED),
             session_id,
             SessionPlacementVersion::INITIAL,
             scoped("projects.foo.reached"),
         ))
         .await?;
     let rejected = UpdateSessionPlacement::new(
-        command(0x12c),
+        command(ARBITRARY_REJECTED_REPLAY_REJECTION_COMMAND_ID_SEED),
         session_id,
         SessionPlacementVersion::try_from_u64(3).expect("fixture mismatch version is positive"),
         scoped("projects.foo.rejected"),
