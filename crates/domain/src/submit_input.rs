@@ -745,12 +745,17 @@ fn freeze_origin_configuration(
         None => {
             let origin = OriginConfiguration::freeze(checked, select_definition)
                 .map_err(OriginModelSettingsError::UnknownAlias)?;
+            let selection = origin.effective().model().selected_direct();
+            let validated_elsewhere = origin
+                .requested()
+                .model_settings()
+                .validated_for()
+                .is_some_and(|validated| validated != selection);
             if origin.requested().per_call_model_settings()
                 != crate::ModelSettingsOverlay::inherit_all()
+                || validated_elsewhere
             {
-                return Err(OriginModelSettingsError::MissingCapabilities {
-                    selection: origin.effective().model().selected_direct(),
-                });
+                return Err(OriginModelSettingsError::MissingCapabilities { selection });
             }
             Ok(origin)
         }
@@ -3337,7 +3342,7 @@ mod tests {
         SubmitInputRejectedSessionNotFoundReconstitutionInput,
         SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
         SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
-        SubmitInputTurnOriginReconstitutionInput,
+        SubmitInputTurnOriginReconstitutionInput, freeze_origin_configuration,
     };
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
@@ -3357,23 +3362,24 @@ mod tests {
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FastModeOverlay,
-        FastModeSupport, FrozenAliasDefinition, FrozenModelSelection,
+        ActiveTurnSchedulingReconstitutionInput, Actor, DangerousToolAutoApproval, DeliveryRequest,
+        FastModeOverlay, FastModeSupport, FrozenAliasDefinition, FrozenModelSelection,
         InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelCallDisposition,
         ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCapabilities,
         ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
-        ModelSelectionRequest, ModelSettingsOverlay, NonEmptyIssuedOperationRefs,
-        NormalizedToolArguments, OriginConfiguration, OriginModelSettingsError,
-        PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, ReasoningLevel,
-        ReconciliationReason, ResolvedContextFrontierReconstitutionInput,
-        ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
-        SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
-        SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
-        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-        SessionCreationProvenance, SessionInputPosition, SessionReconstitutionInput,
-        SettingOverlay, SteeringBinding, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        TranscriptAncestry, TurnDisposition, UserContent,
+        ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
+        NonEmptyIssuedOperationRefs, NormalizedToolArguments, OriginConfiguration,
+        OriginModelSettingsError, PerInputConfigurationChoices,
+        PinnedProviderTargetReconstitutionInput, ReasoningLevel, ReconciliationReason,
+        ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+        ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
+        SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
+        SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionInputPosition, SessionReconstitutionInput, SettingOverlay, SteeringBinding,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
+        ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
+        UserContent,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -4214,6 +4220,65 @@ mod tests {
             SubmitInputPreparationFailure::ModelSettingsResolution(
                 OriginModelSettingsError::MissingCapabilities { selection }
             )
+        );
+    }
+
+    /// S37 / INV-051 / INV-053: catalog-free preparation cannot carry settings
+    /// validated for an alias's prior direct target across a retarget.
+    #[test]
+    fn s37_inv051_inv053_legacy_preparation_rejects_alias_retarget_settings() {
+        let prior_selection = direct(2);
+        let installed_selection = direct(3);
+        let stored = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior model supports the stored level");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(alias(1)),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            stored,
+        )
+        .expect("an alias retains its prior validation identity");
+        let versioned = crate::VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+
+        let error = freeze_origin_configuration(
+            checked,
+            |requested| {
+                assert_eq!(requested, alias(1));
+                Some(FrozenAliasDefinition::selecting(installed_selection))
+            },
+            None,
+        )
+        .expect_err("alias retargeting requires the new target capability record");
+
+        assert_eq!(
+            error,
+            OriginModelSettingsError::MissingCapabilities {
+                selection: installed_selection,
+            }
         );
     }
 
