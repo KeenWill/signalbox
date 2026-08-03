@@ -1532,6 +1532,34 @@ struct InputAcceptedEventFacts {
     content: InputContent,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct TurnModelSettingsResolvedEventFacts {
+    cursor: u64,
+    session_id: CanonicalUuid,
+    accepted_input_id: CanonicalUuid,
+}
+
+#[track_caller]
+fn turn_model_settings_resolved_event_facts(
+    message: &ServerMessage,
+) -> TurnModelSettingsResolvedEventFacts {
+    match message {
+        ServerMessage::SessionEvent {
+            cursor,
+            session_id,
+            event:
+                SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id, ..
+                },
+        } => TurnModelSettingsResolvedEventFacts {
+            cursor: cursor.value(),
+            session_id: *session_id,
+            accepted_input_id: *accepted_input_id,
+        },
+        message => panic!("fixture expected turn-settings resolution event, got {message:?}"),
+    }
+}
+
 #[track_caller]
 fn input_accepted_event_facts(message: &ServerMessage) -> InputAcceptedEventFacts {
     match message {
@@ -3766,9 +3794,15 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
         }
     );
 
+    let settings_followed = response_within(&mut follow).await?;
+    let settings_event = turn_model_settings_resolved_event_facts(settings_followed.message());
+    assert!(settings_event.cursor > follow_cursor);
+    assert_eq!(settings_event.session_id, session_id);
+    assert_eq!(settings_event.accepted_input_id, second_accepted_input);
+
     let followed = response_within(&mut follow).await?;
     let event = input_accepted_event_facts(followed.message());
-    assert!(event.cursor > follow_cursor);
+    assert!(event.cursor > settings_event.cursor);
     assert_eq!(event.session_id, session_id);
     assert_eq!(event.accepted_input_id, second_accepted_input);
     assert_eq!(event.acceptance_position, second_position);
