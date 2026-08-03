@@ -170,7 +170,7 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             }
         case "process_tool":
             do {
-                self = .processTool(try SignalboxProcessToolEvent(from: decoder))
+                self = .processTool(try SignalboxProcessToolEvent(closedFrom: decoder))
             } catch {
                 self = .unknown(
                     try SignalboxUnknownEvent(

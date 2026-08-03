@@ -390,12 +390,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var modelCallIDs: Set<String> = []
     for case .turn(let turn) in records {
       switch turn.state {
-      case .refused(_, _, let modelCallID),
+      case .activeAwaitingModelCallRecovery(_, let modelCallID),
+        .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
-      case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
-        .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .failed,
-        .completed, .cancelled, .toolReconciliationRequired, .unknown:
+      case .queued, .activeRunning, .activeAwaitingToolApproval,
+        .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
+        .toolReconciliationRequired, .unknown:
         break
       }
     }
@@ -758,6 +759,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .all:
       return true
     case .trigger(let trigger):
+      if case .contextCompacted(_, let modelCallID, _, _, _) = trigger {
+        return modelCallID == evidence.modelCallID
+      }
       return turnID(for: trigger) == evidence.turnID
     }
   }
@@ -845,6 +849,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     isAttributableTo trigger: SignalboxProcessSessionEvent
   ) -> Bool {
+    if case .modelIdentityChanged(let entryTurnID, _, _) = message.entry {
+      return turnID(for: trigger) == entryTurnID
+    }
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {

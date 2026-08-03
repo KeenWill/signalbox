@@ -678,6 +678,15 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
     self.output = output
     self.status = status
   }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["kind", "toolRequestID", "toolName", "arguments", "output", "status"],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
+  }
 }
 
 public struct SignalboxProcessTurnFailureEvent: Codable, Equatable, Sendable {

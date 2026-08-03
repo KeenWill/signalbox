@@ -342,6 +342,20 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testExpandedStoredProcessToolDegradesToPayloadPreservingUnknown() throws {
+        let data = Data(
+            #"{"event_id":\#(Self.storedEventID),"event":{"kind":"process_tool","toolRequestID":"\#(Self.storedModelCallID)","toolName":"plan_read","arguments":null,"output":null,"status":"proposed","future_field":"\#(Self.expandedProcessEventFieldValue)"}}"#.utf8
+        )
+
+        let stored = try SignalboxJSONCoding.decoder().decode(SignalboxStoredEvent.self, from: data)
+        let unknown = try Self.unknownEvent(in: stored)
+
+        XCTAssertEqual(
+            unknown.payload["future_field"],
+            .string(Self.expandedProcessEventFieldValue)
+        )
+    }
+
     private static let expandedProcessEventFieldValue = "retained"
     private static let partialUsageCostAmount = "0.01"
     private static let invalidUsageCostAmount = "01"
