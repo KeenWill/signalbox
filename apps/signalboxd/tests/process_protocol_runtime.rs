@@ -3574,6 +3574,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let content = "queued input".to_owned();
+    let expected_snapshot_cursor = 3;
     let (accepted_input, turn) =
         submit_first_input(&mut connection, session_id, content.clone()).await?;
 
@@ -3584,7 +3585,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     let start = response_within(&mut connection).await?;
     assert_eq!(
         transcript_snapshot_start_cursor(start.message(), session_id),
-        2
+        expected_snapshot_cursor
     );
     let queued_turn = response_within(&mut connection).await?;
     let (projected_turn, projected_position, projected_state) =
@@ -3605,7 +3606,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
         transcript_snapshot_end_facts(end.message()),
         TranscriptSnapshotEndFacts {
             session_id,
-            cursor: 2,
+            cursor: expected_snapshot_cursor,
             turn_count: 1,
             entry_count: 0,
         }
