@@ -1009,25 +1009,26 @@ reason/provenance shape does not match its kind.
 
 `session_delegation_wait` records the exact awaiting tool request, relationship,
 parent turn, and foreground/background mode. A foreground row correlates the
-turn's `awaiting_child` phase; a background row cannot. `session_message` is
-append-only, uniquely orders messages per relationship, and requires exact
-parent/child sender and recipient plus the sending tool request.
-`session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, result-unavailable, and child-originated
-terminal outcomes, or one of the same exclusive parent-turn-command and
-parent-goal-command provenance arms for a policy-driven stop or cancellation.
-Delivery satellites bind messages/results to their exact semantic entries; no
-transcript query supplies result content. Every pending message and background
-result delivery additionally receives one positive recipient-wide
-`delivery_sequence` under the recipient session lock. That sequence is unique
-and gap-free per recipient across both kinds; relationship ordinals remain
-relationship-local evidence and never order two different relationships.
-Foreground results stay ordered by their exact awaiting request and do not
-consume an inbox sequence. Their semantic entry repeats that awaiting request as
-the ordinary logical tool-result correlation, so the unchanged proposal-order
-and single-result checks admit it as the `await_session` result without
-admitting a second result for the same request.
+turn's `awaiting_child` phase; a background row cannot and instead requires the
+exact completed effect-free attempt and normalized registration receipt for its
+awaiting request. `session_message` is append-only, uniquely orders messages per
+relationship, and requires exact parent/child sender and recipient plus the
+sending tool request. `session_child_result` has at most one row per spawning
+request and carries exactly one returned-text, failed, stopped, or cancelled
+shape with child turn provenance for returned, failed, result-unavailable, and
+child-originated terminal outcomes, or one of the same exclusive
+parent-turn-command and parent-goal-command provenance arms for a policy-driven
+stop or cancellation. Delivery satellites bind messages/results to their exact
+semantic entries; no transcript query supplies result content. Every pending
+message and background result delivery additionally receives one positive
+recipient-wide `delivery_sequence` under the recipient session lock. That
+sequence is unique and gap-free per recipient across both kinds; relationship
+ordinals remain relationship-local evidence and never order two different
+relationships. Foreground results stay ordered by their exact awaiting request
+and do not consume an inbox sequence. Their semantic entry repeats that awaiting
+request as the ordinary logical tool-result correlation, so the unchanged
+proposal-order and single-result checks admit it as the `await_session` result
+without admitting a second result for the same request.
 
 Parent-and-descendants termination locks relationship rows in stable spawning
 request order before it writes any disposition. The command and every evaluated
@@ -1106,9 +1107,12 @@ requires a `DelegationMessageId` belonging to that relationship and no awaiting
 request. The header's `session_id` is the stream receiving the update or wake.
 Per-kind checks require exactly that shape's columns and reject all others;
 foreign keys correlate every supplied identity to the same relationship.
-Dispatch decodes both closed unions and rejects every other storage version. The
-header completeness trigger includes both record kinds, and both typed records
-are append-only and reject `TRUNCATE` with the rest of the family.
+Lifecycle-disposition updates admit only parent-turn-command or
+parent-goal-command stop/cancel cascade evaluations; child-origin terminal
+events are delivered through `child_result` instead. Dispatch decodes both
+closed unions and rejects every other storage version. The header completeness
+trigger includes both record kinds, and both typed records are append-only and
+reject `TRUNCATE` with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,

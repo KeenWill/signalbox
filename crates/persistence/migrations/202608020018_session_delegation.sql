@@ -1906,6 +1906,24 @@ BEGIN
         RAISE EXCEPTION 'delegation wait requires exact normalized await_session purpose'
             USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_wait_purpose';
     END IF;
+    IF NEW.wait_mode = 'background' AND NOT EXISTS (
+        SELECT 1 FROM tool_attempt
+         WHERE request_id = NEW.awaiting_tool_request_id
+           AND session_id = NEW.parent_session_id
+           AND turn_id = NEW.parent_turn_id
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'completed'
+           AND effect_class = 'effect_free'
+           AND result_content_kind = 'text'
+           AND result_text = format(
+                '{"result":"session_await_registered","tool_request_id":"%s","child_session_id":"%s","mode":"background"}',
+                NEW.awaiting_tool_request_id,
+                NEW.child_session_id
+           )
+    ) THEN
+        RAISE EXCEPTION 'background delegation wait requires exact completed registration receipt'
+            USING ERRCODE = '23514', CONSTRAINT = 'session_delegation_wait_purpose';
+    END IF;
     RETURN NULL;
 END;
 $$;
@@ -2462,8 +2480,14 @@ CREATE TABLE delegation_update_outbox_event (
             AND awaiting_tool_request_id IS NULL AND wait_mode IS NULL
             AND delegation_event_ordinal IS NOT NULL
             AND delegation_event_kind IS NOT NULL AND delegation_event_kind = 'outcome_recorded'
-            AND outcome_kind IS NOT NULL AND reason_kind IS NOT NULL
-            AND provenance_kind IS NOT NULL
+            AND outcome_kind IN (
+                'child_stopped', 'child_cancelled', 'already_terminal', 'continue_running'
+            )
+            AND reason_kind IN (
+                'parent_stopped_parent_and_descendants',
+                'parent_cancelled_parent_and_descendants'
+            )
+            AND provenance_kind IN ('parent_turn_command', 'parent_goal_command')
             AND result_spawning_request_id IS NULL
             AND message_id IS NULL AND sender_session_id IS NULL
             AND recipient_session_id IS NULL AND message_ordinal IS NULL
@@ -2587,6 +2611,17 @@ BEGIN
                             NEW.provenance_goal_generation
                        AND event.provenance_command_id IS NOT DISTINCT FROM
                             NEW.provenance_command_id
+                       AND event.outcome_kind IN (
+                            'child_stopped', 'child_cancelled',
+                            'already_terminal', 'continue_running'
+                       )
+                       AND event.reason_kind IN (
+                            'parent_stopped_parent_and_descendants',
+                            'parent_cancelled_parent_and_descendants'
+                       )
+                       AND event.provenance_kind IN (
+                            'parent_turn_command', 'parent_goal_command'
+                       )
                        AND relation.child_session_id = NEW.child_session_id
                        AND NEW.session_id = relation.parent_session_id
                 )

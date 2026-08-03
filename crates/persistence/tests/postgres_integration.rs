@@ -6532,6 +6532,39 @@ async fn delegation_schema_closes_reviewed_lifecycle_and_delivery_edges()
     assert!(lifecycle_update.contains("parent_turn_command"));
     assert!(lifecycle_update.contains("parent_goal_command"));
 
+    let lifecycle_update_shape: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = 'delegation_update_subject_shape'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(lifecycle_update_shape.contains("parent_stopped_parent_and_descendants"));
+    assert!(lifecycle_update_shape.contains("parent_cancelled_parent_and_descendants"));
+    assert!(lifecycle_update_shape.contains("parent_turn_command"));
+    assert!(lifecycle_update_shape.contains("parent_goal_command"));
+
+    let lifecycle_update_subject: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_update_subject()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(lifecycle_update_subject.contains("parent_stopped_parent_and_descendants"));
+    assert!(lifecycle_update_subject.contains("parent_cancelled_parent_and_descendants"));
+    assert!(lifecycle_update_subject.contains("parent_turn_command"));
+    assert!(lifecycle_update_subject.contains("parent_goal_command"));
+
+    let wait_purpose: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('require_delegation_wait_purpose()'::regprocedure)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(wait_purpose.contains("state_kind = 'terminal'"));
+    assert!(wait_purpose.contains("terminal_disposition_kind = 'completed'"));
+    assert!(wait_purpose.contains("effect_class = 'effect_free'"));
+    assert!(wait_purpose.contains("session_await_registered"));
+    assert!(wait_purpose.contains("tool_request_id"));
+
     let late_wait: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef('require_delegation_wait_update()'::regprocedure)",
     )
