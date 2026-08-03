@@ -189,6 +189,12 @@ impl CommandId {
     }
 }
 
+impl fmt::Display for CommandId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 impl Serialize for CommandId {
     fn serialize<SerializerT>(
         &self,
@@ -1518,37 +1524,69 @@ pub struct ModelSettingsSnapshot {
 
 impl ModelSettingsSnapshot {
     fn validate(&self) -> Result<(), FrameValidationError> {
-        let layers = [
-            (ModelSettingSource::PerCall, self.precedence.per_call),
-            (ModelSettingSource::Session, self.precedence.session),
-            (ModelSettingSource::Profile, self.precedence.profile),
-            (
-                ModelSettingSource::GlobalDefault,
-                self.precedence.global_default,
-            ),
-        ];
-        let reasoning = resolve_wire_nullable(
-            layers.map(|(source, settings)| (source, settings.reasoning_level)),
-        );
-        let fast = resolve_wire_fast(layers.map(|(source, settings)| (source, settings.fast_mode)));
-        let tier =
-            resolve_wire_nullable(layers.map(|(source, settings)| (source, settings.service_tier)));
-        if reasoning != (self.effective.reasoning_level, self.reasoning_source)
-            || fast != (self.effective.fast_mode, self.fast_mode_source)
-            || tier != (self.effective.service_tier, self.service_tier_source)
+        let resolved = resolve_wire_settings(self.precedence);
+        if resolved.effective != self.effective
+            || resolved.reasoning_source != self.reasoning_source
+            || resolved.fast_mode_source != self.fast_mode_source
+            || resolved.service_tier_source != self.service_tier_source
+            || (self.validated_for_selection_id.is_none()
+                && !self.is_model_independent_provider_defaults())
         {
             return Err(FrameValidationError::ModelSettingsShape);
         }
         Ok(())
     }
 
-    fn has_provider_default_effective_values(&self) -> bool {
-        self.effective
-            == (EffectiveModelSettings {
-                reasoning_level: None,
-                fast_mode: FastMode::Disabled,
-                service_tier: None,
+    fn is_model_independent_provider_defaults(&self) -> bool {
+        self.precedence
+            == (ModelSettingsPrecedence {
+                per_call: ModelSettingsOverlay::inherit_all(),
+                session: ModelSettingsOverlay::inherit_all(),
+                profile: ModelSettingsOverlay::inherit_all(),
+                global_default: ModelSettingsOverlay::inherit_all(),
             })
+            && self.effective
+                == (EffectiveModelSettings {
+                    reasoning_level: None,
+                    fast_mode: FastMode::Disabled,
+                    service_tier: None,
+                })
+            && self.reasoning_source.is_none()
+            && self.fast_mode_source.is_none()
+            && self.service_tier_source.is_none()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WireResolvedModelSettings {
+    effective: EffectiveModelSettings,
+    reasoning_source: Option<ModelSettingSource>,
+    fast_mode_source: Option<ModelSettingSource>,
+    service_tier_source: Option<ModelSettingSource>,
+}
+
+fn resolve_wire_settings(precedence: ModelSettingsPrecedence) -> WireResolvedModelSettings {
+    let layers = [
+        (ModelSettingSource::PerCall, precedence.per_call),
+        (ModelSettingSource::Session, precedence.session),
+        (ModelSettingSource::Profile, precedence.profile),
+        (ModelSettingSource::GlobalDefault, precedence.global_default),
+    ];
+    let (reasoning_level, reasoning_source) =
+        resolve_wire_nullable(layers.map(|(source, settings)| (source, settings.reasoning_level)));
+    let (fast_mode, fast_mode_source) =
+        resolve_wire_fast(layers.map(|(source, settings)| (source, settings.fast_mode)));
+    let (service_tier, service_tier_source) =
+        resolve_wire_nullable(layers.map(|(source, settings)| (source, settings.service_tier)));
+    WireResolvedModelSettings {
+        effective: EffectiveModelSettings {
+            reasoning_level,
+            fast_mode,
+            service_tier,
+        },
+        reasoning_source,
+        fast_mode_source,
+        service_tier_source,
     }
 }
 
@@ -1575,6 +1613,193 @@ fn resolve_wire_fast(
         }
     }
     (FastMode::Disabled, None)
+}
+
+fn overlay_inheriting_from(
+    overlay: ModelSettingsOverlay,
+    prior: ModelSettingsOverlay,
+) -> ModelSettingsOverlay {
+    ModelSettingsOverlay {
+        reasoning_level: match overlay.reasoning_level {
+            SettingOverlay::Inherit => prior.reasoning_level,
+            SettingOverlay::ProviderDefault | SettingOverlay::Value(_) => overlay.reasoning_level,
+        },
+        fast_mode: match overlay.fast_mode {
+            FastModeOverlay::Inherit => prior.fast_mode,
+            FastModeOverlay::Value(_) => overlay.fast_mode,
+        },
+        service_tier: match overlay.service_tier {
+            SettingOverlay::Inherit => prior.service_tier,
+            SettingOverlay::ProviderDefault | SettingOverlay::Value(_) => overlay.service_tier,
+        },
+    }
+}
+
+fn with_wire_effective_adjustment(
+    mut precedence: ModelSettingsPrecedence,
+    prior: WireResolvedModelSettings,
+    adjusted: EffectiveModelSettings,
+) -> ModelSettingsPrecedence {
+    if prior.effective.reasoning_level != adjusted.reasoning_level {
+        let value = match adjusted.reasoning_level {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match prior.reasoning_source {
+            Some(ModelSettingSource::PerCall) => precedence.per_call.reasoning_level = value,
+            Some(ModelSettingSource::Session) => precedence.session.reasoning_level = value,
+            Some(ModelSettingSource::Profile) => precedence.profile.reasoning_level = value,
+            Some(ModelSettingSource::GlobalDefault) => {
+                precedence.global_default.reasoning_level = value;
+            }
+            None => {}
+        }
+    }
+    if prior.effective.fast_mode != adjusted.fast_mode {
+        let value = FastModeOverlay::Value(adjusted.fast_mode);
+        match prior.fast_mode_source {
+            Some(ModelSettingSource::PerCall) => precedence.per_call.fast_mode = value,
+            Some(ModelSettingSource::Session) => precedence.session.fast_mode = value,
+            Some(ModelSettingSource::Profile) => precedence.profile.fast_mode = value,
+            Some(ModelSettingSource::GlobalDefault) => precedence.global_default.fast_mode = value,
+            None => {}
+        }
+    }
+    if prior.effective.service_tier != adjusted.service_tier {
+        let value = match adjusted.service_tier {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match prior.service_tier_source {
+            Some(ModelSettingSource::PerCall) => precedence.per_call.service_tier = value,
+            Some(ModelSettingSource::Session) => precedence.session.service_tier = value,
+            Some(ModelSettingSource::Profile) => precedence.profile.service_tier = value,
+            Some(ModelSettingSource::GlobalDefault) => {
+                precedence.global_default.service_tier = value;
+            }
+            None => {}
+        }
+    }
+    precedence
+}
+
+fn apply_wire_adjustments(
+    precedence: ModelSettingsPrecedence,
+    adjustments: &[ModelChangeAdjustment],
+) -> Option<ModelSettingsPrecedence> {
+    validate_adjustments(adjustments).ok()?;
+    let prior = resolve_wire_settings(precedence);
+    let mut effective = prior.effective;
+    for adjustment in adjustments {
+        effective = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { from, to }
+                if prior.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && effective.reasoning_level == Some(*from)
+                    && from != to =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: Some(*to),
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelCleared { from }
+                if prior.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && effective.reasoning_level == Some(*from) =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: None,
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::FastModeDisabled {}
+                if prior.fast_mode_source != Some(ModelSettingSource::PerCall)
+                    && effective.fast_mode == FastMode::Enabled =>
+            {
+                EffectiveModelSettings {
+                    fast_mode: FastMode::Disabled,
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::ServiceTierCleared { from }
+                if prior.service_tier_source != Some(ModelSettingSource::PerCall)
+                    && effective.service_tier == Some(*from) =>
+            {
+                EffectiveModelSettings {
+                    service_tier: None,
+                    ..effective
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelClamped { .. }
+            | ModelChangeAdjustment::ReasoningLevelCleared { .. }
+            | ModelChangeAdjustment::FastModeDisabled {}
+            | ModelChangeAdjustment::ServiceTierCleared { .. } => return None,
+        };
+    }
+    Some(with_wire_effective_adjustment(precedence, prior, effective))
+}
+
+fn unapply_wire_adjustments(
+    settings: &ModelSettingsSnapshot,
+    adjustments: &[ModelChangeAdjustment],
+) -> Option<ModelSettingsPrecedence> {
+    let settled = resolve_wire_settings(settings.precedence);
+    let mut prior = settled.effective;
+    for adjustment in adjustments {
+        prior = match adjustment {
+            ModelChangeAdjustment::ReasoningLevelClamped { from, to }
+                if settled.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.reasoning_level == Some(*to) =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: Some(*from),
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelCleared { from }
+                if settled.reasoning_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.reasoning_level.is_none() =>
+            {
+                EffectiveModelSettings {
+                    reasoning_level: Some(*from),
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::FastModeDisabled {}
+                if settled.fast_mode_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.fast_mode == FastMode::Disabled =>
+            {
+                EffectiveModelSettings {
+                    fast_mode: FastMode::Enabled,
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::ServiceTierCleared { from }
+                if settled.service_tier_source != Some(ModelSettingSource::PerCall)
+                    && settled.effective.service_tier.is_none() =>
+            {
+                EffectiveModelSettings {
+                    service_tier: Some(*from),
+                    ..prior
+                }
+            }
+            ModelChangeAdjustment::ReasoningLevelClamped { .. }
+            | ModelChangeAdjustment::ReasoningLevelCleared { .. }
+            | ModelChangeAdjustment::FastModeDisabled {}
+            | ModelChangeAdjustment::ServiceTierCleared { .. } => return None,
+        };
+    }
+    Some(with_wire_effective_adjustment(
+        settings.precedence,
+        settled,
+        prior,
+    ))
+}
+
+fn snapshot_matches_model(model: &ModelSelection, settings: &ModelSettingsSnapshot) -> bool {
+    match (model, settings.validated_for_selection_id) {
+        (ModelSelection::Direct { selection_id }, Some(validated)) => *selection_id == validated,
+        (ModelSelection::Direct { .. }, None) | (ModelSelection::Alias { .. }, _) => true,
+    }
 }
 
 /// One automatic compatibility adjustment caused by a model change.
@@ -4578,7 +4803,7 @@ pub enum SessionEvent {
     SessionCreated {},
     /// One defaults replacement changed model selection or settings.
     SessionModelSettingsChanged {
-        command_id: CanonicalUuid,
+        command_id: CommandId,
         prior_defaults_version: CanonicalU64,
         installed_defaults_version: CanonicalU64,
         prior_model: ModelSelection,
@@ -4720,16 +4945,48 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             installed_model,
             prior_settings,
             installed_settings,
+            caller_override,
             adjustments,
             ..
         } => {
             prior_settings.validate()?;
             installed_settings.validate()?;
             validate_adjustments(adjustments)?;
+            let validation_changed = matches!(
+                (
+                    prior_settings.validated_for_selection_id,
+                    installed_settings.validated_for_selection_id,
+                ),
+                (Some(prior), Some(installed)) if prior != installed
+            );
+            let model_changed = prior_model != installed_model || validation_changed;
+            let copied_precedence = if model_changed {
+                ModelSettingsPrecedence {
+                    per_call: prior_settings.precedence.per_call,
+                    session: prior_settings.precedence.session,
+                    profile: installed_settings.precedence.profile,
+                    global_default: installed_settings.precedence.global_default,
+                }
+            } else {
+                prior_settings.precedence
+            };
+            let unadjusted_precedence = ModelSettingsPrecedence {
+                session: overlay_inheriting_from(
+                    *caller_override,
+                    prior_settings.precedence.session,
+                ),
+                ..copied_precedence
+            };
+            let provenance_matches = apply_wire_adjustments(unadjusted_precedence, adjustments)
+                .is_some_and(|expected| expected == installed_settings.precedence);
             if prior_defaults_version.value() == 0
                 || prior_defaults_version.value().checked_add(1)
                     != Some(installed_defaults_version.value())
                 || (prior_model == installed_model && prior_settings == installed_settings)
+                || !snapshot_matches_model(prior_model, prior_settings)
+                || !snapshot_matches_model(installed_model, installed_settings)
+                || !provenance_matches
+                || (!adjustments.is_empty() && !model_changed)
             {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
@@ -4738,6 +4995,7 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             defaults_version,
             requested_model,
             selected_direct_id,
+            per_call_override,
             settings,
             adjustments,
             ..
@@ -4750,9 +5008,17 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             );
             let validation_mismatch = match settings.validated_for_selection_id {
                 Some(selection_id) => selection_id != *selected_direct_id,
-                None => !settings.has_provider_default_effective_values(),
+                None => !settings.is_model_independent_provider_defaults(),
             };
-            if defaults_version.value() == 0 || direct_selection_mismatch || validation_mismatch {
+            let adjustment_provenance_mismatch = unapply_wire_adjustments(settings, adjustments)
+                .and_then(|unadjusted| apply_wire_adjustments(unadjusted, adjustments))
+                != Some(settings.precedence);
+            if defaults_version.value() == 0
+                || direct_selection_mismatch
+                || validation_mismatch
+                || settings.precedence.per_call != *per_call_override
+                || adjustment_provenance_mismatch
+            {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
         }
@@ -5320,9 +5586,22 @@ impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
             Self::SessionCreated { model_settings, .. }
-            | Self::InputSubmitted { model_settings, .. }
-            | Self::SessionDefaultsReplaced { model_settings, .. }
-            | Self::SessionDefaults { model_settings, .. } => model_settings.validate()?,
+            | Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
+            Self::SessionDefaultsReplaced {
+                model_selection,
+                model_settings,
+                ..
+            }
+            | Self::SessionDefaults {
+                model_selection,
+                model_settings,
+                ..
+            } => {
+                model_settings.validate()?;
+                if !snapshot_matches_model(model_selection, model_settings) {
+                    return Err(FrameValidationError::ModelSettingsShape);
+                }
+            }
             Self::SessionEvent { event, .. } => validate_settings_event(event)?,
             Self::GoalTransitionApplied {
                 event_ordinal,
@@ -11187,10 +11466,7 @@ mod tests {
                 selected_direct_id: uuid(4),
                 per_call_override: settings_snapshot_fixture().precedence.per_call,
                 settings: settings_snapshot_fixture(),
-                adjustments: vec![ModelChangeAdjustment::ReasoningLevelClamped {
-                    from: ReasoningLevel::XHigh,
-                    to: ReasoningLevel::High,
-                }],
+                adjustments: Vec::new(),
             },
         };
 
@@ -11218,6 +11494,128 @@ mod tests {
         .expect_err("effective settings must resolve from retained provenance");
 
         assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: only the exact all-inherit provider-default snapshot is
+    /// model-independent.
+    #[test]
+    fn inv033_nondefault_settings_snapshot_requires_validation_identity() {
+        let mut model_settings = settings_snapshot_fixture();
+        model_settings.validated_for_selection_id = None;
+
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionCreated {
+                session_id: uuid(1),
+                model_settings,
+            },
+        )
+        .expect_err("nondefault settings require their validating direct selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: the separately reported per-call contribution must equal the
+    /// retained precedence layer.
+    #[test]
+    fn inv033_turn_settings_event_rejects_crosswired_per_call_override() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    defaults_version: CanonicalU64::new(1),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: ModelSettingsOverlay::inherit_all(),
+                    settings: settings_snapshot_fixture(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("event provenance must match the sealed per-call layer");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: caller and adjustment evidence must derive the exact installed
+    /// defaults snapshot.
+    #[test]
+    fn inv033_settings_change_event_rejects_unrelated_installed_snapshot() {
+        let prior_settings = provider_default_settings_snapshot_fixture();
+        let mut installed_settings = settings_snapshot_fixture();
+        installed_settings.precedence.session = installed_settings.precedence.per_call;
+        installed_settings.precedence.per_call = ModelSettingsOverlay::inherit_all();
+        installed_settings.reasoning_source = Some(ModelSettingSource::Session);
+        installed_settings.service_tier_source = Some(ModelSettingSource::Session);
+        let model = ModelSelection::Direct {
+            selection_id: uuid(4),
+        };
+
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(1),
+                event: SessionEvent::SessionModelSettingsChanged {
+                    command_id: command(2).expect("fixture command identity is admitted"),
+                    prior_defaults_version: CanonicalU64::new(1),
+                    installed_defaults_version: CanonicalU64::new(2),
+                    prior_model: model,
+                    installed_model: model,
+                    prior_settings,
+                    installed_settings,
+                    caller_override: ModelSettingsOverlay::inherit_all(),
+                    adjustments: Vec::new(),
+                },
+            },
+        )
+        .expect_err("an all-inherit caller cannot install an unrelated session layer");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: defaults reads bind a direct model to the snapshot validation
+    /// identity.
+    #[test]
+    fn inv033_defaults_read_rejects_crosswired_direct_settings() {
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionDefaults {
+                session_id: uuid(1),
+                defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: uuid(5),
+                },
+                model_settings: settings_snapshot_fixture(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: None,
+            },
+        )
+        .expect_err("direct defaults require settings validated for that selection");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-012 / INV-033: settings-change events reject both reserved command
+    /// identities during wire decoding.
+    #[test]
+    fn inv012_inv033_settings_change_event_rejects_command_sentinels() {
+        let nil = format!(
+            "{{\"version\":1,\"request_id\":\"1\",\"message\":{{\"type\":\"session_event\",\"cursor\":\"1\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"event\":{{\"type\":\"session_model_settings_changed\",\"command_id\":\"00000000-0000-0000-0000-000000000000\",\"prior_defaults_version\":\"1\",\"installed_defaults_version\":\"2\",\"prior_model\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"installed_model\":{{\"kind\":\"alias\",\"alias_id\":\"00000000-0000-0000-0000-000000000005\"}},\"prior_settings\":{SETTINGS_SNAPSHOT_JSON},\"installed_settings\":{SETTINGS_SNAPSHOT_JSON},\"caller_override\":{{\"reasoning_level\":{{\"kind\":\"inherit\"}},\"fast_mode\":{{\"kind\":\"inherit\"}},\"service_tier\":{{\"kind\":\"inherit\"}}}},\"adjustments\":[]}}}}}}"
+        );
+        let all_ones = nil.replace(
+            "00000000-0000-0000-0000-000000000000",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        );
+
+        assert_server_malformed(&nil);
+        assert_server_malformed(&all_ones);
     }
 
     #[test]
@@ -11291,7 +11689,7 @@ mod tests {
                 cursor: CanonicalU64::new(1),
                 session_id: uuid(1),
                 event: SessionEvent::SessionModelSettingsChanged {
-                    command_id: uuid(2),
+                    command_id: command(2).expect("fixture command identity is admitted"),
                     prior_defaults_version: CanonicalU64::new(0),
                     installed_defaults_version: CanonicalU64::new(1),
                     prior_model: ModelSelection::Direct {
@@ -11321,7 +11719,7 @@ mod tests {
                 cursor: CanonicalU64::new(1),
                 session_id: uuid(1),
                 event: SessionEvent::SessionModelSettingsChanged {
-                    command_id: uuid(2),
+                    command_id: command(2).expect("fixture command identity is admitted"),
                     prior_defaults_version: CanonicalU64::new(1),
                     installed_defaults_version: CanonicalU64::new(2),
                     prior_model: model,

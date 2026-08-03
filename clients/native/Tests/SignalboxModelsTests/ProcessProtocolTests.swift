@@ -71,6 +71,80 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testSessionCreatedRequiresTheModelSettingsSnapshot() {
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)"
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxProcessServerMessage.self,
+        from: encoded
+      )
+    )
+  }
+
+  func testSessionCreatedRejectsMalformedModelSettings() {
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)",
+        "model_settings":{}
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxProcessServerMessage.self,
+        from: encoded
+      )
+    )
+  }
+
+  func testInputSubmittedRequiresTheModelSettingsSnapshot() {
+    let encoded = Data(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(sessionID)",
+        "accepted_input_id":"\(turnID)",
+        "acceptance_position":"1",
+        "turn_id":"\(turnID)"
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxInputSubmitted.self, from: encoded)
+    )
+  }
+
+  func testInputSubmittedRejectsMalformedModelSettings() {
+    let encoded = Data(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(sessionID)",
+        "accepted_input_id":"\(turnID)",
+        "acceptance_position":"1",
+        "turn_id":"\(turnID)",
+        "model_settings":{}
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxInputSubmitted.self, from: encoded)
+    )
+  }
+
   /// INV-033: imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
