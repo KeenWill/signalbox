@@ -1,5 +1,6 @@
 //! Argument admission properties.
 
+use git2::ObjectFormat;
 use signalbox_domain::NormalizedToolArguments;
 
 use crate::contracts::LocalToolKind;
@@ -12,7 +13,7 @@ fn stage_argument_rejects_parent_traversal_before_execution() {
     )
     .expect("JSON arguments normalize");
 
-    assert!(decode_operation(LocalToolKind::Stage, &arguments).is_err());
+    assert!(decode_operation(LocalToolKind::Stage, &arguments, ObjectFormat::Sha1).is_err());
 }
 
 #[test]
@@ -22,7 +23,7 @@ fn stage_argument_rejects_the_repository_administration_directory() {
     )
     .expect("JSON arguments normalize");
 
-    assert!(decode_operation(LocalToolKind::Stage, &arguments).is_err());
+    assert!(decode_operation(LocalToolKind::Stage, &arguments, ObjectFormat::Sha1).is_err());
 }
 
 #[test]
@@ -32,5 +33,5 @@ fn revision_argument_rejects_unbounded_ancestry_expression_before_execution() {
     )
     .expect("JSON arguments normalize");
 
-    assert!(decode_operation(LocalToolKind::Log, &arguments).is_err());
+    assert!(decode_operation(LocalToolKind::Log, &arguments, ObjectFormat::Sha1).is_err());
 }

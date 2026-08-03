@@ -12,6 +12,8 @@ use git2::{
     CheckoutNotificationType, Index, IndexEntry, IndexTime, Mempack, Odb, Repository,
     build::CheckoutBuilder,
 };
+use rustix::fs::{AtFlags, RenameFlags, renameat_with, statat};
+use rustix::io::dup;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::ToolExecutionErrorDetail;
 #[cfg(test)]
@@ -30,7 +32,10 @@ use crate::bounded::{
 };
 use crate::branch::branch_create;
 use crate::commit::{RepositoryOperationState, commit, publish_symbolic_head};
-use crate::descriptor::{RepositoryIdentity, descriptor_path};
+use crate::descriptor::{
+    FileIdentity, QuarantineDirectory, RepositoryIdentity, descriptor_entry_exists,
+    descriptor_path, descriptor_path_from_fd,
+};
 use crate::diff::diff;
 use crate::failure::LocalGitFailure;
 use crate::identity::GitIdentity;
@@ -49,9 +54,10 @@ use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain_from;
 use crate::result::{BranchResult, LocalGitResult, StageResult, encode_result};
 use crate::rollback::{
-    CheckoutRollbackContext, WorktreeRollbackIdentities, capture_rollback_identities,
-    capture_rollback_identity, capture_worktree_rollback_state, checkout_tree_with_rollback,
-    restore_index, rollback_checkout_atomically, validate_checkout_path,
+    CheckoutRollbackContext, WorktreeRollbackEntry, WorktreeRollbackIdentities,
+    capture_rollback_identities, capture_rollback_identity, capture_worktree_rollback_state,
+    checkout_snapshot, checkout_tree_with_rollback, open_worktree_parent, restore_index,
+    rollback_checkout_atomically, validate_checkout_path,
 };
 use crate::status::{blob_oid, status, tracked_directories};
 
@@ -67,6 +73,12 @@ pub struct LocalGitExecutor<FileSystem> {
     pub(super) repository_detail: ToolExecutionErrorDetail,
     pub(super) path_detail: ToolExecutionErrorDetail,
     pub(super) operation_detail: ToolExecutionErrorDetail,
+}
+
+struct QuarantinedCheckoutDirectory {
+    quarantine: QuarantineDirectory,
+    target: QuarantineDirectory,
+    path: PathBuf,
 }
 
 /// Sanitized local Git executor failure.
@@ -639,6 +651,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         path: &Path,
         current_index: &Index,
         filemode: bool,
+        checkout_paths: &BTreeSet<PathBuf>,
     ) -> Result<(), LocalGitFailure> {
         let Some(entry) = current_index.get_path(path, 0) else {
             return match self.filesystem.entry_kind(&self.root, path) {
@@ -650,6 +663,12 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 {
                     Ok(())
                 }
+                Ok(WorkspaceEntryKind::Directory) => self.validate_clean_checkout_directory(
+                    path,
+                    current_index,
+                    filemode,
+                    checkout_paths,
+                ),
                 Err(WorkspaceResolveError::Rejected(_)) => Err(LocalGitFailure::Path),
                 Ok(_) | Err(WorkspaceResolveError::Io { .. }) => Err(LocalGitFailure::Operation),
             };
@@ -664,20 +683,229 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 WorkspaceResolveError::Rejected(_) => LocalGitFailure::Path,
                 WorkspaceResolveError::Io { .. } => LocalGitFailure::Operation,
             })?;
-        let observed_mode = if read.mode & 0o111 == 0 {
+        if read.truncated || read.total_bytes != read.bytes.len() as u64 {
+            return Err(LocalGitFailure::Operation);
+        }
+        self.validate_clean_indexed_file(&read.bytes, read.mode, &entry, filemode)
+    }
+
+    fn validate_clean_checkout_directory(
+        &self,
+        path: &Path,
+        current_index: &Index,
+        filemode: bool,
+        checkout_paths: &BTreeSet<PathBuf>,
+    ) -> Result<(), LocalGitFailure> {
+        let state = capture_worktree_rollback_state(
+            &self.filesystem,
+            &self.root,
+            &BTreeSet::from([path.to_path_buf()]),
+        )?;
+        for (entry_path, entry_state) in state {
+            if entry_path == path {
+                continue;
+            }
+            let affected = checkout_paths.contains(&entry_path)
+                || checkout_paths
+                    .iter()
+                    .any(|checkout_path| checkout_path.starts_with(&entry_path));
+            if !affected {
+                return Err(LocalGitFailure::Operation);
+            }
+            match entry_state {
+                WorktreeRollbackEntry::File { bytes, mode } => {
+                    let entry = current_index
+                        .get_path(&entry_path, 0)
+                        .ok_or(LocalGitFailure::Operation)?;
+                    if entry.mode == GITLINK_MODE {
+                        return Err(LocalGitFailure::Operation);
+                    }
+                    self.validate_clean_indexed_file(&bytes, mode, &entry, filemode)?;
+                }
+                WorktreeRollbackEntry::Directory => {}
+                WorktreeRollbackEntry::Missing => return Err(LocalGitFailure::Operation),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_clean_indexed_file(
+        &self,
+        bytes: &[u8],
+        mode: u32,
+        entry: &IndexEntry,
+        filemode: bool,
+    ) -> Result<(), LocalGitFailure> {
+        let observed_mode = if mode & 0o111 == 0 {
             0o100644
         } else {
             0o100755
         };
         let mode_changed = filemode && observed_mode != entry.mode;
-        if read.truncated
-            || blob_oid(&read.bytes, self.repository_authority.object_format)? != entry.id
-            || mode_changed
-        {
+        if blob_oid(bytes, self.repository_authority.object_format)? != entry.id || mode_changed {
             Err(LocalGitFailure::Operation)
         } else {
             Ok(())
         }
+    }
+
+    fn quarantine_checkout_directories(
+        &self,
+        repository: &Repository,
+        checkout_paths: &BTreeSet<PathBuf>,
+        current_index: &Index,
+        target_tree: &git2::Tree<'_>,
+    ) -> Result<Vec<QuarantinedCheckoutDirectory>, LocalGitFailure> {
+        let mut quarantined = Vec::new();
+        let candidates = checkout_paths
+            .iter()
+            .filter(|path| {
+                current_index.get_path(path, 0).is_none()
+                    && target_tree
+                        .get_path(path)
+                        .is_ok_and(|entry| entry.kind() != Some(git2::ObjectType::Tree))
+                    && matches!(
+                        self.filesystem.entry_kind(&self.root, path),
+                        Ok(WorkspaceEntryKind::Directory)
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in candidates {
+            let transition = (|| {
+                let expected = capture_rollback_identity(&self.repository_authority.root, &path)?
+                    .ok_or(LocalGitFailure::Operation)?;
+                let root =
+                    dup(&self.repository_authority.root).map_err(|_| LocalGitFailure::Operation)?;
+                let target_snapshot = QuarantineDirectory::create(&root)?;
+                checkout_snapshot(
+                    repository,
+                    Some(target_tree),
+                    &BTreeSet::from([path.clone()]),
+                    &descriptor_path_from_fd(target_snapshot.descriptor()),
+                )?;
+                let quarantine = QuarantineDirectory::create(&root)?;
+                let quarantined_name = OsStr::new("entry");
+                let (parent, leaf) = open_worktree_parent(&self.repository_authority.root, &path)?;
+                let (target_parent, target_leaf) =
+                    open_worktree_parent(target_snapshot.descriptor(), &path)?;
+                statat(&target_parent, &target_leaf, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|_| LocalGitFailure::Operation)?;
+                let current = statat(&parent, &leaf, AtFlags::SYMLINK_NOFOLLOW)
+                    .map(|status| FileIdentity {
+                        device: status.st_dev,
+                        inode: status.st_ino,
+                    })
+                    .map_err(|_| LocalGitFailure::Operation)?;
+                if current != expected {
+                    return Err(LocalGitFailure::Operation);
+                }
+                renameat_with(
+                    &parent,
+                    &leaf,
+                    quarantine.descriptor(),
+                    quarantined_name,
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(|_| LocalGitFailure::Operation)?;
+                Ok(QuarantinedCheckoutDirectory {
+                    quarantine,
+                    target: target_snapshot,
+                    path,
+                })
+            })();
+            match transition {
+                Ok(transition) => quarantined.push(transition),
+                Err(failure) => {
+                    self.restore_unmodified_quarantined_directories(
+                        &mut quarantined,
+                        &BTreeSet::new(),
+                    )?;
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(quarantined)
+    }
+
+    fn publish_quarantined_checkout_targets(
+        &self,
+        quarantined: &mut [QuarantinedCheckoutDirectory],
+        updated_paths: &RefCell<BTreeSet<PathBuf>>,
+        updated_identities: &RefCell<WorktreeRollbackIdentities>,
+    ) -> Result<(), LocalGitFailure> {
+        for transition in quarantined {
+            let (parent, leaf) =
+                open_worktree_parent(&self.repository_authority.root, &transition.path)?;
+            if descriptor_entry_exists(&parent, &leaf)? {
+                let checkout_updated_path = updated_paths.borrow().iter().any(|updated| {
+                    updated.starts_with(&transition.path) || transition.path.starts_with(updated)
+                });
+                if checkout_updated_path {
+                    continue;
+                }
+                transition.quarantine.keep();
+                return Err(LocalGitFailure::Operation);
+            }
+            let (target_parent, target_leaf) =
+                open_worktree_parent(transition.target.descriptor(), &transition.path)?;
+            let target_identity = statat(&target_parent, &target_leaf, AtFlags::SYMLINK_NOFOLLOW)
+                .map(|status| FileIdentity {
+                    device: status.st_dev,
+                    inode: status.st_ino,
+                })
+                .map_err(|_| LocalGitFailure::Operation)?;
+            if renameat_with(
+                &target_parent,
+                &target_leaf,
+                &parent,
+                &leaf,
+                RenameFlags::NOREPLACE,
+            )
+            .is_err()
+            {
+                transition.quarantine.keep();
+                return Err(LocalGitFailure::Operation);
+            }
+            updated_paths.borrow_mut().insert(transition.path.clone());
+            updated_identities
+                .borrow_mut()
+                .insert(transition.path.clone(), Some(target_identity));
+        }
+        Ok(())
+    }
+
+    fn restore_unmodified_quarantined_directories(
+        &self,
+        quarantined: &mut [QuarantinedCheckoutDirectory],
+        updated_paths: &BTreeSet<PathBuf>,
+    ) -> Result<(), LocalGitFailure> {
+        for transition in quarantined {
+            if updated_paths.iter().any(|updated| {
+                updated.starts_with(&transition.path) || transition.path.starts_with(updated)
+            }) {
+                continue;
+            }
+            let (parent, leaf) =
+                open_worktree_parent(&self.repository_authority.root, &transition.path)?;
+            if descriptor_entry_exists(&parent, &leaf)? {
+                transition.quarantine.keep();
+                return Err(LocalGitFailure::Operation);
+            }
+            if renameat_with(
+                transition.quarantine.descriptor(),
+                OsStr::new("entry"),
+                &parent,
+                &leaf,
+                RenameFlags::NOREPLACE,
+            )
+            .is_err()
+            {
+                transition.quarantine.keep();
+                return Err(LocalGitFailure::Operation);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn branch_switch(
@@ -917,7 +1145,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 &current_index,
                 &target_tree,
             )?;
-            self.validate_clean_checkout_path(path, &current_index, filemode)?;
+            self.validate_clean_checkout_path(path, &current_index, filemode, &checkout_paths)?;
         }
         let mut next_index = Index::new_ext(self.repository_authority.object_format)
             .map_err(|_| LocalGitFailure::Operation)?;
@@ -990,7 +1218,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     captured && current
                 })
             });
-        checkout_tree_with_rollback(
+        let mut quarantined_directories = self.quarantine_checkout_directories(
+            repository,
+            &checkout_paths,
+            &current_index,
+            &target_tree,
+        )?;
+        let checkout_result = checkout_tree_with_rollback(
             repository,
             current_tree.as_ref(),
             &target_tree,
@@ -1015,7 +1249,39 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                     .checkout_tree(target_commit.as_object(), Some(&mut checkout))
                     .map_err(|_| LocalGitFailure::Operation)
             },
-        )?;
+        );
+        if let Err(failure) = checkout_result {
+            self.restore_unmodified_quarantined_directories(
+                &mut quarantined_directories,
+                &updated_paths.borrow(),
+            )?;
+            return Err(failure);
+        }
+        let target_publication = self.publish_quarantined_checkout_targets(
+            &mut quarantined_directories,
+            &updated_paths,
+            &updated_identities,
+        );
+        if let Err(failure) = target_publication {
+            rollback_checkout_atomically(
+                repository,
+                current_tree.as_ref(),
+                &target_tree,
+                &checkout_paths,
+                CheckoutRollbackContext {
+                    filesystem: &self.filesystem,
+                    root: &self.root,
+                    authority: &self.repository_authority,
+                },
+                Some(&updated_identities.borrow()),
+            )?;
+            self.restore_unmodified_quarantined_directories(
+                &mut quarantined_directories,
+                &updated_paths.borrow(),
+            )?;
+            return Err(failure);
+        }
+        drop(quarantined_directories);
         let before_checkout_capture = checkout_paths
             .iter()
             .map(|path| {

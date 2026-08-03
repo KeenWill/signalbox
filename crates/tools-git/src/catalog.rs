@@ -66,6 +66,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitTools<FileSystem> {
                     definition,
                     GitArgumentValidator {
                         kind,
+                        object_format: repository_authority.object_format,
                         detail: invalid_detail.clone(),
                     },
                 ))
@@ -111,8 +112,12 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for LocalGitExecutor<FileSyst
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
         let kind =
             kind_for_name(invocation.request().name().as_str()).ok_or(LocalGitExecutorError)?;
-        let operation = decode_operation(kind, invocation.request().arguments())
-            .map_err(|_| LocalGitExecutorError)?;
+        let operation = decode_operation(
+            kind,
+            invocation.request().arguments(),
+            self.repository_authority.object_format,
+        )
+        .map_err(|_| LocalGitExecutorError)?;
         let evidence = match self.execute_operation(operation) {
             Ok(result) => ToolExecutorEvidence::CompletedText(result),
             Err(LocalGitFailure::Repository) => ToolExecutorEvidence::KnownFailed {

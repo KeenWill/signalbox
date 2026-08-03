@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use git2::ObjectFormat;
 use signalbox_application::ToolArgumentValidator;
 use signalbox_domain::{NormalizedToolArguments, ToolExecutionErrorDetail};
 
@@ -8,6 +9,7 @@ use crate::arguments::{
     checked_relative_path,
 };
 use crate::contracts::LocalToolKind;
+use crate::layout::parse_full_object_id;
 use crate::limits::{
     MAX_BRANCH_BYTES, MAX_COMMIT_MESSAGE_BYTES, MAX_LOG_ENTRIES, MAX_REVISION_BYTES,
     MAX_STAGE_PATHS,
@@ -16,6 +18,7 @@ use crate::limits::{
 pub(super) fn decode_operation(
     kind: LocalToolKind,
     arguments: &NormalizedToolArguments,
+    object_format: ObjectFormat,
 ) -> Result<LocalOperation, InvalidGitArguments> {
     let operation = match kind {
         LocalToolKind::BranchCreate => {
@@ -34,15 +37,18 @@ pub(super) fn decode_operation(
             .map(|_| LocalOperation::Status),
     }
     .map_err(|_| InvalidGitArguments)?;
-    validate_operation(&operation)?;
+    validate_operation(&operation, object_format)?;
     Ok(operation)
 }
 
-pub(super) fn validate_operation(operation: &LocalOperation) -> Result<(), InvalidGitArguments> {
+pub(super) fn validate_operation(
+    operation: &LocalOperation,
+    object_format: ObjectFormat,
+) -> Result<(), InvalidGitArguments> {
     match operation {
         LocalOperation::BranchCreate(arguments) => {
             validate_branch(&arguments.name)?;
-            validate_revision(&arguments.start)
+            validate_revision(&arguments.start, object_format)
         }
         LocalOperation::BranchSwitch(arguments) => validate_branch(&arguments.name),
         LocalOperation::Commit(arguments) => (arguments.message.len() <= MAX_COMMIT_MESSAGE_BYTES
@@ -51,11 +57,11 @@ pub(super) fn validate_operation(operation: &LocalOperation) -> Result<(), Inval
         .ok_or(InvalidGitArguments),
         LocalOperation::Diff(GitDiffArguments::Worktree) | LocalOperation::Status => Ok(()),
         LocalOperation::Diff(GitDiffArguments::Revisions { base, head }) => {
-            validate_revision(base)?;
-            validate_revision(head)
+            validate_revision(base, object_format)?;
+            validate_revision(head, object_format)
         }
         LocalOperation::Log(arguments) => {
-            validate_revision(&arguments.revision)?;
+            validate_revision(&arguments.revision, object_format)?;
             (arguments.max_entries > 0 && arguments.max_entries <= MAX_LOG_ENTRIES)
                 .then_some(())
                 .ok_or(InvalidGitArguments)
@@ -87,8 +93,11 @@ pub(super) fn validate_branch(value: &str) -> Result<(), InvalidGitArguments> {
         .ok_or(InvalidGitArguments)
 }
 
-pub(super) fn validate_revision(value: &str) -> Result<(), InvalidGitArguments> {
-    let exact_object = git2::Oid::from_str(value).is_ok();
+pub(super) fn validate_revision(
+    value: &str,
+    object_format: ObjectFormat,
+) -> Result<(), InvalidGitArguments> {
+    let exact_object = parse_full_object_id(value, object_format).is_some();
     let exact_reference =
         value == "HEAD" || (value.starts_with("refs/") && git2::Reference::is_valid_name(value));
     (value.len() <= MAX_REVISION_BYTES && (exact_object || exact_reference))
@@ -99,6 +108,7 @@ pub(super) fn validate_revision(value: &str) -> Result<(), InvalidGitArguments> 
 #[derive(Clone, Debug)]
 pub(super) struct GitArgumentValidator {
     pub(super) kind: LocalToolKind,
+    pub(super) object_format: ObjectFormat,
     pub(super) detail: ToolExecutionErrorDetail,
 }
 
@@ -107,7 +117,7 @@ impl ToolArgumentValidator for GitArgumentValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode_operation(self.kind, arguments)
+        decode_operation(self.kind, arguments, self.object_format)
             .map(|_| ())
             .map_err(|_| self.detail.clone())
     }

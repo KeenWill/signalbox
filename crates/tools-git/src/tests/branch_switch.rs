@@ -207,8 +207,9 @@ fn branch_switch_checks_out_root_level_change() {
 }
 
 #[test]
-fn branch_switch_rejects_a_file_to_directory_transition() {
+fn branch_switch_replaces_a_clean_tracked_file_with_a_directory() {
     let fixture = Fixture::new();
+    let nested_content = b"nested\n";
     let repository = Repository::open(fixture.root()).expect("fixture repository opens");
     let initial_tree = repository
         .find_commit(fixture.initial)
@@ -216,7 +217,7 @@ fn branch_switch_rejects_a_file_to_directory_transition() {
         .tree()
         .expect("fixture initial tree opens");
     let nested_blob = repository
-        .blob(b"nested\n")
+        .blob(nested_content)
         .expect("nested fixture blob writes");
     let mut nested_builder = repository
         .treebuilder(None)
@@ -243,16 +244,112 @@ fn branch_switch_rejects_a_file_to_directory_transition() {
     commit_all(&repository, "flat source");
     let executor = fixture.executor();
 
+    execute(
+        &executor,
+        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }),
+    );
+
+    assert_eq!(
+        fs::read(fixture.root().join("src/main.txt")).expect("nested fixture content reads"),
+        nested_content
+    );
+}
+
+#[test]
+fn branch_switch_replaces_a_clean_tracked_directory_with_a_file() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists")
+        .tree()
+        .expect("fixture initial tree opens");
+    let flat_content = b"flat\n";
+    let flat_blob = repository
+        .blob(flat_content)
+        .expect("flat fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&initial_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", flat_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    fs::create_dir(fixture.root().join("src")).expect("current fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), b"nested\n")
+        .expect("current nested fixture writes");
+    commit_all(&repository, "nested source");
+    let executor = fixture.executor();
+
+    execute(
+        &executor,
+        LocalOperation::BranchSwitch(GitBranchSwitchArguments {
+            name: FIX_BRANCH.to_owned(),
+        }),
+    );
+
+    assert_eq!(
+        fs::read(fixture.root().join("src")).expect("switched flat fixture reads"),
+        flat_content
+    );
+}
+
+#[test]
+fn branch_switch_preserves_an_untracked_file_inside_a_replaced_directory() {
+    let fixture = Fixture::new();
+    let repository = Repository::open(fixture.root()).expect("fixture repository opens");
+    let initial_tree = repository
+        .find_commit(fixture.initial)
+        .expect("fixture initial commit exists")
+        .tree()
+        .expect("fixture initial tree opens");
+    let flat_blob = repository
+        .blob(b"flat\n")
+        .expect("flat fixture blob writes");
+    let mut target_builder = repository
+        .treebuilder(Some(&initial_tree))
+        .expect("target fixture tree builder opens");
+    target_builder
+        .insert("src", flat_blob, 0o100644)
+        .expect("target fixture file inserts");
+    let target_tree = target_builder.write().expect("target fixture tree writes");
+    let target = raw_commit_with_tree(&repository, target_tree, fixture.initial);
+    let target = repository
+        .find_commit(target)
+        .expect("target fixture commit exists");
+    repository
+        .branch(FIX_BRANCH, &target, false)
+        .expect("target fixture branch creates");
+    fs::create_dir(fixture.root().join("src")).expect("current fixture directory creates");
+    fs::write(fixture.root().join("src/main.txt"), b"nested\n")
+        .expect("current nested fixture writes");
+    commit_all(&repository, "nested source");
+    fs::write(
+        fixture.root().join("src/local.txt"),
+        UNTRACKED_CONTENT.as_bytes(),
+    )
+    .expect("untracked nested fixture writes");
+    let executor = fixture.executor();
+
     let failure = executor
         .execute_operation(LocalOperation::BranchSwitch(GitBranchSwitchArguments {
             name: FIX_BRANCH.to_owned(),
         }))
-        .expect_err("file-to-directory transition rejects");
+        .expect_err("untracked nested obstruction rejects");
 
     assert_eq!(failure, LocalGitFailure::Operation);
     assert_eq!(
-        fs::read(fixture.root().join("src")).expect("flat fixture content reads"),
-        b"flat\n"
+        fs::read(fixture.root().join("src/local.txt")).expect("untracked nested fixture remains"),
+        UNTRACKED_CONTENT.as_bytes()
     );
 }
 

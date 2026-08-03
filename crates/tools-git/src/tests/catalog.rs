@@ -1,7 +1,7 @@
 //! Catalog declaration and effect-class properties.
 
 use signalbox_application::ToolCatalog;
-use signalbox_domain::{ToolEffectClass, ToolName, ToolPermissionDefault};
+use signalbox_domain::{NormalizedToolArguments, ToolEffectClass, ToolName, ToolPermissionDefault};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::catalog::LocalGitTools;
@@ -10,7 +10,36 @@ use crate::names::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
     GIT_LOG_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, LOCAL_GIT_TOOL_NAMES,
 };
-use crate::tests::support::{Fixture, identity};
+use crate::tests::support::{FIX_BRANCH, Fixture, Sha256Fixture, identity};
+
+#[test]
+fn sha256_catalog_admits_only_full_width_sha256_object_ids() {
+    let fixture = Sha256Fixture::new();
+    let catalog = LocalGitTools::try_new(LocalWorkspaceFileSystem, fixture.root(), identity())
+        .expect("SHA-256 suite constructs")
+        .into_parts()
+        .0;
+    let branch_create =
+        ToolName::try_new(GIT_BRANCH_CREATE_NAME.to_owned()).expect("fixture name is admitted");
+    let full_width = NormalizedToolArguments::try_from_provider_text(
+        serde_json::json!({"name": FIX_BRANCH, "start": fixture.initial.to_string()}).to_string(),
+    )
+    .expect("full-width SHA-256 arguments normalize");
+    let sha1_width = NormalizedToolArguments::try_from_provider_text(
+        serde_json::json!({"name": FIX_BRANCH, "start": "0".repeat(40)}).to_string(),
+    )
+    .expect("SHA-1-width arguments normalize");
+
+    assert_eq!(
+        catalog.validate_arguments(&branch_create, &full_width),
+        Ok(())
+    );
+    assert!(
+        catalog
+            .validate_arguments(&branch_create, &sha1_width)
+            .is_err()
+    );
+}
 
 #[test]
 fn catalog_declares_every_local_verb_auto() {
