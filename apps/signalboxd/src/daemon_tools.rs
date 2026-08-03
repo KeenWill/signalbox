@@ -544,15 +544,9 @@ impl DaemonToolCatalog {
         postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
         composition: DaemonToolComposition,
     ) -> Result<(), ConfiguredApprovalPostureError> {
-        for (name, posture) in postures {
+        for (name, _posture) in postures {
             if !configured_composition_contains(&name, composition) {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
-            }
-            match posture {
-                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
-                ToolApprovalPosture::Delegated => {
-                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
-                }
             }
         }
         Ok(())
@@ -567,12 +561,6 @@ impl DaemonToolCatalog {
             let Some(entry) = self.entries.get_mut(&name) else {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             };
-            match posture {
-                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
-                ToolApprovalPosture::Delegated => {
-                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
-                }
-            }
             entry.definition = entry.definition.clone().with_approval_posture(posture);
         }
         Ok(self)
@@ -608,15 +596,13 @@ struct DuplicateDaemonTool;
 pub enum ConfiguredApprovalPostureError {
     /// The configured name is absent from the composed catalog.
     UnknownTool { name: ToolName },
-    /// Delegated judging is not wired into this runtime yet.
-    DelegatedJudgeUnavailable { name: ToolName },
 }
 
 impl ConfiguredApprovalPostureError {
     /// Borrows the configured tool name without exposing it to startup telemetry.
     pub const fn name(&self) -> &ToolName {
         match self {
-            Self::UnknownTool { name } | Self::DelegatedJudgeUnavailable { name } => name,
+            Self::UnknownTool { name } => name,
         }
     }
 }
@@ -625,9 +611,6 @@ impl fmt::Display for ConfiguredApprovalPostureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::UnknownTool { .. } => "configured approval posture names an unknown tool",
-            Self::DelegatedJudgeUnavailable { .. } => {
-                "delegated approval posture requires judge wiring"
-            }
         })
     }
 }
@@ -1099,22 +1082,18 @@ mod tests {
     }
 
     #[test]
-    fn composition_prevalidation_rejects_delegated_without_judge_wiring() {
+    fn composition_prevalidation_accepts_delegated_posture() {
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
-        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
-            [(echo.clone(), ToolApprovalPosture::Delegated)],
+
+        DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(echo, ToolApprovalPosture::Delegated)],
             DaemonToolComposition::Base,
         )
-        .expect_err("delegated posture fails before database construction");
-
-        assert_eq!(
-            rejected,
-            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
-        );
+        .expect("the production composition wires delegated judging");
     }
 
     #[test]
-    fn composed_catalog_rejects_delegated_posture_without_judge_wiring() {
+    fn composed_catalog_applies_delegated_posture() {
         let (echo_catalog, _executor) = EchoTool::try_new()
             .expect("echo fixture compiles")
             .into_parts();
@@ -1122,13 +1101,16 @@ mod tests {
             .expect("single-tool fixture has unique names");
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
 
-        let rejected = catalog
+        let configured = catalog
             .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
-            .expect_err("delegated posture fails closed without judge dispatch");
+            .expect("the composed catalog accepts delegated judging");
 
         assert_eq!(
-            rejected,
-            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+            configured
+                .definition(&echo)
+                .expect("the fixture tool remains composed")
+                .approval_posture(),
+            ToolApprovalPosture::Delegated
         );
     }
 

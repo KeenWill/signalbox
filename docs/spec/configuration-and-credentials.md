@@ -1,7 +1,8 @@
 # Configuration and credentials
 
-The delegated tool-approval posture and judge-selection configuration is
-verified against this PR (`agent/approval-judge-config`).
+The delegated tool-approval posture, judge selection, and daemon composition are
+verified against the implementing stack through this PR
+(`agent/approval-judge-daemon`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -474,30 +475,23 @@ arguments cannot widen either admission rule.
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
 unknown posture values, and startup rejects a structurally valid name that is
-absent from the selected composition. That name check and the temporary
-`delegated` refusal run in the pre-database configuration pass. An absent table
-or omitted tool name preserves that declaration's legacy permission-default and
-session-blanket behavior exactly. Subject to the `AlwaysConfirm` human-only rule
-owned by
+absent from the selected composition. That name check runs in the pre-database
+configuration pass. An absent table or omitted tool name preserves that
+declaration's legacy permission-default and session-blanket behavior exactly.
+Subject to the `AlwaysConfirm` human-only rule owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
 an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
-blanket is enabled. Until judge wiring lands, daemon startup rejects a
-configured `delegated` override.
-
-Committed unimplemented functionality: `delegated` will park with delegated
-authority for the approval-judge wiring. That wiring must not expose a delegated
-request to the ordinary user-decision path before escalation.
+blanket is enabled. `delegated` parks the request, invokes the approval judge,
+and exposes the ordinary user-decision path only after escalation or a terminal
+judge failure.
 
 The optional `[approval_judge]` table has exactly one `selection_id`, and the
-configuration parser requires it to name a configured direct selection.
-
-Committed unimplemented functionality: no present runtime consumes the
-approval-judge selection or dispatches an approval-judge call. The implementing
-daemon-wiring slice must use the selected model through the ordinary adapter,
-credential-profile, and target-resolution machinery; when the table is absent,
-it must use the judged session call's direct selection unchanged, never a
-hardcoded lower tier.
+configuration parser requires it to name a configured direct selection. The
+daemon uses that selection through the ordinary adapter, credential-profile,
+target-resolution, and usage-limit machinery. When the table is absent, the
+judge call uses the request-producing call's direct selection unchanged, never
+a hardcoded lower tier.
 
 When no explicit posture is configured, composition preserves each compiled
 declaration's permission default and feeds it unchanged into the existing

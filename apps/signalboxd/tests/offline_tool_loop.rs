@@ -30,11 +30,13 @@ use signalbox_domain::{
     NormalizedToolArguments, PerInputConfigurationChoices, ProviderModelIdentity,
     ResolvedProviderTarget, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionId, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecision, ToolAttemptDispatchCorrelation, ToolDispatchGeneration, ToolEffectClass,
-    ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
+    ToolApprovalDecision, ToolApprovalPosture, ToolAttemptDispatchCorrelation,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
+    ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_model_provider_runtime::{
-    RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
+    ApprovalJudgeModel, RuntimeApprovalJudgeModel, RuntimeModelCallProvider, RuntimeModelCatalog,
+    RuntimeModelDefinition,
 };
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialAccess,
@@ -46,9 +48,10 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
-    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
-    submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
+    model_execution::PostgresModelCallRepository, process_read::ProcessReadRepository,
+    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    startup::PostgresStartupScanRepository, submit_input::SubmitInputRepository,
+    tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
@@ -137,6 +140,37 @@ provider_model = "fixture-model"
 max_output_tokens = 64
 context_window_tokens = 200000
 "#;
+
+fn approval_judge_model_configuration() -> HubModelConfiguration {
+    HubModelConfiguration::parse(&format!(
+        r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[adapter_mappings]]
+model_family = "fixture"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
+[compaction]
+prompt = "Preserve the fixture."
+
+[[models]]
+selection_id = "{}"
+target_id = "{}"
+model_family = "fixture"
+provider_model = "scripted-tool-loop"
+max_output_tokens = 64
+context_window_tokens = 200000
+"#,
+        Uuid::from_u128(FIXTURE_ID_SEED + 1),
+        Uuid::from_u128(FIXTURE_ID_SEED + 4),
+    ))
+    .expect("the approval judge fixture model configuration is valid")
+}
 
 #[derive(Clone, Debug)]
 struct RecordingScriptedModel {
@@ -304,6 +338,58 @@ impl ToolLoopFixture {
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
             runtime,
+        )
+    }
+
+    fn execution_with_judge<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        judge_script: Script,
+        catalog: Catalog,
+        executor: Executor,
+    ) -> (
+        PostgresProviderToolLoopExecution<
+            RuntimeModelCallProvider<RecordingScriptedModel>,
+            Catalog,
+            Executor,
+        >,
+        Arc<ScriptedModel<ModelCallId>>,
+        Arc<ScriptedModel<ModelCallId>>,
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
+        let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
+        let judge_runtime = Arc::new(ScriptedModel::<ModelCallId>::single(judge_script));
+        let provider = RuntimeModelCallProvider::new(
+            RecordingScriptedModel {
+                inner: Arc::clone(&runtime),
+            },
+            self.runtime_models.clone(),
+        );
+        let judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
+            RecordingScriptedModel {
+                inner: Arc::clone(&judge_runtime),
+            },
+            self.runtime_models.clone(),
+        ));
+        let configuration = approval_judge_model_configuration();
+        (
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    self.pool.clone(),
+                    self.targets.clone(),
+                    self.credential_reference.clone(),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            )
+            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_approval_judge(judge, None, configuration),
+            runtime,
+            judge_runtime,
         )
     }
 
@@ -509,6 +595,23 @@ fn tool(name: &str, permission: ToolPermissionDefault, effect: ToolEffectClass) 
     })
 }
 
+fn delegated_tool(name: &str, effect: ToolEffectClass) -> CompiledTool {
+    let definition = ToolDefinition::new(
+        tool_name(name),
+        format!("Runs the {name} fixture tool."),
+        ToolInputSchema::try_new(String::from(
+            r#"{"additionalProperties":true,"type":"object"}"#,
+        ))
+        .expect("fixture schema is valid"),
+        ToolPermissionDefault::Confirm,
+        effect,
+    )
+    .with_approval_posture(ToolApprovalPosture::Delegated);
+    CompiledTool::new(definition, |_arguments: &NormalizedToolArguments| {
+        Ok::<(), ToolExecutionErrorDetail>(())
+    })
+}
+
 fn catalog(tools: impl IntoIterator<Item = CompiledTool>) -> CompiledToolCatalog {
     CompiledToolCatalog::try_new(tools).expect("fixture tool declarations are unique")
 }
@@ -544,6 +647,41 @@ fn completion_script(text: &str) -> Script {
         content: vec![AssistantPart::Text(text.to_owned())],
         usage: TokenUsage::unreported(),
     }))
+}
+
+fn approval_judge_script(recommendation: &str, rationale: &str) -> Script {
+    Script::delivering(TerminalEvidence::Completed(CompletionEvidence {
+        exchange: ExchangeFacts::default(),
+        message_id: None,
+        reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
+        finish: CompletionFinish::ToolUse,
+        content: vec![AssistantPart::ToolCall(RuntimeToolCallProposal {
+            id: ToolCallId::new("fixture-approval-judge-call"),
+            name: RuntimeToolName::new("tool_approval_decision"),
+            arguments_json: serde_json::json!({
+                "recommendation": recommendation,
+                "rationale": rationale,
+            })
+            .to_string(),
+        })],
+        usage: TokenUsage {
+            input_tokens: Some(17),
+            output_tokens: Some(7),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(2),
+        },
+    }))
+}
+
+async fn model_call_history_count(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<usize, Box<dyn Error>> {
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .ok_or_else(|| std::io::Error::other("fixture session is absent"))?;
+    Ok(snapshot.model_call_usage().len())
 }
 
 fn provider_error_script() -> Script {
@@ -1696,6 +1834,216 @@ impl ToolExecutor for SerialProbeExecutor {
             "completed:{name}"
         ))))
     }
+}
+
+/// A delegated park with no judge call yet remains a resumable turn after
+/// composition restart and is judged exactly once by the fresh composition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "delegated";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
+    let executor = RecordingExecutor::completing();
+    let (first_execution, _first_runtime) = fixture.execution(
+        [tool_use_script(&[(TOOL_NAME, "{}")])],
+        tool_catalog.clone(),
+        executor.clone(),
+    );
+
+    first_execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
+        .find_resumable_turn(fixture.session)
+        .await?;
+    let (restarted_execution, _runtime, judge_runtime) = fixture.execution_with_judge(
+        [completion_script("restarted delegated result observed")],
+        approval_judge_script("approve", "The restarted request is bounded."),
+        tool_catalog,
+        executor.clone(),
+    );
+
+    assert!(!continuation);
+    assert_eq!(scheduled, vec![fixture.session]);
+    assert_eq!(resumable, Some(fixture.turn));
+    restarted_execution.resume_active(fixture.session).await?;
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(judge_runtime.received_operations().len(), 1);
+    Ok(())
+}
+
+/// Delegated approval parks first, records the deciding model and rationale,
+/// executes exactly once, and exposes the dedicated judge in model-call
+/// history.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "delegated";
+    const RATIONALE: &str = "The effect-free fixture request is bounded.";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
+    let executor = RecordingExecutor::completing();
+    let (execution, _runtime, judge_runtime) = fixture.execution_with_judge(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("delegated result observed"),
+        ],
+        approval_judge_script("approve", RATIONALE),
+        tool_catalog,
+        executor.clone(),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.request_ids().await?[0];
+    let decision: (String, String, String, String, bool, Uuid) = sqlx::query_as(
+        "SELECT decision.decision_kind, decision.decision_source,
+                decision.rationale, judge.recommendation_kind,
+                decision.delegate_model_call_id = judge.model_call_id,
+                decision.delegate_model_selection_id
+           FROM tool_approval_decision AS decision
+           JOIN tool_approval_judge_model_call AS judge
+             ON judge.request_id = decision.request_id
+          WHERE decision.request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(decision.0, "approve");
+    assert_eq!(decision.1, "delegate");
+    assert_eq!(decision.2, RATIONALE);
+    assert_eq!(decision.3, "approve");
+    assert!(decision.4);
+    assert_eq!(decision.5, Uuid::from_u128(FIXTURE_ID_SEED + 1));
+    assert_eq!(judge_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        3
+    );
+    Ok(())
+}
+
+/// Delegated denial records the same full provenance, skips the executor, and
+/// still advances through the ordinary continuation model call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "delegated";
+    const RATIONALE: &str = "The requested action is unnecessary.";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime, judge_runtime) = fixture.execution_with_judge(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("delegated denial observed"),
+        ],
+        approval_judge_script("deny", RATIONALE),
+        tool_catalog,
+        executor.clone(),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.request_ids().await?[0];
+    let decision: (String, String, String, String) = sqlx::query_as(
+        "SELECT decision.decision_kind, decision.decision_source,
+                decision.rationale, judge.recommendation_kind
+           FROM tool_approval_decision AS decision
+           JOIN tool_approval_judge_model_call AS judge
+             ON judge.request_id = decision.request_id
+          WHERE decision.request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(executor.events().is_empty());
+    assert_eq!(decision.0, "deny");
+    assert_eq!(decision.1, "delegate");
+    assert_eq!(decision.2, RATIONALE);
+    assert_eq!(decision.3, "deny");
+    assert_eq!(runtime.received_operations().len(), 2);
+    assert_eq!(judge_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        3
+    );
+    Ok(())
+}
+
+/// Escalation records the judge call without fabricating a decision and keeps
+/// the exact request parked until an explicit user command resolves it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "delegated";
+    const RATIONALE: &str = "Human context is required.";
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([delegated_tool(TOOL_NAME, ToolEffectClass::EffectFree)]);
+    let executor = RecordingExecutor::completing();
+    let (execution, _runtime, judge_runtime) = fixture.execution_with_judge(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("human-approved result observed"),
+        ],
+        approval_judge_script("escalate_to_human", RATIONALE),
+        tool_catalog,
+        executor.clone(),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let request = fixture.request_ids().await?[0];
+    let parked: (String, Uuid, String, String, i64) = sqlx::query_as(
+        "SELECT lifecycle.active_phase_kind, lifecycle.approval_tool_request_id,
+                judge.recommendation_kind, judge.rationale,
+                (SELECT count(*) FROM tool_approval_decision
+                  WHERE request_id = judge.request_id)
+           FROM turn_lifecycle AS lifecycle
+           JOIN tool_approval_judge_model_call AS judge
+             ON judge.session_id = lifecycle.session_id
+            AND judge.turn_id = lifecycle.turn_id
+          WHERE lifecycle.session_id = $1 AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(parked.0, "awaiting_tool_approval");
+    assert_eq!(parked.1, request.into_uuid());
+    assert_eq!(parked.2, "escalate_to_human");
+    assert_eq!(parked.3, RATIONALE);
+    assert_eq!(parked.4, 0);
+    assert!(executor.events().is_empty());
+    assert_eq!(judge_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+
+    fixture
+        .decide(request, ToolApprovalDecision::Approve)
+        .await?;
+    execution.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        3
+    );
+    Ok(())
 }
 
 /// S10 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
