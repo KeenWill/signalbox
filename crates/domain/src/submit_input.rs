@@ -24,10 +24,11 @@ use crate::{
     AcceptedInputQueuePriority, AcceptedInputQueueWork, AcceptedInputSchedulingProjection, Actor,
     AppliedInterruptCommandResult, AppliedInterruptState, CurrentTurnAttemptState, DeliveryRequest,
     DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration, GoalTurnSource,
-    ModelAlias, ModelCapabilityCatalog, ModelSelectionRequest, OriginConfiguration,
-    OriginModelSettingsError, PerInputConfigurationChoices, ReconciliationReason, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SteeringBinding, TurnDisposition, TurnId, UserContent,
+    ModelAlias, ModelCapabilityCatalog, ModelChangeAdjustment, ModelSelectionRequest,
+    OriginConfiguration, OriginModelSettingsError, PerInputConfigurationChoices,
+    ReconciliationReason, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
+    TurnDisposition, TurnId, UserContent, ValidatedModelSettings,
     VersionedSessionConfigurationDefaults, derive_accepted_input_total_order,
 };
 
@@ -1467,6 +1468,8 @@ struct SubmitInputTurnOriginAppliedReconstitutionFacts {
     defaults: SessionConfigurationDefaults,
     stored_requested_model: ModelSelectionRequest,
     stored_frozen_model: FrozenModelSelection,
+    stored_model_settings: Option<ValidatedModelSettings>,
+    stored_model_settings_adjustments: Box<[ModelChangeAdjustment]>,
 }
 
 #[derive(Clone, Debug)]
@@ -1589,6 +1592,10 @@ pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
     pub stored_requested_model: ModelSelectionRequest,
     /// The frozen model selection stored with the origin.
     pub stored_frozen_model: FrozenModelSelection,
+    /// The complete resolved model settings stored for the origin.
+    pub stored_model_settings: Option<ValidatedModelSettings>,
+    /// Ordered automatic model-change adjustments stored for the origin.
+    pub stored_model_settings_adjustments: Vec<ModelChangeAdjustment>,
 }
 
 /// Named facts for reconstructing an applied pending-steering submission.
@@ -1819,6 +1826,8 @@ impl SubmitInputReconstitutionInput {
             defaults,
             stored_requested_model,
             stored_frozen_model,
+            stored_model_settings,
+            stored_model_settings_adjustments,
         } = input;
         Self {
             command,
@@ -1844,6 +1853,9 @@ impl SubmitInputReconstitutionInput {
                     defaults,
                     stored_requested_model,
                     stored_frozen_model,
+                    stored_model_settings,
+                    stored_model_settings_adjustments: stored_model_settings_adjustments
+                        .into_boxed_slice(),
                 },
             )),
         }
@@ -2165,6 +2177,8 @@ impl SubmitInputReconstitutionInput {
                     defaults,
                     stored_requested_model,
                     stored_frozen_model,
+                    stored_model_settings,
+                    stored_model_settings_adjustments,
                 } = *facts;
                 let (expected_predecessor, expected_priority, interrupt_predecessor) = match self
                     .command
@@ -2308,6 +2322,8 @@ impl SubmitInputReconstitutionInput {
                     defaults,
                     stored_requested_model,
                     stored_frozen_model,
+                    stored_model_settings,
+                    stored_model_settings_adjustments.into_vec(),
                 )
                 .map_err(&fail)?;
                 let applied_interrupt = match interrupt_predecessor {
@@ -2802,6 +2818,8 @@ fn reconstruct_origin_configuration(
     defaults: SessionConfigurationDefaults,
     stored_requested_model: ModelSelectionRequest,
     stored_frozen_model: FrozenModelSelection,
+    stored_model_settings: Option<ValidatedModelSettings>,
+    stored_model_settings_adjustments: Vec<ModelChangeAdjustment>,
 ) -> Result<OriginConfiguration, SubmitInputReconstitutionFailure> {
     let Some(configuration) = explicit_origin_configuration(command.delivery) else {
         return Err(SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin);
@@ -2815,24 +2833,39 @@ fn reconstruct_origin_configuration(
 
     let versioned = VersionedSessionConfigurationDefaults::reconstitute(defaults_version, defaults);
     let checked = versioned
-        .derive_request(defaults_version, configuration.model())
+        .derive_request_with_model_settings(
+            defaults_version,
+            configuration.model(),
+            configuration.model_settings(),
+        )
         .map_err(|_| SubmitInputReconstitutionFailure::DefaultsVersionMismatch)?;
     if checked.request().model() != stored_requested_model {
         return Err(SubmitInputReconstitutionFailure::RequestedModelMismatch);
     }
 
-    let frozen = OriginConfiguration::freeze(checked, |alias| match stored_frozen_model {
-        FrozenModelSelection::FrozenAlias {
-            alias: stored_alias,
-            definition,
-        } if stored_alias == alias => Some(definition),
-        FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. } => None,
-    })
-    .map_err(|_| SubmitInputReconstitutionFailure::FrozenModelMismatch)?;
-    if frozen.effective().model() != &stored_frozen_model {
-        return Err(SubmitInputReconstitutionFailure::FrozenModelMismatch);
+    match stored_model_settings {
+        Some(stored_model_settings) => OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            stored_frozen_model,
+            stored_model_settings,
+            stored_model_settings_adjustments,
+        )
+        .ok_or(SubmitInputReconstitutionFailure::FrozenModelMismatch),
+        None if stored_model_settings_adjustments.is_empty() => {
+            let frozen = OriginConfiguration::freeze(checked, |alias| match stored_frozen_model {
+                FrozenModelSelection::FrozenAlias {
+                    alias: stored_alias,
+                    definition,
+                } if stored_alias == alias => Some(definition),
+                FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. } => None,
+            })
+            .map_err(|_| SubmitInputReconstitutionFailure::FrozenModelMismatch)?;
+            (frozen.effective().model() == &stored_frozen_model)
+                .then_some(frozen)
+                .ok_or(SubmitInputReconstitutionFailure::FrozenModelMismatch)
+        }
+        None => Err(SubmitInputReconstitutionFailure::FrozenModelMismatch),
     }
-    Ok(frozen)
 }
 
 fn explicit_origin_configuration(
@@ -3584,6 +3617,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
     }
@@ -3722,6 +3757,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
         .reconstitute()
@@ -3844,6 +3881,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
     }
@@ -3884,6 +3923,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
     }
@@ -5114,6 +5155,8 @@ mod tests {
                 defaults: defaults(ModelSelectionRequest::Direct(direct(2))),
                 stored_requested_model: ModelSelectionRequest::Direct(direct(2)),
                 stored_frozen_model: FrozenModelSelection::Direct(direct(2)),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
         .reconstitute()

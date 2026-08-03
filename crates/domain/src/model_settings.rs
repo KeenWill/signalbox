@@ -440,7 +440,7 @@ impl ModelSettingsPrecedence {
         }
     }
 
-    fn with_effective_adjustment(
+    pub(crate) fn with_effective_adjustment(
         mut self,
         prior: ResolvedModelSettings,
         adjusted: EffectiveModelSettings,
