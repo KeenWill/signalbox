@@ -103,22 +103,24 @@ events is rejected.
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
 admits only the otherwise-canonical legacy shape, uses the retained run ID as
-the definition-identity sentinel, suppresses the same completed run by branch
-and run identity, and writes the complete current shape on the next successful
-commit. A legacy cursor therefore cannot permanently block its repository.
+the definition-identity sentinel, suppresses the same completed run attempt by
+branch, run ID, and attempt number, and writes the complete current shape on the
+next successful commit. A legacy cursor therefore cannot permanently block its
+repository.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
-per-pull-request state, branch heads, and completed branch-workflow identities,
-producing only the closed version-one event vocabulary below in deterministic
-order. The cursor retains provider identities for completed check suites, check
-runs, reviews, threads, and both the workflow definition and branch-workflow
-run, so workflows that share a display name remain distinct and renaming a
-workflow cannot re-emit its already-observed run. The display name remains the
-rule-visible event payload. A provider fact retained in the consecutive
-comparison baseline is not re-emitted. Rules receive only events: they cannot
-inspect normalized snapshots or rerun the differ. Why: transport independence
-requires both polling and a later authenticated webhook receiver to feed the
-same durable facts.
+per-pull-request state, branch heads, and completed branch-workflow identities
+(`run_id`, `run_attempt`), producing only the closed version-one event
+vocabulary below in deterministic order. The cursor retains provider identities
+for completed check suites, check runs, reviews, threads, and both the workflow
+definition and branch-workflow run attempt. Workflows that share a display name
+therefore remain distinct, renaming a workflow cannot re-emit its already
+observed run attempt, and a new attempt under an unchanged run ID does emit. The
+display name remains the rule-visible event payload. A provider fact retained in
+the consecutive comparison baseline is not re-emitted. Rules receive only
+events: they cannot inspect normalized snapshots or rerun the differ. Why:
+transport independence requires both polling and a later authenticated webhook
+receiver to feed the same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and

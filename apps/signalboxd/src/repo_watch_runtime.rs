@@ -28,7 +28,7 @@ use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
     MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
-    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
@@ -945,6 +945,10 @@ impl GitHubRepositoryPoller {
             let has_next = response.workflow_runs.len() == PAGE_SIZE;
             for run in response.workflow_runs {
                 let run_id = object_id(run.id)?;
+                let run_attempt = RepoWatchWorkflowRunAttempt::new(
+                    NonZeroU64::new(run.run_attempt)
+                        .ok_or(RepositoryWatchAttemptError::Normalization)?,
+                );
                 let Some(head_repository) = run.head_repository else {
                     continue;
                 };
@@ -954,6 +958,7 @@ impl GitHubRepositoryPoller {
                     return Ok(Some(RepoWatchWorkflowRunObservation::new(
                         run_id,
                         workflow_identity,
+                        run_attempt,
                         branch.branch().clone(),
                         workflow_name,
                         normalize_conclusion(run.conclusion.as_deref())?,
@@ -1557,6 +1562,7 @@ struct WorkflowRunsResponse {
 #[derive(Clone, Deserialize)]
 struct WorkflowRunResponse {
     id: u64,
+    run_attempt: u64,
     conclusion: Option<String>,
     head_repository: Option<RepositoryResponse>,
 }
@@ -1731,6 +1737,7 @@ mod tests {
     const BRANCHES: [&str; 2] = [BASE_BRANCH, HEAD_BRANCH];
     const WORKFLOW_ID: u64 = 61;
     const WORKFLOW_RUN_IDS: [u64; 2] = [71, 72];
+    const WORKFLOW_RUN_ATTEMPT: u64 = 1;
     const FOREIGN_WORKFLOW_RUN_ID: u64 = 73;
     const PROVIDER_HEAD_REPOSITORY: &str = "Fork/Repository";
     const PROVIDER_BASE_REPOSITORY: &str = "Namespace/Project";
@@ -1926,6 +1933,7 @@ mod tests {
         serde_json::json!({
             "workflow_runs": [{
                 "id": WORKFLOW_RUN_IDS[0],
+                "run_attempt": WORKFLOW_RUN_ATTEMPT,
                 "conclusion": "success",
                 "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
             }]
@@ -1937,6 +1945,7 @@ mod tests {
         serde_json::json!({
             "workflow_runs": [{
                 "id": WORKFLOW_RUN_IDS[1],
+                "run_attempt": WORKFLOW_RUN_ATTEMPT,
                 "conclusion": "failure",
                 "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
             }]
@@ -1949,11 +1958,13 @@ mod tests {
             "workflow_runs": [
                 {
                     "id": FOREIGN_WORKFLOW_RUN_ID,
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
                     "conclusion": "failure",
                     "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
                 },
                 {
                     "id": WORKFLOW_RUN_IDS[0],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
                     "conclusion": "success",
                     "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
                 }
@@ -1968,6 +1979,7 @@ mod tests {
                 serde_json::json!({
                     "id": FOREIGN_WORKFLOW_RUN_ID + u64::try_from(offset)
                         .expect("fixture page offset fits u64"),
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
                     "conclusion": "failure",
                     "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
                 })
@@ -2645,6 +2657,10 @@ mod tests {
         assert_eq!(state.workflow_runs().len(), WORKFLOW_RUN_IDS.len());
         assert_eq!(state.workflow_runs()[0].branch().as_str(), HEAD_BRANCH);
         assert_eq!(state.workflow_runs()[0].workflow_id().get(), WORKFLOW_ID);
+        assert_eq!(
+            state.workflow_runs()[0].attempt().get(),
+            WORKFLOW_RUN_ATTEMPT
+        );
         assert_eq!(state.workflow_runs()[0].workflow().as_str(), WORKFLOW_NAME);
         assert_eq!(
             state.workflow_runs()[0].conclusion(),

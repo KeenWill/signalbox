@@ -569,14 +569,21 @@ async fn cursor_constraint_rejects_a_non_numeric_payload_storage_version()
 async fn cursor_constraint_rejects_a_fractional_payload_storage_version()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
     let update = sqlx::query(
         "UPDATE repo_watch_cursor
             SET cursor_payload = '{\"storage_version\": 0.6}'::jsonb
           WHERE repository = $1",
     )
     .bind(repository.as_str())
-    .execute(&pool)
+    .execute(&mut *connection)
     .await;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
 
     assert!(update.is_err());
     Ok(())

@@ -21,7 +21,7 @@ use signalbox_domain::{
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
     ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchTextError,
-    RepositorySlug, ReviewThreadId, WorkflowName,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewThreadId, WorkflowName,
 };
 use sqlx::{
     PgPool, Postgres, Transaction,
@@ -700,6 +700,7 @@ struct WorkflowRunRecord {
         skip_serializing_if = "Option::is_none"
     )]
     workflow_id: Option<u64>,
+    attempt: u64,
     branch: String,
     workflow: String,
     conclusion: String,
@@ -772,6 +773,7 @@ fn repository_state_record(state: &RepoWatchRepositoryState) -> RepositoryStateR
             .map(|run| WorkflowRunRecord {
                 id: run.id().get(),
                 workflow_id: Some(run.workflow_id().get()),
+                attempt: run.attempt().get(),
                 branch: run.branch().as_str().to_owned(),
                 workflow: run.workflow().as_str().to_owned(),
                 conclusion: repo_watch_check_conclusion_to_str(run.conclusion()).to_owned(),
@@ -926,6 +928,11 @@ fn decode_repository_state(
                         ))?,
                     "workflow_run.workflow_id",
                 )?,
+                NonZeroU64::new(run.attempt)
+                    .map(RepoWatchWorkflowRunAttempt::new)
+                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                        "workflow_run.attempt",
+                    ))?,
                 BranchName::try_new(run.branch)?,
                 WorkflowName::try_new(run.workflow)?,
                 repo_watch_check_conclusion_from_str(&run.conclusion).ok_or(
@@ -1728,7 +1735,10 @@ fn event_row_matches_encoded(row: &EventRow, encoded: &EncodedEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, num::NonZeroU16};
+    use std::{
+        error::Error,
+        num::{NonZeroU16, NonZeroU64},
+    };
 
     use signalbox_domain::CheckConclusion;
 
@@ -1746,10 +1756,17 @@ mod tests {
         GitHubObjectId::new(NonZeroU64::new(value).expect("fixture object identity is positive"))
     }
 
+    fn workflow_attempt(value: u64) -> RepoWatchWorkflowRunAttempt {
+        RepoWatchWorkflowRunAttempt::new(
+            NonZeroU64::new(value).expect("fixture workflow attempt is positive"),
+        )
+    }
+
     fn workflow_candidate() -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
         let workflow_run = RepoWatchWorkflowRunObservation::new(
             github_object_id(WORKFLOW_RUN_ID),
             github_object_id(WORKFLOW_ID),
+            workflow_attempt(1),
             BranchName::try_new(String::from(BRANCH))?,
             WorkflowName::try_new(String::from(WORKFLOW))?,
             CheckConclusion::Success,
@@ -1769,6 +1786,7 @@ mod tests {
         let alpha = RepoWatchWorkflowRunObservation::new(
             github_object_id(LEGACY_WORKFLOW_RUN_IDS[0]),
             github_object_id(LEGACY_WORKFLOW_IDS[0]),
+            workflow_attempt(1),
             BranchName::try_new(String::from(BRANCH))?,
             WorkflowName::try_new(String::from(LEGACY_WORKFLOW_NAMES[0]))?,
             CheckConclusion::Success,
@@ -1776,6 +1794,7 @@ mod tests {
         let zulu = RepoWatchWorkflowRunObservation::new(
             github_object_id(LEGACY_WORKFLOW_RUN_IDS[1]),
             github_object_id(LEGACY_WORKFLOW_IDS[1]),
+            workflow_attempt(1),
             BranchName::try_new(String::from(BRANCH))?,
             WorkflowName::try_new(String::from(LEGACY_WORKFLOW_NAMES[1]))?,
             CheckConclusion::Failure,
@@ -1826,7 +1845,8 @@ mod tests {
     }
 
     #[test]
-    fn cursor_round_trip_retains_provider_workflow_identity() -> Result<(), Box<dyn Error>> {
+    fn cursor_round_trip_retains_provider_workflow_identity_and_attempt()
+    -> Result<(), Box<dyn Error>> {
         let candidate = workflow_candidate()?;
 
         let encoded = encode_cursor_candidate(&candidate)?;
@@ -1836,6 +1856,10 @@ mod tests {
         assert_eq!(
             decoded.observation().state().workflow_runs()[0].workflow_id(),
             github_object_id(WORKFLOW_ID)
+        );
+        assert_eq!(
+            decoded.observation().state().workflow_runs()[0].attempt(),
+            candidate.observation().state().workflow_runs()[0].attempt()
         );
         Ok(())
     }

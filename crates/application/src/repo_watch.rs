@@ -6,8 +6,8 @@ use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId,
     MergeableState, PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent,
     ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventConstructionError,
-    RepoWatchEventId, RepoWatchEventKindV1, RepositorySlug, ReviewState, ReviewThreadId,
-    WorkflowName,
+    RepoWatchEventId, RepoWatchEventKindV1, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -314,6 +314,7 @@ const fn reaction_subject_sort_key(subject: ReactionSubject) -> (u8, u64) {
 pub struct RepoWatchWorkflowRunObservation {
     id: GitHubObjectId,
     workflow_id: GitHubObjectId,
+    attempt: RepoWatchWorkflowRunAttempt,
     branch: BranchName,
     workflow: WorkflowName,
     conclusion: CheckConclusion,
@@ -323,6 +324,7 @@ impl RepoWatchWorkflowRunObservation {
     pub const fn new(
         id: GitHubObjectId,
         workflow_id: GitHubObjectId,
+        attempt: RepoWatchWorkflowRunAttempt,
         branch: BranchName,
         workflow: WorkflowName,
         conclusion: CheckConclusion,
@@ -330,6 +332,7 @@ impl RepoWatchWorkflowRunObservation {
         Self {
             id,
             workflow_id,
+            attempt,
             branch,
             workflow,
             conclusion,
@@ -342,6 +345,10 @@ impl RepoWatchWorkflowRunObservation {
 
     pub const fn workflow_id(&self) -> GitHubObjectId {
         self.workflow_id
+    }
+
+    pub const fn attempt(&self) -> RepoWatchWorkflowRunAttempt {
+        self.attempt
     }
 
     pub const fn branch(&self) -> &BranchName {
@@ -951,10 +958,11 @@ fn derive_workflow_events(
     events: &mut Vec<RepoWatchEvent>,
 ) {
     for run in current.workflow_runs() {
-        let already_observed = previous
-            .workflow_runs()
-            .iter()
-            .any(|prior| prior.branch() == run.branch() && prior.id() == run.id());
+        let already_observed = previous.workflow_runs().iter().any(|prior| {
+            prior.branch() == run.branch()
+                && prior.id() == run.id()
+                && prior.attempt() == run.attempt()
+        });
         if !already_observed {
             events.push(RepoWatchEvent::branch_workflow(
                 ids.next_event_id(),
@@ -1234,9 +1242,30 @@ mod tests {
         workflow_name: &str,
         conclusion: CheckConclusion,
     ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
+        workflow_run_for_attempt(id, workflow_id, workflow_name, 1, conclusion)
+    }
+
+    fn workflow_run_attempt(
+        id: u64,
+        attempt: u64,
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
+        workflow_run_for_attempt(id, WORKFLOW_ID, WORKFLOW_NAME, attempt, conclusion)
+    }
+
+    fn workflow_run_for_attempt(
+        id: u64,
+        workflow_id: u64,
+        workflow_name: &str,
+        attempt: u64,
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchWorkflowRunObservation, RepoWatchTextError> {
         Ok(RepoWatchWorkflowRunObservation::new(
             object_id(id),
             object_id(workflow_id),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(attempt).expect("fixture workflow attempt is positive"),
+            ),
             BranchName::try_new(String::from(BASE_BRANCH))?,
             WorkflowName::try_new(String::from(workflow_name))?,
             conclusion,
@@ -1869,6 +1898,40 @@ mod tests {
                 branch: BranchName::try_new(String::from(BASE_BRANCH))?,
                 workflow_id: object_id(WORKFLOW_ID),
             })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn new_workflow_attempt_emits_when_run_identity_is_unchanged() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            vec![workflow_run_attempt(
+                WORKFLOW_RUN_ID,
+                1,
+                CheckConclusion::Failure,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current_run = workflow_run_attempt(WORKFLOW_RUN_ID, 2, CheckConclusion::Success)?;
+        let current = observation(
+            Vec::new(),
+            vec![current_run.clone()],
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+                branch: current_run.branch().clone(),
+                workflow: current_run.workflow().clone(),
+                conclusion: current_run.conclusion(),
+            }
         );
         Ok(())
     }
