@@ -563,21 +563,7 @@ where
                                 }
                                 TurnEventEffect::Ready => {
                                     interrupts.reset();
-                                    match turns.status() {
-                                        Some(ChatTurnStatus::Queued(turn_id)) => {
-                                            output.chat_queued(turn_id)?;
-                                        }
-                                        Some(ChatTurnStatus::Active(turn_id)) => {
-                                            output.chat_activated(turn_id)?;
-                                        }
-                                        Some(ChatTurnStatus::AwaitingApproval {
-                                            turn_id,
-                                            tool_request_id,
-                                        }) => {
-                                            output.chat_awaiting_approval(turn_id, tool_request_id)?;
-                                        }
-                                        None => output.chat_ready(session_id)?,
-                                    }
+                                    render_chat_status(&turns, output, session_id)?;
                                 }
                                 TurnEventEffect::None => {}
                             }
@@ -1204,6 +1190,23 @@ fn render_approval_wait(turns: &ChatTurns, output: &mut Output<'_>) -> Result<()
     Ok(())
 }
 
+fn render_chat_status(
+    turns: &ChatTurns,
+    output: &mut Output<'_>,
+    session_id: CanonicalUuid,
+) -> Result<(), ClientError> {
+    match turns.status() {
+        Some(ChatTurnStatus::Queued(turn_id)) => output.chat_queued(turn_id)?,
+        Some(ChatTurnStatus::Active(turn_id)) => output.chat_activated(turn_id)?,
+        Some(ChatTurnStatus::AwaitingApproval {
+            turn_id,
+            tool_request_id,
+        }) => output.chat_awaiting_approval(turn_id, tool_request_id)?,
+        None => output.chat_ready(session_id)?,
+    }
+    Ok(())
+}
+
 async fn refresh_approval_after_decision(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -1226,13 +1229,7 @@ async fn refresh_approval_after_decision(
     };
     turns.resynchronize(&mut snapshot)?;
     interrupts.reset();
-    if let Some(ChatTurnStatus::AwaitingApproval {
-        turn_id,
-        tool_request_id,
-    }) = turns.status()
-    {
-        output.chat_awaiting_approval(turn_id, tool_request_id)?;
-    }
+    render_chat_status(turns, output, session_id)?;
     Ok(true)
 }
 
@@ -1790,6 +1787,25 @@ mod tests {
             ),
             TurnEventEffect::ApprovalDecided
         );
+    }
+
+    #[test]
+    fn terminal_approval_refresh_renders_authoritative_ready_state() {
+        const SESSION_IDENTITY: u128 = 47;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(SESSION_IDENTITY));
+        let turns = ChatTurns::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        render_chat_status(&turns, &mut output, session_id)
+            .expect("the authoritative ready state renders");
+
+        assert_eq!(
+            String::from_utf8(stdout).expect("ready output is UTF-8"),
+            format!("chat session={session_id} state=ready\n")
+        );
+        assert!(stderr.is_empty());
     }
 
     #[test]

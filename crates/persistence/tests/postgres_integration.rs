@@ -4540,6 +4540,101 @@ async fn approval_guard_user_decision_requires_event_and_lifecycle_effect()
     Ok(())
 }
 
+/// S10 / INV-019: a later request cannot gain a decision while an earlier
+/// request in the same proposal batch still owns the approval wait.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv019_approval_guard_rejects_decision_for_later_request() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = APPROVAL_FIXTURE_SEED + 0x100;
+    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+        &pool,
+        seed,
+        &[
+            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
+            ("second-tool", "{}"),
+        ],
+    )
+    .await?;
+    let [first_request, later_request] = requests.as_slice() else {
+        panic!("the fixture has two ordered approval requests")
+    };
+    let waiting_request: Uuid = sqlx::query_scalar(
+        "SELECT approval_tool_request_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(waiting_request, first_request.into_uuid());
+
+    let command = Uuid::from_u128(seed + 0xd0);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'applied', NULL, NULL)",
+    )
+    .bind(command)
+    .bind(later_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, owner_command_id)
+         VALUES ($1, 'approve', 'owner_command', $2)",
+    )
+    .bind(later_request.into_uuid())
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ('tool_approval_decided', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO tool_approval_decided_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, $3
+           FROM header",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(later_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("a later decision cannot bypass the active approval wait");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_explicit_requires_atomic_effect")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_guard_unsent_judge_call_rejects_usage() -> Result<(), Box<dyn Error>> {

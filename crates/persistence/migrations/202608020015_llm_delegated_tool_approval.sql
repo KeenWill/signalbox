@@ -600,6 +600,18 @@ BEGIN
         ON lifecycle.turn_id = request.turn_id
        AND lifecycle.session_id = request.session_id
      WHERE dispatched.request_id = NEW.request_id
+       AND lifecycle.active_tool_round_call_id =
+           request.producing_model_call_id
+       AND NOT EXISTS (
+            SELECT 1
+              FROM tool_request AS earlier
+              LEFT JOIN tool_approval_decision AS earlier_decision
+                ON earlier_decision.request_id = earlier.request_id
+             WHERE earlier.producing_model_call_id =
+                   request.producing_model_call_id
+               AND earlier.request_ordinal < request.request_ordinal
+               AND earlier_decision.request_id IS NULL
+       )
        AND NOT (
             lifecycle.state_kind = 'active'
             AND lifecycle.active_phase_kind = 'awaiting_tool_approval'

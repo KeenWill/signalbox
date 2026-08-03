@@ -1864,27 +1864,21 @@ fn validate_tool_approval_event_shape(
     decider: &ToolApprovalEventDecider,
     rationale: &Option<String>,
 ) -> Result<(), FrameValidationError> {
-    let shape_matches = match (decision, decider, rationale) {
-        (
+    let shape_matches = match decider {
+        ToolApprovalEventDecider::User { .. } => match decision {
             ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None },
-            ToolApprovalEventDecider::User { .. },
-            None,
-        ) => true,
-        (
+            | ToolApprovalEventDecision::Deny { reason: None } => rationale.is_none(),
             ToolApprovalEventDecision::Deny {
                 reason: Some(reason),
-            },
-            ToolApprovalEventDecider::User { .. },
-            None,
-        ) => ToolDenialReason::try_new(reason.clone()).is_ok(),
-        (
+            } => rationale.is_none() && ToolDenialReason::try_new(reason.clone()).is_ok(),
+        },
+        ToolApprovalEventDecider::Delegate { .. } => match decision {
             ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None },
-            ToolApprovalEventDecider::Delegate { .. },
-            Some(rationale),
-        ) => ToolDecisionRationale::try_new(rationale.clone()).is_ok(),
-        _ => false,
+            | ToolApprovalEventDecision::Deny { reason: None } => rationale
+                .as_ref()
+                .is_some_and(|rationale| ToolDecisionRationale::try_new(rationale.clone()).is_ok()),
+            ToolApprovalEventDecision::Deny { reason: Some(_) } => false,
+        },
     };
     if !shape_matches {
         return Err(FrameValidationError::ToolApprovalShape);
@@ -8981,7 +8975,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_approval_user_approve_event_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_tool_approval_user_approve_event_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(3)?,
             ServerMessage::SessionEvent {
@@ -9002,7 +8997,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_approval_user_deny_event_round_trips_with_reason()
+    fn inv033_tool_approval_user_deny_event_round_trips_with_reason()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(15)?,
@@ -9026,7 +9021,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_approval_delegate_deny_event_round_trips_with_rationale()
+    fn inv033_tool_approval_delegate_deny_event_round_trips_with_rationale()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -9049,28 +9044,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_approval_user_decider_rejects_delegate_rationale() {
+    fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
         );
     }
 
     #[test]
-    fn tool_approval_delegate_decider_requires_rationale() {
+    fn inv033_tool_approval_delegate_decider_requires_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":null}}}"#,
         );
     }
 
     #[test]
-    fn tool_approval_delegate_denial_rejects_user_reason() {
+    fn inv033_tool_approval_delegate_denial_rejects_user_reason() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
         );
     }
 
     #[test]
-    fn tool_approval_delegate_rationale_rejects_oversize() {
+    fn inv033_tool_approval_delegate_rationale_rejects_oversize() {
         const RATIONALE_FILLER: &str = "x";
         let oversized_rationale =
             RATIONALE_FILLER.repeat(ToolDecisionRationale::MAX_UTF8_BYTES + 1);
