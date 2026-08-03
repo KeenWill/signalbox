@@ -1490,6 +1490,59 @@ pub struct ModelSettingsSnapshot {
     pub validated_for_selection_id: Option<CanonicalUuid>,
 }
 
+impl ModelSettingsSnapshot {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        let layers = [
+            (ModelSettingSource::PerCall, self.precedence.per_call),
+            (ModelSettingSource::Session, self.precedence.session),
+            (ModelSettingSource::Profile, self.precedence.profile),
+            (
+                ModelSettingSource::GlobalDefault,
+                self.precedence.global_default,
+            ),
+        ];
+        let reasoning = resolve_wire_nullable(
+            layers.map(|(source, settings)| (source, settings.reasoning_level)),
+        );
+        let fast = resolve_wire_fast(layers.map(|(source, settings)| (source, settings.fast_mode)));
+        let tier =
+            resolve_wire_nullable(layers.map(|(source, settings)| (source, settings.service_tier)));
+        if reasoning != (self.effective.reasoning_level, self.reasoning_source)
+            || fast != (self.effective.fast_mode, self.fast_mode_source)
+            || tier != (self.effective.service_tier, self.service_tier_source)
+        {
+            return Err(FrameValidationError::ModelSettingsShape);
+        }
+        Ok(())
+    }
+}
+
+fn resolve_wire_nullable<ValueT: Copy>(
+    layers: impl IntoIterator<Item = (ModelSettingSource, SettingOverlay<ValueT>)>,
+) -> (Option<ValueT>, Option<ModelSettingSource>) {
+    for (source, setting) in layers {
+        match setting {
+            SettingOverlay::Inherit => {}
+            SettingOverlay::ProviderDefault => return (None, Some(source)),
+            SettingOverlay::Value(value) => return (Some(value), Some(source)),
+        }
+    }
+    (None, None)
+}
+
+fn resolve_wire_fast(
+    layers: impl IntoIterator<Item = (ModelSettingSource, SettingOverlay<FastMode>)>,
+) -> (FastMode, Option<ModelSettingSource>) {
+    for (source, setting) in layers {
+        match setting {
+            SettingOverlay::Inherit => {}
+            SettingOverlay::ProviderDefault => return (FastMode::Disabled, Some(source)),
+            SettingOverlay::Value(value) => return (value, Some(source)),
+        }
+    }
+    (FastMode::Disabled, None)
+}
+
 /// One automatic compatibility adjustment caused by a model change.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -2428,6 +2481,8 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Initial session model-selection defaults.
         initial_model_selection: ModelSelection,
+        /// Initial session-layer settings contribution.
+        model_settings: ModelSettingsOverlay,
         /// Optional initial system prompt; required null-or-text member.
         #[serde(default, skip_serializing_if = "SystemPromptMember::is_absent")]
         system_prompt: SystemPromptMember,
@@ -2495,6 +2550,8 @@ pub enum ClientRequest {
         /// steering.
         #[serde(deserialize_with = "deserialize_required_nullable")]
         expected_defaults_version: Option<CanonicalU64>,
+        /// Per-call settings contribution; steering must inherit every knob.
+        model_settings: ModelSettingsOverlay,
         /// Optional delivery treatment; absence selects the start-when-idle default.
         #[serde(
             default,
@@ -2583,6 +2640,8 @@ pub enum ClientRequest {
         expected_defaults_version: CanonicalU64,
         /// Complete replacement model selection.
         model_selection: ModelSelection,
+        /// Complete replacement session-layer settings contribution.
+        model_settings: ModelSettingsOverlay,
         /// Complete replacement dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
         /// Complete replacement system prompt; required null-or-text member.
@@ -2640,6 +2699,8 @@ pub enum ClientRequest {
         relationship: ImportedSessionRelationship,
         /// Initial session model-selection defaults.
         initial_model_selection: ModelSelection,
+        /// Initial session-layer settings contribution.
+        model_settings: ModelSettingsOverlay,
     },
     /// Reconcile the exact active turn parked on an ambiguous model call.
     ///
@@ -2926,6 +2987,7 @@ impl ClientRequest {
         if let Self::SubmitInput {
             expected_defaults_version,
             delivery,
+            model_settings,
             ..
         } = self
         {
@@ -2937,6 +2999,11 @@ impl ClientRequest {
             );
             if !valid {
                 return Err(FrameValidationError::InputDeliveryShape);
+            }
+            if matches!(delivery, Some(InputDelivery::Steer { .. }))
+                && *model_settings != ModelSettingsOverlay::inherit_all()
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
             }
         }
         if let Self::AppendConversationImport { chunk } = self
@@ -4486,6 +4553,55 @@ pub enum SessionEvent {
     },
 }
 
+fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationError> {
+    match event {
+        SessionEvent::SessionModelSettingsChanged {
+            prior_defaults_version,
+            installed_defaults_version,
+            prior_settings,
+            installed_settings,
+            ..
+        } => {
+            prior_settings.validate()?;
+            installed_settings.validate()?;
+            if prior_defaults_version.value().checked_add(1)
+                != Some(installed_defaults_version.value())
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
+            }
+        }
+        SessionEvent::TurnModelSettingsResolved {
+            defaults_version,
+            selected_direct_id,
+            settings,
+            ..
+        } => {
+            settings.validate()?;
+            if defaults_version.value() == 0
+                || settings
+                    .validated_for_selection_id
+                    .is_some_and(|selection| selection != *selected_direct_id)
+            {
+                return Err(FrameValidationError::ModelSettingsShape);
+            }
+        }
+        SessionEvent::SessionCreated {}
+        | SessionEvent::InputAccepted { .. }
+        | SessionEvent::GoalTurnRetired { .. }
+        | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::ToolBatchTransition { .. }
+        | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::TurnCompleted { .. }
+        | SessionEvent::TurnFailed { .. }
+        | SessionEvent::TurnRefused { .. }
+        | SessionEvent::TurnCancelled { .. }
+        | SessionEvent::TurnReconciliationRequired { .. }
+        | SessionEvent::TurnToolReconciliationRequired { .. } => {}
+    }
+    Ok(())
+}
+
 /// Closed versioned server message family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -4494,6 +4610,8 @@ pub enum ServerMessage {
     SessionCreated {
         /// Created session.
         session_id: CanonicalUuid,
+        /// Complete settings snapshot installed as defaults version one.
+        model_settings: ModelSettingsSnapshot,
     },
     /// Input acceptance receipt.
     InputSubmitted {
@@ -4505,6 +4623,8 @@ pub enum ServerMessage {
         acceptance_position: CanonicalU64,
         /// Created origin turn.
         turn_id: CanonicalUuid,
+        /// Complete settings snapshot frozen for the origin turn.
+        model_settings: ModelSettingsSnapshot,
     },
     /// Configuration-free steering acceptance receipt.
     SteeringSubmitted {
@@ -4683,6 +4803,8 @@ pub enum ServerMessage {
         defaults_version: CanonicalU64,
         /// Complete committed model selection.
         model_selection: ModelSelection,
+        /// Complete settings snapshot installed on the new epoch.
+        model_settings: ModelSettingsSnapshot,
         /// Complete committed dangerous-tool blanket-auto posture.
         dangerous_tool_auto_approval: bool,
         /// Complete committed system prompt; required null-or-text member.
@@ -4697,6 +4819,8 @@ pub enum ServerMessage {
         defaults_version: CanonicalU64,
         /// Complete model selection on that epoch.
         model_selection: ModelSelection,
+        /// Complete settings snapshot stored on the selected epoch.
+        model_settings: ModelSettingsSnapshot,
         /// Complete dangerous-tool blanket-auto posture on that epoch.
         dangerous_tool_auto_approval: bool,
         /// Exact optional system prompt on that epoch.
@@ -4994,6 +5118,11 @@ pub enum ServerMessage {
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
+            Self::SessionCreated { model_settings, .. }
+            | Self::InputSubmitted { model_settings, .. }
+            | Self::SessionDefaultsReplaced { model_settings, .. }
+            | Self::SessionDefaults { model_settings, .. } => model_settings.validate()?,
+            Self::SessionEvent { event, .. } => validate_settings_event(event)?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -5906,6 +6035,26 @@ mod tests {
         }
     }
 
+    const SETTINGS_SNAPSHOT_JSON: &str = concat!(
+        "{\"precedence\":{",
+        "\"per_call\":{\"reasoning_level\":{\"kind\":\"value\",\"value\":\"high\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"provider_default\"}},",
+        "\"session\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"profile\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}},",
+        "\"global_default\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+        "\"fast_mode\":{\"kind\":\"inherit\"},",
+        "\"service_tier\":{\"kind\":\"inherit\"}}},",
+        "\"effective\":{\"reasoning_level\":\"high\",\"fast_mode\":\"disabled\",",
+        "\"service_tier\":null},\"reasoning_source\":\"per_call\",",
+        "\"fast_mode_source\":null,\"service_tier_source\":\"per_call\",",
+        "\"validated_for_selection_id\":\"00000000-0000-0000-0000-000000000004\"}"
+    );
+
     fn orchestration_snapshot_fixture(
         state: ReviewOrchestrationState,
         status: ReviewOrchestrationConcernStatus,
@@ -6233,6 +6382,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new("hello".to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(u64::MAX)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -6927,6 +7077,7 @@ mod tests {
             ClientRequest::CreateSession {
                 command_id: command(4)?,
                 initial_model_selection: model,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
             },
         )?;
@@ -6938,6 +7089,7 @@ mod tests {
                 session_id: uuid(6),
                 content: InputContent::new(String::new()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -7470,6 +7622,7 @@ mod tests {
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(6),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         let frame =
@@ -7477,7 +7630,7 @@ mod tests {
         let encoded = encode_client_line(&frame)?;
         assert_eq!(
             String::from_utf8(encoded.clone())?,
-            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"}}}\n"
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_session_from_imported_frontier\",\"command_id\":\"00000000-0000-0000-0000-000000000004\",\"imported_conversation_id\":\"00000000-0000-0000-0000-000000000005\",\"through_position\":\"2\",\"relationship\":\"resume\",\"initial_model_selection\":{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000006\"},\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}}}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
@@ -7496,6 +7649,7 @@ mod tests {
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: uuid(6),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )?;
         let encoded = encode_client_line(&frame)?;
@@ -7589,6 +7743,7 @@ mod tests {
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: uuid(6),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         );
 
@@ -7903,6 +8058,7 @@ mod tests {
                 session_id: uuid(6),
                 content: InputContent::new(String::from("ordinary work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -8030,6 +8186,7 @@ mod tests {
                 session_id: uuid(3),
                 content: InputContent::new(String::from("content")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -8043,6 +8200,7 @@ mod tests {
                 accepted_input_id: uuid(4),
                 acceptance_position: CanonicalU64::new(1),
                 turn_id: uuid(5),
+                model_settings: settings_snapshot_fixture(),
             },
         )?;
         let encoded_response = encode_server_line(&response_frame)?;
@@ -8622,6 +8780,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(None),
         };
@@ -8635,6 +8794,8 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
@@ -8645,13 +8806,16 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: settings_snapshot_fixture(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(None),
         };
         assert_server_message_round_trip(
             request(7)?,
             replacement_receipt,
-            r#"{"type":"session_defaults_replaced","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":true,"system_prompt":null}"#,
+            &format!(
+                "{{\"type\":\"session_defaults_replaced\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":true,\"system_prompt\":null}}"
+            ),
         )?;
         let model_identity_entry = ServerMessage::TranscriptEntry {
             entry_index: CanonicalU64::new(5),
@@ -8713,6 +8877,7 @@ mod tests {
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
             )?)),
@@ -8725,6 +8890,8 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"initial_model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
         assert_eq!(decode_client_line(&encoded)?, frame);
@@ -8734,6 +8901,7 @@ mod tests {
             initial_model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
         };
         let promptless_frame =
@@ -8745,11 +8913,13 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000001\",\
              \"initial_model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"system_prompt\":null}}\n"
         );
         assert_eq!(decode_client_line(&promptless_encoded)?, promptless_frame);
         let decoded_null = decode_client_line(&line(
-            r#"{"version":1,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"system_prompt":null}}"#,
+            r#"{"version":1,"request_id":"8","request":{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000001","initial_model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"system_prompt":null}}"#,
         ))?;
         let ClientRequest::CreateSession { system_prompt, .. } = decoded_null.request() else {
             panic!("decoded frame must be a create request");
@@ -8763,6 +8933,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             dangerous_tool_auto_approval: false,
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
@@ -8777,6 +8948,8 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"expected_defaults_version\":\"3\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
+             \"fast_mode\":{\"kind\":\"inherit\"},\"service_tier\":{\"kind\":\"inherit\"}},\
              \"dangerous_tool_auto_approval\":false,\
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
@@ -8818,6 +8991,7 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: settings_snapshot_fixture(),
             dangerous_tool_auto_approval: true,
             system_prompt: SystemPromptMember::present(Some(SystemPromptText::try_new(
                 "exact prompt text".to_owned(),
@@ -8831,6 +9005,10 @@ mod tests {
              \"session_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"defaults_version\":\"4\",\"model_selection\":{\"kind\":\"direct\",\
              \"selection_id\":\"00000000-0000-0000-0000-000000000004\"},\
+             \"model_settings\":"
+                .to_owned()
+                + SETTINGS_SNAPSHOT_JSON
+                + ",\
              \"dangerous_tool_auto_approval\":true,\
              \"system_prompt\":\"exact prompt text\"}}\n"
         );
@@ -8845,13 +9023,16 @@ mod tests {
             model_selection: ModelSelection::Direct {
                 selection_id: uuid(4),
             },
+            model_settings: settings_snapshot_fixture(),
             dangerous_tool_auto_approval: false,
             system_prompt: Some(SystemPromptText::try_new("exact prompt text".to_owned())?),
         };
         assert_server_message_round_trip(
             request(13)?,
             defaults_read,
-            r#"{"type":"session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"4","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"system_prompt":"exact prompt text"}"#,
+            &format!(
+                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"4\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":\"exact prompt text\"}}"
+            ),
         )?;
         assert_server_message_round_trip(
             request(14)?,
@@ -8861,10 +9042,13 @@ mod tests {
                 model_selection: ModelSelection::Direct {
                     selection_id: uuid(4),
                 },
+                model_settings: settings_snapshot_fixture(),
                 dangerous_tool_auto_approval: false,
                 system_prompt: None,
             },
-            r#"{"type":"session_defaults","session_id":"00000000-0000-0000-0000-000000000002","defaults_version":"1","model_selection":{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000004"},"dangerous_tool_auto_approval":false,"system_prompt":null}"#,
+            &format!(
+                "{{\"type\":\"session_defaults\",\"session_id\":\"00000000-0000-0000-0000-000000000002\",\"defaults_version\":\"1\",\"model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000004\"}},\"model_settings\":{SETTINGS_SNAPSHOT_JSON},\"dangerous_tool_auto_approval\":false,\"system_prompt\":null}}"
+            ),
         )?;
         Ok(())
     }
@@ -9804,6 +9988,7 @@ mod tests {
             session_id: uuid(2),
             content: InputContent::new(String::from("steering")),
             expected_defaults_version: None,
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: Some(InputDelivery::Steer {
                 expected_active_turn_id: uuid(3),
             }),
@@ -9819,6 +10004,9 @@ mod tests {
                 "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"content\":\"steering\",\"expected_defaults_version\":null,",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}},",
                 "\"delivery\":{\"type\":\"steer\",",
                 "\"expected_active_turn_id\":",
                 "\"00000000-0000-0000-0000-000000000003\"}}}\n"
@@ -9839,6 +10027,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("queued")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -9853,6 +10042,9 @@ mod tests {
                 "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"content\":\"queued\",\"expected_defaults_version\":\"7\",",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}},",
                 "\"delivery\":{\"type\":\"queue\",",
                 "\"expected_active_turn_id\":",
                 "\"00000000-0000-0000-0000-000000000003\"}}}\n"
@@ -9874,6 +10066,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("start")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
             },
         )?;
@@ -9886,6 +10079,9 @@ mod tests {
                 "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
                 "\"content\":\"start\",\"expected_defaults_version\":\"7\",",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}},",
                 "\"delivery\":{\"type\":\"start_when_idle\"}}}\n"
             )
         );
@@ -9906,6 +10102,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("start without defaults")),
                 expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
             },
         );
@@ -9919,6 +10116,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("queue without defaults")),
                 expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -9941,6 +10139,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("misconfigured steering")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -9956,6 +10155,7 @@ mod tests {
                 session_id: uuid(2),
                 content: InputContent::new(String::from("zero-version steering")),
                 expected_defaults_version: Some(CanonicalU64::new(0)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
                     expected_active_turn_id: uuid(3),
                 }),
@@ -10024,6 +10224,7 @@ mod tests {
                 session_id: uuid(6),
                 content: InputContent::new(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )?;
@@ -10040,8 +10241,11 @@ mod tests {
             request(1)?,
             ServerMessage::SessionCreated {
                 session_id: uuid(1),
+                model_settings: settings_snapshot_fixture(),
             },
-            r#"{"type":"session_created","session_id":"00000000-0000-0000-0000-000000000001"}"#,
+            &format!(
+                "{{\"type\":\"session_created\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"model_settings\":{SETTINGS_SNAPSHOT_JSON}}}"
+            ),
         )?;
         assert_server_message_round_trip(
             request(2)?,
@@ -10050,8 +10254,11 @@ mod tests {
                 accepted_input_id: uuid(2),
                 acceptance_position: CanonicalU64::new(1),
                 turn_id: uuid(3),
+                model_settings: settings_snapshot_fixture(),
             },
-            r#"{"type":"input_submitted","session_id":"00000000-0000-0000-0000-000000000001","accepted_input_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","turn_id":"00000000-0000-0000-0000-000000000003"}"#,
+            &format!(
+                "{{\"type\":\"input_submitted\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"accepted_input_id\":\"00000000-0000-0000-0000-000000000002\",\"acceptance_position\":\"1\",\"turn_id\":\"00000000-0000-0000-0000-000000000003\",\"model_settings\":{SETTINGS_SNAPSHOT_JSON}}}"
+            ),
         )?;
         assert_server_message_round_trip(
             request(3)?,
@@ -10532,6 +10739,48 @@ mod tests {
 
         assert_eq!(decoded, frame);
         Ok(())
+    }
+
+    /// INV-033: complete settings snapshots cannot contradict their retained
+    /// precedence provenance.
+    #[test]
+    fn inv033_model_settings_snapshot_rejects_inconsistent_effective_values() {
+        let mut model_settings = settings_snapshot_fixture();
+        model_settings.effective.reasoning_level = Some(ReasoningLevel::Low);
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::SessionCreated {
+                session_id: uuid(1),
+                model_settings,
+            },
+        )
+        .expect_err("effective settings must resolve from retained provenance");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: steering inherits its source turn and cannot carry an
+    /// independent settings contribution.
+    #[test]
+    fn inv033_steering_rejects_a_model_settings_override() {
+        let mut model_settings = ModelSettingsOverlay::inherit_all();
+        model_settings.reasoning_level = SettingOverlay::Value(ReasoningLevel::High);
+        let error = ClientFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ClientRequest::SubmitInput {
+                command_id: command(1).expect("fixture command identity is admitted"),
+                session_id: uuid(2),
+                content: InputContent::new(String::from("steer")),
+                expected_defaults_version: None,
+                model_settings,
+                delivery: Some(InputDelivery::Steer {
+                    expected_active_turn_id: uuid(3),
+                }),
+            },
+        )
+        .expect_err("steering cannot override its source turn settings");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
     #[test]
