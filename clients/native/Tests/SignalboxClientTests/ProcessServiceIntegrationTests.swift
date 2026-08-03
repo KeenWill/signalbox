@@ -457,6 +457,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
   }
 
+  func testApprovalDecisionSideProjectionPromotesSuccessorWait() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithAwaitingProposedTool()
+    let trigger = try ProcessProjectionFixture.userApprovalEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let tool = try ProcessProjectionFixture.onlyTool(in: projection)
+
+    XCTAssertEqual(tool.status, .awaitingDecision)
+  }
+
   func testContextCompactionSideProjectionIncludesItsSummary() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithContextSummary()
     let trigger = try ProcessProjectionFixture.contextCompactedTrigger()
@@ -6910,6 +6921,49 @@ extension ProcessProjectionFixture {
           "model_call_id":"\(delegateModelCall)"
         },
         "rationale":"\(delegateRationale)"
+      }
+      """
+    )
+  }
+
+  static func snapshotWithAwaitingProposedTool() throws -> SignalboxSynchronizationSnapshot {
+    let snapshot = try snapshotWithProposedTool()
+    let message = try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_awaiting_tool_approval",
+          "tool_request_id":"\(proposedToolRequest)"
+        }
+      }
+      """
+    )
+    guard case .transcriptTurn(let turn) = message else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureMessage
+    }
+    return SignalboxSynchronizationSnapshot(
+      sessionID: snapshot.sessionID,
+      cursor: snapshot.cursor,
+      records: [.turn(turn)] + snapshot.records
+    )
+  }
+
+  static func userApprovalEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(closedToolID)",
+        "decision":{"type":"approve"},
+        "decider":{
+          "type":"user",
+          "command_id":"\(delegateModelSelection)"
+        },
+        "rationale":null
       }
       """
     )

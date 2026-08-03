@@ -257,7 +257,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     awaitingToolDecisionRequestID: String?,
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
-    guard entryIsSelected(message, selection: selection) else {
+    guard
+      entryIsSelected(
+        message,
+        awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
+        selection: selection
+      )
+    else {
       return nil
     }
     switch message.entry {
@@ -506,19 +512,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func entryIsSelected(
     _ message: SignalboxTranscriptEntryMessage,
+    awaitingToolDecisionRequestID: String?,
     selection: Selection
   ) -> Bool {
     switch selection {
     case .all:
       return true
     case .trigger(let trigger):
-      return entry(message, isAttributableTo: trigger)
+      return entry(
+        message,
+        isAttributableTo: trigger,
+        awaitingToolDecisionRequestID: awaitingToolDecisionRequestID
+      )
     }
   }
 
   private func entry(
     _ message: SignalboxTranscriptEntryMessage,
-    isAttributableTo trigger: SignalboxProcessSessionEvent
+    isAttributableTo trigger: SignalboxProcessSessionEvent,
+    awaitingToolDecisionRequestID: String?
   ) -> Bool {
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
@@ -545,6 +557,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .turnCancelled(let turnID, let cancellationEntryID, _):
       return message.entryID == cancellationEntryID
         || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
+    case .toolApprovalDecided(let turnID, _, _, _, _):
+      guard let awaitingToolDecisionRequestID,
+        case .assistantToolUse(let entryTurnID, _, let requestID, _, _, _) = message.entry
+      else {
+        return false
+      }
+      return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
     case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
       guard
         case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
@@ -554,8 +573,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
       return entryAttemptID == toolAttemptID && context.turnID == turnID
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolApprovalDecided, .contextCompacted, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+      .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
   }
