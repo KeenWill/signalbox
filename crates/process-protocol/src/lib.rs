@@ -90,6 +90,9 @@ pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
 /// Maximum exact required tags in one metadata-list filter.
 pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
+/// Maximum ASCII bytes in one complete dotted session-placement path.
+pub const MAX_SESSION_PLACEMENT_PATH_BYTES: usize = 4000;
+
 /// Maximum UTF-8 bytes in one session system prompt.
 pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
@@ -1407,6 +1410,7 @@ fn validate_session_placement(placement: &SessionPlacement) -> Result<(), FrameV
     };
     let segments = path.split('.').collect::<Vec<_>>();
     let shape_valid = !path.is_empty()
+        && path.len() <= MAX_SESSION_PLACEMENT_PATH_BYTES
         && segments.len() <= 64
         && segments.iter().all(|segment| {
             !segment.is_empty()
@@ -8863,6 +8867,26 @@ mod tests {
             Err(super::CanonicalValueError::Placement)
         );
         Ok(())
+    }
+
+    #[test]
+    fn inv033_session_placement_constructor_rejects_paths_over_the_total_byte_bound() {
+        let segment_valid_path_over_total_bound = vec!["x".repeat(64); 63].join(".");
+
+        assert_eq!(
+            super::SessionPlacement::try_scoped(segment_valid_path_over_total_bound),
+            Err(super::CanonicalValueError::Placement)
+        );
+    }
+
+    #[test]
+    fn inv033_session_placement_decoder_rejects_paths_over_the_total_byte_bound() {
+        let segment_valid_path_over_total_bound = vec!["x".repeat(64); 63].join(".");
+        let frame = format!(
+            r#"{{"version":1,"request_id":"1","request":{{"type":"create_session","command_id":"00000000-0000-0000-0000-000000000047","initial_model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000048"}},"system_prompt":null,"placement":{{"kind":"scoped","path":"{segment_valid_path_over_total_bound}"}}}}}}"#
+        );
+
+        assert_client_malformed(&frame);
     }
 
     /// INV-033: invalid template names or versions cannot enter admitted frames.

@@ -46,8 +46,6 @@ const ARBITRARY_ROOT_CREATION_COMMAND_ID_SEED: u128 = 0x101;
 const ARBITRARY_ROOT_CREATION_SESSION_ID_SEED: u128 = 0x201;
 const ARBITRARY_PATHLESS_CREATION_COMMAND_ID_SEED: u128 = 0x102;
 const ARBITRARY_PATHLESS_CREATION_SESSION_ID_SEED: u128 = 0x202;
-const ARBITRARY_OVERLONG_PATH_CREATION_COMMAND_ID_SEED: u128 = 0x138;
-const ARBITRARY_OVERLONG_PATH_SESSION_ID_SEED: u128 = 0x233;
 const ARBITRARY_RESERVED_IDENTITY_SESSION_ID_SEED: u128 = 0x230;
 const ARBITRARY_RESERVED_IDENTITY_CREATION_COMMAND_ID_SEED: u128 = 0x130;
 const ARBITRARY_MISSING_HEAD_SESSION_ID_SEED: u128 = 0x204;
@@ -146,46 +144,6 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .await?;
     migrate(&pool).await?;
     Ok((container, pool))
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_schema_rejects_a_segment_valid_path_over_the_total_bound() -> Result<(), Box<dyn Error>>
-{
-    let (container, pool) = migrated_postgres().await?;
-    let session_id = session(ARBITRARY_OVERLONG_PATH_SESSION_ID_SEED);
-    CreateSessionRepository::new(pool.clone(), credential_pin())
-        .handle(creation(
-            command(ARBITRARY_OVERLONG_PATH_CREATION_COMMAND_ID_SEED),
-            session_id,
-            SessionPlacement::pathless(),
-        ))
-        .await?;
-    sqlx::query("ALTER TABLE session_placement_event DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    let overlong_path = vec![
-        "x".repeat(SessionPlacementPath::MAX_SEGMENT_BYTES);
-        SessionPlacementPath::MAX_DEPTH - 1
-    ]
-    .join(".");
-    assert!(overlong_path.len() > SessionPlacementPath::MAX_BYTES);
-
-    let error = sqlx::query(
-        "UPDATE session_placement_event
-            SET placement_path = $2
-          WHERE session_id = $1",
-    )
-    .bind(*session_id.as_uuid())
-    .bind(overlong_path)
-    .execute(&pool)
-    .await
-    .expect_err("the database total-path bound matches domain admission");
-    assert!(error.as_database_error().is_some());
-
-    pool.close().await;
-    drop(container);
-    Ok(())
 }
 
 struct ScopedReadFixture {
