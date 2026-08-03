@@ -266,7 +266,27 @@ BEGIN
                          FROM turn_lifecycle AS live_turn
                          WHERE live_turn.session_id = action.session_id
                            AND live_turn.state_kind <> 'terminal'
-                           AND live_turn.turn_id <> completed_turn_id
+                           AND goal_turn_is_runtime_relevant(
+                                live_turn.session_id,
+                                live_turn.turn_id
+                           )
+                           AND (
+                                completed_turn_id IS NULL
+                                OR live_turn.turn_id <> completed_turn_id
+                           )
+                   )
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM goal_event AS current_goal
+                         WHERE current_goal.session_id = action.session_id
+                           AND current_goal.event_ordinal = (
+                                SELECT max(candidate.event_ordinal)
+                                  FROM goal_event AS candidate
+                                 WHERE candidate.session_id = action.session_id
+                           )
+                           AND current_goal.event_kind IN (
+                                'commissioned', 'resumed', 'superseded'
+                           )
                    )
            )
         ON CONFLICT DO NOTHING;
@@ -294,6 +314,27 @@ CREATE TRIGGER repo_watch_dispatch_release_on_terminal_turn
 AFTER UPDATE OF state_kind ON turn_lifecycle
 FOR EACH ROW
 EXECUTE FUNCTION repo_watch_release_completed_dispatch_batches();
+
+CREATE FUNCTION repo_watch_release_completed_dispatch_batches_for_goal()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.event_kind NOT IN ('blocked', 'achieved', 'user_stopped') THEN
+        RETURN NULL;
+    END IF;
+    PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
+        NULL::uuid,
+        NEW.session_id
+    );
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER repo_watch_dispatch_release_on_terminal_goal
+AFTER INSERT ON goal_event
+FOR EACH ROW
+EXECUTE FUNCTION repo_watch_release_completed_dispatch_batches_for_goal();
 
 CREATE TABLE repo_watch_rule_evaluation (
     repository text NOT NULL,

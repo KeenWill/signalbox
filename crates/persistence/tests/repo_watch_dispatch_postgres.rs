@@ -13,16 +13,21 @@ use signalbox_application::{
     RepoWatchTemplateResolver, UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
-    BranchName, CommitSha, DangerousToolAutoApproval, DirectModelSelection, MergeableState,
-    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
+    AcceptedInputId, BranchName, CommitSha, DangerousToolAutoApproval, DirectModelSelection,
+    DurableCommandId, GoalCommandResult, GoalNeed, GoalSchedulerProvenance, GoalStatement,
+    GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionRequest, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepositorySlug,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, UserContent,
+    SessionTemplateName, SessionTemplateProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
-    SessionCredentialPin, SessionModelCredential, local_test_connection_options, migrate,
+    SessionCredentialPin, SessionModelCredential,
+    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
+    goal_turn::GoalTurnCandidates,
+    local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
@@ -236,6 +241,85 @@ fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
 
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
     matches!(outcome, RepoWatchRuleEvaluationOutcome::Dispatched { .. })
+}
+
+fn command(value: u128) -> DurableCommandId {
+    DurableCommandId::from_uuid(Uuid::from_u128(value))
+}
+
+fn goal_turn_candidates(value: u128) -> GoalTurnCandidates {
+    GoalTurnCandidates::new(
+        AcceptedInputId::from_uuid(Uuid::from_u128(value)),
+        TurnId::from_uuid(Uuid::from_u128(value + 1)),
+    )
+}
+
+fn assert_applied_goal_command(outcome: GoalCommandHandlingOutcome) {
+    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) = outcome else {
+        panic!("fixture goal command must apply");
+    };
+}
+
+fn assert_applied_goal_transition(outcome: GoalTransitionOutcome) {
+    let GoalTransitionOutcome::Applied(_) = outcome else {
+        panic!("fixture goal transition must apply");
+    };
+}
+
+async fn mark_queued_turn_failed(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+    predecessor: Option<TurnId>,
+    identity_seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    let lineage = if predecessor.is_some() {
+        "after"
+    } else {
+        "first_in_session"
+    };
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal', start_lineage_kind = $3,
+                immediate_predecessor_turn_id = $4, starting_frontier_id = $5,
+                terminal_frontier_id = $6, terminal_disposition_kind = 'failed'
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.as_uuid())
+    .bind(turn.as_uuid())
+    .bind(lineage)
+    .bind(predecessor.map(TurnId::into_uuid))
+    .bind(Uuid::from_u128(identity_seed))
+    .bind(Uuid::from_u128(identity_seed + 1))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn check_completed_turn_for_release(
+    pool: &PgPool,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
+        .bind(turn.as_uuid())
+        .bind(session.as_uuid())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn release_count(fixture: &DispatchFixture) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_release WHERE dispatch_id = $1")
+        .bind(fixture.dispatch_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await
 }
 
 async fn wait_for_backend_lock(pool: &PgPool, backend: i32) -> Result<(), Box<dyn Error>> {
@@ -582,6 +666,64 @@ async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time
 
     assert!(release_age_seconds >= 7_199.0);
     assert!(outcome_is_dispatched(&outcome));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pursuing_goal_holds_singleton_until_its_terminal_transition() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.sessions[0];
+    let initial_turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    let goal_turn = goal_turn_candidates(0x2_000);
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0x3_000),
+                    session,
+                    GoalUserAction::Attach(
+                        GoalStatement::try_new(String::from("finish repository ownership"))
+                            .expect("fixture goal statement is valid"),
+                    ),
+                ),
+                Some(goal_turn),
+                |_| None,
+            )
+            .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, session, initial_turn, None, 0x4_000).await?;
+    check_completed_turn_for_release(&fixture.pool, session, initial_turn).await?;
+    assert_eq!(release_count(&fixture).await?, 0);
+    mark_queued_turn_failed(
+        &fixture.pool,
+        session,
+        goal_turn.turn(),
+        Some(initial_turn),
+        0x6_000,
+    )
+    .await?;
+    check_completed_turn_for_release(&fixture.pool, session, goal_turn.turn()).await?;
+    assert_eq!(release_count(&fixture).await?, 0);
+    assert_applied_goal_transition(
+        GoalRepository::new(fixture.pool.clone())
+            .block_execution_failure(
+                session,
+                GoalNeed::try_new(String::from("repair the failed goal turn"))
+                    .expect("fixture goal need is valid"),
+                GoalSchedulerProvenance::new(goal_turn.turn()),
+            )
+            .await?,
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
     Ok(())
 }
 

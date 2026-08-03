@@ -345,9 +345,12 @@ singleton refuses another match. The batch releases it at the terminal
 transition that makes every dispatched session in that batch terminal; cooldown
 is measured from that recorded transition rather than from later watcher work
 and suppresses a successor until its interval has elapsed. Equal recovery cannot
-create a second session for the same admitted action. The append-only dispatch
-records identify the sessions responsible for the PR; no mutable assignment flag
-replaces them.
+create a second session for the same admitted action. A session whose current
+goal is pursuing remains nonterminal for singleton ownership across the gap
+between a completed goal turn and its durably queued continuation. Goal
+blocking, achievement, or user stop rechecks release after pursuit ends. The
+append-only dispatch records identify the sessions responsible for the PR; no
+mutable assignment flag replaces them.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
