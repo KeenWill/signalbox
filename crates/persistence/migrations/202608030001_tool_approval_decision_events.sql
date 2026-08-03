@@ -49,7 +49,7 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM tool_approval_decision
          WHERE request_id = NEW.request_id
-           AND decision_source <> 'automatic'
+           AND decision_source NOT IN ('policy_auto', 'session_blanket')
     ) THEN
         RAISE EXCEPTION 'tool approval decided event requires explicit provenance'
             USING ERRCODE = '23514',
@@ -80,7 +80,7 @@ AS $$
 DECLARE
     matching_effects bigint;
 BEGIN
-    IF NEW.decision_source = 'automatic' THEN
+    IF NEW.decision_source IN ('policy_auto', 'session_blanket') THEN
         RETURN NULL;
     END IF;
 

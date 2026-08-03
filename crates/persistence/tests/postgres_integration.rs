@@ -781,6 +781,12 @@ struct ApprovalJudgeDecisionDurableState {
 }
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
+struct AutomaticApprovalEventState {
+    decision_exists: bool,
+    decided_event_exists: bool,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
 struct AppliedApprovalJudgeProjection {
     judge_state: String,
     recommendation: String,
@@ -2329,12 +2335,14 @@ async fn checkpoint_tool_batch_with_approval(
     let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
         panic!("the fixture reaches a tool round")
     };
-    assert_eq!(
-        round.next_phase(),
-        &ActiveTurnPhase::AwaitingApproval {
-            request: requests[0],
-        }
-    );
+    if initial_approval.requires_decision() {
+        assert_eq!(
+            round.next_phase(),
+            &ActiveTurnPhase::AwaitingApproval {
+                request: requests[0],
+            }
+        );
+    }
     Ok((fixture, model_repository, observation, requests))
 }
 async fn insert_completed_judge(
@@ -4237,6 +4245,43 @@ async fn approval_decision_insert_serializes_a_concurrent_judge_preparation()
     .await?;
     assert!(durable_state.prepared_judge_exists);
     assert!(!durable_state.decision_exists);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _repository, _observation, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        APPROVAL_FIXTURE_SEED,
+        &[(APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS)],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the automatic fixture returns one request")
+    };
+    let state: AutomaticApprovalEventState = sqlx::query_as(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM tool_approval_decision
+                 WHERE request_id = $1 AND decision_source = 'policy_auto'
+            ) AS decision_exists,
+            EXISTS (
+                SELECT 1 FROM tool_approval_decided_outbox_event
+                 WHERE request_id = $1
+            ) AS decided_event_exists",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert!(state.decision_exists);
+    assert!(!state.decided_event_exists);
 
     pool.close().await;
     drop(container);
