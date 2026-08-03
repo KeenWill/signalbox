@@ -579,6 +579,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testUnknownSnapshotTurnStateStaysAfterEarlierTranscriptEntries() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithTranscriptBeforeUnknownTurnState()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.transcriptThenUnknownTimelineKinds
+    )
+  }
+
   func testPlanReadUsesTypedFaithfulTimelineSummary() throws {
     let record = ProcessProjectionFixture.planReadToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -603,6 +616,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.planCreateArgumentPresentation
     )
     XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateOutputPresentation)
+  }
+
+  func testDeniedPlanWriteKeepsResultShapedOutputRaw() throws {
+    let record = ProcessProjectionFixture.deniedPlanCreateToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputLabel, ProcessProjectionFixture.rawToolOutputLabel)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planCreateRawOutputPreview)
+  }
+
+  func testClosedPlanReadKeepsResultShapedOutputRaw() throws {
+    let record = ProcessProjectionFixture.closedPlanReadToolRecord()
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: normalizer.timelineItems)
+
+    XCTAssertEqual(tool.outputLabel, ProcessProjectionFixture.rawToolOutputLabel)
+    XCTAssertEqual(tool.outputPreview, ProcessProjectionFixture.planReadRawOutputPreview)
   }
 
   func testPlanRevisionUsesTypedFaithfulTimelineSummary() throws {
@@ -5361,6 +5392,9 @@ private enum ProcessProjectionFixture {
     "Turn \(crossTurn), model call \(ProcessDriverFixture.modelCall): "
       + "the snapshot retained an unrecognized current model-call state.",
   ]
+  static let transcriptThenUnknownTimelineKinds: [ProcessTimelineFixtureKind] = [
+    .message, .message, .unknown,
+  ]
   static let planReadRequestID = "ffffffff-5555-4555-8555-555555555551"
   static let planWriteRequestID = "ffffffff-5555-4555-8555-555555555552"
   static let planCreateRequestID = "ffffffff-5555-4555-8555-555555555553"
@@ -5468,6 +5502,9 @@ private enum ProcessProjectionFixture {
   static let cyclicPlanHistoryPreview = rawToolOutputPreview(cyclicPlanHistoryOutput)
   static let planReadDisplayName = "Plan read"
   static let planWriteDisplayName = "Plan update"
+  static let rawToolOutputLabel = "Output"
+  static let planReadRawOutputPreview = rawToolOutputPreview(planReadOutput)
+  static let planCreateRawOutputPreview = rawToolOutputPreview(planCreateOutput)
   static let planReadArgumentPresentation = "After entry: Beginning\nInclude history: Yes"
   static let planCreateArgumentPresentation = "Create entry: Draft protocol"
   static let planReviseArgumentPresentation = "Revise entry #1: Audit protocol"
@@ -7108,6 +7145,21 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func snapshotWithTranscriptBeforeUnknownTurnState() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    let transcript = try snapshotWithCompletedTurnEntries()
+    let unknown = try snapshotWithUnknownTurnState()
+    guard case .turn(let unknownTurn)? = unknown.records.first else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureEvent
+    }
+    return SignalboxSynchronizationSnapshot(
+      sessionID: transcript.sessionID,
+      cursor: transcript.cursor,
+      records: [.turn(unknownTurn)] + transcript.records
+    )
+  }
+
   static func snapshotWithUnknownTurnState() throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7160,6 +7212,16 @@ private enum ProcessProjectionFixture {
     )
   }
 
+  static func closedPlanReadToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planReadRequestID,
+      toolName: "plan_read",
+      arguments: planReadArguments,
+      output: planReadOutput,
+      status: .closed
+    )
+  }
+
   static func planCreateToolRecord() -> SignalboxStoredEvent {
     planToolRecord(
       requestID: planCreateRequestID,
@@ -7167,6 +7229,16 @@ private enum ProcessProjectionFixture {
       arguments: planCreateArguments,
       output: planCreateOutput,
       status: .completed
+    )
+  }
+
+  static func deniedPlanCreateToolRecord() -> SignalboxStoredEvent {
+    planToolRecord(
+      requestID: planCreateRequestID,
+      toolName: "plan_write",
+      arguments: planCreateArguments,
+      output: planCreateOutput,
+      status: .denied
     )
   }
 

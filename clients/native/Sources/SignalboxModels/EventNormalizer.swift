@@ -306,7 +306,8 @@ public enum SignalboxEventNormalizer {
             let plan = planPresentation(
                 toolName: event.toolName,
                 arguments: event.arguments,
-                output: event.output
+                output: event.output,
+                status: event.status
             )
             return .tool(
                 SignalboxToolCard(
@@ -382,7 +383,7 @@ public enum SignalboxEventNormalizer {
         let name: String
         let argumentsLabel: String
         let arguments: String?
-        let outputLabel: String
+        let outputLabel: String?
         let output: String?
     }
 
@@ -754,40 +755,47 @@ public enum SignalboxEventNormalizer {
     private static func planPresentation(
         toolName: String,
         arguments: String?,
-        output: String?
+        output: String?,
+        status: SignalboxProcessToolStatus
     ) -> PlanPresentation? {
         switch toolName {
         case "plan_read":
             let decodedArguments = arguments.flatMap(decodePlanReadArguments)
-            let decodedOutput = output.flatMap { decode(PlanReadOutput.self, from: $0) }
+            let decodedOutput = status == .completed
+                ? output.flatMap { decode(PlanReadOutput.self, from: $0) }
+                : nil
+            let presentationOutput = decodedArguments.flatMap { arguments in
+                decodedOutput.flatMap { output in
+                    validPlanReadResponse(arguments: arguments, output: output)
+                        ? formattedPlanReadOutput(output)
+                        : nil
+                }
+            }
             return PlanPresentation(
                 name: "Plan read",
                 argumentsLabel: "Read request",
                 arguments: decodedArguments.map(formattedPlanReadArguments),
-                outputLabel: "Current plan",
-                output: decodedArguments.flatMap { arguments in
-                    decodedOutput.flatMap { output in
-                        validPlanReadResponse(arguments: arguments, output: output)
-                            ? formattedPlanReadOutput(output)
-                            : nil
-                    }
-                }
+                outputLabel: presentationOutput == nil ? nil : "Current plan",
+                output: presentationOutput
             )
         case "plan_write":
             let decodedArguments = arguments.flatMap(decodePlanWriteArguments)
-            let decodedOutput = output.flatMap { decode(PlanWriteOutput.self, from: $0) }
+            let decodedOutput = status == .completed
+                ? output.flatMap { decode(PlanWriteOutput.self, from: $0) }
+                : nil
+            let presentationOutput = decodedArguments.flatMap { arguments in
+                decodedOutput.flatMap { output in
+                    planEvent(output.event, matches: arguments)
+                        ? formattedPlanEvent(output.event)
+                        : nil
+                }
+            }
             return PlanPresentation(
                 name: "Plan update",
                 argumentsLabel: "Plan operation",
                 arguments: decodedArguments.map(formattedPlanWriteArguments),
-                outputLabel: "Appended event",
-                output: decodedArguments.flatMap { arguments in
-                    decodedOutput.flatMap { output in
-                        planEvent(output.event, matches: arguments)
-                            ? formattedPlanEvent(output.event)
-                            : nil
-                    }
-                }
+                outputLabel: presentationOutput == nil ? nil : "Appended event",
+                output: presentationOutput
             )
         default:
             return nil

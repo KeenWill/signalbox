@@ -70,10 +70,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     let entryIndex: SignalboxCanonicalUInt64
   }
 
+  private static let maximumAnchoredEntryIndex = UInt64((Int.max / 2 - 2) / 2)
+  private static let firstTurnStateEventID = Int.max / 2 + 1
+
   private var presentationIDs: [PresentationIdentity: SignalboxEventID] = [:]
   private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
   private var toolContextsByRequestID: [String: ToolContext] = [:]
-  private var nextSyntheticEventID = Int.min / 2
+  private var nextSyntheticEventID = Self.firstTurnStateEventID
   private var nextModelCallUsageEventID = Int.min / 4
 
   public init() {}
@@ -611,7 +614,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     if let existing = presentationIDs[identity] {
       return existing
     }
-    guard entryIndex.rawValue <= UInt64((Int.max - 1) / 2) else {
+    guard entryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
     let claimed = SignalboxEventID(rawValue: Int(entryIndex.rawValue) * 2 + 1)
@@ -625,7 +628,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     if let existing = presentationIDs[identity] {
       return existing
     }
-    guard nextSyntheticEventID < Int.min / 4 else {
+    guard nextSyntheticEventID < Int.max else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
     let claimed = SignalboxEventID(rawValue: nextSyntheticEventID)
@@ -643,7 +646,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return existing
     }
     if let anchorEntryIndex {
-      guard anchorEntryIndex.rawValue <= UInt64((Int.max - 2) / 2) else {
+      guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
         throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
       }
       let claimed = SignalboxEventID(rawValue: Int(anchorEntryIndex.rawValue) * 2 + 2)
