@@ -821,6 +821,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testUnknownSnapshotTurnStateReanchorsAfterAuthoritativeRefresh() throws {
+    var projector = SignalboxProcessTranscriptProjector()
+    let unanchored = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithUnknownTurnState()
+    )
+
+    let anchored = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithTranscriptBeforeUnknownTurnState()
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: anchored.records)
+
+    XCTAssertEqual(anchored.records.first?.eventID, unanchored.records.first?.eventID)
+    XCTAssertEqual(
+      ProcessProjectionFixture.timelineKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.unknownThenTranscriptTimelineKinds
+    )
+  }
+
   func testPlanReadUsesTypedFaithfulTimelineSummary() throws {
     let record = ProcessProjectionFixture.planReadToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -10107,6 +10125,24 @@ extension ProcessServiceIntegrationTests {
     XCTAssertEqual(boundaryCards.newest.kind, ProcessProjectionFixture.unknownNestedStateKind)
   }
 
+  @MainActor
+  func testUnknownHistoryBoundaryHasDistinctTimelineIdentity() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .authoritativeSnapshot(
+        try ProcessProjectionFixture.snapshotWithUnknownEntryKind(
+          ProcessProjectionFixture.futureSessionEventKind
+        )
+      )
+    )
+
+    try ProcessProjectionFixture.fillUnknownSessionEventHistory(in: viewModel)
+
+    XCTAssertEqual(Set(viewModel.timeline.map(\.id)).count, viewModel.timeline.count)
+  }
+
   func testModelUsageKeepsItsTranscriptAnchorAfterNormalization() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithAnchoredUsageAndLaterMessage()
     var projector = SignalboxProcessTranscriptProjector()
@@ -10422,7 +10458,7 @@ extension ProcessServiceIntegrationTests {
 extension ProcessProjectionFixture {
   static let futureSessionEventKind = "fixture_future_session_event"
   static let formerUsageCollisionEntryIndex = UInt64(7)
-  static let disjointUsageAndSemanticPresentationIDs = [Int.min, Int.min / 4]
+  static let disjointUsageAndSemanticPresentationIDs = [Int.min + 1, Int.min / 4]
   static let disjointUsageAndSemanticEventKinds = [
     "process_conservative", "process_model_call_usage",
   ]

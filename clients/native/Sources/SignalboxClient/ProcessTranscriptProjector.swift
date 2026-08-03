@@ -75,7 +75,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private static let presentationLaneStride = 4
-  private static let firstSemanticEventID = Int.min
+  private static let firstSemanticEventID = Int.min + 1
   private static let semanticEventIDLimit = Int.min / 2
   private static let firstTurnStateEventID = Int.max / 2 + 1
   private static let maximumAnchoredEntryIndex = UInt64(
@@ -865,6 +865,21 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return claimed
   }
 
+  private func turnStatePresentationOrder(
+    eventID: SignalboxEventID,
+    anchorEntryIndex: SignalboxCanonicalUInt64?
+  ) throws -> SignalboxEventID {
+    guard let anchorEntryIndex else {
+      return eventID
+    }
+    guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    return SignalboxEventID(
+      rawValue: Int(anchorEntryIndex.rawValue) * Self.presentationLaneStride
+    )
+  }
+
   private mutating func claimModelCallUsagePresentationID(
     _ evidence: SignalboxTranscriptModelCallUsage,
     anchorEntryIndex: SignalboxCanonicalUInt64?,
@@ -987,9 +1002,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard let content else {
       return nil
     }
+    let eventID = try claimTurnStatePresentationID(
+      .turnState(turn.turnID.rawValue),
+      anchorEntryIndex: anchorEntryIndex
+    )
     return SignalboxStoredEvent(
-      eventID: try claimTurnStatePresentationID(
-        .turnState(turn.turnID.rawValue),
+      eventID: eventID,
+      presentationOrder: try turnStatePresentationOrder(
+        eventID: eventID,
         anchorEntryIndex: anchorEntryIndex
       ),
       event: .processConservative(
