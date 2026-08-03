@@ -132,7 +132,7 @@ fn openai_service_tier<C>(
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Scale)) => Some("scale"),
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority)) => Some("priority"),
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Fast)) => Some("fast"),
-        Some(_) => {
+        Some(ServiceTier::Anthropic(_)) | Some(ServiceTier::CodexCli(_)) => {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: "OpenAI cannot enforce another provider's service tier".to_string(),
             });
