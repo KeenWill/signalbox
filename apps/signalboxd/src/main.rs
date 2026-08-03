@@ -46,15 +46,15 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CODE_HOST_CREDENTIAL_REFERENCE,
-    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonTools, DaemonToolsConstructionError,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
-    LocalProcessListener, LocalSocketError, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
-    usage_limits::UsageLimitedModelCallProvider,
+    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
+    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
+    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -899,8 +899,8 @@ async fn run_hub(
         })?;
     let daemon_tool_configuration = model_configuration.daemon_tools();
     let tool_composition = match daemon_tool_configuration {
-        Some(_) => daemon_tools::DaemonToolComposition::WithMappedFamilies,
-        None => daemon_tools::DaemonToolComposition::Base,
+        Some(_) => DaemonToolComposition::WithMappedFamilies,
+        None => DaemonToolComposition::Base,
     };
     DaemonToolCatalog::validate_approval_postures_for_composition(
         model_configuration.tool_approval_postures(),
