@@ -68,18 +68,18 @@ use signalbox_process_protocol::{
     ConversationSummary, CurrentModelCallState, EffectiveModelSettings, ErrorCode, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelSelection, ModelSettingsOverlay, ModelSettingsPrecedence,
-    ModelSettingsSnapshot, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
-    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
-    ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SystemPromptMember,
-    SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState,
-    decode_server_line, encode_client_line,
+    MetadataActor, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
+    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
+    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
+    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -144,6 +144,7 @@ model_family = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 256
 context_window_tokens = 200000
+reasoning_levels = ["low"]
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000004"
@@ -382,6 +383,18 @@ fn provider_default_model_settings(selection_id: CanonicalUuid) -> ModelSettings
         fast_mode_source: None,
         service_tier_source: None,
         validated_for_selection_id: Some(selection_id),
+    }
+}
+
+fn primary_direct_selection_id() -> CanonicalUuid {
+    CanonicalUuid::from_uuid(Uuid::from_u128(1))
+}
+
+fn low_reasoning_override() -> ModelSettingsOverlay {
+    ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
     }
 }
 
@@ -875,6 +888,27 @@ async fn accepted_successor_turn(
         message => {
             Err(io::Error::other(format!("unexpected accepted-input response: {message:?}")).into())
         }
+    }
+}
+
+async fn accepted_successor_model_settings(
+    connection: &mut Connection,
+    session_id: CanonicalUuid,
+    acceptance: u64,
+) -> Result<ModelSettingsSnapshot, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::InputSubmitted {
+            session_id: accepted_session,
+            acceptance_position,
+            model_settings,
+            ..
+        } if *accepted_session == session_id && acceptance_position.value() == acceptance => {
+            Ok(*model_settings)
+        }
+        message => Err(io::Error::other(format!(
+            "unexpected accepted-input settings response: {message:?}"
+        ))
+        .into()),
     }
 }
 
@@ -3490,6 +3524,49 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
     runtime.stop().await
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+    let requested = low_reasoning_override();
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                expected_defaults_version: CanonicalU64::new(1),
+                model_settings: requested,
+            },
+        )
+        .await?;
+    let settings = accepted_successor_model_settings(&mut connection, session_id, 2).await?;
+
+    assert_eq!(settings.precedence.per_call, requested);
+    assert_eq!(
+        settings.effective.reasoning_level,
+        Some(ReasoningLevel::Low)
+    );
+    assert_eq!(settings.reasoning_source, Some(ModelSettingSource::PerCall));
+    assert_eq!(
+        settings.validated_for_selection_id,
+        Some(primary_direct_selection_id())
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// INV-012: two overlapping requests carrying one reconciliation command
 /// identity both land on the committed decision.
 ///
@@ -4347,6 +4424,48 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
     assert_eq!(
         replayed_turn_id, successor_turn_id,
         "an equal stop retry returns its recorded successor"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, stopped_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    activate_turn(&runtime.pool, SessionId::from_uuid(session_id.into_uuid())).await?;
+    let requested = low_reasoning_override();
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: stopped_turn_id,
+                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                expected_defaults_version: CanonicalU64::new(1),
+                model_settings: requested,
+            },
+        )
+        .await?;
+    let settings = accepted_successor_model_settings(&mut connection, session_id, 2).await?;
+
+    assert_eq!(settings.precedence.per_call, requested);
+    assert_eq!(
+        settings.effective.reasoning_level,
+        Some(ReasoningLevel::Low)
+    );
+    assert_eq!(settings.reasoning_source, Some(ModelSettingSource::PerCall));
+    assert_eq!(
+        settings.validated_for_selection_id,
+        Some(primary_direct_selection_id())
     );
 
     drop(connection);

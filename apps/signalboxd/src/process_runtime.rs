@@ -1374,15 +1374,6 @@ where
             expected_defaults_version,
             model_settings,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_reconcile_turn(
                 writer,
                 version,
@@ -1392,6 +1383,7 @@ where
                 expected_active_turn_id,
                 content,
                 expected_defaults_version,
+                model_settings,
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -1938,15 +1930,6 @@ where
             expected_defaults_version,
             model_settings,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_stop_turn(
                 writer,
                 version,
@@ -1956,6 +1939,7 @@ where
                 expected_active_turn_id,
                 content,
                 expected_defaults_version,
+                model_settings,
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -8245,6 +8229,7 @@ async fn handle_reconcile_turn<Writer>(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: CanonicalU64,
+    model_settings: WireModelSettingsOverlay,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -8295,6 +8280,7 @@ where
         )
         .await;
     };
+    let model_settings = domain_model_settings_overlay(model_settings);
     if !command_is_claimed {
         match ProcessReadRepository::new(pool.clone())
             .model_call_recovery_precondition(session)
@@ -8356,9 +8342,10 @@ where
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
-            configuration: PerInputConfigurationChoices::new(
+            configuration: PerInputConfigurationChoices::with_model_settings(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
+                model_settings,
             ),
         },
     );
@@ -8407,6 +8394,7 @@ async fn handle_stop_turn<Writer>(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: CanonicalU64,
+    model_settings: WireModelSettingsOverlay,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -8442,15 +8430,17 @@ where
         )
         .await;
     };
+    let model_settings = domain_model_settings_overlay(model_settings);
     let request = SubmitInputRequest::try_new(
         command_id,
         session,
         content,
         DeliveryRequest::Interrupt {
             expected_active_turn,
-            configuration: PerInputConfigurationChoices::new(
+            configuration: PerInputConfigurationChoices::with_model_settings(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
+                model_settings,
             ),
         },
     );
