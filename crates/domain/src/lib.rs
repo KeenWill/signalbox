@@ -52,7 +52,7 @@ pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
     SessionSystemPromptError, SessionSystemPromptFailure, TurnConfigurationProvenance,
     UnknownModelAlias, VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
@@ -136,12 +136,13 @@ pub use model_execution::{
     ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use model_settings::{
-    AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings, EffectiveModelSettings,
-    FastMode, FastModeSupport, ModelCapabilities, ModelCapabilityCatalog,
-    ModelCapabilityCatalogError, ModelCapabilityDefinition, ModelChangeAdjustment,
-    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
-    ReasoningLevel, ResolvedModelSettings, ServiceTier, SessionModelSettingsChanged,
-    SettingOverlay, TurnModelSettingsResolved, UnsupportedModelSetting, ValidatedModelSettings,
+    AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
+    EffectiveModelSettings, FastMode, FastModeOverlay, FastModeSupport, ModelCapabilities,
+    ModelCapabilityCatalog, ModelCapabilityCatalogError, ModelCapabilityDefinition,
+    ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+    OpenAiServiceTier, ReasoningLevel, ResolvedModelSettings, ServiceTier,
+    SessionModelSettingsChanged, SettingOverlay, TurnModelSettingsResolved,
+    UnsupportedModelSetting, ValidatedModelSettings,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,

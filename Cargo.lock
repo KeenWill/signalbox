@@ -3326,6 +3326,7 @@ version = "0.0.0"
 dependencies = [
  "expect-test",
  "rust_decimal",
+ "serde",
  "serde_json",
  "signalbox-application",
  "signalbox-conversation-import-claude-code",
@@ -3476,8 +3477,14 @@ dependencies = [
  "gix-hash",
  "gix-validate",
  "rustix",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-tool-contract",
  "signalbox-tools-workspace",
  "tempfile",
 ]

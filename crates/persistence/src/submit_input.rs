@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_application::{SubmitInputOutcome, SubmitInputTransaction};
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
@@ -21,11 +22,12 @@ use signalbox_domain::{
     FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
     GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
     ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, SemanticTranscriptEntryId,
+    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, PerInputConfigurationChoices,
+    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -62,8 +64,10 @@ use crate::{
         dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
-        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
-        turn_id_to_uuid,
+        model_change_adjustments_from_json, model_change_adjustments_to_json,
+        model_settings_from_json, model_settings_overlay_from_json, model_settings_overlay_to_json,
+        model_settings_to_json, positive_u64_from_numeric, session_id_from_uuid,
+        session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
@@ -431,12 +435,28 @@ struct PreparedAgainstLockedState {
 #[derive(Clone, Debug)]
 pub struct SubmitInputRepository {
     pool: PgPool,
+    model_capabilities: Option<ModelCapabilityCatalog>,
 }
 
 impl SubmitInputRepository {
     /// Uses the supplied pool for atomic handling and fail-closed loads.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            model_capabilities: None,
+        }
+    }
+
+    /// Uses the supplied pool and deployment capability catalog for
+    /// settings-aware input preparation.
+    pub fn with_model_capabilities(
+        pool: PgPool,
+        model_capabilities: ModelCapabilityCatalog,
+    ) -> Self {
+        Self {
+            pool,
+            model_capabilities: Some(model_capabilities),
+        }
     }
 
     /// Handles an unseen command or resolves its immutable recorded meaning.
@@ -506,6 +526,7 @@ impl SubmitInputRepository {
             next_reclassified_turn,
             next_tool_cancellation,
             select_definition,
+            self.model_capabilities.as_ref(),
         )
         .await;
 
@@ -612,6 +633,7 @@ async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     mut next_reclassified_turn: NextTurn,
     mut next_tool_cancellation: NextToolCancellation,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    model_capabilities: Option<&ModelCapabilityCatalog>,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError>
 where
     NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -690,8 +712,15 @@ where
     let PreparedAgainstLockedState {
         prepared,
         scheduling,
-    } = prepare_against_locked_state(connection, command, accepted_input, turn, select_definition)
-        .await?;
+    } = prepare_against_locked_state(
+        connection,
+        command,
+        accepted_input,
+        turn,
+        select_definition,
+        model_capabilities,
+    )
+    .await?;
     let recorded = prepared.result().clone();
     let interrupt = match prepared.result() {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
@@ -1051,6 +1080,7 @@ async fn prepare_against_locked_state(
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    model_capabilities: Option<&ModelCapabilityCatalog>,
 ) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
@@ -1116,7 +1146,21 @@ async fn prepare_against_locked_state(
     let scheduling = load_scheduling_projection(connection, session.clone()).await?;
     let active_turn_id = scheduling.active_turn().map(|active| active.turn());
     let prepared = if active_turn_id.is_some() {
-        command.prepare_with_active_turn(&scheduling, accepted_input, turn, select_definition)
+        match model_capabilities {
+            Some(capabilities) => command.prepare_with_active_turn_with_model_settings(
+                &scheduling,
+                accepted_input,
+                turn,
+                select_definition,
+                capabilities,
+            ),
+            None => command.prepare_with_active_turn(
+                &scheduling,
+                accepted_input,
+                turn,
+                select_definition,
+            ),
+        }
     } else {
         let previous_position = sqlx::query_scalar::<_, Decimal>(
             "SELECT acceptance_position
@@ -1137,13 +1181,23 @@ async fn prepare_against_locked_state(
             })
         })
         .transpose()?;
-        command.prepare_when_no_active_turn(
-            &session,
-            accepted_input,
-            turn,
-            previous_position,
-            select_definition,
-        )
+        match model_capabilities {
+            Some(capabilities) => command.prepare_when_no_active_turn_with_model_settings(
+                &session,
+                accepted_input,
+                turn,
+                previous_position,
+                select_definition,
+                capabilities,
+            ),
+            None => command.prepare_when_no_active_turn(
+                &session,
+                accepted_input,
+                turn,
+                previous_position,
+                select_definition,
+            ),
+        }
     };
 
     prepared
@@ -1171,6 +1225,9 @@ async fn prepare_against_locked_state(
             }
             SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
                 SubmitInputCorruption::Inconsistent("interrupt queue order").into()
+            }
+            SubmitInputPreparationFailure::ModelSettingsResolution(_) => {
+                SubmitInputCorruption::Inconsistent("model settings resolution").into()
             }
         })
 }
@@ -1266,6 +1323,7 @@ pub(crate) async fn load_scheduling_projection(
             goal_defaults.direct_model_selection_id AS goal_defaults_direct_id,
             goal_defaults.model_alias_id AS goal_defaults_alias_id,
             goal_defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            goal_defaults.model_settings AS goal_defaults_model_settings,
             turn.turn_id AS lifecycle_turn_id,
             turn.session_id AS lifecycle_session_id,
             turn.state_kind AS lifecycle_state_kind,
@@ -3601,6 +3659,7 @@ fn decode_goal_origin_configuration(
         row.try_get("goal_defaults_direct_id")?,
         row.try_get("goal_defaults_alias_id")?,
         required(row, "goal_defaults_tool_auto_approval")?,
+        required(row, "goal_defaults_model_settings")?,
         "goal defaults",
     )?;
     let requested = decode_model_selection(
@@ -3723,6 +3782,7 @@ async fn load_active_acceptance_tail(
             replacement_model_kind,
             replacement_direct_model_selection_id,
             replacement_model_alias_id,
+            model_settings_override,
             CASE
                 WHEN goal_turn_is_runtime_relevant(
                     accepted.session_id, accepted.origin_turn_id
@@ -3755,6 +3815,7 @@ async fn load_active_acceptance_tail(
             row.try_get("replacement_model_kind")?,
             row.try_get("replacement_direct_model_selection_id")?,
             row.try_get("replacement_model_alias_id")?,
+            required(&row, "model_settings_override")?,
             "active acceptance-tail delivery",
         )?;
         let disposition_kind: String = required(&row, "disposition_kind")?;
@@ -3889,7 +3950,7 @@ async fn insert_prepared(
              delivery_kind, expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
-             result_kind, rejection_kind, result_session_id,
+             model_settings_override, result_kind, rejection_kind, result_session_id,
              result_accepted_input_id, result_turn_id,
              result_actual_active_turn_id,
              result_expected_active_turn_id, result_expected_defaults_version,
@@ -3899,7 +3960,7 @@ async fn insert_prepared(
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
              $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-             $26, $27, $28, $29)",
+             $26, $27, $28, $29, $30)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -3917,6 +3978,7 @@ async fn insert_prepared(
     .bind(delivery.replacement.kind)
     .bind(delivery.replacement.direct)
     .bind(delivery.replacement.alias)
+    .bind(&delivery.model_settings)
     .bind(result.kind)
     .bind(result.rejection_kind)
     .bind(session_id_to_uuid(result.session))
@@ -3955,10 +4017,11 @@ async fn insert_prepared(
                  expected_active_turn_id, expected_defaults_version,
                  model_override_kind, replacement_model_kind,
                  replacement_direct_model_selection_id, replacement_model_alias_id,
-                 acceptance_position, disposition_kind, origin_turn_id)
+                 model_settings_override, acceptance_position, disposition_kind,
+                 origin_turn_id)
              VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15)",
+                 $14, $15, $16)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
@@ -3972,10 +4035,49 @@ async fn insert_prepared(
         .bind(delivery.replacement.kind)
         .bind(delivery.replacement.direct)
         .bind(delivery.replacement.alias)
+        .bind(&delivery.model_settings)
         .bind(input_position_to_numeric(position))
         .bind("origin_of")
         .bind(turn_id_to_uuid(applied.turn()))
         .execute(&mut *connection)
+        .await?;
+
+        let settings_event =
+            applied
+                .model_settings_event()
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "resolved model settings event",
+                ))?;
+        sqlx::query(
+            "INSERT INTO turn_model_settings_resolved
+                (accepted_input_id, turn_id, session_id, defaults_version,
+                 selected_direct_model_id, per_call_model_settings,
+                 resolved_model_settings, adjustments)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(accepted_input_id_to_uuid(settings_event.accepted_input()))
+        .bind(turn_id_to_uuid(settings_event.turn()))
+        .bind(session_id_to_uuid(applied.session()))
+        .bind(defaults_version_to_numeric(
+            settings_event.defaults_version(),
+        ))
+        .bind(settings_event.selection().selected_direct().into_uuid())
+        .bind(model_settings_overlay_to_json(
+            settings_event.per_call_override(),
+        ))
+        .bind(model_settings_to_json(settings_event.settings()))
+        .bind(model_change_adjustments_to_json(
+            settings_event.adjustments(),
+        ))
+        .execute(&mut *connection)
+        .await?;
+        outbox::append(
+            connection,
+            OutboxEvent::TurnModelSettingsResolved {
+                session: applied.session(),
+                accepted_input: applied.accepted_input(),
+            },
+        )
         .await?;
 
         sqlx::query(
@@ -4053,16 +4155,21 @@ async fn insert_prepared(
                  expected_active_turn_id, expected_defaults_version,
                  model_override_kind, replacement_model_kind,
                  replacement_direct_model_selection_id, replacement_model_alias_id,
-                 acceptance_position, disposition_kind, origin_turn_id)
+                 model_settings_override, acceptance_position, disposition_kind,
+                 origin_turn_id)
              VALUES
                 ($1, $2, $3, 'text', $4, 'next_safe_point',
-                 $5, NULL, NULL, NULL, NULL, NULL, $6, 'pending_steering', NULL)",
+                 $5, NULL, NULL, NULL, NULL, NULL, $6, $7,
+                 'pending_steering', NULL)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
         .bind(command.content().text().as_str())
         .bind(turn_id_to_uuid(applied.binding().source_turn()))
+        .bind(model_settings_overlay_to_json(
+            signalbox_domain::ModelSettingsOverlay::inherit_all(),
+        ))
         .bind(input_position_to_numeric(applied.acceptance_position()))
         .execute(&mut *connection)
         .await?;
@@ -4159,13 +4266,13 @@ fn encode_frozen_model(model: &FrozenModelSelection) -> EncodedFrozenModel {
     }
 }
 
-#[derive(Clone, Copy)]
 struct EncodedDelivery {
     kind: &'static str,
     expected_active_turn: Option<Uuid>,
     expected_defaults_version: Option<Decimal>,
     model_override_kind: Option<&'static str>,
     replacement: EncodedSelection,
+    model_settings: Value,
 }
 
 fn encode_delivery(delivery: DeliveryRequest) -> EncodedDelivery {
@@ -4189,6 +4296,9 @@ fn encode_delivery(delivery: DeliveryRequest) -> EncodedDelivery {
             expected_defaults_version: None,
             model_override_kind: None,
             replacement: EncodedSelection::absent(),
+            model_settings: model_settings_overlay_to_json(
+                signalbox_domain::ModelSettingsOverlay::inherit_all(),
+            ),
         },
         DeliveryRequest::AfterCurrentTurn {
             expected_active_turn,
@@ -4222,6 +4332,7 @@ fn encode_configured_delivery(
         )),
         model_override_kind: Some(model_override_kind),
         replacement,
+        model_settings: model_settings_overlay_to_json(configuration.model_settings()),
     }
 }
 
@@ -4481,6 +4592,19 @@ fn configured_defaults_version(
     }
 }
 
+fn configured_model_settings(
+    delivery: DeliveryRequest,
+) -> Option<signalbox_domain::ModelSettingsOverlay> {
+    match delivery {
+        DeliveryRequest::StartWhenNoActiveTurn { configuration }
+        | DeliveryRequest::Interrupt { configuration, .. }
+        | DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
+            Some(configuration.model_settings())
+        }
+        DeliveryRequest::NextSafePoint { .. } => None,
+    }
+}
+
 async fn load_complete_rows(
     connection: &mut PgConnection,
     command_ids: &[Uuid],
@@ -4506,6 +4630,7 @@ async fn load_complete_rows(
             typed.replacement_model_kind AS command_replacement_model_kind,
             typed.replacement_direct_model_selection_id AS command_replacement_direct_id,
             typed.replacement_model_alias_id AS command_replacement_alias_id,
+            typed.model_settings_override AS command_model_settings_override,
             typed.result_kind,
             typed.rejection_kind,
             typed.result_session_id,
@@ -4531,6 +4656,7 @@ async fn load_complete_rows(
             accepted.replacement_model_kind AS accepted_replacement_model_kind,
             accepted.replacement_direct_model_selection_id AS accepted_replacement_direct_id,
             accepted.replacement_model_alias_id AS accepted_replacement_alias_id,
+            accepted.model_settings_override AS accepted_model_settings_override,
             accepted.acceptance_position AS accepted_position,
             accepted.disposition_kind,
             accepted.origin_turn_id,
@@ -4558,6 +4684,13 @@ async fn load_complete_rows(
             defaults.direct_model_selection_id AS defaults_direct_id,
             defaults.model_alias_id AS defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS defaults_tool_auto_approval,
+            defaults.model_settings AS defaults_model_settings,
+            settings.selected_direct_model_id AS settings_selected_direct_id,
+            settings.session_id AS settings_session_id,
+            settings.defaults_version AS settings_defaults_version,
+            settings.per_call_model_settings,
+            settings.resolved_model_settings,
+            settings.adjustments AS model_settings_adjustments,
             (
                 SELECT count(*)
                   FROM accepted_input AS effect
@@ -4583,6 +4716,9 @@ async fn load_complete_rows(
                 queued.defaults_version,
                 typed.result_selected_defaults_version
               )
+         LEFT JOIN turn_model_settings_resolved AS settings
+           ON settings.accepted_input_id = accepted.accepted_input_id
+          AND settings.turn_id = queued.turn_id
          WHERE registry.command_id = ANY($1)",
     )
     .bind(command_ids)
@@ -5417,6 +5553,7 @@ fn decode_complete(
             row.try_get("command_replacement_model_kind")?,
             row.try_get("command_replacement_direct_id")?,
             row.try_get("command_replacement_alias_id")?,
+            required(&row, "command_model_settings_override")?,
             "command delivery",
         )?,
     );
@@ -5568,6 +5705,7 @@ fn decode_applied_turn_origin(
         row.try_get("accepted_replacement_model_kind")?,
         row.try_get("accepted_replacement_direct_id")?,
         row.try_get("accepted_replacement_alias_id")?,
+        required(row, "accepted_model_settings_override")?,
         "accepted delivery",
     )?;
     let accepted_position = decode_position(row, "accepted_position")?;
@@ -5618,6 +5756,7 @@ fn decode_applied_turn_origin(
         row.try_get("defaults_direct_id")?,
         row.try_get("defaults_alias_id")?,
         required(row, "defaults_tool_auto_approval")?,
+        required(row, "defaults_model_settings")?,
         "selected defaults",
     )?;
     let stored_requested_model = decode_model_selection(
@@ -5632,6 +5771,61 @@ fn decode_applied_turn_origin(
         row.try_get("frozen_model_alias_id")?,
         row.try_get("frozen_alias_selected_direct_id")?,
     )?;
+    let stored_settings_selection: Option<Uuid> = row.try_get("settings_selected_direct_id")?;
+    let stored_settings_session: Option<Uuid> = row.try_get("settings_session_id")?;
+    let stored_settings_defaults: Option<Decimal> = row.try_get("settings_defaults_version")?;
+    let stored_per_call_settings: Option<Value> = row.try_get("per_call_model_settings")?;
+    let stored_resolved_settings: Option<Value> = row.try_get("resolved_model_settings")?;
+    let stored_adjustments: Option<Value> = row.try_get("model_settings_adjustments")?;
+    let (stored_model_settings, stored_model_settings_adjustments) = match (
+        stored_settings_selection,
+        stored_settings_session,
+        stored_settings_defaults,
+        stored_per_call_settings,
+        stored_resolved_settings,
+        stored_adjustments,
+    ) {
+        (None, None, None, None, None, None) => (None, Vec::new()),
+        (
+            Some(selection),
+            Some(settings_session),
+            Some(settings_defaults),
+            Some(per_call),
+            Some(settings),
+            Some(adjustments),
+        ) => {
+            let per_call = model_settings_overlay_from_json(per_call)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("per-call model settings"))?;
+            let settings = model_settings_from_json(settings)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("resolved model settings"))?;
+            let adjustments = model_change_adjustments_from_json(adjustments)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("model settings adjustments"))?;
+            if DirectModelSelection::from_uuid(selection) != stored_frozen_model.selected_direct()
+                || session_id_from_uuid(settings_session) != result_session
+                || defaults_version_from_numeric(settings_defaults).map_err(|reason| {
+                    SubmitInputCorruption::InvalidOrdinal {
+                        field: "settings defaults version",
+                        reason,
+                    }
+                })? != defaults_version
+                || per_call
+                    != configured_model_settings(accepted_delivery).ok_or(
+                        SubmitInputCorruption::Inconsistent("origin delivery settings"),
+                    )?
+            {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "resolved model settings correlation",
+                )
+                .into());
+            }
+            (Some(settings), adjustments)
+        }
+        _ => {
+            return Err(
+                SubmitInputCorruption::Inconsistent("resolved model settings event shape").into(),
+            );
+        }
+    };
 
     Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         SubmitInputAppliedTurnOriginReconstitutionInput {
@@ -5656,6 +5850,8 @@ fn decode_applied_turn_origin(
             defaults,
             stored_requested_model,
             stored_frozen_model,
+            stored_model_settings,
+            stored_model_settings_adjustments,
         },
     ))
 }
@@ -5687,6 +5883,7 @@ fn decode_applied_pending_steering(
         row.try_get("accepted_replacement_model_kind")?,
         row.try_get("accepted_replacement_direct_id")?,
         row.try_get("accepted_replacement_alias_id")?,
+        required(row, "accepted_model_settings_override")?,
         "accepted delivery",
     )?;
     let accepted_position = decode_position(row, "accepted_position")?;
@@ -5898,6 +6095,7 @@ fn decode_rejected(
                 row.try_get("defaults_direct_id")?,
                 row.try_get("defaults_alias_id")?,
                 required(row, "defaults_tool_auto_approval")?,
+                required(row, "defaults_model_settings")?,
                 "selected defaults",
             )?;
             if selected != defaults_version {
@@ -6193,8 +6391,11 @@ fn decode_delivery(
     replacement_model_kind: Option<String>,
     replacement_direct: Option<Uuid>,
     replacement_alias: Option<Uuid>,
+    model_settings_override: Value,
     field: &'static str,
 ) -> Result<DeliveryRequest, SubmitInputRepositoryError> {
+    let model_settings_override = model_settings_overlay_from_json(model_settings_override)
+        .map_err(|_| SubmitInputCorruption::Inconsistent("model settings override"))?;
     match kind.as_str() {
         "start_when_no_active_turn" => {
             if expected_active_turn.is_some() {
@@ -6207,6 +6408,7 @@ fn decode_delivery(
                     replacement_model_kind,
                     replacement_direct,
                     replacement_alias,
+                    model_settings_override,
                     field,
                 )?,
             })
@@ -6222,6 +6424,7 @@ fn decode_delivery(
                 replacement_model_kind,
                 replacement_direct,
                 replacement_alias,
+                model_settings_override,
                 field,
             )?;
             if kind == "interrupt" {
@@ -6242,6 +6445,7 @@ fn decode_delivery(
                 || replacement_model_kind.is_some()
                 || replacement_direct.is_some()
                 || replacement_alias.is_some()
+                || model_settings_override != signalbox_domain::ModelSettingsOverlay::inherit_all()
             {
                 return Err(SubmitInputCorruption::Inconsistent(field).into());
             }
@@ -6262,6 +6466,7 @@ fn decode_configuration(
     replacement_model_kind: Option<String>,
     replacement_direct: Option<Uuid>,
     replacement_alias: Option<Uuid>,
+    model_settings_override: signalbox_domain::ModelSettingsOverlay,
     field: &'static str,
 ) -> Result<PerInputConfigurationChoices, SubmitInputRepositoryError> {
     let expected =
@@ -6293,7 +6498,11 @@ fn decode_configuration(
         }
         None => return Err(SubmitInputCorruption::Missing("model_override_kind").into()),
     };
-    Ok(PerInputConfigurationChoices::new(expected, model))
+    Ok(PerInputConfigurationChoices::with_model_settings(
+        expected,
+        model,
+        model_settings_override,
+    ))
 }
 
 fn decode_defaults_version(
@@ -6352,6 +6561,7 @@ fn decode_defaults(
     direct: Option<Uuid>,
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
+    model_settings: Value,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, SubmitInputRepositoryError> {
     let model = decode_model_selection(kind, direct, alias, field)?;
@@ -6362,12 +6572,14 @@ fn decode_defaults(
                 value: dangerous_tool_auto_approval,
             }
         })?;
-    Ok(
-        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
-            model,
-            dangerous_tool_auto_approval,
-        ),
-    )
+    let model_settings = model_settings_from_json(model_settings)
+        .map_err(|_| SubmitInputCorruption::Inconsistent("model settings"))?;
+    Ok(SessionConfigurationDefaults::complete_with_model_settings(
+        model,
+        dangerous_tool_auto_approval,
+        None,
+        model_settings,
+    ))
 }
 
 fn decode_dangerous_tool_auto_approval(

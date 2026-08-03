@@ -42,6 +42,15 @@ pub enum FastMode {
     Enabled,
 }
 
+/// One fast-mode contribution at a precedence layer.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FastModeOverlay {
+    /// Consult the next lower-precedence layer.
+    Inherit,
+    /// Explicitly select enabled or disabled fast mode and stop resolution.
+    Value(FastMode),
+}
+
 /// Anthropic service-tier values.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AnthropicServiceTier {
@@ -105,7 +114,7 @@ pub enum SettingOverlay<T> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ModelSettingsOverlay {
     reasoning_level: SettingOverlay<ReasoningLevel>,
-    fast_mode: SettingOverlay<FastMode>,
+    fast_mode: FastModeOverlay,
     service_tier: SettingOverlay<ServiceTier>,
 }
 
@@ -114,7 +123,7 @@ impl ModelSettingsOverlay {
     pub const fn inherit_all() -> Self {
         Self {
             reasoning_level: SettingOverlay::Inherit,
-            fast_mode: SettingOverlay::Inherit,
+            fast_mode: FastModeOverlay::Inherit,
             service_tier: SettingOverlay::Inherit,
         }
     }
@@ -122,7 +131,7 @@ impl ModelSettingsOverlay {
     /// Constructs a complete labeled overlay.
     pub const fn new(
         reasoning_level: SettingOverlay<ReasoningLevel>,
-        fast_mode: SettingOverlay<FastMode>,
+        fast_mode: FastModeOverlay,
         service_tier: SettingOverlay<ServiceTier>,
     ) -> Self {
         Self {
@@ -139,7 +148,7 @@ impl ModelSettingsOverlay {
                 Some(value) => SettingOverlay::Value(value),
                 None => SettingOverlay::ProviderDefault,
             },
-            fast_mode: SettingOverlay::Value(settings.fast_mode),
+            fast_mode: FastModeOverlay::Value(settings.fast_mode),
             service_tier: match settings.service_tier {
                 Some(value) => SettingOverlay::Value(value),
                 None => SettingOverlay::ProviderDefault,
@@ -153,7 +162,7 @@ impl ModelSettingsOverlay {
     }
 
     /// Returns the fast-mode contribution.
-    pub const fn fast_mode(&self) -> SettingOverlay<FastMode> {
+    pub const fn fast_mode(&self) -> FastModeOverlay {
         self.fast_mode
     }
 
@@ -284,6 +293,30 @@ impl ValidatedModelSettings {
         }
     }
 
+    /// Reconstitutes stored validation evidence only when its complete
+    /// precedence chain resolves to the stored effective value and sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconstitute(
+        precedence: ModelSettingsPrecedence,
+        effective: EffectiveModelSettings,
+        reasoning_source: Option<ModelSettingSource>,
+        fast_mode_source: Option<ModelSettingSource>,
+        service_tier_source: Option<ModelSettingSource>,
+        validated_for: Option<DirectModelSelection>,
+    ) -> Option<Self> {
+        let resolved = ResolvedModelSettings {
+            effective,
+            reasoning_source,
+            fast_mode_source,
+            service_tier_source,
+        };
+        (precedence.resolve() == resolved).then_some(Self {
+            precedence,
+            resolved,
+            validated_for,
+        })
+    }
+
     /// Returns the exact four-layer contributions that produced this value.
     pub const fn precedence(&self) -> ModelSettingsPrecedence {
         self.precedence
@@ -388,6 +421,12 @@ impl ModelSettingsPrecedence {
         self.global_default
     }
 
+    /// Replaces only the per-call layer while retaining the copied durable
+    /// session, profile, and global layers.
+    pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self {
+        Self { per_call, ..self }
+    }
+
     /// Resolves each knob independently through the fixed precedence chain.
     pub fn resolve(self) -> ResolvedModelSettings {
         let layers = [
@@ -409,6 +448,72 @@ impl ModelSettingsPrecedence {
             service_tier_source,
         }
     }
+
+    pub(crate) fn with_effective_adjustment(
+        mut self,
+        prior: ResolvedModelSettings,
+        adjusted: EffectiveModelSettings,
+    ) -> Self {
+        if prior.effective.reasoning_level != adjusted.reasoning_level {
+            self.set_reasoning_at_source(prior.reasoning_source, adjusted.reasoning_level);
+        }
+        if prior.effective.fast_mode != adjusted.fast_mode {
+            self.set_fast_mode_at_source(prior.fast_mode_source, adjusted.fast_mode);
+        }
+        if prior.effective.service_tier != adjusted.service_tier {
+            self.set_service_tier_at_source(prior.service_tier_source, adjusted.service_tier);
+        }
+        self
+    }
+
+    fn set_reasoning_at_source(
+        &mut self,
+        source: Option<ModelSettingSource>,
+        value: Option<ReasoningLevel>,
+    ) {
+        let overlay = match value {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match source {
+            Some(ModelSettingSource::PerCall) => self.per_call.reasoning_level = overlay,
+            Some(ModelSettingSource::Session) => self.session.reasoning_level = overlay,
+            Some(ModelSettingSource::Profile) => self.profile.reasoning_level = overlay,
+            Some(ModelSettingSource::GlobalDefault) => {
+                self.global_default.reasoning_level = overlay
+            }
+            None => {}
+        }
+    }
+
+    fn set_fast_mode_at_source(&mut self, source: Option<ModelSettingSource>, value: FastMode) {
+        let overlay = FastModeOverlay::Value(value);
+        match source {
+            Some(ModelSettingSource::PerCall) => self.per_call.fast_mode = overlay,
+            Some(ModelSettingSource::Session) => self.session.fast_mode = overlay,
+            Some(ModelSettingSource::Profile) => self.profile.fast_mode = overlay,
+            Some(ModelSettingSource::GlobalDefault) => self.global_default.fast_mode = overlay,
+            None => {}
+        }
+    }
+
+    fn set_service_tier_at_source(
+        &mut self,
+        source: Option<ModelSettingSource>,
+        value: Option<ServiceTier>,
+    ) {
+        let overlay = match value {
+            Some(value) => SettingOverlay::Value(value),
+            None => SettingOverlay::ProviderDefault,
+        };
+        match source {
+            Some(ModelSettingSource::PerCall) => self.per_call.service_tier = overlay,
+            Some(ModelSettingSource::Session) => self.session.service_tier = overlay,
+            Some(ModelSettingSource::Profile) => self.profile.service_tier = overlay,
+            Some(ModelSettingSource::GlobalDefault) => self.global_default.service_tier = overlay,
+            None => {}
+        }
+    }
 }
 
 fn resolve_nullable<T: Copy>(
@@ -425,13 +530,12 @@ fn resolve_nullable<T: Copy>(
 }
 
 fn resolve_fast(
-    layers: impl IntoIterator<Item = (ModelSettingSource, SettingOverlay<FastMode>)>,
+    layers: impl IntoIterator<Item = (ModelSettingSource, FastModeOverlay)>,
 ) -> (FastMode, Option<ModelSettingSource>) {
     for (source, overlay) in layers {
         match overlay {
-            SettingOverlay::Inherit => {}
-            SettingOverlay::ProviderDefault => return (FastMode::Disabled, Some(source)),
-            SettingOverlay::Value(value) => return (value, Some(source)),
+            FastModeOverlay::Inherit => {}
+            FastModeOverlay::Value(value) => return (value, Some(source)),
         }
     }
     (FastMode::Disabled, None)
@@ -499,7 +603,7 @@ impl ModelCapabilities {
                 requested: level,
             });
         }
-        if overlay.fast_mode == SettingOverlay::Value(FastMode::Enabled)
+        if overlay.fast_mode == FastModeOverlay::Value(FastMode::Enabled)
             && self.fast_mode == FastModeSupport::Unsupported
         {
             return Err(UnsupportedModelSetting::FastMode { selection });
@@ -575,6 +679,26 @@ impl ModelCapabilities {
         }
     }
 
+    /// Validates the caller-owned layer and adjusts only incompatibility that
+    /// remains because inherited layers were carried across a model change.
+    pub fn validate_model_change(
+        &self,
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+        caller_overlay: ModelSettingsOverlay,
+    ) -> Result<AdjustedModelSettings, UnsupportedModelSetting> {
+        self.validate_explicit(selection, caller_overlay)?;
+        let prior = precedence.resolve();
+        let compatible = self.adjust_for_model_change(prior.effective());
+        let (effective, adjustments) = compatible.into_parts();
+        let precedence = precedence.with_effective_adjustment(prior, effective);
+        let resolved = precedence.resolve();
+        Ok(AdjustedModelSettings {
+            settings: ValidatedModelSettings::for_selection(precedence, resolved, selection),
+            adjustments,
+        })
+    }
+
     /// Selects the capability-authorized serving target for fast mode.
     pub const fn serving_target(
         &self,
@@ -588,6 +712,30 @@ impl ModelCapabilities {
             (FastMode::Enabled, FastModeSupport::AlternateTarget(target)) => Some(target),
             (FastMode::Enabled, FastModeSupport::Unsupported) => None,
         }
+    }
+}
+
+/// Complete validated settings plus ordered model-change adjustment evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdjustedModelSettings {
+    settings: ValidatedModelSettings,
+    adjustments: Box<[ModelChangeAdjustment]>,
+}
+
+impl AdjustedModelSettings {
+    /// Returns the complete validated settings after adjustment.
+    pub const fn settings(&self) -> ValidatedModelSettings {
+        self.settings
+    }
+
+    /// Borrows adjustments in reasoning, fast, service-tier order.
+    pub fn adjustments(&self) -> &[ModelChangeAdjustment] {
+        &self.adjustments
+    }
+
+    /// Returns the validated snapshot and ordered adjustment evidence.
+    pub fn into_parts(self) -> (ValidatedModelSettings, Box<[ModelChangeAdjustment]>) {
+        (self.settings, self.adjustments)
     }
 }
 
@@ -932,10 +1080,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        AnthropicServiceTier, EffectiveModelSettings, FastMode, FastModeSupport, ModelCapabilities,
-        ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
-        OpenAiServiceTier, ReasoningLevel, ServiceTier, SessionModelSettingsChanged,
-        SettingOverlay, UnsupportedModelSetting,
+        AnthropicServiceTier, EffectiveModelSettings, FastMode, FastModeOverlay, FastModeSupport,
+        ModelCapabilities, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
+        ModelSettingsPrecedence, OpenAiServiceTier, ReasoningLevel, ServiceTier,
+        SessionModelSettingsChanged, SettingOverlay, UnsupportedModelSetting,
     };
     use crate::test_support::{command_id, direct, provider_model_identity, session_id};
     use crate::{
@@ -961,22 +1109,22 @@ mod tests {
     fn s37_inv051_resolves_the_fixed_precedence_chain_with_explicit_clearing() {
         let per_call = ModelSettingsOverlay::new(
             SettingOverlay::ProviderDefault,
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
         let session = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Value(FastMode::Enabled),
+            FastModeOverlay::Value(FastMode::Enabled),
             SettingOverlay::Inherit,
         );
         let profile = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::Medium),
-            SettingOverlay::Value(FastMode::Disabled),
+            FastModeOverlay::Value(FastMode::Disabled),
             SettingOverlay::Value(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
         );
         let global = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::Low),
-            SettingOverlay::Value(FastMode::Disabled),
+            FastModeOverlay::Value(FastMode::Disabled),
             SettingOverlay::Value(ServiceTier::Anthropic(AnthropicServiceTier::Auto)),
         );
 
@@ -1002,6 +1150,57 @@ mod tests {
         );
     }
 
+    /// INV-003 / INV-053: stored settings reconstitute from self-contained
+    /// structural facts without consulting a mutable capability catalog.
+    #[test]
+    fn inv003_inv053_validated_settings_reconstitute_from_exact_stored_facts() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::Medium], FastModeSupport::Unsupported, []);
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::Medium),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let stored = supported
+            .validate_precedence(selected, precedence)
+            .expect("the stored setting was capability-validated before persistence");
+        let resolved = stored.resolved();
+
+        let reconstituted = super::ValidatedModelSettings::reconstitute(
+            stored.precedence(),
+            stored.effective(),
+            resolved.reasoning_source(),
+            resolved.fast_mode_source(),
+            resolved.service_tier_source(),
+            stored.validated_for(),
+        );
+
+        assert_eq!(reconstituted, Some(stored));
+    }
+
+    /// INV-003: a stored effective value that disagrees with its precedence
+    /// chain cannot claim validated settings provenance.
+    #[test]
+    fn inv003_inconsistent_stored_settings_fail_reconstitution() {
+        let precedence = ModelSettingsPrecedence::provider_defaults();
+
+        let reconstituted = super::ValidatedModelSettings::reconstitute(
+            precedence,
+            EffectiveModelSettings::new(Some(ReasoningLevel::High), FastMode::Disabled, None),
+            Some(ModelSettingSource::Session),
+            None,
+            None,
+            Some(direct(1)),
+        );
+
+        assert_eq!(reconstituted, None);
+    }
+
     /// S37 / INV-051: an explicit unsupported level is a typed error rather
     /// than delegated to an open provider enum or silent clamp.
     #[test]
@@ -1014,7 +1213,7 @@ mod tests {
         );
         let requested = ModelSettingsOverlay::new(
             SettingOverlay::Value(ReasoningLevel::High),
-            SettingOverlay::Inherit,
+            FastModeOverlay::Inherit,
             SettingOverlay::Inherit,
         );
 
@@ -1094,6 +1293,76 @@ mod tests {
         );
     }
 
+    /// S37 / INV-052: inherited incompatibility rewrites the inherited source
+    /// in the validated snapshot while preserving ordered adjustment evidence.
+    #[test]
+    fn s37_inv052_model_change_installs_a_self_consistent_adjusted_snapshot() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
+        let session = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            session,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+
+        let adjusted = supported
+            .validate_model_change(selected, precedence, ModelSettingsOverlay::inherit_all())
+            .expect("the incompatible value is inherited across the model change");
+
+        assert_eq!(
+            adjusted.settings().effective().reasoning_level(),
+            Some(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            adjusted.settings().precedence().session().reasoning_level(),
+            SettingOverlay::Value(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            adjusted.adjustments(),
+            [ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }]
+        );
+    }
+
+    /// S37 / INV-051: the same unsupported value remains an error when the
+    /// model-change caller explicitly supplies it.
+    #[test]
+    fn s37_inv051_model_change_does_not_adjust_an_explicit_unsupported_value() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, []);
+        let caller = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            caller,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+
+        let error = supported
+            .validate_model_change(selected, precedence, caller)
+            .expect_err("the caller-owned unsupported value is not adjusted");
+
+        assert_eq!(
+            error,
+            UnsupportedModelSetting::ReasoningLevel {
+                selection: selected,
+                requested: ReasoningLevel::High,
+            }
+        );
+    }
+
     /// S37 / INV-054: an alternate fast target is selected only from the
     /// declared capability record.
     #[test]
@@ -1125,7 +1394,7 @@ mod tests {
                     ModelSettingsOverlay::inherit_all(),
                     ModelSettingsOverlay::new(
                         SettingOverlay::Value(ReasoningLevel::Low),
-                        SettingOverlay::Inherit,
+                        FastModeOverlay::Inherit,
                         SettingOverlay::Inherit,
                     ),
                     ModelSettingsOverlay::inherit_all(),

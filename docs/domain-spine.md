@@ -1585,6 +1585,12 @@ impl VersionedSessionConfigurationDefaults {
         expected: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
     ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
+    pub fn derive_request_with_model_settings(
+        &self,
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        per_call_model_settings: ModelSettingsOverlay,
+    ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
     // accessors: version(), defaults()
 }
 // reconstitution pairing of an arbitrary version with a defaults value is
@@ -1599,7 +1605,7 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest { /* private */ }
 // sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
 impl ConfigurationRequest {
-    // accessors: model(), dangerous_tool_auto_approval(), model_settings()
+    // accessors: model(), dangerous_tool_auto_approval(), model_settings(), per_call_model_settings()
 }
 
 pub struct VersionCheckedConfigurationRequest { /* private */ }
@@ -1620,7 +1626,24 @@ impl OriginConfiguration {
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<Self, UnknownModelAlias>;
-    // accessors: requested(), session_defaults_version(), effective()
+    pub fn freeze_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<Self, OriginModelSettingsError>;
+    pub fn reconstitute_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        frozen_model: FrozenModelSelection,
+        stored_settings: ValidatedModelSettings,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
+    // accessors: requested(), session_defaults_version(), effective(), model_settings_adjustments()
+}
+
+pub enum OriginModelSettingsError {
+    UnknownAlias(UnknownModelAlias),
+    MissingCapabilities { selection: DirectModelSelection },
+    Unsupported(UnsupportedModelSetting),
 }
 
 pub struct OriginConfigurationReconstitutionInput { /* private */ }
@@ -1662,6 +1685,8 @@ pub enum ReasoningLevel {
 
 pub enum FastMode { Disabled, Enabled }
 
+pub enum FastModeOverlay { Inherit, Value(FastMode) }
+
 pub enum AnthropicServiceTier { Auto, StandardOnly }
 
 pub enum OpenAiServiceTier { Auto, Default, Flex, Scale, Priority, Fast }
@@ -1685,7 +1710,7 @@ impl ModelSettingsOverlay {
     pub const fn inherit_all() -> Self;
     pub const fn new(
         reasoning_level: SettingOverlay<ReasoningLevel>,
-        fast_mode: SettingOverlay<FastMode>,
+        fast_mode: FastModeOverlay,
         service_tier: SettingOverlay<ServiceTier>,
     ) -> Self;
     pub const fn from_effective(settings: EffectiveModelSettings) -> Self;
@@ -1715,6 +1740,14 @@ pub struct ValidatedModelSettings { /* private */ }
 // sealed: provider_defaults or ModelCapabilities::validate_precedence
 impl ValidatedModelSettings {
     pub const fn provider_defaults() -> Self;
+    pub fn reconstitute(
+        precedence: ModelSettingsPrecedence,
+        effective: EffectiveModelSettings,
+        reasoning_source: Option<ModelSettingSource>,
+        fast_mode_source: Option<ModelSettingSource>,
+        service_tier_source: Option<ModelSettingSource>,
+        validated_for: Option<DirectModelSelection>,
+    ) -> Option<Self>;
     // accessors: precedence(), resolved(), effective(), validated_for()
 }
 
@@ -1727,6 +1760,7 @@ impl ModelSettingsPrecedence {
         profile: ModelSettingsOverlay,
         global_default: ModelSettingsOverlay,
     ) -> Self;
+    pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self;
     pub fn resolve(self) -> ResolvedModelSettings;
     // accessors: per_call(), session(), profile(), global_default()
 }
@@ -1758,6 +1792,12 @@ impl ModelCapabilities {
         &self,
         inherited: EffectiveModelSettings,
     ) -> CompatibleModelSettings;
+    pub fn validate_model_change(
+        &self,
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+        caller_overlay: ModelSettingsOverlay,
+    ) -> Result<AdjustedModelSettings, UnsupportedModelSetting>;
     pub const fn serving_target(
         &self,
         selected: ResolvedProviderTarget,
@@ -1784,6 +1824,13 @@ pub struct CompatibleModelSettings { /* private */ }
 impl CompatibleModelSettings {
     pub fn into_parts(self) -> (EffectiveModelSettings, Box<[ModelChangeAdjustment]>);
     // accessors: effective(), adjustments()
+}
+
+pub struct AdjustedModelSettings { /* private */ }
+// sealed: ModelCapabilities::validate_model_change
+impl AdjustedModelSettings {
+    pub fn into_parts(self) -> (ValidatedModelSettings, Box<[ModelChangeAdjustment]>);
+    // accessors: settings(), adjustments()
 }
 
 pub struct SessionModelSettingsChanged { /* private */ }
@@ -1970,12 +2017,29 @@ impl SubmitInput {
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_when_no_active_turn_with_model_settings(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     pub fn prepare_with_active_turn(
         self,
         scheduling: &AcceptedInputSchedulingProjection,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn_with_model_settings(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
 }
@@ -1999,6 +2063,7 @@ impl SubmitInputAppliedResult {
 pub struct SubmitInputTurnOriginAppliedResult { /* private */ }
 // sealed: SubmitInput preparation or checked applied reconstitution
 impl SubmitInputTurnOriginAppliedResult {
+    pub fn model_settings_event(&self) -> Option<TurnModelSettingsResolved>;
     // accessors: accepted_input(), session(), turn(), disposition(),
     // queue_order(), acceptance_position(), origin_configuration(),
     // applied_interrupt()
@@ -2079,6 +2144,7 @@ pub enum SubmitInputPreparationFailure {
     },
     ActiveTurnProjectionMissing,
     InterruptQueueOrderInvalid,
+    ModelSettingsResolution(OriginModelSettingsError),
 }
 
 pub struct GoalTurnOriginConstructionInput {
@@ -4530,16 +4596,32 @@ built from its candidate, crate-internally.
 ```rust
 pub struct ReplaceSessionDefaults { /* private */ }
 impl ReplaceSessionDefaults {
-    pub const fn new(
+    pub fn new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
     ) -> Self;
+    pub fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+    ) -> Self;
+    pub fn with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Self;
     pub const fn prepare_session_not_found(self) -> PreparedReplaceSessionDefaults;
     pub fn prepare_against(self, current: &Session)
         -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
-    // accessors: command_id(), session(), expected_current_version(), replacement()
+    // accessors: command_id(), session(), expected_current_version(), replacement(),
+    // caller_model_settings(), model_settings_adjustments()
 }
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
@@ -5859,8 +5941,25 @@ impl ReplaceSessionDefaultsRequest {
         replacement: SessionConfigurationDefaults,
         prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId>;
     // accessors: command_id(), session(), expected_current_version(), replacement(),
-    // prompt_member()
+    // caller_model_settings(), model_settings_adjustments(), prompt_member()
 }
 
 pub enum PromptMemberStatement {
@@ -8934,8 +9033,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session                                    | 22                   |
 | domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
-| domain: configuration                              | 23                   |
-| domain: model_settings                             | 23                   |
+| domain: configuration                              | 24                   |
+| domain: model_settings                             | 25                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
@@ -8962,7 +9061,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **733 (+7 free fn)** |
+| **signalbox-domain total**                         | **736 (+7 free fn)** |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |

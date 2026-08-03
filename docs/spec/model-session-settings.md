@@ -125,6 +125,13 @@ lower value exists. A caller that explicitly sets the same incompatible value in
 the model-change command receives the ordinary unsupported-value error;
 `inherit` is what identifies incompatibility as model-change-induced.
 
+The installed snapshot writes an automatically adjusted value back at the
+inherited source layer that supplied it. Its precedence chain therefore resolves
+to its recorded effective value without consulting adjustment history. The event
+retains the prior snapshot, caller overlay, and adjustment list, so this
+normalization does not erase either the caller's provenance or the reason the
+installed inherited contribution differs from its predecessor.
+
 Alias retargeting is a model change for this rule. Because an alias can acquire
 a different immutable definition between inputs without a defaults replacement,
 input acceptance repeats capability resolution and records any automatic
@@ -151,7 +158,10 @@ Adjustment variants are closed: `reasoning_level_clamped { from, to }`,
 `service_tier_cleared { from }`. Stored and wire representations use distinct
 types but preserve every field. Equal durable-command replay returns the first
 recorded result and events; conflicting override provenance is conflicting reuse
-(INV-012).
+(INV-012). Automatic adjustments are server-derived evidence, not caller
+payload: they do not participate in command comparison. A first application
+stores them with the event, while an equal replay returns that recorded evidence
+instead of deriving it again from the current capability catalog.
 
 ## Adapter translation
 

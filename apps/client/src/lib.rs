@@ -6663,20 +6663,25 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let parked_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("continue after reconciliation"));
+        let expected_content = content.clone();
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::ReconcileTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == parked_turn_id
-            ));
+                &ClientRequest::ReconcileTurn {
+                    command_id,
+                    session_id,
+                    expected_active_turn_id: parked_turn_id,
+                    content: expected_content,
+                    expected_defaults_version: CanonicalU64::new(1),
+                }
+            );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6698,10 +6703,10 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = reconcile_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             parked_turn_id,
-            InputContent::new(String::from("continue after reconciliation")),
+            content,
             CanonicalU64::new(1),
         )
         .await?;
@@ -6721,20 +6726,25 @@ mod tests {
         let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
+        let content = InputContent::new(String::from("continue after the stop"));
+        let expected_content = content.clone();
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert!(matches!(
+            assert_eq!(
                 request.request(),
-                ClientRequest::StopTurn {
-                    session_id: requested_session,
-                    expected_active_turn_id: requested_turn,
-                    ..
-                } if *requested_session == session_id && *requested_turn == active_turn_id
-            ));
+                &ClientRequest::StopTurn {
+                    command_id,
+                    session_id,
+                    expected_active_turn_id: active_turn_id,
+                    content: expected_content,
+                    expected_defaults_version: CanonicalU64::new(1),
+                }
+            );
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -6756,10 +6766,10 @@ mod tests {
         let mut client = ProcessClient::new(socket);
         let accepted_successor = stop_turn(
             &mut client,
-            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            command_id,
             session_id,
             active_turn_id,
-            InputContent::new(String::from("continue after the stop")),
+            content,
             CanonicalU64::new(1),
         )
         .await?;

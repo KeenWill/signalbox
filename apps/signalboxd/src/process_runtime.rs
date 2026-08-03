@@ -40,12 +40,13 @@ use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FastMode as DomainFastMode, FrozenModelSelection, Goal,
-    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection,
-    GoalCommandResult, GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement,
-    GoalUserAction, GoalUserCommand, ImportedConversation, ImportedConversationFormat,
-    ImportedConversationId, ImportedSessionRelationship as DomainImportedSessionRelationship,
-    ImportedSourceAttestation, ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
+    DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
+    FastModeOverlay as DomainFastModeOverlay, FrozenModelSelection, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
+    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
+    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
@@ -121,10 +122,11 @@ use signalbox_process_protocol::{
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
     FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
-    FastMode as WireFastMode, FrameDecodeErrorKind, FrameEncodeError,
-    GoalBlockedProvenance as WireGoalBlockedProvenance, GoalBlockedReason as WireGoalBlockedReason,
-    GoalCommandRejection as WireGoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
+    FastMode as WireFastMode, FastModeOverlay as WireFastModeOverlay, FrameDecodeErrorKind,
+    FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
+    GoalBlockedReason as WireGoalBlockedReason, GoalCommandRejection as WireGoalCommandRejection,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+    ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
@@ -184,6 +186,26 @@ const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
+
+fn provider_default_wire_model_settings() -> WireModelSettingsSnapshot {
+    WireModelSettingsSnapshot {
+        precedence: WireModelSettingsPrecedence {
+            per_call: WireModelSettingsOverlay::inherit_all(),
+            session: WireModelSettingsOverlay::inherit_all(),
+            profile: WireModelSettingsOverlay::inherit_all(),
+            global_default: WireModelSettingsOverlay::inherit_all(),
+        },
+        effective: WireEffectiveModelSettings {
+            reasoning_level: None,
+            fast_mode: FastMode::Disabled,
+            service_tier: None,
+        },
+        reasoning_source: None,
+        fast_mode_source: None,
+        service_tier_source: None,
+        validated_for_selection_id: None,
+    }
+}
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -1084,6 +1106,15 @@ where
             model_settings,
             system_prompt,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_create_session(
                 writer,
                 version,
@@ -1118,6 +1149,15 @@ where
             initial_model_selection,
             model_settings,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_create_session_from_imported_frontier(
                 writer,
                 version,
@@ -1309,6 +1349,15 @@ where
             model_settings,
             delivery,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_submit_input(
                 writer,
                 version,
@@ -1500,6 +1549,15 @@ where
             dangerous_tool_auto_approval,
             system_prompt,
         } => {
+            if model_settings != WireModelSettingsOverlay::inherit_all() {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
+                )
+                .await;
+            }
             handle_replace_session_defaults(
                 writer,
                 version,
@@ -9632,7 +9690,7 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
 fn domain_model_settings_overlay(value: WireModelSettingsOverlay) -> DomainModelSettingsOverlay {
     DomainModelSettingsOverlay::new(
         domain_setting_overlay(value.reasoning_level, domain_reasoning_level),
-        domain_setting_overlay(value.fast_mode, domain_fast_mode),
+        domain_fast_mode_overlay(value.fast_mode),
         domain_setting_overlay(value.service_tier, domain_service_tier),
     )
 }
@@ -9741,6 +9799,13 @@ const fn domain_fast_mode(value: WireFastMode) -> DomainFastMode {
     match value {
         WireFastMode::Disabled => DomainFastMode::Disabled,
         WireFastMode::Enabled => DomainFastMode::Enabled,
+    }
+}
+
+const fn domain_fast_mode_overlay(value: WireFastModeOverlay) -> DomainFastModeOverlay {
+    match value {
+        WireFastModeOverlay::Inherit => DomainFastModeOverlay::Inherit,
+        WireFastModeOverlay::Value(value) => DomainFastModeOverlay::Value(domain_fast_mode(value)),
     }
 }
 
@@ -9869,8 +9934,15 @@ fn wire_model_settings(settings: ValidatedModelSettings) -> WireModelSettingsSna
 fn wire_model_settings_overlay(value: DomainModelSettingsOverlay) -> WireModelSettingsOverlay {
     WireModelSettingsOverlay {
         reasoning_level: wire_setting_overlay(value.reasoning_level(), wire_reasoning_level),
-        fast_mode: wire_setting_overlay(value.fast_mode(), wire_fast_mode),
+        fast_mode: wire_fast_mode_overlay(value.fast_mode()),
         service_tier: wire_setting_overlay(value.service_tier(), wire_service_tier),
+    }
+}
+
+const fn wire_fast_mode_overlay(value: DomainFastModeOverlay) -> WireFastModeOverlay {
+    match value {
+        DomainFastModeOverlay::Inherit => WireFastModeOverlay::Inherit,
+        DomainFastModeOverlay::Value(value) => WireFastModeOverlay::Value(wire_fast_mode(value)),
     }
 }
 

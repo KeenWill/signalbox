@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_application::SessionReader;
 use signalbox_domain::{
     DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
@@ -18,8 +19,8 @@ use crate::create_session_from_imported_frontier::{
 };
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
-    defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
-    session_placement_event_kind_from_str,
+    defaults_version_from_numeric, model_settings_from_json, session_id_from_uuid,
+    session_id_to_uuid, session_placement_event_kind_from_str,
 };
 
 // Applied migrations freeze this legacy storage spelling.
@@ -187,6 +188,7 @@ pub(crate) async fn load_session_from_connection(
             v.model_alias_id,
             v.dangerous_tool_auto_approval,
             v.system_prompt,
+            v.model_settings,
             seed.session_id AS seed_session_id,
             seed.seed_context_frontier_id,
             seed_frontier.owning_session_id AS seed_frontier_session_id,
@@ -342,6 +344,7 @@ fn decode_complete(
         row.try_get("model_alias_id")?,
         required(&row, "dangerous_tool_auto_approval")?,
         row.try_get("system_prompt")?,
+        required(&row, "model_settings")?,
     )?;
     let placement = decode_current_placement(&row, PlacementCreationFamily::Native)?;
 
@@ -567,6 +570,7 @@ fn decode_selection(
     alias: Option<Uuid>,
     dangerous_tool_auto_approval: String,
     system_prompt: Option<String>,
+    model_settings: Value,
 ) -> Result<SessionConfigurationDefaults, SessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
@@ -597,9 +601,12 @@ fn decode_selection(
                 .map_err(|_| SessionCorruption::Inconsistent("system prompt admission"))
         })
         .transpose()?;
-    Ok(SessionConfigurationDefaults::complete(
+    let model_settings = model_settings_from_json(model_settings)
+        .map_err(|_| SessionCorruption::Inconsistent("model settings"))?;
+    Ok(SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
+        model_settings,
     ))
 }
