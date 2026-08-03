@@ -23,8 +23,8 @@ use crate::command_registry::{
 use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
-    defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-    session_id_to_uuid, session_placement_event_kind_to_str,
+    defaults_version_to_numeric, durable_command_id_to_uuid, session_creation_cause_to_str,
+    session_id_from_uuid, session_id_to_uuid, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -34,8 +34,6 @@ const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
 const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
-// Applied migrations freeze this legacy storage spelling.
-const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
 
@@ -368,7 +366,9 @@ async fn insert_prepared(
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(USER_INITIATED)
+    .bind(session_creation_cause_to_str(
+        &SessionCreationCause::UserInitiated,
+    ))
     .bind(NO_ANCESTRY)
     .bind(
         session
@@ -471,7 +471,9 @@ async fn insert_prepared(
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
-    .bind(USER_INITIATED)
+    .bind(session_creation_cause_to_str(
+        &SessionCreationCause::UserInitiated,
+    ))
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(command_selection.kind)
@@ -871,7 +873,7 @@ fn decode_provenance(
     cause: String,
     ancestry: String,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != USER_INITIATED {
+    if cause != session_creation_cause_to_str(&SessionCreationCause::UserInitiated) {
         return Err(CreateSessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,

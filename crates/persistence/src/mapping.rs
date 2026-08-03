@@ -6,12 +6,38 @@ use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, DangerousToolAutoApproval, DurableCommandId, GoalBlockedReasonKind,
     GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
-    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
     SessionPlacementEventKind, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
     ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
+
+/// Closed session-creation cause discriminators stored in PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionCreationCauseStorageKind {
+    UserInitiated,
+    Delegated,
+}
+
+/// Encodes a session-creation cause as its closed PostgreSQL spelling.
+pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
+    match value {
+        SessionCreationCause::UserInitiated => "owner_initiated",
+        SessionCreationCause::Delegated { .. } => "delegated",
+    }
+}
+
+/// Decodes a closed session-creation cause discriminator from PostgreSQL.
+pub(crate) fn session_creation_cause_from_str(
+    value: &str,
+) -> Option<SessionCreationCauseStorageKind> {
+    match value {
+        "owner_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
+        "delegated" => Some(SessionCreationCauseStorageKind::Delegated),
+        _ => None,
+    }
+}
 
 /// Closed durable-command kinds stored by the user-global registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -543,28 +569,52 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionPlacementEventKind, ToolApprovalPosture,
-        ToolPermissionDefault, TurnId,
+        AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion,
+        SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+        ToolApprovalPosture, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
     use super::{
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
-        PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
-        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
-        input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
-        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
-        session_placement_event_kind_from_str, session_placement_event_kind_to_str,
-        session_placement_rejection_from_str, session_placement_result_kind_from_str,
-        session_placement_result_kind_to_str, tool_approval_posture_from_str,
-        tool_approval_posture_to_str, tool_permission_default_from_str,
-        tool_permission_default_to_str, turn_id_from_uuid, turn_id_to_uuid,
+        PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        accepted_input_id_from_uuid, accepted_input_id_to_uuid, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
+        input_position_to_numeric, plan_event_kind_from_str, plan_event_kind_to_str,
+        session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
+        session_id_to_uuid, session_placement_event_kind_from_str,
+        session_placement_event_kind_to_str, session_placement_rejection_from_str,
+        session_placement_result_kind_from_str, session_placement_result_kind_to_str,
+        tool_approval_posture_from_str, tool_approval_posture_to_str,
+        tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
+        turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+    const DELEGATED_REQUEST_ID: u128 = 1;
+
+    #[test]
+    fn session_creation_cause_mapping_is_closed() {
+        assert_eq!(
+            session_creation_cause_from_str(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            Some(SessionCreationCauseStorageKind::UserInitiated)
+        );
+        assert_eq!(
+            session_creation_cause_from_str(session_creation_cause_to_str(
+                &SessionCreationCause::Delegated {
+                    spawning_request: signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
+                        DELEGATED_REQUEST_ID,
+                    )),
+                },
+            )),
+            Some(SessionCreationCauseStorageKind::Delegated)
+        );
+        assert_eq!(session_creation_cause_from_str("unknown"), None);
+    }
 
     #[test]
     fn plan_event_kind_mapping_is_closed() {

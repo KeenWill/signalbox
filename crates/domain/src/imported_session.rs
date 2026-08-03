@@ -788,7 +788,10 @@ struct ValidatedImportedSeedProjection {
 }
 
 const fn delegated_imported_session_mismatch(provenance: SessionCreationProvenance) -> bool {
-    matches!(provenance.cause(), SessionCreationCause::Delegated { .. })
+    match provenance.cause() {
+        SessionCreationCause::UserInitiated => false,
+        SessionCreationCause::Delegated { .. } => true,
+    }
 }
 
 fn validate_imported_seed_projection(
