@@ -1391,8 +1391,7 @@ optional `approval` object repeats the exact `decision`, `decider`, and nullable
 `rationale` shape of `tool_approval_decided`; it is absent while the request is
 pending and when automatic policy decided without an explicit event. This makes
 explicit provenance available from an authoritative snapshot after its event
-cursor has passed. The
-vocabulary additionally admits the text-bearing
+cursor has passed. The vocabulary additionally admits the text-bearing
 `context_summary { model_call_id, first_source_session_id, first_entry_id, through_source_session_id, through_entry_id }`;
 its content follows through the ordinary `transcript_content` sequence, and its
 source-qualified endpoints and call identify the exact recorded provenance. The
