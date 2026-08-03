@@ -2225,7 +2225,7 @@ mod tests {
     #[test]
     fn matching_rule_emits_every_dispatch_action_in_order() -> Result<(), Box<dyn Error>> {
         let first_template = SessionTemplateName::try_new(String::from("merge-forward"))?;
-        let second_template = SessionTemplateName::try_new(String::from("notify-owner"))?;
+        let second_template = SessionTemplateName::try_new(String::from("notify-user"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("conflict"))?,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
