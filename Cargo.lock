@@ -3493,7 +3493,9 @@ dependencies = [
 name = "signalbox-tools-github"
 version = "0.0.0"
 dependencies = [
+ "bstr",
  "futures-util",
+ "gix-validate",
  "reqwest",
  "rustls",
  "schemars 1.2.1",

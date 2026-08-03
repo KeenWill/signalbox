@@ -27,6 +27,10 @@ mod objects;
 mod pack_install;
 mod packed_reference;
 mod pinning;
+mod push_arguments;
+mod push_catalog;
+mod push_executor;
+mod push_transport;
 mod reference_lock;
 mod reference_read;
 mod reflog;
@@ -47,5 +51,12 @@ pub use executor::{LocalGitExecutor, LocalGitExecutorError};
 pub use identity::{GitIdentity, InvalidGitIdentity};
 pub use names::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
-    GIT_LOG_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, LOCAL_GIT_TOOL_NAMES,
+    GIT_LOG_NAME, GIT_PUSH_CONFIGURED_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, LOCAL_GIT_TOOL_NAMES,
+};
+pub use push_arguments::GitPushArguments;
+pub use push_catalog::{GitPushTools, GitPushToolsConstructionError};
+pub use push_executor::{GitPushExecutor, GitPushExecutorError};
+pub use push_transport::{
+    ConfiguredGitRemote, GitPushReceipt, GitPushRequest, GitPushTransport, GitPushTransportFailure,
+    InvalidConfiguredGitRemote, InvalidGitPushReceipt,
 };

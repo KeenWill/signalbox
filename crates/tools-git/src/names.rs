@@ -19,6 +19,9 @@ pub const GIT_BRANCH_CREATE_NAME: &str = "git_branch_create";
 /// Local branch switch tool name.
 pub const GIT_BRANCH_SWITCH_NAME: &str = "git_branch_switch";
 
+/// Configured-remote branch push tool name.
+pub const GIT_PUSH_CONFIGURED_NAME: &str = "git_push_configured";
+
 /// Fixed local-family catalog order.
 pub const LOCAL_GIT_TOOL_NAMES: [&str; 7] = [
     GIT_BRANCH_CREATE_NAME,
