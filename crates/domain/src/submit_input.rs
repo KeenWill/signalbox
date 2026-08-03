@@ -25,8 +25,8 @@ use crate::{
     AppliedInterruptCommandResult, AppliedInterruptState, CurrentTurnAttemptState, DeliveryRequest,
     DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration, GoalTurnSource,
     ModelAlias, ModelCapabilityCatalog, ModelChangeAdjustment, ModelSelectionRequest,
-    OriginConfiguration, OriginModelSettingsError, PerInputConfigurationChoices,
-    ReconciliationReason, Session, SessionConfigurationDefaults,
+    ModelSettingsOverlay, OriginConfiguration, OriginModelSettingsError,
+    PerInputConfigurationChoices, ReconciliationReason, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
     TurnDisposition, TurnId, UserContent, ValidatedModelSettings,
     VersionedSessionConfigurationDefaults, derive_accepted_input_total_order,
@@ -2873,6 +2873,14 @@ fn reconstruct_origin_configuration(
     if checked.request().model() != stored_requested_model {
         return Err(SubmitInputReconstitutionFailure::RequestedModelMismatch);
     }
+    let selected_direct = stored_frozen_model.selected_direct();
+    let legacy_settings_are_safe = checked.request().per_call_model_settings()
+        == ModelSettingsOverlay::inherit_all()
+        && !checked
+            .request()
+            .model_settings()
+            .validated_for()
+            .is_some_and(|validated| validated != selected_direct);
 
     match stored_model_settings {
         Some(stored_model_settings) => OriginConfiguration::reconstitute_with_model_settings(
@@ -2882,7 +2890,7 @@ fn reconstruct_origin_configuration(
             stored_model_settings_adjustments,
         )
         .ok_or(SubmitInputReconstitutionFailure::FrozenModelMismatch),
-        None if stored_model_settings_adjustments.is_empty() => {
+        None if stored_model_settings_adjustments.is_empty() && legacy_settings_are_safe => {
             let frozen = OriginConfiguration::freeze(checked, |alias| match stored_frozen_model {
                 FrozenModelSelection::FrozenAlias {
                     alias: stored_alias,
@@ -3327,7 +3335,7 @@ mod tests {
     use std::hash::{Hash, Hasher};
 
     use super::{
-        ReconstitutedSubmitInput, SubmitInput,
+        ReconstitutedSubmitInput, StoredOriginConfigurationReconstitutionFacts, SubmitInput,
         SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
         SubmitInputAppliedTurnOriginReconstitutionInput,
         SubmitInputDirectTurnOriginConstructionInput, SubmitInputPreparationFailure,
@@ -3343,6 +3351,7 @@ mod tests {
         SubmitInputRejectedUnknownModelAliasReconstitutionInput, SubmitInputResult,
         SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
         SubmitInputTurnOriginReconstitutionInput, freeze_origin_configuration,
+        reconstruct_origin_configuration,
     };
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
@@ -4279,6 +4288,90 @@ mod tests {
             OriginModelSettingsError::MissingCapabilities {
                 selection: installed_selection,
             }
+        );
+    }
+
+    /// INV-051: a legacy origin row cannot omit settings evidence while the
+    /// caller contributes an explicit per-call setting.
+    #[test]
+    fn inv051_legacy_reconstitution_rejects_explicit_per_call_settings() {
+        let selection = direct(2);
+        let per_call = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::High),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let command = start_command_with_settings(1, "settings input", 1, per_call);
+        let facts = StoredOriginConfigurationReconstitutionFacts {
+            defaults_session: session_id(1),
+            defaults_version: version(1),
+            defaults: defaults(ModelSelectionRequest::Direct(selection)),
+            stored_requested_model: ModelSelectionRequest::Direct(selection),
+            stored_frozen_model: FrozenModelSelection::Direct(selection),
+            stored_model_settings: None,
+            stored_model_settings_adjustments: Vec::new(),
+        };
+
+        let result = reconstruct_origin_configuration(&command, facts);
+
+        assert_eq!(
+            result.expect_err("explicit settings require stored evidence"),
+            SubmitInputReconstitutionFailure::FrozenModelMismatch
+        );
+    }
+
+    /// INV-051 / INV-053: a legacy origin row cannot carry defaults settings
+    /// validated for an alias's prior direct selection across a retarget.
+    #[test]
+    fn inv051_inv053_legacy_reconstitution_rejects_alias_retarget_settings() {
+        let requested_alias = alias(1);
+        let prior_selection = direct(2);
+        let installed_selection = direct(3);
+        let stored_settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior selection supports the stored defaults");
+        let stored_defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(requested_alias),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            stored_settings,
+        )
+        .expect("alias defaults can retain prior validation evidence");
+        let command = start_command(1, "settings input", 1);
+        let facts = StoredOriginConfigurationReconstitutionFacts {
+            defaults_session: session_id(1),
+            defaults_version: version(1),
+            defaults: stored_defaults,
+            stored_requested_model: ModelSelectionRequest::Alias(requested_alias),
+            stored_frozen_model: FrozenModelSelection::FrozenAlias {
+                alias: requested_alias,
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+            stored_model_settings: None,
+            stored_model_settings_adjustments: Vec::new(),
+        };
+
+        let result = reconstruct_origin_configuration(&command, facts);
+
+        assert_eq!(
+            result.expect_err("retargeted defaults require stored settings evidence"),
+            SubmitInputReconstitutionFailure::FrozenModelMismatch
         );
     }
 
