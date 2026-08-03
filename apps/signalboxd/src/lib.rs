@@ -1026,7 +1026,11 @@ async fn execute_approval_judge(
     let usage = provider_reported_usage(result.usage);
     if result.call != prepared.call() {
         repository
-            .fail(&prepared, FailedApprovalJudgeDisposition::Ambiguous, usage)
+            .fail(
+                &prepared,
+                FailedApprovalJudgeDisposition::Ambiguous,
+                ProviderReportedTokenUsage::unreported(),
+            )
             .await?;
         return Ok(ApprovalJudgeLoopOutcome::Parked);
     }

@@ -232,6 +232,7 @@ struct ToolLoopFixture {
     session: SessionId,
     turn: TurnId,
     activated: ActivatedAcceptedInputTurn,
+    selection: DirectModelSelection,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
     credential_reference: ModelCallCredentialReference,
@@ -327,11 +328,16 @@ impl ToolLoopFixture {
             session,
             turn,
             activated: *activated,
+            selection,
             targets,
             runtime_models,
             credential_reference: ModelCallCredentialReference::new("scripted-tool-loop-test"),
             tool_dispatch_gate,
         })
+    }
+
+    const fn selection(&self) -> DirectModelSelection {
+        self.selection
     }
 
     fn execution<Catalog, Executor>(
@@ -1940,10 +1946,7 @@ async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<
     assert_eq!(decision.rationale, RATIONALE);
     assert_eq!(decision.recommendation, RECOMMENDATION);
     assert!(decision.model_call_matches);
-    assert_eq!(
-        decision.model_selection_id,
-        Uuid::from_u128(FIXTURE_ID_SEED + 1)
-    );
+    assert_eq!(decision.model_selection_id, fixture.selection().into_uuid());
     assert_eq!(judge_runtime.received_operations().len(), 1);
     assert_eq!(
         model_call_history_count(&fixture.pool, fixture.session).await?,
@@ -1998,10 +2001,7 @@ async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), 
     assert_eq!(decision.rationale, RATIONALE);
     assert_eq!(decision.recommendation, RECOMMENDATION);
     assert!(decision.model_call_matches);
-    assert_eq!(
-        decision.model_selection_id,
-        Uuid::from_u128(FIXTURE_ID_SEED + 1)
-    );
+    assert_eq!(decision.model_selection_id, fixture.selection().into_uuid());
     assert_eq!(runtime.received_operations().len(), 2);
     assert_eq!(judge_runtime.received_operations().len(), 1);
     assert_eq!(
