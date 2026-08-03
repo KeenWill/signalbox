@@ -41,8 +41,8 @@ use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
+    DecideToolRequestResult, DelegateApprovalRecommendation, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, PerInputConfigurationChoices,
@@ -57,13 +57,16 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd,
     ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure, ToolCallProposal,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind, ToolName,
-    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    ToolDecisionRationale, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorKind, ToolName, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
+    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
+    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
+    approval_judge::{
+        CompleteApprovalJudgeOutcome, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+    },
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
@@ -139,6 +142,28 @@ const APPROVAL_RECOMMENDATION: &str = "approve";
 const APPROVAL_JUDGE_CREDENTIAL: &str = "fixture-credential";
 const APPROVAL_JUDGE_RATIONALE: &str = "fixture rationale";
 const APPROVAL_JUDGE_ESTIMATED_PROVENANCE: &str = "estimated";
+const APPROVAL_DELEGATE_SOURCE: &str = "delegate";
+
+fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprovalJudge {
+    match outcome {
+        PrepareApprovalJudgeOutcome::Ready(prepared) => *prepared,
+        PrepareApprovalJudgeOutcome::NoWork
+        | PrepareApprovalJudgeOutcome::InFlightAfterRestart(_) => {
+            panic!("the delegated fixture prepares a fresh judge call")
+        }
+    }
+}
+
+fn applied_tool_decision(
+    prepared: &signalbox_domain::PreparedDecideToolRequest,
+) -> &signalbox_domain::DecideToolRequestAppliedResult {
+    match prepared.result() {
+        DecideToolRequestResult::Applied(applied) => applied,
+        DecideToolRequestResult::Rejected(_) => {
+            panic!("the escalated delegated request admits a user decision")
+        }
+    }
+}
 
 fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
     signalbox_persistence::SessionCredentialPin::try_new(vec![
@@ -3500,6 +3525,190 @@ async fn approval_judge_terminal_transition_accepts_estimated_usage_provenance()
             APPROVAL_JUDGE_ESTIMATED_PROVENANCE.to_owned(),
             estimated_input_tokens,
         )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_repository_defaults_to_the_producing_model() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ec0;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+    let producing_selection: Uuid = sqlx::query_scalar(
+        "SELECT COALESCE(direct_model_selection_id, frozen_alias_selected_direct_id)
+           FROM model_call WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(prepared.request().id(), requests[0]);
+    assert_eq!(prepared.selection().into_uuid(), producing_selection);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_repository_atomically_applies_provenanced_approval()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ee0;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let request = requests[0];
+    let repository = model_repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(fixture.session, fixture.turn, judge_call, None)
+            .await?,
+    );
+
+    assert_eq!(prepared.request().id(), request);
+    repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported().with_input_tokens(Some(13)),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
+    let stored: (String, String, String, Uuid, Uuid, String, String) = sqlx::query_as(
+        "SELECT judge.state_kind, judge.recommendation_kind,
+                decision.decision_source, decision.delegate_model_selection_id,
+                decision.delegate_model_call_id, decision.rationale,
+                lifecycle.active_phase_kind
+           FROM tool_approval_judge_model_call AS judge
+           JOIN tool_approval_decision AS decision
+             ON decision.request_id = judge.request_id
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = judge.turn_id
+            AND lifecycle.session_id = judge.session_id
+          WHERE judge.model_call_id = $1",
+    )
+    .bind(judge_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::Decided);
+    assert_eq!(stored.0, "terminal");
+    assert_eq!(stored.1, APPROVAL_RECOMMENDATION);
+    assert_eq!(stored.2, APPROVAL_DELEGATE_SOURCE);
+    assert_eq!(stored.3, prepared.selection().into_uuid());
+    assert_eq!(stored.4, prepared.call().into_uuid());
+    assert_eq!(stored.5, APPROVAL_JUDGE_RATIONALE);
+    assert_eq!(stored.6, "running");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_decision()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7f20;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let request = requests[0];
+    let repository = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+                None,
+            )
+            .await?,
+    );
+
+    repository.authorize(&prepared).await?;
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
+            ProviderReportedTokenUsage::unreported(),
+            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+        )
+        .await?;
+    let parked: (String, String, bool, String, Uuid) = sqlx::query_as(
+        "SELECT judge.state_kind, judge.recommendation_kind,
+                EXISTS (
+                    SELECT 1 FROM tool_approval_decision
+                     WHERE request_id = judge.request_id
+                ),
+                lifecycle.active_phase_kind, lifecycle.approval_tool_request_id
+           FROM tool_approval_judge_model_call AS judge
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = judge.turn_id
+            AND lifecycle.session_id = judge.session_id
+          WHERE judge.model_call_id = $1",
+    )
+    .bind(prepared.call().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let user_decision = model_repository
+        .tool_loop_repository()
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xe2)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe3)),
+        )
+        .await?;
+
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(parked.0, "terminal");
+    assert_eq!(parked.1, "escalate_to_human");
+    assert!(!parked.2);
+    assert_eq!(parked.3, "awaiting_tool_approval");
+    assert_eq!(parked.4, request.into_uuid());
+    assert_eq!(
+        applied_tool_decision(&user_decision).resolution().request(),
+        request
     );
 
     pool.close().await;

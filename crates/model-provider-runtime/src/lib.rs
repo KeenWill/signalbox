@@ -8,8 +8,13 @@
 //! docs/spec/model-call-execution.md. It owns no retry, fallback, lifecycle,
 //! or durable state.
 
+mod approval_judge;
 mod context_compaction;
 
+pub use approval_judge::{
+    ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
+    ApprovalJudgeModelResult, RuntimeApprovalJudgeModel,
+};
 pub use context_compaction::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
     ContextCompactionModelResult, RuntimeContextCompactionModel,
