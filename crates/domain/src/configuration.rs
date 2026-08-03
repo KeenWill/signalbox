@@ -690,6 +690,7 @@ pub struct OriginConfiguration {
     requested: ConfigurationRequest,
     session_defaults_version: SessionConfigurationDefaultsVersion,
     effective: EffectiveConfiguration,
+    model_settings_adjusted_from: Option<DirectModelSelection>,
     model_settings_adjustments: Box<[ModelChangeAdjustment]>,
 }
 
@@ -724,6 +725,7 @@ impl OriginConfiguration {
                 requested.dangerous_tool_auto_approval(),
                 requested.model_settings(),
             ),
+            model_settings_adjusted_from: None,
             model_settings_adjustments: Box::new([]),
         })
     }
@@ -759,10 +761,8 @@ impl OriginConfiguration {
             .model_settings
             .precedence()
             .with_per_call(caller_overlay);
-        let model_changed = request
-            .model_settings
-            .validated_for()
-            .is_some_and(|validated| validated != selection);
+        let prior_validation = request.model_settings.validated_for();
+        let model_changed = prior_validation.is_some_and(|validated| validated != selection);
         let (model_settings, adjustments) = if model_changed {
             model_capabilities
                 .validate_model_change(selection, precedence, caller_overlay)
@@ -776,6 +776,9 @@ impl OriginConfiguration {
                 Vec::new().into_boxed_slice(),
             )
         };
+        let model_settings_adjusted_from = (!adjustments.is_empty())
+            .then_some(prior_validation)
+            .flatten();
         request.model_settings = model_settings;
         Ok(Self {
             requested: request,
@@ -785,6 +788,7 @@ impl OriginConfiguration {
                 request.dangerous_tool_auto_approval(),
                 model_settings,
             ),
+            model_settings_adjusted_from,
             model_settings_adjustments: adjustments,
         })
     }
@@ -815,10 +819,8 @@ impl OriginConfiguration {
         {
             return None;
         }
-        let model_changed = request
-            .model_settings
-            .validated_for()
-            .is_some_and(|validated| validated != selected);
+        let prior_validation = request.model_settings.validated_for();
+        let model_changed = prior_validation.is_some_and(|validated| validated != selected);
         if !adjustments.is_empty() && !model_changed {
             return None;
         }
@@ -835,6 +837,9 @@ impl OriginConfiguration {
             return None;
         }
         request.model_settings = stored_settings;
+        let model_settings_adjusted_from = (!adjustments.is_empty())
+            .then_some(prior_validation)
+            .flatten();
         Some(Self {
             requested: request,
             session_defaults_version,
@@ -843,6 +848,7 @@ impl OriginConfiguration {
                 request.dangerous_tool_auto_approval(),
                 stored_settings,
             ),
+            model_settings_adjusted_from,
             model_settings_adjustments: adjustments.into_boxed_slice(),
         })
     }
@@ -862,7 +868,12 @@ impl OriginConfiguration {
         &self.effective
     }
 
-    /// Borrows ordered automatic alias-retarget adjustments.
+    /// Returns the prior direct validation identity that caused adjustments.
+    pub const fn model_settings_adjusted_from(&self) -> Option<DirectModelSelection> {
+        self.model_settings_adjusted_from
+    }
+
+    /// Borrows ordered automatic model-change adjustments.
     pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment] {
         &self.model_settings_adjustments
     }
@@ -1271,6 +1282,7 @@ mod tests {
                 to: ReasoningLevel::Medium,
             }]
         );
+        assert_eq!(origin.model_settings_adjusted_from(), Some(prior_selection));
         assert_eq!(
             origin.requested().per_call_model_settings(),
             ModelSettingsOverlay::inherit_all()
