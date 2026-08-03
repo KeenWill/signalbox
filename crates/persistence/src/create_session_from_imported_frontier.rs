@@ -678,6 +678,12 @@ async fn load_creation_from_connection(
             v.system_prompt AS stored_system_prompt,
             placement_head.current_version AS current_placement_head_version,
             current_placement.version AS current_placement_event_version,
+            EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+            ) AS current_placement_later_event_exists,
             initial_placement.version AS initial_placement_version,
             initial_placement.prior_version AS initial_placement_prior_version,
             initial_placement.event_kind AS initial_placement_event_kind,
@@ -818,6 +824,20 @@ fn validate_initial_placement_effect(row: &PgRow) -> Result<(), ImportedSessionR
             })?;
     if head != current_event {
         return Err(ImportedSessionCorruption::Inconsistent("current placement head event").into());
+    }
+    let history_head_state =
+        crate::session_placement::PlacementHistoryHeadState::from_later_event_exists(required(
+            row,
+            "current_placement_later_event_exists",
+        )?);
+    match history_head_state {
+        crate::session_placement::PlacementHistoryHeadState::MatchesLatestEvent => {}
+        crate::session_placement::PlacementHistoryHeadState::BehindLaterEvent => {
+            return Err(ImportedSessionCorruption::Inconsistent(
+                "session placement head behind event history",
+            )
+            .into());
+        }
     }
     let initial =
         crate::session_placement::decode_version(required(row, "initial_placement_version")?)

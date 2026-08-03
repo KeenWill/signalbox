@@ -39,8 +39,8 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SystemPromptMember,
-    ToolDecision, TurnState, decode_server_line, encode_client_line,
+    ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionPlacement,
+    SystemPromptMember, ToolDecision, TurnState, decode_server_line, encode_client_line,
 };
 use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
 use signalbox_tools_conversations::{
@@ -48,15 +48,16 @@ use signalbox_tools_conversations::{
     READ_OWN_CONVERSATION_NAME,
 };
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
-use signalbox_tools_web::WEB_FETCH_NAME;
+use signalbox_tools_web::{BRAVE_SEARCH_CREDENTIAL_REFERENCE, WEB_FETCH_NAME, WEB_SEARCH_NAME};
 use signalboxd::{
     APPLY_PATCH_NAME, ActivatedTurnExecution, CHANGE_REQUEST_COMMENT_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_SUMMARY_NAME,
     CHANGE_REQUEST_THREAD_REPLY_NAME, CHANGE_REQUEST_THREAD_RESOLVE_NAME,
     CODE_HOST_CREDENTIAL_REFERENCE, DaemonTools, EDIT_FILE_NAME, FileCredentialAccess,
     GitHubCodeHostTransport, HubModelConfiguration, LIST_DIRECTORY_NAME, LocalProcessListener,
-    PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME, ProcessRuntime, READ_FILE_NAME,
-    SEARCH_FILES_NAME, SessionTemplateConfiguration, SystemCurrentTimeClock, WRITE_FILE_NAME,
+    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
+    ProcessRuntime, READ_FILE_NAME, SEARCH_FILES_NAME, SessionTemplateConfiguration,
+    SystemCurrentTimeClock, WRITE_FILE_NAME,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -98,6 +99,8 @@ const FIRST_PLAN_STATUS: &str = "in_progress";
 const SECOND_PLAN_STATUS: &str = "completed";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/";
+const UNUSED_WEB_SEARCH_CREDENTIAL_FILE: &str = "unused-brave-key";
+const DENIED_WEB_SEARCH_QUERY: &str = "synthetic denied search";
 const DENIED_WRITE_PATH: &str = "denied.txt";
 const DENIED_PATCH_PATH: &str = "denied-patch.txt";
 
@@ -237,10 +240,20 @@ async fn run_live_smoke() -> SmokeResult {
         credential_file,
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
     );
+    let web_search_credentials = FileCredentialAccess::new(
+        credential_directory
+            .path()
+            .join(UNUSED_WEB_SEARCH_CREDENTIAL_FILE),
+        CredentialReference::new(BRAVE_SEARCH_CREDENTIAL_REFERENCE),
+    );
     let tools = DaemonTools::try_new_production(
         SystemCurrentTimeClock,
         pool.clone(),
-        credentials,
+        MappedDaemonCredentialInputs {
+            web_search: web_search_credentials,
+            code_host: credentials.clone(),
+            github: credentials,
+        },
         GitHubCodeHostTransport::try_new()?,
         github_egress_policy,
         &configured_workspace,
@@ -353,11 +366,21 @@ async fn run_live_smoke() -> SmokeResult {
     .await?;
     assert_plan_fold(&current_tool_results(&probe)?, &plan_fixture)?;
 
-    run_automatic_turn(
+    let web_fetch_turn = run_parking_turn(
         &pool,
         &mut connection,
         session,
         "exercise allowed web fetch",
+        &execution,
+    )
+    .await?;
+    decide_requests(
+        &pool,
+        &mut connection,
+        session,
+        web_fetch_turn,
+        &[WEB_FETCH_NAME],
+        DecisionPosture::Approve,
         &execution,
     )
     .await?;
@@ -652,6 +675,8 @@ fn confirm_calls(session: CanonicalUuid) -> Vec<ScriptedToolCall> {
             SESSION_STATUS_UPDATE_NAME,
             json!({"title": "denied", "tags": [], "attributes": {}, "archived": false}),
         ),
+        call(WEB_FETCH_NAME, json!({"url": WEB_URL})),
+        call(WEB_SEARCH_NAME, json!({"query": DENIED_WEB_SEARCH_QUERY})),
         call(
             WRITE_FILE_NAME,
             json!({"path": DENIED_WRITE_PATH, "content": "denied\n"}),
@@ -1023,6 +1048,7 @@ async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUui
                 alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(SMOKE_ALIAS)),
             },
             system_prompt: SystemPromptMember::present(None),
+            placement: SessionPlacement::Pathless {},
         })
         .await?;
     let response = connection.response_within().await?;

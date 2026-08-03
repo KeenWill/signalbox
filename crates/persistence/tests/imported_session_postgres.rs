@@ -25,7 +25,8 @@ use signalbox_domain::{
     CreateSessionFromImportedFrontier, DangerousToolAutoApproval, DirectModelSelection,
     DurableCommandId, ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
     ImportedTranscriptEntryId, ModelSelectionRequest, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionId, TranscriptAncestry,
+    SessionConfigurationDefaults, SessionId, SessionPlacement, SessionPlacementPath,
+    SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -37,6 +38,7 @@ use signalbox_persistence::{
     mapping::DurableCommandIdMappingError,
     migrate,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
+    session_placement::SessionPlacementRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -50,6 +52,15 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_imported_session_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const ARBITRARY_LAGGING_HEAD_CONVERSATION_ID_SEED: u128 = 0x122;
+const ARBITRARY_LAGGING_HEAD_IMPORTED_ENTRY_ID_SEED: u128 = 0x222;
+const ARBITRARY_LAGGING_HEAD_CREATION_COMMAND_ID_SEED: u128 = 0x322;
+const ARBITRARY_LAGGING_HEAD_SESSION_ID_SEED: u128 = 0x422;
+const ARBITRARY_LAGGING_HEAD_SEED_FRONTIER_ID_SEED: u128 = 0x722;
+const ARBITRARY_LAGGING_HEAD_SEMANTIC_ENTRY_ID_SEED: u128 = 0x622;
+const ARBITRARY_LAGGING_HEAD_UPDATE_COMMAND_ID_SEED: u128 = 0x323;
+const ARBITRARY_LAGGING_HEAD_REPLAY_SESSION_ID_SEED: u128 = 0x423;
+const ARBITRARY_LAGGING_HEAD_REPLAY_FRONTIER_ID_SEED: u128 = 0x723;
 
 fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
     signalbox_persistence::SessionCredentialPin::try_new(vec![
@@ -266,6 +277,91 @@ async fn s28_inv012_inv039_equal_replay_requires_its_placement_effect_without_ge
         panic!("missing imported placement head fails with typed corruption")
     };
     assert_eq!(field, "current_placement_head_version");
+    Ok(())
+}
+
+/// S28 / INV-002 / INV-012: imported creation replay rejects a placement head
+/// behind its append-only event history before generating fresh identities.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv012_imported_creation_replay_rejects_a_lagging_placement_head()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(
+        ARBITRARY_LAGGING_HEAD_CONVERSATION_ID_SEED,
+        ARBITRARY_LAGGING_HEAD_IMPORTED_ENTRY_ID_SEED,
+        "{\"type\":\"summary\",\"value\":null}",
+    );
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let command = imported_command(
+        ARBITRARY_LAGGING_HEAD_CREATION_COMMAND_ID_SEED,
+        &conversation,
+        ImportedSessionRelationship::Resume,
+    );
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
+    let created = repository
+        .handle(
+            command.clone(),
+            SessionId::from_uuid(Uuid::from_u128(ARBITRARY_LAGGING_HEAD_SESSION_ID_SEED)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(
+                ARBITRARY_LAGGING_HEAD_SEED_FRONTIER_ID_SEED,
+            )),
+            || {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    ARBITRARY_LAGGING_HEAD_SEMANTIC_ENTRY_ID_SEED,
+                ))
+            },
+        )
+        .await?;
+    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = created else {
+        panic!("fixture creation must apply")
+    };
+    SessionPlacementRepository::new(pool.clone())
+        .handle(UpdateSessionPlacement::new(
+            DurableCommandId::from_uuid(Uuid::from_u128(
+                ARBITRARY_LAGGING_HEAD_UPDATE_COMMAND_ID_SEED,
+            )),
+            applied.session(),
+            SessionPlacementVersion::INITIAL,
+            SessionPlacement::scoped(SessionPlacementPath::try_new(
+                "projects.imported.updated".to_owned(),
+            )?)?,
+        ))
+        .await?;
+    sqlx::query("ALTER TABLE session_current_placement DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_current_placement SET current_version = 1
+          WHERE session_id = $1",
+    )
+    .bind(*applied.session().as_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(
+                ARBITRARY_LAGGING_HEAD_REPLAY_SESSION_ID_SEED,
+            )),
+            ContextFrontierId::from_uuid(Uuid::from_u128(
+                ARBITRARY_LAGGING_HEAD_REPLAY_FRONTIER_ID_SEED,
+            )),
+            || panic!("corrupt replay must fail before semantic identity generation"),
+        )
+        .await
+        .expect_err("imported creation replay rejects a lagging placement head");
+    let ImportedSessionRepositoryError::Corruption(ImportedSessionCorruption::Inconsistent(reason)) =
+        error
+    else {
+        panic!("lagging imported placement head fails with typed corruption")
+    };
+    assert_eq!(reason, "session placement head behind event history");
     Ok(())
 }
 

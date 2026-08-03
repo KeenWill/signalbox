@@ -1470,6 +1470,11 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )?;
+        let current_check_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::TimedOut,
+        );
         let current = observation(
             vec![pull_request(PullRequestFacts {
                 head_sha: CHANGED_HEAD,
@@ -1478,11 +1483,7 @@ mod tests {
                     object_id(CHECK_SUITE_ID),
                     ChecksOutcome::Failure,
                 )],
-                completed_check_runs: vec![RepoWatchCheckRunObservation::new(
-                    object_id(CHECK_RUN_ID),
-                    CheckRunName::try_new(String::from(CHECK_NAME))?,
-                    CheckConclusion::TimedOut,
-                )],
+                completed_check_runs: vec![current_check_run.clone()],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],
             Vec::new(),
@@ -1512,8 +1513,8 @@ mod tests {
         assert_eq!(
             events[3].kind(),
             &RepoWatchEventKindV1::CheckRunCompleted {
-                name: CheckRunName::try_new(String::from(CHECK_NAME))?,
-                conclusion: CheckConclusion::TimedOut,
+                name: current_check_run.name().clone(),
+                conclusion: current_check_run.conclusion(),
             }
         );
         Ok(())
