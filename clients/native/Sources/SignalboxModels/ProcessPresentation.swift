@@ -388,12 +388,13 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     unrecognizedKind: String? = nil,
     sourceAttribution: SignalboxProcessMessageSourceAttribution? = nil
   ) {
+    let retainedUnrecognizedKind = sourceAttribution == nil
+      ? unrecognizedKind.map { SignalboxProcessPresentation.retainedLabel($0) }
+      : nil
     self.kind = "process_message"
-    self.role = sourceAttribution?.role ?? role
+    self.role = retainedUnrecognizedKind == nil ? sourceAttribution?.role ?? role : .unknown
     self.text = text
-    self.unrecognizedKind = unrecognizedKind.map {
-      SignalboxProcessPresentation.retainedLabel($0)
-    }
+    self.unrecognizedKind = retainedUnrecognizedKind
     self.sourceAttribution = sourceAttribution
   }
 

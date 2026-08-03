@@ -154,6 +154,45 @@ final class SignalboxModelsTests: XCTestCase {
         )
     }
 
+    func testProcessMessageInitializerMakesUnrecognizedRoleRoundTrippable() throws {
+        let event = SignalboxProcessMessageEvent(
+            role: .assistant,
+            text: "Fixture text",
+            unrecognizedKind: Self.futureSpeakerKind
+        )
+
+        let encoded = try SignalboxJSONCoding.encoder().encode(event)
+        let decoded = try SignalboxJSONCoding.decoder().decode(
+            SignalboxProcessMessageEvent.self,
+            from: encoded
+        )
+
+        XCTAssertEqual(event.role, .unknown)
+        XCTAssertEqual(event.unrecognizedKind, Self.futureSpeakerKind)
+        XCTAssertEqual(decoded, event)
+    }
+
+    func testProcessMessageInitializerPrefersTypedSourceAttribution() throws {
+        let attribution = SignalboxProcessMessageSourceAttribution.importedAssistantRole
+        let event = SignalboxProcessMessageEvent(
+            role: .user,
+            text: "Fixture text",
+            unrecognizedKind: Self.futureSpeakerKind,
+            sourceAttribution: attribution
+        )
+
+        let encoded = try SignalboxJSONCoding.encoder().encode(event)
+        let decoded = try SignalboxJSONCoding.decoder().decode(
+            SignalboxProcessMessageEvent.self,
+            from: encoded
+        )
+
+        XCTAssertEqual(event.role, attribution.role)
+        XCTAssertNil(event.unrecognizedKind)
+        XCTAssertEqual(event.sourceAttribution, attribution)
+        XCTAssertEqual(decoded, event)
+    }
+
     func testProcessMessageDecodeBoundsUnrecognizedKind() throws {
         let value = String(
             repeating: "x",
