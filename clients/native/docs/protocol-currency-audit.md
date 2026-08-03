@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `ecbe29e0` on 2026-08-03.
+Verified against repository head `279ce522` on 2026-08-03.
 
 ## Scope and method
 
@@ -27,7 +27,7 @@ from the current protocol.
 
 The current Rust protocol has 51 client request verbs and 66 server message
 kinds. Before this work, native modeled 16 request verbs and 34 server message
-kinds, plus a generic unknown-message envelope. Twelve of the 13 current durable
+kinds, plus a generic unknown-message envelope. Thirteen of the 14 current durable
 `SessionEvent` variants and all four current text-entry variants were named, but
 some nested future variants were rejected during synchronization. Native named
 eight of the nine current non-text transcript-entry variants. The remaining
@@ -123,8 +123,8 @@ kinds `goal_transition_applied`, `goal_history_start`, `goal_history_state`,
 
 The durable event family itself is current: `session_created`, `input_accepted`,
 `turn_activated`, `model_call_transition`, `tool_batch_transition`,
-`context_compacted`, `turn_completed`, `turn_failed`, `turn_refused`,
-`turn_cancelled`, `turn_reconciliation_required`, and
+`tool_approval_decided`, `context_compacted`, `turn_completed`, `turn_failed`,
+`turn_refused`, `turn_cancelled`, `turn_reconciliation_required`, and
 `turn_tool_reconciliation_required` are all decoded. The current
 `goal_turn_retired` variant and future variants use native's generic
 unknown-event representation for forward compatibility. The gap was acceptance
