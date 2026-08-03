@@ -112,6 +112,16 @@ impl ModelCapabilityCatalog {
         definitions: impl IntoIterator<Item = ModelCapabilityDefinition>,
     ) -> Result<Self, ModelCapabilityCatalogError> {
         let mut definitions = definitions.into_iter().collect::<Vec<_>>();
+        let self_mapped = definitions.iter().find_map(|definition| {
+            matches!(
+                definition.capabilities.fast_mode(),
+                Some(FastModeTarget::Mapped(target)) if target == &definition.target
+            )
+            .then(|| definition.target.clone())
+        });
+        if let Some(target) = self_mapped {
+            return Err(ModelCapabilityCatalogError::SelfMappedFastTarget { target });
+        }
         definitions.sort_by(|left, right| left.target.as_str().cmp(right.target.as_str()));
         let duplicate = definitions
             .windows(2)
@@ -276,11 +286,16 @@ pub enum ModelCapabilityCatalogError {
         /// Duplicated target.
         target: ResolvedTarget,
     },
+    /// A mapped fast target repeated the selected target.
+    SelfMappedFastTarget {
+        /// Target that must use the same-target capability variant.
+        target: ResolvedTarget,
+    },
 }
 
 impl std::fmt::Display for ModelCapabilityCatalogError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("model capability catalog contains a duplicate target")
+        formatter.write_str("model capability catalog contains an invalid target relation")
     }
 }
 
@@ -374,6 +389,26 @@ mod tests {
         assert_eq!(
             tier.to_string(),
             "explicit service tier openai:priority is unsupported by the exact runtime target"
+        );
+    }
+
+    /// S37 / INV-054: a same-target request control cannot masquerade as a
+    /// distinct serving-identity mapping.
+    #[test]
+    fn s37_inv054_capability_catalog_rejects_self_mapped_fast_target() {
+        let selected = ResolvedTarget::new("fixture-model");
+        let definition = ModelCapabilityDefinition::new(
+            selected.clone(),
+            ModelCapabilities::new(
+                BTreeSet::new(),
+                Some(FastModeTarget::Mapped(selected.clone())),
+                BTreeSet::new(),
+            ),
+        );
+
+        assert_eq!(
+            ModelCapabilityCatalog::try_from_definitions([definition]),
+            Err(super::ModelCapabilityCatalogError::SelfMappedFastTarget { target: selected })
         );
     }
 }

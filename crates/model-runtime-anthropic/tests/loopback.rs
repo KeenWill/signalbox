@@ -670,7 +670,7 @@ async fn input_count_uses_the_declared_fast_target() {
         selected,
         ModelCapabilities::new(
             BTreeSet::new(),
-            Some(FastModeTarget::Mapped(mapped)),
+            Some(FastModeTarget::Mapped(mapped.clone())),
             BTreeSet::new(),
         ),
     )];
@@ -695,7 +695,7 @@ async fn input_count_uses_the_declared_fast_target() {
         }
     );
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].contains(r#""model":"model-fast-1""#));
+    assert!(requests[0].contains(&format!(r#""model":"{}""#, mapped.as_str())));
     assert!(requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
 }
 

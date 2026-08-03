@@ -1038,15 +1038,18 @@ impl TurnModelSettingsResolved {
                     },
                 )
             });
-        (selection_matches && caller_matches && adjustments_match).then(|| Self {
-            accepted_input,
-            turn,
-            defaults_version,
-            selection,
-            per_call_override,
-            settings,
-            adjustments: adjustments.into_boxed_slice(),
-        })
+        let adjustments_match_selection =
+            adjustments.is_empty() || matches!(selection, FrozenModelSelection::FrozenAlias { .. });
+        (selection_matches && caller_matches && adjustments_match && adjustments_match_selection)
+            .then(|| Self {
+                accepted_input,
+                turn,
+                defaults_version,
+                selection,
+                per_call_override,
+                settings,
+                adjustments: adjustments.into_boxed_slice(),
+            })
     }
 
     /// Returns the accepted input whose origin resolution produced the event.
@@ -1970,6 +1973,43 @@ mod tests {
         let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
             .validate_precedence(selection, ModelSettingsPrecedence::provider_defaults())
             .expect("provider defaults are supported");
+
+        let event = TurnModelSettingsResolved::try_new(
+            AcceptedInputId::from_uuid(Uuid::from_u128(1)),
+            TurnId::from_uuid(Uuid::from_u128(2)),
+            SessionConfigurationDefaultsVersion::first(),
+            FrozenModelSelection::Direct(selection),
+            ModelSettingsOverlay::inherit_all(),
+            settings,
+            vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }],
+        );
+
+        assert_eq!(event, None);
+    }
+
+    /// INV-003 / INV-053: immutable direct selections cannot produce the
+    /// alias-retarget adjustments recorded at input acceptance.
+    #[test]
+    fn inv003_inv053_turn_event_rejects_adjustments_for_direct_selection() {
+        let selection = direct(1);
+        let settings = capabilities([ReasoningLevel::Low], FastModeSupport::Unsupported, [])
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the adjusted fixture level is supported");
 
         let event = TurnModelSettingsResolved::try_new(
             AcceptedInputId::from_uuid(Uuid::from_u128(1)),
