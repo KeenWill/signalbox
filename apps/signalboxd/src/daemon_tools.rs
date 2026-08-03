@@ -1110,7 +1110,7 @@ mod tests {
                 .definition(&echo)
                 .expect("the fixture tool remains composed")
                 .approval_posture(),
-            ToolApprovalPosture::Delegated
+            Some(ToolApprovalPosture::Delegated)
         );
     }
 

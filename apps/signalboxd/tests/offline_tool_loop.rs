@@ -177,6 +177,34 @@ struct RecordingScriptedModel {
     inner: Arc<ScriptedModel<ModelCallId>>,
 }
 
+type FixtureProvider = RuntimeModelCallProvider<RecordingScriptedModel>;
+type FixtureExecution<Catalog, Executor> =
+    PostgresProviderToolLoopExecution<FixtureProvider, Catalog, Executor>;
+type FixtureJudgeExecution<Catalog, Executor> = (
+    FixtureExecution<Catalog, Executor>,
+    Arc<ScriptedModel<ModelCallId>>,
+    Arc<ScriptedModel<ModelCallId>>,
+);
+
+#[derive(Debug, sqlx::FromRow)]
+struct DelegateDecisionProjection {
+    decision_kind: String,
+    decision_source: String,
+    rationale: String,
+    recommendation: String,
+    model_call_matches: bool,
+    model_selection_id: Uuid,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct EscalatedParkProjection {
+    active_phase: String,
+    approval_request_id: Uuid,
+    recommendation: String,
+    rationale: String,
+    decision_count: i64,
+}
+
 impl ModelRuntime<ModelCallId> for RecordingScriptedModel {
     type Prepared = ScriptedPrepared<ModelCallId>;
 
@@ -312,11 +340,7 @@ impl ToolLoopFixture {
         catalog: Catalog,
         executor: Executor,
     ) -> (
-        PostgresProviderToolLoopExecution<
-            RuntimeModelCallProvider<RecordingScriptedModel>,
-            Catalog,
-            Executor,
-        >,
+        FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
     ) {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
@@ -347,15 +371,7 @@ impl ToolLoopFixture {
         judge_script: Script,
         catalog: Catalog,
         executor: Executor,
-    ) -> (
-        PostgresProviderToolLoopExecution<
-            RuntimeModelCallProvider<RecordingScriptedModel>,
-            Catalog,
-            Executor,
-        >,
-        Arc<ScriptedModel<ModelCallId>>,
-        Arc<ScriptedModel<ModelCallId>>,
-    )
+    ) -> FixtureJudgeExecution<Catalog, Executor>
     where
         Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
         Executor: ToolExecutor + Clone + Send + 'static,
@@ -1902,11 +1918,12 @@ async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.request_ids().await?[0];
-    let decision: (String, String, String, String, bool, Uuid) = sqlx::query_as(
+    let decision: DelegateDecisionProjection = sqlx::query_as(
         "SELECT decision.decision_kind, decision.decision_source,
-                decision.rationale, judge.recommendation_kind,
-                decision.delegate_model_call_id = judge.model_call_id,
-                decision.delegate_model_selection_id
+                decision.rationale,
+                judge.recommendation_kind AS recommendation,
+                decision.delegate_model_call_id = judge.model_call_id AS model_call_matches,
+                decision.delegate_model_selection_id AS model_selection_id
            FROM tool_approval_decision AS decision
            JOIN tool_approval_judge_model_call AS judge
              ON judge.request_id = decision.request_id
@@ -1917,12 +1934,15 @@ async fn delegated_approve_records_provenance_then_executes() -> Result<(), Box<
     .await?;
 
     assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
-    assert_eq!(decision.0, "approve");
-    assert_eq!(decision.1, "delegate");
-    assert_eq!(decision.2, RATIONALE);
-    assert_eq!(decision.3, "approve");
-    assert!(decision.4);
-    assert_eq!(decision.5, Uuid::from_u128(FIXTURE_ID_SEED + 1));
+    assert_eq!(decision.decision_kind, "approve");
+    assert_eq!(decision.decision_source, "delegate");
+    assert_eq!(decision.rationale, RATIONALE);
+    assert_eq!(decision.recommendation, "approve");
+    assert!(decision.model_call_matches);
+    assert_eq!(
+        decision.model_selection_id,
+        Uuid::from_u128(FIXTURE_ID_SEED + 1)
+    );
     assert_eq!(judge_runtime.received_operations().len(), 1);
     assert_eq!(
         model_call_history_count(&fixture.pool, fixture.session).await?,
@@ -1955,9 +1975,12 @@ async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), 
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.request_ids().await?[0];
-    let decision: (String, String, String, String) = sqlx::query_as(
+    let decision: DelegateDecisionProjection = sqlx::query_as(
         "SELECT decision.decision_kind, decision.decision_source,
-                decision.rationale, judge.recommendation_kind
+                decision.rationale,
+                judge.recommendation_kind AS recommendation,
+                decision.delegate_model_call_id = judge.model_call_id AS model_call_matches,
+                decision.delegate_model_selection_id AS model_selection_id
            FROM tool_approval_decision AS decision
            JOIN tool_approval_judge_model_call AS judge
              ON judge.request_id = decision.request_id
@@ -1968,10 +1991,15 @@ async fn delegated_deny_records_provenance_then_skips_execution() -> Result<(), 
     .await?;
 
     assert!(executor.events().is_empty());
-    assert_eq!(decision.0, "deny");
-    assert_eq!(decision.1, "delegate");
-    assert_eq!(decision.2, RATIONALE);
-    assert_eq!(decision.3, "deny");
+    assert_eq!(decision.decision_kind, "deny");
+    assert_eq!(decision.decision_source, "delegate");
+    assert_eq!(decision.rationale, RATIONALE);
+    assert_eq!(decision.recommendation, "deny");
+    assert!(decision.model_call_matches);
+    assert_eq!(
+        decision.model_selection_id,
+        Uuid::from_u128(FIXTURE_ID_SEED + 1)
+    );
     assert_eq!(runtime.received_operations().len(), 2);
     assert_eq!(judge_runtime.received_operations().len(), 1);
     assert_eq!(
@@ -2005,11 +2033,12 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
         .execute(Box::new(fixture.activated.clone()))
         .await?;
     let request = fixture.request_ids().await?[0];
-    let parked: (String, Uuid, String, String, i64) = sqlx::query_as(
-        "SELECT lifecycle.active_phase_kind, lifecycle.approval_tool_request_id,
-                judge.recommendation_kind, judge.rationale,
+    let parked: EscalatedParkProjection = sqlx::query_as(
+        "SELECT lifecycle.active_phase_kind AS active_phase,
+                lifecycle.approval_tool_request_id AS approval_request_id,
+                judge.recommendation_kind AS recommendation, judge.rationale,
                 (SELECT count(*) FROM tool_approval_decision
-                  WHERE request_id = judge.request_id)
+                  WHERE request_id = judge.request_id) AS decision_count
            FROM turn_lifecycle AS lifecycle
            JOIN tool_approval_judge_model_call AS judge
              ON judge.session_id = lifecycle.session_id
@@ -2021,11 +2050,11 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
     .fetch_one(&fixture.pool)
     .await?;
 
-    assert_eq!(parked.0, "awaiting_tool_approval");
-    assert_eq!(parked.1, request.into_uuid());
-    assert_eq!(parked.2, "escalate_to_human");
-    assert_eq!(parked.3, RATIONALE);
-    assert_eq!(parked.4, 0);
+    assert_eq!(parked.active_phase, "awaiting_tool_approval");
+    assert_eq!(parked.approval_request_id, request.into_uuid());
+    assert_eq!(parked.recommendation, "escalate_to_human");
+    assert_eq!(parked.rationale, RATIONALE);
+    assert_eq!(parked.decision_count, 0);
     assert!(executor.events().is_empty());
     assert_eq!(judge_runtime.received_operations().len(), 1);
     assert_eq!(

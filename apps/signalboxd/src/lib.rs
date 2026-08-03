@@ -998,12 +998,9 @@ async fn execute_approval_judge(
     let result = match result {
         Ok(result) => result,
         Err(error) => {
+            let usage = provider_reported_usage(error.usage());
             repository
-                .fail(
-                    &prepared,
-                    judge_failure_disposition(error),
-                    ProviderReportedTokenUsage::unreported(),
-                )
+                .fail(&prepared, judge_failure_disposition(error), usage)
                 .await?;
             return Ok(ApprovalJudgeLoopOutcome::Parked);
         }
@@ -1064,9 +1061,10 @@ const fn judge_failure_disposition(
     error: ApprovalJudgeModelError,
 ) -> FailedApprovalJudgeDisposition {
     match error {
-        ApprovalJudgeModelError::Refused => FailedApprovalJudgeDisposition::Refused,
+        ApprovalJudgeModelError::Refused(_) => FailedApprovalJudgeDisposition::Refused,
         ApprovalJudgeModelError::CancellationConfirmed => FailedApprovalJudgeDisposition::Cancelled,
-        ApprovalJudgeModelError::BoundaryLoss | ApprovalJudgeModelError::CorrelationMismatch => {
+        ApprovalJudgeModelError::BoundaryLoss(_)
+        | ApprovalJudgeModelError::CorrelationMismatch(_) => {
             FailedApprovalJudgeDisposition::Ambiguous
         }
         ApprovalJudgeModelError::UnconfiguredTarget
@@ -1074,11 +1072,13 @@ const fn judge_failure_disposition(
         | ApprovalJudgeModelError::CancelledBeforeSend
         | ApprovalJudgeModelError::PreparationFailed
         | ApprovalJudgeModelError::PreparationDefect
-        | ApprovalJudgeModelError::ProviderError
+        | ApprovalJudgeModelError::ProviderError(_)
         | ApprovalJudgeModelError::ProvenUnsent
-        | ApprovalJudgeModelError::ProviderTargetSubstituted
-        | ApprovalJudgeModelError::IncompleteDecision
-        | ApprovalJudgeModelError::InvalidDecision => FailedApprovalJudgeDisposition::KnownFailed,
+        | ApprovalJudgeModelError::ProviderTargetSubstituted(_)
+        | ApprovalJudgeModelError::IncompleteDecision(_)
+        | ApprovalJudgeModelError::InvalidDecision(_) => {
+            FailedApprovalJudgeDisposition::KnownFailed
+        }
     }
 }
 

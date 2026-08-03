@@ -133,7 +133,7 @@ impl PostgresEligibilitySweep {
                  GROUP BY terminal.session_id
                 UNION
                 SELECT active.session_id
-                 FROM turn_lifecycle AS active
+                  FROM turn_lifecycle AS active
                  WHERE active.state_kind = 'active'
                    AND active.active_tool_round_call_id IS NOT NULL
                    AND (
