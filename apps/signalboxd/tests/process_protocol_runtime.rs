@@ -5225,8 +5225,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
     let ServerMessage::SessionCreated {
         session_id,
         model_settings,
-    } =
-        *response_within(&mut connection).await?.message()
+    } = *response_within(&mut connection).await?.message()
     else {
         panic!("prompted creation must return its session");
     };
