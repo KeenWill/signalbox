@@ -37,8 +37,9 @@ export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
 verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
 pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag. The runner
+#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
+are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
+lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed

@@ -1412,17 +1412,17 @@ fn validate_session_placement_shape(
         SessionPlacement::Scoped { path } => (path, false),
         SessionPlacement::RootGlobalRead { path, .. } => (path, true),
     };
-    let segments = path.split('.').collect::<Vec<_>>();
-    let shape_valid = !path.is_empty()
-        && segments.len() <= 64
-        && segments.iter().all(|segment| {
-            !segment.is_empty()
-                && segment.len() <= 64
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        })
-        && (segments.len() == 1) == root;
+    let segment_count = path.split('.').try_fold(0_usize, |count, segment| {
+        let next_count = count + 1;
+        (next_count <= 64
+            && !segment.is_empty()
+            && segment.len() <= 64
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+        .then_some(next_count)
+    });
+    let shape_valid = segment_count.is_some_and(|count| (count == 1) == root);
     if shape_valid {
         Ok(())
     } else {
@@ -1433,16 +1433,16 @@ fn validate_session_placement_shape(
 fn validate_submitted_session_placement(
     placement: &SessionPlacement,
 ) -> Result<(), FrameValidationError> {
-    validate_session_placement_shape(placement)?;
     let within_submission_bound = match placement {
         SessionPlacement::Pathless {} => true,
         SessionPlacement::Scoped { path } | SessionPlacement::RootGlobalRead { path, .. } => {
             path.len() <= MAX_SESSION_PLACEMENT_PATH_BYTES
         }
     };
-    within_submission_bound
-        .then_some(())
-        .ok_or(FrameValidationError::PlacementShape)
+    if !within_submission_bound {
+        return Err(FrameValidationError::PlacementShape);
+    }
+    validate_session_placement_shape(placement)
 }
 
 /// One exact complete session-metadata object.
@@ -8980,9 +8980,14 @@ mod tests {
     #[test]
     fn inv033_session_placement_constructor_rejects_paths_over_the_total_byte_bound() {
         let segment_valid_path_over_total_bound = vec!["x".repeat(64); 63].join(".");
+        let frame_sized_empty_segments = ".".repeat(super::MAX_FRAME_BYTES - 1);
 
         assert_eq!(
             super::SessionPlacement::try_scoped(segment_valid_path_over_total_bound),
+            Err(super::CanonicalValueError::Placement)
+        );
+        assert_eq!(
+            super::SessionPlacement::try_scoped(frame_sized_empty_segments),
             Err(super::CanonicalValueError::Placement)
         );
     }
