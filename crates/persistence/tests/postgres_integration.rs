@@ -17495,7 +17495,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         rolled_back,
-        ("active".into(), "prepared".into(), 0, 0, Decimal::from(3))
+        ("active".into(), "prepared".into(), 0, 0, Decimal::from(4))
     );
 
     sqlx::query(
@@ -17533,7 +17533,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         committed,
-        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(4))
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(5))
     );
 
     pool.close().await;
@@ -19914,7 +19914,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .expect("the committed session has a transcript projection");
 
     assert_eq!(queued_snapshot.session(), session);
-    assert_eq!(queued_snapshot.cursor(), 2);
+    assert_eq!(queued_snapshot.cursor(), 3);
     assert_eq!(queued_snapshot.turns().len(), 1);
     assert_eq!(queued_snapshot.turns()[0].turn(), turn);
     assert_eq!(queued_snapshot.turns()[0].acceptance_position(), 1);
@@ -19947,7 +19947,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .expect("the committed session has a transcript projection");
 
     assert_eq!(snapshot.session(), session);
-    assert_eq!(snapshot.cursor(), 3);
+    assert_eq!(snapshot.cursor(), 4);
     assert_eq!(snapshot.turns().len(), 1);
     assert_eq!(snapshot.turns()[0].turn(), turn);
     assert_eq!(snapshot.turns()[0].acceptance_position(), 1);
@@ -21011,6 +21011,12 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
         DispatchedOutboxEventKind::SessionCreated
     ));
 
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
     let mut accepted = None;
     assert_eq!(
         dispatcher
@@ -21019,7 +21025,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
     );
     let accepted = accepted.expect("the input acceptance event was offered");
     assert_eq!(accepted.session(), session);
@@ -21041,7 +21047,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
     let activation = activation.expect("the turn activation event was offered");
     assert_eq!(activation.session(), session);
@@ -21072,7 +21078,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
     .bind(attempt.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_counts, (1, 1, Decimal::from(3)));
+    assert_eq!(durable_counts, (1, 1, Decimal::from(4)));
 
     pool.close().await;
     drop(container);
@@ -21138,6 +21144,12 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 2 }
     );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
     let mut activation = None;
     assert_eq!(
         dispatcher
@@ -21146,7 +21158,7 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
     assert_eq!(
         activation
@@ -21187,7 +21199,7 @@ async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
     .await?;
     sqlx::query(
         "UPDATE outbox_delivery_state
-            SET delivered_through = 2,
+            SET delivered_through = 3,
                 last_delivery_xid = pg_current_xact_id()
           WHERE singleton",
     )
@@ -21239,14 +21251,30 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
         .await?;
 
     let dispatcher = OutboxDispatcher::new(pool.clone());
-    for sequence in 1..=3 {
-        assert_eq!(
-            dispatcher
-                .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
-                .await?,
-            OutboxDispatchOutcome::Delivered { sequence }
-        );
-    }
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
+    );
     let mut prepared_transition = None;
     assert_eq!(
         dispatcher
@@ -21255,7 +21283,7 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 4 }
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
     );
     assert_eq!(
         prepared_transition
@@ -21281,7 +21309,7 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 5 }
+        OutboxDispatchOutcome::Delivered { sequence: 6 }
     );
 
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
@@ -21350,6 +21378,12 @@ async fn s01_inv032_model_call_dispatch_rejects_an_unreached_transition()
             .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
 
     sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
@@ -21585,6 +21619,12 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
             .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
     );
 
     sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER accepted_input_is_append_only")
