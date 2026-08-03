@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The delegated tool-approval posture and judge-selection configuration is
+verified against this PR (`agent/approval-judge-config`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -468,18 +471,48 @@ one credential-free download from its validated, pinned, bounded public HTTPS
 redirect destination; the pull-request suite has no such exception. Model
 arguments cannot widen either admission rule.
 
-Composition preserves each compiled declaration's permission default and feeds
-it unchanged into the existing durable approval flow. Exact-revision code-host
-and pull-request reads and all workspace reads default to `Auto`; code-host
-mutations, GitHub review publication, and every workspace mutation default to
-`Confirm`. Reading the invoking session's transcript defaults to `Auto`, while
-listing conversations and reading another native or imported conversation
-default to `Confirm`. With the session posture disabled, a confirmed request
-creates the ordinary durable approval wait exposed by the process protocol;
-execution does not enter its transport or filesystem boundary until a
-per-request approval is recorded. A session frozen with `ApproveAll` instead
-receives the existing explicit `SessionBlanket` approval and does not park. No
-composition layer changes a declaration from `Confirm` to `Auto`.
+The optional `[tool_approval_postures]` table maps an exact composed tool name
+to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
+unknown posture values, and startup rejects a structurally valid name that is
+absent from the selected composition. That name check and the temporary
+`delegated` refusal run in the pre-database configuration pass. An absent table
+or omitted tool name preserves that declaration's legacy permission-default and
+session-blanket behavior exactly. Subject to the `AlwaysConfirm` human-only rule
+owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
+an explicit posture supersedes that legacy result for the request: `auto`
+records policy automation and `human` parks for a user even when the session
+blanket is enabled. Until judge wiring lands, daemon startup rejects a
+configured `delegated` override.
+
+Committed unimplemented functionality: `delegated` will park with delegated
+authority for the approval-judge wiring. That wiring must not expose a delegated
+request to the ordinary user-decision path before escalation.
+
+The optional `[approval_judge]` table has exactly one `selection_id`, and the
+configuration parser requires it to name a configured direct selection.
+
+Committed unimplemented functionality: no present runtime consumes the
+approval-judge selection or dispatches an approval-judge call. The implementing
+daemon-wiring slice must use the selected model through the ordinary adapter,
+credential-profile, and target-resolution machinery; when the table is absent,
+it must use the judged session call's direct selection unchanged, never a
+hardcoded lower tier.
+
+When no explicit posture is configured, composition preserves each compiled
+declaration's permission default and feeds it unchanged into the existing
+durable approval flow. Exact-revision code-host and pull-request reads and all
+workspace reads default to `Auto`; code-host mutations, GitHub review
+publication, and every workspace mutation default to `Confirm`. Reading the
+invoking session's transcript defaults to `Auto`, while listing conversations
+and reading another native or imported conversation default to `Confirm`. With
+the session posture disabled, a confirmed request creates the ordinary durable
+approval wait exposed by the process protocol; execution does not enter its
+transport or filesystem boundary until a per-request approval is recorded. A
+session frozen with `ApproveAll` instead receives the existing explicit
+`SessionBlanket` approval and does not park. Only the explicit
+`[tool_approval_postures]` table changes a declaration's resolved posture;
+family composition itself does not.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
