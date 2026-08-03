@@ -23,6 +23,28 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-033: turn stops encode the required descendant scope in version one.
+  func testTurnStopRequestEncodesItsDescendantScope() throws {
+    let frame = SignalboxProcessClientFrame(
+      requestID: try SignalboxRequestID(validating: 9),
+      request: .stopTurn(
+        commandID: try SignalboxCommandID(validating: turnID),
+        sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+        expectedActiveTurnID: try SignalboxCanonicalUUID(validating: turnID),
+        content: "Stop and continue",
+        expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 3),
+        descendantScope: .parentAndDescendants
+      )
+    )
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(frame)
+
+    XCTAssertEqual(
+      String(decoding: encoded, as: UTF8.self),
+      #"{"request":{"command_id":"\#(turnID)","content":"Stop and continue","descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+    )
+  }
+
   func testNewerProtocolVersionRemainsClassifiable() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.newerVersionFrame()
