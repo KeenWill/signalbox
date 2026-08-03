@@ -3084,7 +3084,10 @@ private enum ProcessSubmissionFixture {
       commandID: try SignalboxCommandID(validating: commandID),
       sessionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.session),
       content: content,
-      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1)
+      expectedDefaultsVersion: SignalboxCanonicalUInt64(rawValue: 1),
+      modelSelection: .direct(
+        selectionID: try SignalboxCanonicalUUID(validating: ProcessDriverFixture.modelCall)
+      )
     )
   }
 
@@ -3180,7 +3183,8 @@ private struct RejectingProcessService: SignalboxProcessServiceProtocol {
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3500,7 +3504,8 @@ private actor AmbiguousThenAcceptingProcessService: SignalboxProcessServiceProto
       commandID: try SignalboxCommandID(validating: commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3715,7 +3720,8 @@ private actor CancellationThenAcceptingProcessService: SignalboxProcessServicePr
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3761,7 +3767,8 @@ private actor ImmediateAcceptingProcessService: SignalboxProcessServiceProtocol 
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3831,7 +3838,8 @@ private actor DefaultsMismatchThenAcceptingProcessService: SignalboxProcessServi
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3894,7 +3902,8 @@ private actor SuspendedSubmissionService: SignalboxProcessServiceProtocol {
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 
@@ -3959,7 +3968,8 @@ private actor AmbiguousThenUnsentSubmissionService: SignalboxProcessServiceProto
       commandID: try SignalboxCommandID(validating: ProcessSubmissionFixture.commandID),
       sessionID: session.id,
       content: content,
-      expectedDefaultsVersion: session.defaultsVersion
+      expectedDefaultsVersion: session.defaultsVersion,
+      modelSelection: session.modelSelection
     )
   }
 

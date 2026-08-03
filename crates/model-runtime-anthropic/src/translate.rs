@@ -632,9 +632,19 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_fast_mode_and_tier_use_the_anthropic_wire_controls() {
+    fn reasoning_uses_the_anthropic_effort_control() {
         let mut operation = operation("call-settings");
         operation.settings.reasoning_level = Some(ReasoningLevel::XHigh);
+
+        let request = build_request(&operation).expect("supported reasoning translates");
+        let value = serde_json::to_value(request).expect("wire request serializes");
+
+        assert_eq!(value["output_config"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn fast_mode_and_tier_use_the_anthropic_wire_controls() {
+        let mut operation = operation("call-settings");
         operation.settings.fast_mode = FastMode::Enabled;
         operation.settings.service_tier =
             Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly));
@@ -642,7 +652,6 @@ mod tests {
         let request = build_request(&operation).expect("supported controls translate");
         let value = serde_json::to_value(request).expect("wire request serializes");
 
-        assert_eq!(value["output_config"]["effort"], "xhigh");
         assert_eq!(value["speed"], "fast");
         assert_eq!(value["service_tier"], "standard_only");
     }

@@ -3231,6 +3231,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3361,6 +3362,7 @@ async fn connection_reconciles_the_parked_turn(
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after the wedge")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3394,6 +3396,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: unparked_turn_id,
                 content: InputContent::new(String::from("names no parked turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3415,6 +3418,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3430,6 +3434,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("the decision is already recorded")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3464,6 +3469,7 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
         expected_active_turn_id: parked_turn_id,
         content: InputContent::new(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -3509,6 +3515,7 @@ async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decis
         expected_active_turn_id: parked_turn_id,
         content: InputContent::new(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     let mut first = Connection::connect(runtime.socket()).await?;
     let mut second = Connection::connect(runtime.socket()).await?;
@@ -3552,6 +3559,7 @@ async fn s04_reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Bo
                 expected_active_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xB3)),
                 content: InputContent::new(String::from("names no session")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4141,6 +4149,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(successor_content.clone()),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4190,6 +4199,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4224,6 +4234,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(String::from("a second distinct stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4261,6 +4272,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 expected_active_turn_id: unstarted_turn_id,
                 content: InputContent::new(String::from("names no active turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4285,6 +4297,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 expected_active_turn_id: unstarted_turn_id,
                 content: InputContent::new(String::from("names a stale turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4319,6 +4332,7 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
         expected_active_turn_id: stopped_turn_id,
         content: InputContent::new(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -4367,6 +4381,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("stop during the approval wait")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4425,6 +4440,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after the denied round")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;

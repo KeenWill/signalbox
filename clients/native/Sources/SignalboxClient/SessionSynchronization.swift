@@ -1319,7 +1319,8 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
     case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
-    case .sessionCreated, .inputAccepted, .modelCallTransition, .turnActivated:
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .modelCallTransition, .turnActivated:
       return false
     }
   }
@@ -1968,7 +1969,8 @@ extension SignalboxProcessSessionEvent {
       return ("tool_batch_transition.state.\(kind)", nil)
     case .unknown(let kind, _, let diagnostic):
       return (kind, diagnostic)
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .turnActivated, .modelCallTransition,
       .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired:
@@ -1995,7 +1997,8 @@ extension SignalboxProcessSessionEvent {
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .sessionCreated, .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .turnActivated, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired:
       return 0
