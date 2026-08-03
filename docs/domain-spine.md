@@ -5880,6 +5880,113 @@ pub fn derive_repo_watch_events(
     current: &RepoWatchObservation,
     ids: &mut impl RepoWatchEventIdGenerator,
 ) -> Result<Vec<RepoWatchEvent>, RepoWatchDifferError>;
+
+pub struct RepoWatchResolvedTemplate { /* private */ }
+impl RepoWatchResolvedTemplate {
+    pub const fn new(
+        provenance: SessionTemplateProvenance,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    // accessors: provenance(), defaults()
+}
+
+pub trait RepoWatchTemplateResolver {
+    fn resolve_repo_watch_template(
+        &self,
+        name: &SessionTemplateName,
+    ) -> Option<RepoWatchResolvedTemplate>;
+}
+
+pub enum RepoWatchSingletonKey {
+    PullRequest { repository: RepositorySlug, number: PullRequestNumber },
+    Stack { repository: RepositorySlug, root_branch: BranchName },
+    Rule,
+    Repository { repository: RepositorySlug },
+}
+
+pub struct RepoWatchPreparedDispatchAction { /* private */ }
+impl RepoWatchPreparedDispatchAction {
+    // accessors: action(), prepared_session()
+    pub fn into_parts(self) -> (RepoWatchActionV1, PreparedCreateSession);
+}
+
+pub enum RepoWatchRuleEvaluation {
+    NotMatched {
+        event: RepoWatchEvent,
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+    },
+    Matched {
+        dispatch_id: RepoWatchDispatchId,
+        event: RepoWatchEvent,
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+        singleton: RepoWatchSingletonKey,
+        cooldown: std::time::Duration,
+        actions: Box<[RepoWatchPreparedDispatchAction]>,
+    },
+}
+
+pub enum RepoWatchRuleEvaluationOutcome {
+    NotMatched,
+    Occupied,
+    Cooldown,
+    Dispatched {
+        dispatch_id: RepoWatchDispatchId,
+        sessions: Box<[SessionId]>,
+    },
+    Replayed {
+        dispatch_id: RepoWatchDispatchId,
+        sessions: Box<[SessionId]>,
+    },
+}
+
+pub trait RepoWatchDispatchTransaction {
+    type Error;
+    async fn handle_repo_watch_evaluation(
+        &mut self,
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error>;
+}
+
+pub trait RepoWatchDispatchIdGenerator {
+    fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
+    fn next_command_id(&mut self) -> DurableCommandId;
+    fn next_session_id(&mut self) -> SessionId;
+}
+
+pub struct UuidV7RepoWatchDispatchIdGenerator;
+
+pub enum RepoWatchDispatchPreparationError {
+    Context(RepoWatchDispatchContextError),
+    UnknownTemplate(SessionTemplateName),
+    SessionPreparation,
+    InvalidSingletonTarget,
+}
+
+pub struct RepoWatchDispatchService<Ids, Transaction> { /* private */ }
+impl<Ids, Transaction> RepoWatchDispatchService<Ids, Transaction> {
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self;
+}
+impl<Ids: RepoWatchDispatchIdGenerator, Transaction: RepoWatchDispatchTransaction>
+    RepoWatchDispatchService<Ids, Transaction>
+{
+    pub async fn evaluate(
+        &mut self,
+        event: RepoWatchEvent,
+        rule: &RepoWatchRule,
+        observation: &RepoWatchObservation,
+        templates: &impl RepoWatchTemplateResolver,
+    ) -> Result<
+        RepoWatchRuleEvaluationOutcome,
+        RepoWatchDispatchServiceError<Transaction::Error>,
+    >;
+}
+
+pub enum RepoWatchDispatchServiceError<TransactionError> {
+    Preparation(RepoWatchDispatchPreparationError),
+    Transaction(TransactionError),
+}
 ```
 
 ## application: review_orchestration
@@ -8964,7 +9071,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
-| application: repo_watch                            | 19 (incl. 1 trait)   |
+| application: repo_watch                            | 31 (incl. 4 traits)  |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
 | application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
@@ -8974,4 +9081,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **224**              |
+| **signalbox-application total**                    | **236**              |

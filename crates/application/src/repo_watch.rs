@@ -1,13 +1,17 @@
 //! Pure repository-state comparison for the repository-watch event boundary.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt, future::Future};
 
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId,
-    MergeableState, PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent,
-    ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventConstructionError,
-    RepoWatchEventId, RepoWatchEventKindV1, RepoWatchWorkflowRunAttempt, RepositorySlug,
-    ReviewState, ReviewThreadId, WorkflowName,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, CreateSession,
+    DurableCommandId, GitHubObjectId, MergeableState, PreparedCreateSession,
+    PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId,
+    RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindV1,
+    RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
+    ReviewThreadId, SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionTemplateName, SessionTemplateProvenance, TranscriptAncestry, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -1079,6 +1083,360 @@ fn reject_duplicate_branch_heads(
         }
     }
     Ok(())
+}
+
+/// One completely resolved immutable session template used by dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchResolvedTemplate {
+    provenance: SessionTemplateProvenance,
+    defaults: SessionConfigurationDefaults,
+}
+
+impl RepoWatchResolvedTemplate {
+    pub const fn new(
+        provenance: SessionTemplateProvenance,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            provenance,
+            defaults,
+        }
+    }
+
+    pub const fn provenance(&self) -> &SessionTemplateProvenance {
+        &self.provenance
+    }
+
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
+    }
+}
+
+/// Immutable process-lifetime template lookup for repository-watch dispatch.
+pub trait RepoWatchTemplateResolver {
+    fn resolve_repo_watch_template(
+        &self,
+        name: &SessionTemplateName,
+    ) -> Option<RepoWatchResolvedTemplate>;
+}
+
+/// Durable singleton identity derived independently for one matched rule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepoWatchSingletonKey {
+    PullRequest {
+        repository: RepositorySlug,
+        number: PullRequestNumber,
+    },
+    Stack {
+        repository: RepositorySlug,
+        root_branch: BranchName,
+    },
+    Rule,
+    Repository {
+        repository: RepositorySlug,
+    },
+}
+
+/// One action whose current-interface session creation has been domain-prepared.
+#[derive(Debug)]
+pub struct RepoWatchPreparedDispatchAction {
+    action: RepoWatchActionV1,
+    prepared_session: PreparedCreateSession,
+}
+
+impl RepoWatchPreparedDispatchAction {
+    pub const fn action(&self) -> &RepoWatchActionV1 {
+        &self.action
+    }
+
+    pub const fn prepared_session(&self) -> &PreparedCreateSession {
+        &self.prepared_session
+    }
+
+    pub fn into_parts(self) -> (RepoWatchActionV1, PreparedCreateSession) {
+        (self.action, self.prepared_session)
+    }
+}
+
+/// One rule evaluation submitted to the atomic persistence boundary.
+#[derive(Debug)]
+pub enum RepoWatchRuleEvaluation {
+    NotMatched {
+        event: RepoWatchEvent,
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+    },
+    Matched {
+        dispatch_id: RepoWatchDispatchId,
+        event: RepoWatchEvent,
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+        singleton: RepoWatchSingletonKey,
+        cooldown: std::time::Duration,
+        actions: Box<[RepoWatchPreparedDispatchAction]>,
+    },
+}
+
+/// Durable result of one event/rule evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepoWatchRuleEvaluationOutcome {
+    NotMatched,
+    Occupied,
+    Cooldown,
+    Dispatched {
+        dispatch_id: RepoWatchDispatchId,
+        sessions: Box<[SessionId]>,
+    },
+    Replayed {
+        dispatch_id: RepoWatchDispatchId,
+        sessions: Box<[SessionId]>,
+    },
+}
+
+/// Atomic rule-evaluation, singleton-admission, session-creation, and audit port.
+pub trait RepoWatchDispatchTransaction {
+    type Error;
+
+    fn handle_repo_watch_evaluation(
+        &mut self,
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> impl Future<Output = Result<RepoWatchRuleEvaluationOutcome, Self::Error>> + Send;
+}
+
+/// Candidate identity supply for one repository-watch dispatch batch.
+pub trait RepoWatchDispatchIdGenerator {
+    fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
+    fn next_command_id(&mut self) -> DurableCommandId;
+    fn next_session_id(&mut self) -> SessionId;
+}
+
+/// Production UUIDv7 identity source for repository-watch dispatch.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UuidV7RepoWatchDispatchIdGenerator;
+
+impl RepoWatchDispatchIdGenerator for UuidV7RepoWatchDispatchIdGenerator {
+    fn next_dispatch_id(&mut self) -> RepoWatchDispatchId {
+        RepoWatchDispatchId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_command_id(&mut self) -> DurableCommandId {
+        DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+    }
+
+    fn next_session_id(&mut self) -> SessionId {
+        SessionId::from_uuid(uuid::Uuid::now_v7())
+    }
+}
+
+/// Why a validated rule could not be prepared for its atomic dispatch port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RepoWatchDispatchPreparationError {
+    Context(RepoWatchDispatchContextError),
+    UnknownTemplate(SessionTemplateName),
+    SessionPreparation,
+    InvalidSingletonTarget,
+}
+
+impl fmt::Display for RepoWatchDispatchPreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Context(_) => "repository-watch event could not form dispatch context",
+            Self::UnknownTemplate(_) => "repository-watch rule names an unknown session template",
+            Self::SessionPreparation => "repository-watch session preparation failed",
+            Self::InvalidSingletonTarget => {
+                "repository-watch singleton scope is incompatible with the event target"
+            }
+        })
+    }
+}
+
+impl Error for RepoWatchDispatchPreparationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Context(error) => Some(error),
+            Self::UnknownTemplate(_) | Self::SessionPreparation | Self::InvalidSingletonTarget => {
+                None
+            }
+        }
+    }
+}
+
+/// Coordinates pure matching and current-interface session preparation.
+#[derive(Debug)]
+pub struct RepoWatchDispatchService<Ids, Transaction> {
+    ids: Ids,
+    transaction: Transaction,
+}
+
+impl<Ids, Transaction> RepoWatchDispatchService<Ids, Transaction> {
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self {
+        Self { ids, transaction }
+    }
+}
+
+impl<Ids, Transaction> RepoWatchDispatchService<Ids, Transaction>
+where
+    Ids: RepoWatchDispatchIdGenerator,
+    Transaction: RepoWatchDispatchTransaction,
+{
+    pub async fn evaluate(
+        &mut self,
+        event: RepoWatchEvent,
+        rule: &RepoWatchRule,
+        observation: &RepoWatchObservation,
+        templates: &impl RepoWatchTemplateResolver,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchServiceError<Transaction::Error>>
+    {
+        let actions = rule
+            .actions_for_event(&event)
+            .map_err(RepoWatchDispatchPreparationError::Context)
+            .map_err(RepoWatchDispatchServiceError::Preparation)?;
+        if actions.is_empty() {
+            return self
+                .transaction
+                .handle_repo_watch_evaluation(RepoWatchRuleEvaluation::NotMatched {
+                    event,
+                    rule_id: rule.id().clone(),
+                    rule_version: rule.version(),
+                })
+                .await
+                .map_err(RepoWatchDispatchServiceError::Transaction);
+        }
+        let singleton = singleton_key(rule.singleton_per(), &event, observation)
+            .ok_or(RepoWatchDispatchPreparationError::InvalidSingletonTarget)
+            .map_err(RepoWatchDispatchServiceError::Preparation)?;
+        let mut prepared_actions = Vec::with_capacity(actions.len());
+        for action in actions {
+            let RepoWatchActionV1::DispatchSession(dispatch) = &action;
+            let template = templates
+                .resolve_repo_watch_template(dispatch.template())
+                .ok_or_else(|| {
+                    RepoWatchDispatchPreparationError::UnknownTemplate(dispatch.template().clone())
+                })
+                .map_err(RepoWatchDispatchServiceError::Preparation)?;
+            let command = CreateSession::new_from_template(
+                self.ids.next_command_id(),
+                SessionCreationProvenance::new(
+                    SessionCreationCause::UserInitiated,
+                    TranscriptAncestry::None,
+                ),
+                template.provenance,
+                template.defaults,
+            );
+            let prepared_session = command
+                .prepare(self.ids.next_session_id())
+                .map_err(|_| RepoWatchDispatchPreparationError::SessionPreparation)
+                .map_err(RepoWatchDispatchServiceError::Preparation)?;
+            prepared_actions.push(RepoWatchPreparedDispatchAction {
+                action,
+                prepared_session,
+            });
+        }
+        self.transaction
+            .handle_repo_watch_evaluation(RepoWatchRuleEvaluation::Matched {
+                dispatch_id: self.ids.next_dispatch_id(),
+                event,
+                rule_id: rule.id().clone(),
+                rule_version: rule.version(),
+                singleton,
+                cooldown: rule.cooldown(),
+                actions: prepared_actions.into_boxed_slice(),
+            })
+            .await
+            .map_err(RepoWatchDispatchServiceError::Transaction)
+    }
+}
+
+/// Nonterminal rule-dispatch orchestration failure.
+#[derive(Debug)]
+pub enum RepoWatchDispatchServiceError<TransactionError> {
+    Preparation(RepoWatchDispatchPreparationError),
+    Transaction(TransactionError),
+}
+
+fn singleton_key(
+    scope: RepoWatchSingletonScope,
+    event: &RepoWatchEvent,
+    observation: &RepoWatchObservation,
+) -> Option<RepoWatchSingletonKey> {
+    match scope {
+        RepoWatchSingletonScope::Rule => Some(RepoWatchSingletonKey::Rule),
+        RepoWatchSingletonScope::Repository => Some(RepoWatchSingletonKey::Repository {
+            repository: event.repository().clone(),
+        }),
+        RepoWatchSingletonScope::PullRequest => {
+            let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+                return None;
+            };
+            Some(RepoWatchSingletonKey::PullRequest {
+                repository: event.repository().clone(),
+                number: context.number(),
+            })
+        }
+        RepoWatchSingletonScope::Stack => {
+            let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+                return None;
+            };
+            Some(RepoWatchSingletonKey::Stack {
+                repository: event.repository().clone(),
+                root_branch: stack_root(event.repository(), context, observation),
+            })
+        }
+    }
+}
+
+fn stack_root(
+    repository: &RepositorySlug,
+    context: &PullRequestEventContext,
+    observation: &RepoWatchObservation,
+) -> BranchName {
+    let mut frontier = BTreeSet::from([context.base_branch().clone()]);
+    let mut visited = BTreeSet::new();
+    let mut roots = BTreeSet::new();
+    while let Some(branch) = frontier.pop_first() {
+        if !visited.insert(branch.clone()) {
+            continue;
+        }
+        let parents = observation
+            .state()
+            .pull_requests()
+            .iter()
+            .filter(|candidate| {
+                candidate.lifecycle() == RepoWatchPullRequestLifecycle::Open
+                    && candidate.context().head_repository() == repository
+                    && candidate.context().head_branch() == &branch
+            })
+            .map(|parent| parent.context().base_branch().clone())
+            .collect::<Vec<_>>();
+        if parents.is_empty() {
+            roots.insert(branch);
+        } else {
+            frontier.extend(parents);
+        }
+    }
+    roots
+        .into_iter()
+        .next()
+        .or_else(|| visited.into_iter().next())
+        .unwrap_or_else(|| context.base_branch().clone())
+}
+
+/// Display and error forwarding for repository-watch dispatch service failures.
+impl<TransactionError> fmt::Display for RepoWatchDispatchServiceError<TransactionError>
+where
+    TransactionError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preparation(error) => error.fmt(formatter),
+            Self::Transaction(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<TransactionError> Error for RepoWatchDispatchServiceError<TransactionError> where
+    TransactionError: Error + 'static
+{
 }
 
 #[cfg(test)]

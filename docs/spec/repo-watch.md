@@ -16,10 +16,8 @@ from the watcher.
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
-persistence and differ behavior below is verified against this PR
-(`agent/repo-watch-persistence`). Polling behavior is verified against PR #438
-(`agent/repo-watch-poller`). Rule dispatch becomes implemented only in the later
-child pull request named by its verification reference.
+persistence, differ, polling, and rule-dispatch behavior below is verified
+against this PR (`agent/repo-watch-dispatch`).
 
 ## Configuration and credential boundary
 
@@ -34,10 +32,10 @@ not substitute for a missing repository-watch credential reference. Credential
 paths are absolute and cannot contain parent-directory components, so a lexical
 alias cannot bypass duplicate-reference validation.
 
-**Committed unimplemented functionality.** Slice 4 adds versioned structured
-rules to this same section and makes invalid rules a startup configuration
-failure. No present configuration surface accepts rules; this paragraph binds
-only that compatibility constraint.
+**Implemented behavior.** The section also accepts versioned structured rules.
+Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
+more than 128 rules, more than 32 actions per rule, or cooldowns beyond signed
+64-bit seconds fail startup configuration before polling begins.
 
 **Implemented behavior.** Repository identities normalize to ASCII lowercase at
 construction. Both slug segments are nonempty ASCII letters, digits, dots,
@@ -222,12 +220,11 @@ identical observations emit nothing.
 
 ## Structured rules
 
-**Foundation contract.** Configuration encodes rules as versioned TOML structs,
+**Implemented behavior.** Configuration encodes rules as versioned TOML structs,
 not a string DSL. Fields within one rule are conjunctive and distinct rules are
 disjunctive. Omitting every target field means everything; requiring labels or
 supplying regex fields narrows only that rule. There is no global targeting
-switch. No present configuration or execution surface loads or evaluates these
-rules; Slice 4 implements this constraint.
+switch.
 
 **Implemented behavior.** The version-one matcher value has exactly these
 fields:
@@ -240,13 +237,13 @@ fields:
 - a mergeable-state `any_of` list; and
 - a conclusion `any_of` list.
 
-**Foundation contract.** The last two fields are the ratified payload
+**Implemented behavior.** The last two fields are the ratified payload
 qualifiers. They do not split event kinds by payload. For `ChecksCompleted`,
 `success` and `failure` map to the same conclusion values used by the qualifier.
 A supplied payload qualifier is false for an event kind to which it does not
 apply. Expressiveness grows only by adding versioned fields.
 
-**Foundation contract.** A branch event cannot satisfy pull-request-only base,
+**Implemented behavior.** A branch event cannot satisfy pull-request-only base,
 head, title, body, label, draft, author, or mergeable-state fields. Repository,
 event-kind, and conclusion fields can apply to either context shape where their
 payload exists. An exact-author field is false when GitHub supplies no current
@@ -273,10 +270,9 @@ without that prefix.
 tagged action variants. Version one ships exactly one configured variant,
 `dispatch_session { template }`; no unused action variant is reserved.
 
-**Foundation contract.** When a fact matches, every configured action produces
+**Implemented behavior.** When a fact matches, every configured action produces
 one emitted `dispatch_session { template, params }` action in list order, where
-`params` is the exact injected tagged context for that event. No present runtime
-matches a rule or emits an action; Slice 4 implements this constraint.
+`params` is the exact injected tagged context for that event.
 
 **Implemented behavior.** Dispatch context is the ratified tagged union:
 
@@ -295,14 +291,35 @@ both shapes and therefore requires both. An unknown template or missing context
 declaration is also a validation failure; diagnostics safely name the affected
 template.
 
-**Foundation contract.** Configuration completes the implemented rule and
-template-context validation before polling starts. Dispatch never discovers a
-shape mismatch at runtime. No present configuration surface performs this
-startup validation; Slices 3 and 4 implement this constraint.
+**Implemented behavior.** Configuration completes rule and template-context
+validation before polling starts. Dispatch therefore cannot discover a shape
+mismatch at runtime.
+
+**Implemented behavior.** Each admitted action creates a fresh session from the
+complete resolved template copy, then submits the tagged context as the first
+accepted JSON text input through the existing `StartWhenNoActiveTurn` path. The
+input selects the session's version-one defaults and its template-selected
+model. The JSON object carries `type = "pull_request"` or `type = "branch"`, the
+fields of that tagged context, and an `event` object containing version, event
+identity, repository, complete normalized target, kind, and payload. A durable
+delivery intent reserves the submit-command, accepted-input, turn, and
+cancellation candidates before submission; equal recovery reuses those exact
+identities and records the final dispatch-to-turn link only after applied input
+is durable. A lost scheduler nudge remains recoverable by the ordinary
+eligibility sweep.
+
+**Committed unimplemented functionality.** No present session-creation or
+input-submission surface identifies repository watch as a purpose-specific actor
+or creation cause. Version one therefore uses the current user-initiated,
+no-ancestry creation interface and user-attributed input interface. A committed
+follow-up will add purpose-specific durable repository-watch provenance linked
+to `RepoWatchDispatchId`; compatibility requires it to preserve dispatch,
+session, context, and input identities rather than recreate or reinterpret them.
+This paragraph constrains only that future adoption.
 
 ## Deduplication, concurrency, and audit
 
-**Foundation contract.** Every rule independently selects `singleton_per` from
+**Implemented behavior.** Every rule independently selects `singleton_per` from
 `pull_request` (the default), `stack`, `rule`, or `repo`, plus a nonnegative
 cooldown. Pull-request scope keys by repository and PR number. Stack scope keys
 by repository and the base-branch chaining component containing the PR: an open
@@ -313,18 +330,26 @@ identity and version; repository scope adds repository. Branch events cannot
 satisfy pull-request or stack scope and make such a rule invalid rather than
 silently changing its key.
 
-**Foundation contract.** One event/rule match admits its complete ordered action
-list as one singleton batch. Admission, creation of every dispatched session,
-and every audit record commit in one durable transaction; failure rolls back the
-whole batch. Each record links the triggering event, rule identity and version,
-singleton key, action ordinal, session-template provenance, and newly created
-session. The action ordinal distinguishes sibling sessions without letting the
-first action suppress later actions from the same match. An occupied singleton
-refuses another match. The batch releases it only after every dispatched session
-in that batch is terminal; cooldown begins at release and suppresses a successor
-until its recorded interval has elapsed. Equal recovery cannot create a second
-session for the same admitted action. The append-only dispatch records identify
-the sessions responsible for the PR; no mutable assignment flag replaces them.
+**Implemented behavior.** One event/rule match admits its complete ordered
+action list as one singleton batch. Admission, creation of every dispatched
+session, and every audit record commit in one durable transaction; failure rolls
+back the whole batch. Each record links the triggering event, rule identity and
+version, singleton key, action ordinal, session-template provenance, and newly
+created session. The action ordinal distinguishes sibling sessions without
+letting the first action suppress later actions from the same match. An occupied
+singleton refuses another match. The batch releases it only after every
+dispatched session in that batch is terminal; cooldown begins at release and
+suppresses a successor until its recorded interval has elapsed. Equal recovery
+cannot create a second session for the same admitted action. The append-only
+dispatch records identify the sessions responsible for the PR; no mutable
+assignment flag replaces them.
+
+**Implemented behavior.** A newly configured rule activates immediately after
+the repository's current durable event tail, before its task polls, and consumes
+later events in cursor and event-ordinal order. Activation and each terminal
+evaluation outcome are append-only. Restart resumes the oldest unevaluated fact
+for that rule version; it neither redispatches an evaluated fact nor treats
+pre-activation history as a new live signal.
 
 ## First live rule
 

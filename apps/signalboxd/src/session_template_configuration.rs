@@ -12,12 +12,14 @@ use std::{
 use rustix::fs::{Mode, OFlags, open};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    ReviewConcernSpec, ReviewOrchestrationAttempt, ReviewOrchestrationAttemptError,
-    ReviewOrchestrationAttemptId, ReviewStageTemplateDigests, ReviewTemplateDigest,
+    RepoWatchResolvedTemplate, RepoWatchTemplateResolver, ReviewConcernSpec,
+    ReviewOrchestrationAttempt, ReviewOrchestrationAttemptError, ReviewOrchestrationAttemptId,
+    ReviewStageTemplateDigests, ReviewTemplateDigest,
 };
 use signalbox_domain::{
-    DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest, ReviewKey,
-    ReviewPolicy, ReviewTargetId, SessionConfigurationDefaults, SessionSystemPrompt,
+    DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest,
+    RepoWatchDispatchContextShape, RepoWatchTemplateContextDeclaration, ReviewKey, ReviewPolicy,
+    ReviewTargetId, SessionConfigurationDefaults, SessionSystemPrompt,
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
     SessionTemplateVersion,
 };
@@ -50,6 +52,7 @@ pub struct ResolvedSessionTemplate {
     version: SessionTemplateVersion,
     provenance: SessionTemplateProvenance,
     defaults: SessionConfigurationDefaults,
+    repo_watch_contexts: Box<[RepoWatchDispatchContextShape]>,
 }
 
 impl ResolvedSessionTemplate {
@@ -66,6 +69,11 @@ impl ResolvedSessionTemplate {
     /// Borrows the complete resolved defaults copy.
     pub const fn defaults(&self) -> &SessionConfigurationDefaults {
         &self.defaults
+    }
+
+    /// Returns the explicitly accepted repository-watch dispatch shapes.
+    pub fn repo_watch_contexts(&self) -> &[RepoWatchDispatchContextShape] {
+        &self.repo_watch_contexts
     }
 }
 
@@ -195,6 +203,23 @@ impl SessionTemplateConfiguration {
             .map(|(name, template)| (name, template.version()))
     }
 
+    /// Returns every nonempty repository-watch context declaration by template name.
+    pub fn repo_watch_context_declarations(
+        &self,
+    ) -> Result<Vec<RepoWatchTemplateContextDeclaration>, SessionTemplateConfigurationError> {
+        self.templates
+            .values()
+            .filter(|template| !template.repo_watch_contexts.is_empty())
+            .map(|template| {
+                RepoWatchTemplateContextDeclaration::try_new(
+                    template.provenance().name().clone(),
+                    template.repo_watch_contexts.to_vec(),
+                )
+                .map_err(|_| SessionTemplateConfigurationError::InvalidRepoWatchContexts)
+            })
+            .collect()
+    }
+
     /// Resolves an attempt only when the complete client selection matches the library.
     pub fn resolve_review_attempt(
         &self,
@@ -219,6 +244,20 @@ impl SessionTemplateConfiguration {
         self.review_library
             .as_ref()
             .map(|library| &library.selection)
+    }
+}
+
+impl RepoWatchTemplateResolver for SessionTemplateConfiguration {
+    fn resolve_repo_watch_template(
+        &self,
+        name: &SessionTemplateName,
+    ) -> Option<RepoWatchResolvedTemplate> {
+        self.resolve(name).map(|template| {
+            RepoWatchResolvedTemplate::new(
+                template.provenance().clone(),
+                template.defaults().clone(),
+            )
+        })
     }
 }
 
@@ -435,6 +474,7 @@ fn insert_review_template(
             version: source.version,
             provenance: SessionTemplateProvenance::new(name, digest),
             defaults,
+            repo_watch_contexts: Box::new([]),
         },
     );
     Ok(derive_review_template_digest(review_key, body, source))
@@ -559,6 +599,7 @@ fn parse_template(
             "system_prompt",
             "system_prompt_file",
             "dangerous_tool_auto_approval",
+            "repo_watch_contexts",
         ],
     )?;
     let name = SessionTemplateName::try_new(required_string(table, "name")?.to_owned())
@@ -618,6 +659,7 @@ fn parse_template(
     } else {
         DangerousToolAutoApproval::Disabled
     };
+    let repo_watch_contexts = parse_repo_watch_contexts(table)?;
     let defaults =
         SessionConfigurationDefaults::complete(model, dangerous_tool_auto_approval, Some(prompt));
     let digest = SessionTemplateContentDigest::derive(version, &defaults)
@@ -626,7 +668,36 @@ fn parse_template(
         version,
         provenance: SessionTemplateProvenance::new(name, digest),
         defaults,
+        repo_watch_contexts: repo_watch_contexts.into_boxed_slice(),
     })
+}
+
+fn parse_repo_watch_contexts(
+    table: &Table,
+) -> Result<Vec<RepoWatchDispatchContextShape>, SessionTemplateConfigurationError> {
+    let Some(item) = table.get("repo_watch_contexts") else {
+        return Ok(Vec::new());
+    };
+    let values = item
+        .as_array()
+        .ok_or(SessionTemplateConfigurationError::InvalidRepoWatchContexts)?;
+    if values.is_empty() {
+        return Err(SessionTemplateConfigurationError::InvalidRepoWatchContexts);
+    }
+    let mut contexts = Vec::with_capacity(values.len());
+    for value in values {
+        let context = match value.as_str() {
+            Some("pull_request") => RepoWatchDispatchContextShape::PullRequest,
+            Some("branch") => RepoWatchDispatchContextShape::Branch,
+            _ => return Err(SessionTemplateConfigurationError::InvalidRepoWatchContexts),
+        };
+        if contexts.contains(&context) {
+            return Err(SessionTemplateConfigurationError::InvalidRepoWatchContexts);
+        }
+        contexts.push(context);
+    }
+    contexts.sort();
+    Ok(contexts)
 }
 
 fn is_reserved_review_template_name(name: &SessionTemplateName) -> bool {
@@ -780,6 +851,7 @@ pub enum SessionTemplateConfigurationError {
     InvalidApproval,
     InvalidReviewKey,
     InvalidConcernInventory,
+    InvalidRepoWatchContexts,
 }
 
 impl fmt::Display for SessionTemplateConfigurationError {
@@ -810,6 +882,9 @@ impl fmt::Display for SessionTemplateConfigurationError {
             Self::InvalidApproval => "session template has a missing or mistyped approval posture",
             Self::InvalidReviewKey => "review library contains an invalid key",
             Self::InvalidConcernInventory => "review library concern inventory is incomplete",
+            Self::InvalidRepoWatchContexts => {
+                "session template has an invalid repository-watch context declaration"
+            }
         })
     }
 }
@@ -822,8 +897,8 @@ mod tests {
 
     use signalbox_application::ReviewOrchestrationAttemptId;
     use signalbox_domain::{
-        DangerousToolAutoApproval, ModelSelectionRequest, ReviewTargetId, SessionSystemPrompt,
-        SessionTemplateName,
+        DangerousToolAutoApproval, ModelSelectionRequest, RepoWatchDispatchContextShape,
+        ReviewTargetId, SessionSystemPrompt, SessionTemplateName,
     };
 
     use super::{
@@ -961,6 +1036,52 @@ documentation-code-drift = "Find documentation drift."
             template.provenance().content_digest().as_bytes(),
             &EXPECTED_TEMPLATE_DIGEST
         );
+    }
+
+    #[test]
+    fn ordinary_template_declares_repository_watch_context_shapes() {
+        let configuration = SessionTemplateConfiguration::parse_at(
+            &inline_catalog("repo_watch_contexts = [\"branch\", \"pull_request\"]"),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("repository-watch context declaration is valid");
+        let name = SessionTemplateName::try_new(String::from(TEMPLATE_NAME))
+            .expect("template fixture name is valid");
+        let template = configuration
+            .resolve(&name)
+            .expect("configured template resolves");
+
+        assert_eq!(
+            template.repo_watch_contexts(),
+            [
+                RepoWatchDispatchContextShape::PullRequest,
+                RepoWatchDispatchContextShape::Branch,
+            ]
+        );
+        assert_eq!(
+            configuration
+                .repo_watch_context_declarations()
+                .expect("configured declarations remain valid")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn ordinary_template_rejects_an_empty_repository_watch_context_declaration() {
+        let result = SessionTemplateConfiguration::parse_at(
+            &inline_catalog("repo_watch_contexts = []"),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(SessionTemplateConfigurationError::InvalidRepoWatchContexts)
+        ));
     }
 
     #[test]
@@ -1499,7 +1620,8 @@ dangerous_tool_auto_approval = false
     #[test]
     fn example_review_library_is_immediately_parseable_with_its_documented_alias() {
         let catalog = include_str!("../../../config/session-templates.example.toml")
-            .replace("7fde05bc-b4c3-44f7-8a87-748814c80191", ALIAS_ID);
+            .replace("7fde05bc-b4c3-44f7-8a87-748814c80191", ALIAS_ID)
+            .replace("540ce009-c2ec-4a04-b823-c411ea189778", ALIAS_ID);
         let configuration = SessionTemplateConfiguration::parse_at(
             &catalog,
             Path::new("config/session-templates.example.toml"),
@@ -1508,7 +1630,7 @@ dangerous_tool_auto_approval = false
         )
         .expect("example review library is valid");
 
-        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 4);
+        assert_eq!(configuration.summaries().len(), REVIEW_CONCERNS.len() + 5);
     }
     #[test]
     fn review_attempt_rejects_a_reordered_concern_selection() {

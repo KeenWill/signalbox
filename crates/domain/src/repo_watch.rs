@@ -989,6 +989,103 @@ impl RepoWatchMatcherV1 {
     pub fn conclusion(&self) -> &[CheckConclusion] {
         &self.conclusion
     }
+
+    /// Reports whether one closed durable fact satisfies every configured field.
+    pub fn matches(&self, event: &RepoWatchEvent) -> bool {
+        if !self.event_kinds.is_empty() && !self.event_kinds.contains(&event.kind().name()) {
+            return false;
+        }
+        if self
+            .repository
+            .as_ref()
+            .is_some_and(|repository| repository != event.repository())
+        {
+            return false;
+        }
+        if !self.mergeable_state_matches(event.kind()) || !self.conclusion_matches(event.kind()) {
+            return false;
+        }
+        match event.target() {
+            RepoWatchEventTarget::PullRequest(context) => self.pull_request_fields_match(context),
+            RepoWatchEventTarget::Branch => self.has_no_pull_request_fields(),
+        }
+    }
+
+    fn has_no_pull_request_fields(&self) -> bool {
+        self.base_branch.is_none()
+            && self.head_branch.is_none()
+            && self.title.is_none()
+            && self.body.is_none()
+            && self.labels.any_of.is_empty()
+            && self.labels.all_of.is_empty()
+            && self.labels.none_of.is_empty()
+            && self.draft.is_none()
+            && self.author.is_none()
+            && self.mergeable_state.is_empty()
+    }
+
+    fn pull_request_fields_match(&self, context: &PullRequestEventContext) -> bool {
+        self.base_branch
+            .as_ref()
+            .is_none_or(|branch| branch == context.base_branch())
+            && self
+                .head_branch
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(context.head_branch().as_str()))
+            && self
+                .title
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(context.title().as_str()))
+            && self
+                .body
+                .as_ref()
+                .is_none_or(|pattern| pattern.is_match(context.body().as_str()))
+            && (self.labels.any_of.is_empty()
+                || self
+                    .labels
+                    .any_of
+                    .iter()
+                    .any(|label| context.labels().contains(label)))
+            && self
+                .labels
+                .all_of
+                .iter()
+                .all(|label| context.labels().contains(label))
+            && self
+                .labels
+                .none_of
+                .iter()
+                .all(|label| !context.labels().contains(label))
+            && self.draft.is_none_or(|draft| draft == context.draft())
+            && self
+                .author
+                .as_ref()
+                .is_none_or(|author| context.author() == Some(author))
+    }
+
+    fn mergeable_state_matches(&self, kind: &RepoWatchEventKindV1) -> bool {
+        if self.mergeable_state.is_empty() {
+            return true;
+        }
+        matches!(
+            kind,
+            RepoWatchEventKindV1::MergeableStateChanged { current }
+                if self.mergeable_state.contains(current)
+        )
+    }
+
+    fn conclusion_matches(&self, kind: &RepoWatchEventKindV1) -> bool {
+        if self.conclusion.is_empty() {
+            return true;
+        }
+        let conclusion = match kind {
+            RepoWatchEventKindV1::ChecksCompleted { outcome } => (*outcome).into(),
+            RepoWatchEventKindV1::CheckRunCompleted { conclusion, .. }
+            | RepoWatchEventKindV1::BranchWorkflowRunCompleted { conclusion, .. } => *conclusion,
+            _ => return false,
+        };
+        self.conclusion.contains(&conclusion)
+    }
 }
 
 /// Durable singleton key selected independently by each rule.
@@ -1384,6 +1481,29 @@ impl RepoWatchRule {
         }
         Ok(())
     }
+
+    /// Derives the complete ordered action list for one matching durable fact.
+    pub fn actions_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<Vec<RepoWatchActionV1>, RepoWatchDispatchContextError> {
+        if !self.matcher.matches(event) {
+            return Ok(Vec::new());
+        }
+        let params = DispatchSessionParameters::try_from_event(event.clone())?;
+        Ok(self
+            .actions
+            .iter()
+            .map(|action| match action {
+                RepoWatchRuleActionV1::DispatchSession { template } => {
+                    RepoWatchActionV1::DispatchSession(DispatchSessionAction::new(
+                        template.clone(),
+                        params.clone(),
+                    ))
+                }
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -1397,7 +1517,7 @@ mod tests {
     use super::{
         BranchName, CheckConclusion, CommitSha, LabelName, MergeableState, PullRequestBody,
         PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-        RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
+        RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextShape, RepoWatchEvent,
         RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
         RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
         RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
@@ -2031,6 +2151,119 @@ mod tests {
         assert!(missing_declaration.contains(template.as_str()));
         assert!(rejected_context.contains(template.as_str()));
         assert!(rejected_context.contains(&RepoWatchDispatchContextShape::Branch.to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn conflict_qualifier_matches_only_the_conflicting_payload() -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(30)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            pull_request_context(
+                CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+                BranchName::try_new(String::from("main"))?,
+                Vec::new(),
+            )?,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Conflicting,
+            },
+        )?;
+
+        assert!(matcher.matches(&event));
+        Ok(())
+    }
+
+    #[test]
+    fn conflict_qualifier_rejects_the_mergeable_payload() -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(31)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            pull_request_context(
+                CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+                BranchName::try_new(String::from("main"))?,
+                Vec::new(),
+            )?,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Mergeable,
+            },
+        )?;
+
+        assert!(!matcher.matches(&event));
+        Ok(())
+    }
+
+    #[test]
+    fn branch_conclusion_qualifier_matches_without_pull_request_fields()
+    -> Result<(), Box<dyn Error>> {
+        let matcher = RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
+            conclusion: vec![CheckConclusion::Failure],
+            ..RepoWatchMatcherV1Input::default()
+        });
+        let event = RepoWatchEvent::branch_workflow(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(32)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            BranchName::try_new(String::from("main"))?,
+            super::WorkflowName::try_new(String::from("ci"))?,
+            CheckConclusion::Failure,
+        );
+
+        assert!(matcher.matches(&event));
+        Ok(())
+    }
+
+    #[test]
+    fn matching_rule_emits_every_dispatch_action_in_order() -> Result<(), Box<dyn Error>> {
+        let first_template = SessionTemplateName::try_new(String::from("merge-forward"))?;
+        let second_template = SessionTemplateName::try_new(String::from("notify-owner"))?;
+        let rule = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("conflict"))?,
+            RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+                event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+                mergeable_state: vec![MergeableState::Conflicting],
+                ..RepoWatchMatcherV1Input::default()
+            }),
+            vec![
+                RepoWatchRuleActionV1::DispatchSession {
+                    template: first_template.clone(),
+                },
+                RepoWatchRuleActionV1::DispatchSession {
+                    template: second_template.clone(),
+                },
+            ],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::ZERO,
+        )?;
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(Uuid::from_u128(33)),
+            RepositorySlug::try_new(String::from("namespace/repo"))?,
+            pull_request_context(
+                CommitSha::try_new(String::from(CONTEXT_HEAD_SHA))?,
+                BranchName::try_new(String::from("main"))?,
+                Vec::new(),
+            )?,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Conflicting,
+            },
+        )?;
+
+        let actions = rule.actions_for_event(&event)?;
+        let RepoWatchActionV1::DispatchSession(first) = &actions[0];
+        let RepoWatchActionV1::DispatchSession(second) = &actions[1];
+        assert_eq!(first.template(), &first_template);
+        assert_eq!(second.template(), &second_template);
+        assert_eq!(first.params().event(), &event);
+        assert_eq!(second.params().event(), &event);
         Ok(())
     }
 }

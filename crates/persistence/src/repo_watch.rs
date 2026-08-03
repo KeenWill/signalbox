@@ -502,6 +502,21 @@ impl PostgresRepoWatchStore {
             next_after,
         })
     }
+
+    /// Loads one exact durable event identity through the closed decoder.
+    pub async fn load_event(
+        &self,
+        repository: &RepositorySlug,
+        event: RepoWatchEventId,
+    ) -> Result<Option<RepoWatchEvent>, RepoWatchStoreError> {
+        let row = sqlx::query_as::<_, EventRow>(EVENT_BY_ID_SQL)
+            .bind(repository.as_str())
+            .bind(event.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| decode_positioned_event(repository, row).map(|positioned| positioned.event))
+            .transpose()
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -1440,6 +1455,20 @@ const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generati
    FROM repo_watch_event
   WHERE repository = $1 AND cursor_generation = $2
   ORDER BY event_ordinal";
+
+const EVENT_BY_ID_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
+        event_version,
+        target_kind, event_kind,
+        pull_request_number, head_sha, head_repository, base_branch,
+        head_branch, title, body, labels, draft, author,
+        previous_sha, current_sha, mergeable_state, checks_outcome,
+        check_run_name, conclusion, workflow_branch, workflow_name,
+        review_reviewer, review_state, review_commit, thread_id,
+        label_name, advanced_branch, reaction_subject_kind,
+        reaction_subject_id, reaction_reactor, reaction_content,
+        reaction_change
+   FROM repo_watch_event
+  WHERE repository = $1 AND event_id = $2";
 
 async fn load_event_rows(
     pool: &PgPool,

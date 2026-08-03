@@ -17,29 +17,45 @@ use reqwest::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    RepoWatchBranchHead, RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation,
+    InProcessEligibilityNudge, InProcessToolDispatchGate, RepoWatchBranchHead,
+    RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation, RepoWatchDispatchService,
     RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchEventIdGenerator,
-    derive_repo_watch_events,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, SubmitInputIdGenerator,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
-    MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
-    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    AcceptedInputId, BranchName, CancelledModelCallTurnIdentities, CheckConclusion, CheckRunName,
+    ChecksOutcome, CommitSha, ContextFrontierId, DeliveryRequest, DurableCommandId, GitHubObjectId,
+    LabelName, MergeableState, ModelSelectionOverride, PerInputConfigurationChoices,
+    PullRequestBody, PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber,
+    PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
+    RepoWatchEvent, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
+    SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
+    SubmitInput as DomainSubmitInput, SubmitInputAppliedResult, SubmitInputResult, TurnId,
+    UserContent, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
     RepoWatchCursorCandidate,
 };
+use signalbox_persistence::repo_watch_dispatch::{
+    PostgresRepoWatchDispatchStore, RepoWatchDeliveryCandidates, RepoWatchPendingDelivery,
+};
+use signalbox_persistence::submit_input::{
+    SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError,
+};
 use sqlx::PgPool;
 use tokio::{select, sync::watch, task::JoinSet, time::sleep};
 
+use crate::SessionTemplateConfiguration;
 use crate::configuration::{
-    FileCredentialAccess, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
+    FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
+    WatchedRepositoryConfiguration,
 };
 
 const REST_BASE_URL: &str = "https://api.github.com/";
@@ -112,13 +128,26 @@ impl RepositoryWatchRuntime {
     pub fn try_new(
         pool: PgPool,
         configuration: &RepositoryWatchConfiguration,
+        templates: SessionTemplateConfiguration,
+        models: HubModelConfiguration,
+        credential_pin: signalbox_persistence::SessionCredentialPin,
+        eligibility_nudge: InProcessEligibilityNudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         for repository in configuration.repositories() {
             tasks.push(RepositoryWatchTask::try_new(
-                pool.clone(),
                 repository,
-                configuration.signal_reviewers().to_vec(),
+                RepositoryWatchTaskContext {
+                    pool: pool.clone(),
+                    signal_reviewers: configuration.signal_reviewers().to_vec(),
+                    rules: configuration.rules().to_vec(),
+                    templates: templates.clone(),
+                    models: models.clone(),
+                    credential_pin: credential_pin.clone(),
+                    eligibility_nudge: eligibility_nudge.clone(),
+                    tool_dispatch_gate: tool_dispatch_gate.clone(),
+                },
             )?);
         }
         Ok(Self { tasks })
@@ -176,25 +205,55 @@ async fn supervise_repository_tasks(
 }
 
 struct RepositoryWatchTask {
+    pool: PgPool,
     repository: RepositorySlug,
     interval: Duration,
     poller: GitHubRepositoryPoller,
     store: PostgresRepoWatchStore,
+    dispatch_store: PostgresRepoWatchDispatchStore,
+    rules: Vec<RepoWatchRule>,
+    templates: SessionTemplateConfiguration,
+    models: HubModelConfiguration,
+    eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
+    rules_activated: bool,
+}
+
+struct RepositoryWatchTaskContext {
+    pool: PgPool,
+    signal_reviewers: Vec<RepoWatchAuthorLogin>,
+    rules: Vec<RepoWatchRule>,
+    templates: SessionTemplateConfiguration,
+    models: HubModelConfiguration,
+    credential_pin: signalbox_persistence::SessionCredentialPin,
+    eligibility_nudge: InProcessEligibilityNudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
 impl RepositoryWatchTask {
     fn try_new(
-        pool: PgPool,
         configuration: &WatchedRepositoryConfiguration,
-        signal_reviewers: Vec<RepoWatchAuthorLogin>,
+        context: RepositoryWatchTaskContext,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
+        let RepositoryWatchTaskContext {
+            pool,
+            signal_reviewers,
+            rules,
+            templates,
+            models,
+            credential_pin,
+            eligibility_nudge,
+            tool_dispatch_gate,
+        } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
             configuration.credential_file().to_path_buf(),
             credential_reference.clone(),
             MAX_CREDENTIAL_BYTES,
         );
+        let store = PostgresRepoWatchStore::new(pool.clone());
         Ok(Self {
+            pool: pool.clone(),
             repository: configuration.repository().clone(),
             interval: configuration.poll_interval(),
             poller: GitHubRepositoryPoller::try_new(
@@ -203,7 +262,14 @@ impl RepositoryWatchTask {
                 credentials,
                 credential_reference,
             )?,
-            store: PostgresRepoWatchStore::new(pool),
+            store,
+            dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
+            rules,
+            templates,
+            models,
+            eligibility_nudge,
+            tool_dispatch_gate,
+            rules_activated: false,
         })
     }
 
@@ -213,7 +279,7 @@ impl RepositoryWatchTask {
                 return;
             }
             select! {
-                result = self.poll_and_commit() => {
+                result = self.run_attempt() => {
                     match result {
                         Ok(()) => tracing::debug!(
                             repository = %self.repository.as_str(),
@@ -239,6 +305,121 @@ impl RepositoryWatchTask {
                         return;
                     }
                 }
+            }
+        }
+    }
+
+    async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        if !self.rules_activated {
+            self.activate_rules().await?;
+            self.rules_activated = true;
+        }
+        self.process_dispatches().await?;
+        self.poll_and_commit().await?;
+        self.process_dispatches().await
+    }
+
+    async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
+        for rule in &self.rules {
+            self.dispatch_store
+                .activate_rule(&self.repository, rule.id(), rule.version())
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        }
+        Ok(())
+    }
+
+    async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        for rule in &self.rules {
+            while let Some(event) = self
+                .dispatch_store
+                .load_next_event(&self.repository, rule.id(), rule.version())
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            {
+                let cursor = self
+                    .store
+                    .load_cursor(&self.repository)
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                    .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                let mut service = RepoWatchDispatchService::new(
+                    UuidV7RepoWatchDispatchIdGenerator,
+                    self.dispatch_store.clone(),
+                );
+                service
+                    .evaluate(
+                        event,
+                        rule,
+                        cursor.candidate().observation(),
+                        &self.templates,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+            }
+        }
+        while let Some(delivery) = self
+            .dispatch_store
+            .prepare_next_delivery(&self.repository, new_delivery_candidates())
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+        {
+            self.deliver_context(delivery).await?;
+        }
+        Ok(())
+    }
+
+    async fn deliver_context(
+        &self,
+        delivery: RepoWatchPendingDelivery,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let event = self
+            .store
+            .load_event(&self.repository, delivery.event_id())
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            .ok_or(RepositoryWatchAttemptError::Persistence)?;
+        let content = UserContent::try_text(dispatch_context_json(&event))
+            .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+        let identities = delivery.identities();
+        let request = SubmitInputRequest::try_new(
+            identities.submit_command_id,
+            delivery.session_id(),
+            content,
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+        let mut service = SubmitInputService::new(
+            ReservedDeliveryIds { identities },
+            RepoWatchSubmitInputTransaction {
+                repository: SubmitInputRepository::new(self.pool.clone()),
+                models: &self.models,
+            },
+            self.eligibility_nudge.clone(),
+            self.tool_dispatch_gate.clone(),
+        );
+        let outcome = service
+            .execute(request)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        match outcome {
+            SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(result),
+            )) if result.accepted_input() == identities.accepted_input_id
+                && result.turn() == identities.turn_id =>
+            {
+                self.dispatch_store
+                    .record_delivery(&delivery)
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)
+            }
+            SubmitInputOutcome::Recorded(_) | SubmitInputOutcome::ConflictingReuse { .. } => {
+                Err(RepositoryWatchAttemptError::Dispatch)
             }
         }
     }
@@ -283,6 +464,277 @@ impl RepositoryWatchTask {
     }
 }
 
+fn new_delivery_candidates() -> RepoWatchDeliveryCandidates {
+    RepoWatchDeliveryCandidates {
+        submit_command_id: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
+        accepted_input_id: AcceptedInputId::from_uuid(uuid::Uuid::now_v7()),
+        turn_id: TurnId::from_uuid(uuid::Uuid::now_v7()),
+        cancellation_entry_id: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+        cancellation_frontier_id: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+    }
+}
+
+struct ReservedDeliveryIds {
+    identities: RepoWatchDeliveryCandidates,
+}
+
+impl SubmitInputIdGenerator for ReservedDeliveryIds {
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
+        self.identities.accepted_input_id
+    }
+
+    fn next_turn_id(&mut self) -> TurnId {
+        self.identities.turn_id
+    }
+
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        self.identities.cancellation_entry_id
+    }
+
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId {
+        self.identities.cancellation_frontier_id
+    }
+}
+
+struct RepoWatchSubmitInputTransaction<'configuration> {
+    repository: SubmitInputRepository,
+    models: &'configuration HubModelConfiguration,
+}
+
+impl SubmitInputTransaction for RepoWatchSubmitInputTransaction<'_> {
+    type Error = SubmitInputRepositoryError;
+
+    async fn handle<NextTurn, NextToolCancellation>(
+        &mut self,
+        command: DomainSubmitInput,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
+    ) -> Result<SubmitInputOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
+            + Send,
+    {
+        let outcome = self
+            .repository
+            .handle_with_candidates_alias_resolver(
+                command,
+                accepted_input,
+                turn,
+                cancellation_identities,
+                next_reclassified_turn,
+                next_tool_cancellation,
+                |alias| self.models.resolve_alias(alias),
+            )
+            .await?;
+        Ok(match outcome {
+            SubmitInputHandlingOutcome::Recorded(result) => SubmitInputOutcome::Recorded(result),
+            SubmitInputHandlingOutcome::ConflictingReuse { command_id } => {
+                SubmitInputOutcome::ConflictingReuse { command_id }
+            }
+        })
+    }
+}
+
+fn dispatch_context_json(event: &RepoWatchEvent) -> String {
+    let event_value = serde_json::json!({
+        "version": 1,
+        "id": event.id().as_uuid().to_string(),
+        "repo": event.repository().as_str(),
+        "target": event_target_json(event.target()),
+        "kind": event_kind_name(event.kind()),
+        "payload": event_payload_json(event.kind()),
+    });
+    match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => serde_json::json!({
+            "type": "pull_request",
+            "repo": event.repository().as_str(),
+            "number": context.number().get(),
+            "head_sha": context.head_sha().as_str(),
+            "event": event_value,
+        })
+        .to_string(),
+        RepoWatchEventTarget::Branch => {
+            let RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+                branch,
+                workflow,
+                conclusion,
+            } = event.kind()
+            else {
+                return event_value.to_string();
+            };
+            serde_json::json!({
+                "type": "branch",
+                "repo": event.repository().as_str(),
+                "branch": branch.as_str(),
+                "workflow": workflow.as_str(),
+                "conclusion": check_conclusion_name(*conclusion),
+                "event": event_value,
+            })
+            .to_string()
+        }
+    }
+}
+
+fn event_target_json(target: &RepoWatchEventTarget) -> serde_json::Value {
+    match target {
+        RepoWatchEventTarget::PullRequest(context) => serde_json::json!({
+            "type": "pull_request",
+            "number": context.number().get(),
+            "head_sha": context.head_sha().as_str(),
+            "head_repo": context.head_repository().as_str(),
+            "base_branch": context.base_branch().as_str(),
+            "head_branch": context.head_branch().as_str(),
+            "title": context.title().as_str(),
+            "body": context.body().as_str(),
+            "labels": context.labels().iter().map(LabelName::as_str).collect::<Vec<_>>(),
+            "draft": context.draft(),
+            "author": context.author().map(RepoWatchAuthorLogin::as_str),
+        }),
+        RepoWatchEventTarget::Branch => serde_json::json!({ "type": "branch" }),
+    }
+}
+
+const fn event_kind_name(kind: &RepoWatchEventKindV1) -> &'static str {
+    match kind {
+        RepoWatchEventKindV1::PullRequestOpened => "PullRequestOpened",
+        RepoWatchEventKindV1::PullRequestClosed => "PullRequestClosed",
+        RepoWatchEventKindV1::PullRequestMerged => "PullRequestMerged",
+        RepoWatchEventKindV1::HeadChanged { .. } => "HeadChanged",
+        RepoWatchEventKindV1::MergeableStateChanged { .. } => "MergeableStateChanged",
+        RepoWatchEventKindV1::ChecksCompleted { .. } => "ChecksCompleted",
+        RepoWatchEventKindV1::CheckRunCompleted { .. } => "CheckRunCompleted",
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted { .. } => "BranchWorkflowRunCompleted",
+        RepoWatchEventKindV1::ReviewSubmitted { .. } => "ReviewSubmitted",
+        RepoWatchEventKindV1::ThreadOpened { .. } => "ThreadOpened",
+        RepoWatchEventKindV1::ThreadResolved { .. } => "ThreadResolved",
+        RepoWatchEventKindV1::Labeled { .. } => "Labeled",
+        RepoWatchEventKindV1::Unlabeled { .. } => "Unlabeled",
+        RepoWatchEventKindV1::BaseAdvanced { .. } => "BaseAdvanced",
+        RepoWatchEventKindV1::ReactionChanged { .. } => "ReactionChanged",
+    }
+}
+
+fn event_payload_json(kind: &RepoWatchEventKindV1) -> serde_json::Value {
+    match kind {
+        RepoWatchEventKindV1::PullRequestOpened
+        | RepoWatchEventKindV1::PullRequestClosed
+        | RepoWatchEventKindV1::PullRequestMerged => serde_json::json!({}),
+        RepoWatchEventKindV1::HeadChanged { previous, current } => serde_json::json!({
+            "previous": previous.as_str(), "current": current.as_str()
+        }),
+        RepoWatchEventKindV1::MergeableStateChanged { current } => {
+            serde_json::json!({ "current": mergeable_state_name(*current) })
+        }
+        RepoWatchEventKindV1::ChecksCompleted { outcome } => {
+            serde_json::json!({ "outcome": checks_outcome_name(*outcome) })
+        }
+        RepoWatchEventKindV1::CheckRunCompleted { name, conclusion } => serde_json::json!({
+            "name": name.as_str(), "conclusion": check_conclusion_name(*conclusion)
+        }),
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+            branch,
+            workflow,
+            conclusion,
+        } => serde_json::json!({
+            "branch": branch.as_str(),
+            "workflow": workflow.as_str(),
+            "conclusion": check_conclusion_name(*conclusion),
+        }),
+        RepoWatchEventKindV1::ReviewSubmitted {
+            reviewer,
+            state,
+            commit,
+        } => serde_json::json!({
+            "reviewer": reviewer.as_str(),
+            "state": review_state_name(*state),
+            "commit": commit.as_str(),
+        }),
+        RepoWatchEventKindV1::ThreadOpened { thread }
+        | RepoWatchEventKindV1::ThreadResolved { thread } => {
+            serde_json::json!({ "thread": thread.as_str() })
+        }
+        RepoWatchEventKindV1::Labeled { label } | RepoWatchEventKindV1::Unlabeled { label } => {
+            serde_json::json!({ "label": label.as_str() })
+        }
+        RepoWatchEventKindV1::BaseAdvanced { branch } => {
+            serde_json::json!({ "branch": branch.as_str() })
+        }
+        RepoWatchEventKindV1::ReactionChanged {
+            subject,
+            reactor,
+            content,
+            change,
+        } => serde_json::json!({
+            "subject": reaction_subject_json(*subject),
+            "reactor": reactor.as_str(),
+            "content": content.as_str(),
+            "change": reaction_change_name(*change),
+        }),
+    }
+}
+
+fn reaction_subject_json(subject: ReactionSubject) -> serde_json::Value {
+    match subject {
+        ReactionSubject::PullRequestBody => serde_json::json!({ "type": "pull_request_body" }),
+        ReactionSubject::IssueComment { id } => {
+            serde_json::json!({ "type": "issue_comment", "id": id.get() })
+        }
+        ReactionSubject::ReviewComment { id } => {
+            serde_json::json!({ "type": "review_comment", "id": id.get() })
+        }
+    }
+}
+
+const fn checks_outcome_name(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+const fn check_conclusion_name(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+const fn mergeable_state_name(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+const fn review_state_name(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+const fn reaction_change_name(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepositoryWatchAttemptError {
     Credential,
@@ -295,6 +747,7 @@ enum RepositoryWatchAttemptError {
     ResourceLimit,
     Normalization,
     Differ,
+    Dispatch,
     Persistence,
 }
 
@@ -311,6 +764,7 @@ impl RepositoryWatchAttemptError {
             Self::ResourceLimit => "repository_resource_limit_exceeded",
             Self::Normalization => "repository_state_invalid",
             Self::Differ => "repository_differ_failed",
+            Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
         }
     }
@@ -1651,10 +2105,14 @@ mod tests {
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReviewObservation, RepoWatchThreadState,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowResponse, normalize_pull_request_context, object_id,
-        supervise_repository_tasks,
+        ResourceKey, ReviewState, Url, WorkflowResponse, dispatch_context_json,
+        normalize_pull_request_context, object_id, supervise_repository_tasks,
     };
-    use signalbox_domain::{BranchName, CommitSha, ReactionSubject};
+    use signalbox_domain::{
+        BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
+        PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
+        RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1,
+    };
     use signalbox_model_runtime::CredentialReference;
 
     const WATCHED_REPOSITORY: &str = "namespace/project";
@@ -2782,5 +3240,51 @@ mod tests {
         assert!(key.0.starts_with(CACHE_KEY_KIND));
         assert!(!key.0.contains(CACHE_KEY_QUERY_VALUE));
         assert!(!key.0.contains(WATCHED_REPOSITORY));
+    }
+
+    #[test]
+    fn pull_request_dispatch_context_serializes_the_complete_triggering_fact() {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())
+                .expect("fixture base branch is valid"),
+            head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new("Repository watch".to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new("Conflict detected.".to_owned())
+                .expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(71)),
+            repository,
+            context,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Conflicting,
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value =
+            serde_json::from_str(&dispatch_context_json(&event)).expect("dispatch context is JSON");
+
+        assert_eq!(encoded["type"], "pull_request");
+        assert_eq!(encoded["repo"], WATCHED_REPOSITORY);
+        assert_eq!(encoded["number"], PULL_NUMBER);
+        assert_eq!(encoded["head_sha"], HEAD_SHA);
+        assert_eq!(encoded["event"]["target"]["base_branch"], BASE_BRANCH);
+        assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
+        assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
+        assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
     }
 }

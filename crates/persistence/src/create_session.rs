@@ -350,6 +350,34 @@ fn existing_outcome(
     }
 }
 
+pub(crate) async fn insert_fresh_prepared(
+    connection: &mut PgConnection,
+    prepared: PreparedCreateSession,
+    credential_pin: &crate::SessionCredentialPin,
+) -> Result<(), CreateSessionRepositoryError> {
+    let command_id = prepared.command().command_id();
+    let claimed = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(durable_command_id_to_uuid(command_id))
+    .bind(COMMAND_KIND)
+    .bind(WRITTEN_STORAGE_VERSION)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "fresh repository-watch command identity collided",
+        )
+        .into());
+    }
+    insert_prepared(connection, prepared, credential_pin).await
+}
+
 async fn insert_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,

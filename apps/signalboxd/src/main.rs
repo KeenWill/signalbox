@@ -966,6 +966,24 @@ async fn run_hub(
             SanitizedStartupCause::TemplateConfiguration(&error),
         )
     })?;
+    if let Some(repository_watch) = model_configuration.repository_watch() {
+        let declarations = template_configuration
+            .repo_watch_context_declarations()
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::TemplateConfiguration(&error),
+                )
+            })?;
+        repository_watch
+            .validate_template_contexts(&declarations)
+            .map_err(|error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::ModelConfiguration(&error),
+                )
+            })?;
+    }
     let anthropic_api_key_file = configuration
         .anthropic_api_key_file(model_configuration.uses_anthropic_adapter())
         .map_err(|error| {
@@ -1159,21 +1177,6 @@ async fn run_hub(
         return Err(error);
     }
 
-    let repository_watch_runtime = match model_configuration.repository_watch() {
-        Some(configuration) => match RepositoryWatchRuntime::try_new(pool.clone(), configuration) {
-            Ok(runtime) => Some(runtime),
-            Err(_) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
-                );
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        },
-        None => None,
-    };
-
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1230,6 +1233,28 @@ async fn run_hub(
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
+    let repository_watch_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match RepositoryWatchRuntime::try_new(
+            pool.clone(),
+            configuration,
+            template_configuration.clone(),
+            model_configuration.clone(),
+            model_configuration.session_credential_pin(),
+            eligibility_nudge.clone(),
+            tool_dispatch_gate.clone(),
+        ) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
