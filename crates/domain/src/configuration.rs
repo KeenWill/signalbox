@@ -699,11 +699,13 @@ impl OriginConfiguration {
     ///
     /// `select_definition` supplies the current immutable definition when the
     /// request names an alias; returning `None` reports the alias as unknown
-    /// and freezes nothing. A direct request never invokes it.
+    /// and freezes nothing. A direct request never invokes it. Settings that
+    /// require validation for a different selected model need the
+    /// settings-aware path and fail as missing capability evidence here.
     pub fn freeze(
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    ) -> Result<Self, UnknownModelAlias> {
+    ) -> Result<Self, OriginModelSettingsError> {
         let VersionCheckedConfigurationRequest {
             request: requested,
             session_defaults_version,
@@ -713,9 +715,23 @@ impl OriginConfiguration {
             ModelSelectionRequest::Direct(selection) => FrozenModelSelection::Direct(selection),
             ModelSelectionRequest::Alias(alias) => match select_definition(alias) {
                 Some(definition) => FrozenModelSelection::FrozenAlias { alias, definition },
-                None => return Err(UnknownModelAlias { alias }),
+                None => {
+                    return Err(OriginModelSettingsError::UnknownAlias(UnknownModelAlias {
+                        alias,
+                    }));
+                }
             },
         };
+        let selection = model.selected_direct();
+        let needs_capabilities = requested.per_call_model_settings()
+            != ModelSettingsOverlay::inherit_all()
+            || requested
+                .model_settings()
+                .validated_for()
+                .is_some_and(|validated| validated != selection);
+        if needs_capabilities {
+            return Err(OriginModelSettingsError::MissingCapabilities { selection });
+        }
 
         Ok(Self {
             requested,
@@ -1029,10 +1045,11 @@ mod tests {
         ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
         FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
         ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-        OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
-        SessionSystemPromptFailure, TurnConfigurationProvenance,
-        VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+        OriginConfigurationReconstitutionInput, OriginModelSettingsError,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+        SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
+        TurnConfigurationProvenance, UnknownModelAlias, VersionCheckedConfigurationRequest,
+        VersionedSessionConfigurationDefaults,
     };
     use crate::test_support::{alias, direct, turn_id};
     use crate::{
@@ -1753,7 +1770,116 @@ mod tests {
         let error = OriginConfiguration::freeze(checked, |_| None)
             .expect_err("an unknown alias cannot freeze provenance");
 
-        assert_eq!(error.alias(), requested_alias);
+        assert_eq!(
+            error,
+            OriginModelSettingsError::UnknownAlias(UnknownModelAlias {
+                alias: requested_alias,
+            })
+        );
+    }
+
+    /// S37 / INV-003 / INV-051: the catalog-free origin path cannot preserve
+    /// settings admitted for an alias's prior direct target after retargeting.
+    #[test]
+    fn s37_inv003_inv051_legacy_freeze_rejects_alias_retarget_settings() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let requested_alias = alias(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior direct target supports the fixture setting");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(requested_alias),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        )
+        .expect("alias defaults retain their validation identity");
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+            )
+            .expect("the fixture names the current defaults epoch");
+
+        let error = OriginConfiguration::freeze(checked, |_| {
+            Some(FrozenAliasDefinition::selecting(installed_selection))
+        })
+        .expect_err("retargeted settings require exact capability evidence");
+
+        assert_eq!(
+            error,
+            OriginModelSettingsError::MissingCapabilities {
+                selection: installed_selection,
+            }
+        );
+    }
+
+    /// S37 / INV-003 / INV-051: legacy reconstitution rejects an alias whose
+    /// frozen target differs from the stored settings validation identity.
+    #[test]
+    fn s37_inv003_inv051_legacy_reconstitution_rejects_alias_retarget_settings() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let requested_alias = alias(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior direct target supports the fixture setting");
+        let requested_model = ModelSelectionRequest::Alias(requested_alias);
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            requested_model,
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        )
+        .expect("alias defaults retain their validation identity");
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+
+        let reconstituted = OriginConfigurationReconstitutionInput::new(
+            versioned.version(),
+            versioned.defaults().clone(),
+            requested_model,
+            FrozenModelSelection::FrozenAlias {
+                alias: requested_alias,
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+        )
+        .reconstitute();
+
+        assert_eq!(reconstituted, None);
     }
 
     /// INV-008: the defaults version belongs to provenance, not

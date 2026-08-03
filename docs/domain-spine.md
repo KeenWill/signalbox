@@ -1625,7 +1625,7 @@ impl OriginConfiguration {
     pub fn freeze(
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    ) -> Result<Self, UnknownModelAlias>;
+    ) -> Result<Self, OriginModelSettingsError>;
     pub fn freeze_with_model_settings(
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
@@ -1659,7 +1659,7 @@ impl OriginConfigurationReconstitutionInput {
 }
 
 pub struct UnknownModelAlias { /* private */ }
-// sealed: Err of OriginConfiguration::freeze
+// sealed: OriginModelSettingsError::UnknownAlias
 impl UnknownModelAlias {
     // accessors: alias()
 }
