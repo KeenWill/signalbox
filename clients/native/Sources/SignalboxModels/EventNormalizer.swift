@@ -47,6 +47,11 @@ public struct SignalboxProcessNoticeCard: Equatable, Sendable {
     public let details: [SignalboxProcessNoticeDetail]
 }
 
+fileprivate enum SignalboxToolCardPresentation: Equatable, Sendable {
+    case planRead(arguments: String?, output: String?)
+    case planUpdate(arguments: String?)
+}
+
 public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     public let eventID: SignalboxEventID
     public let invocationID: SignalboxToolInvocationID
@@ -58,11 +63,7 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     public let decisionReason: String?
     public let childSessionID: SignalboxSessionID?
     public let decisionAvailable: Bool
-    public let presentationName: String?
-    public let presentationArgumentsLabel: String?
-    public let presentationArguments: String?
-    public let presentationOutputLabel: String?
-    public let presentationOutput: String?
+    fileprivate let presentation: SignalboxToolCardPresentation?
 
     public init(
         eventID: SignalboxEventID,
@@ -74,12 +75,35 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         statusUpdates: [String],
         decisionReason: String?,
         childSessionID: SignalboxSessionID?,
-        decisionAvailable: Bool = true,
-        presentationName: String? = nil,
-        presentationArgumentsLabel: String? = nil,
-        presentationArguments: String? = nil,
-        presentationOutputLabel: String? = nil,
-        presentationOutput: String? = nil
+        decisionAvailable: Bool = true
+    ) {
+        self.init(
+            eventID: eventID,
+            invocationID: invocationID,
+            toolName: toolName,
+            status: status,
+            arguments: arguments,
+            output: output,
+            statusUpdates: statusUpdates,
+            decisionReason: decisionReason,
+            childSessionID: childSessionID,
+            decisionAvailable: decisionAvailable,
+            presentation: nil
+        )
+    }
+
+    fileprivate init(
+        eventID: SignalboxEventID,
+        invocationID: SignalboxToolInvocationID,
+        toolName: String,
+        status: SignalboxToolCardStatus,
+        arguments: String?,
+        output: String?,
+        statusUpdates: [String],
+        decisionReason: String?,
+        childSessionID: SignalboxSessionID?,
+        decisionAvailable: Bool,
+        presentation: SignalboxToolCardPresentation?
     ) {
         self.eventID = eventID
         self.invocationID = invocationID
@@ -91,20 +115,57 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         self.decisionReason = decisionReason
         self.childSessionID = childSessionID
         self.decisionAvailable = decisionAvailable
-        self.presentationName = presentationName
-        self.presentationArgumentsLabel = presentationArgumentsLabel
-        self.presentationArguments = presentationArguments
-        self.presentationOutputLabel = presentationOutputLabel
-        self.presentationOutput = presentationOutput
+        self.presentation = presentation
     }
 
     public var id: SignalboxEventID { eventID }
 
-    public var displayName: String { presentationName ?? toolName }
+    public var displayName: String {
+        switch presentation {
+        case .planRead:
+            return "Plan read"
+        case .planUpdate:
+            return "Plan update"
+        case nil:
+            return toolName
+        }
+    }
 
-    public var argumentsLabel: String { presentationArgumentsLabel ?? "Arguments" }
+    public var argumentsLabel: String {
+        switch presentation {
+        case .planRead:
+            return "Read request"
+        case .planUpdate:
+            return "Plan operation"
+        case nil:
+            return "Arguments"
+        }
+    }
 
-    public var outputLabel: String { presentationOutputLabel ?? "Output" }
+    public var outputLabel: String {
+        guard case .planRead(_, let output) = presentation,
+            output != nil
+        else {
+            return "Output"
+        }
+        return "Current plan"
+    }
+
+    public var presentationArguments: String? {
+        switch presentation {
+        case .planRead(let arguments, _), .planUpdate(let arguments):
+            return arguments
+        case nil:
+            return nil
+        }
+    }
+
+    public var presentationOutput: String? {
+        guard case .planRead(_, let output) = presentation else {
+            return nil
+        }
+        return output
+    }
 
     public var compactArgumentSummary: String {
         let trimmed = (presentationArguments ?? arguments ?? "")
@@ -303,7 +364,7 @@ public enum SignalboxEventNormalizer {
         case .processImportedContent(let event):
             return .processEvidence(importedContentCard(record: record, event: event))
         case .processTool(let event):
-            let plan = planPresentation(event)
+            let presentation = planPresentation(event)
             return .tool(
                 SignalboxToolCard(
                     eventID: record.eventID,
@@ -316,11 +377,7 @@ public enum SignalboxEventNormalizer {
                     decisionReason: nil,
                     childSessionID: nil,
                     decisionAvailable: true,
-                    presentationName: plan?.name,
-                    presentationArgumentsLabel: plan?.argumentsLabel,
-                    presentationArguments: plan?.arguments,
-                    presentationOutputLabel: plan?.outputLabel,
-                    presentationOutput: plan?.output
+                    presentation: presentation
                 )
             )
         case .processTurnFailure(let event):
@@ -372,14 +429,6 @@ public enum SignalboxEventNormalizer {
         case .recoveryRequired:
             return .failed
         }
-    }
-
-    private struct PlanPresentation {
-        let name: String
-        let argumentsLabel: String
-        let arguments: String?
-        let outputLabel: String?
-        let output: String?
     }
 
     private struct PlanReadArguments: Decodable {
@@ -747,7 +796,7 @@ public enum SignalboxEventNormalizer {
 
     private static func planPresentation(
         _ tool: SignalboxProcessToolEvent
-    ) -> PlanPresentation? {
+    ) -> SignalboxToolCardPresentation? {
         switch tool.toolName {
         case "plan_read":
             let decodedArguments = tool.arguments.flatMap(decodePlanReadArguments)
@@ -762,21 +811,14 @@ public enum SignalboxEventNormalizer {
                         : nil
                 }
             }
-            return PlanPresentation(
-                name: "Plan read",
-                argumentsLabel: "Read request",
+            return .planRead(
                 arguments: decodedArguments.map(formattedPlanReadArguments),
-                outputLabel: presentationOutput == nil ? nil : "Current plan",
                 output: presentationOutput
             )
         case "plan_write":
             let decodedArguments = tool.arguments.flatMap(decodePlanWriteArguments)
-            return PlanPresentation(
-                name: "Plan update",
-                argumentsLabel: "Plan operation",
-                arguments: decodedArguments.map(formattedPlanWriteArguments),
-                outputLabel: nil,
-                output: nil
+            return .planUpdate(
+                arguments: decodedArguments.map(formattedPlanWriteArguments)
             )
         default:
             return nil

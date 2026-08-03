@@ -921,23 +921,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private mutating func claimTurnStatePresentationID(
-    _ identity: PresentationIdentity,
-    anchorEntryIndex: SignalboxCanonicalUInt64?
+    _ identity: PresentationIdentity
   ) throws -> SignalboxEventID {
-    if let existing = presentationIDs[identity] {
-      return existing
-    }
-    guard let anchorEntryIndex else {
-      return try claimTrailingPresentationID(identity)
-    }
-    guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
-      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
-    }
-    let claimed = SignalboxEventID(
-      rawValue: Int(anchorEntryIndex.rawValue) * Self.presentationLaneStride
-    )
-    presentationIDs[identity] = claimed
-    return claimed
+    try claimTrailingPresentationID(identity)
   }
 
   private func turnStatePresentationOrder(
@@ -1062,10 +1048,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard let content else {
       return nil
     }
-    let eventID = try claimTurnStatePresentationID(
-      .turnState(turn.turnID.rawValue),
-      anchorEntryIndex: anchorEntryIndex
-    )
+    let eventID = try claimTurnStatePresentationID(.turnState(turn.turnID.rawValue))
     return SignalboxStoredEvent(
       eventID: eventID,
       presentationOrder: try turnStatePresentationOrder(
@@ -1621,10 +1604,33 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           nativeSourceSessionID: snapshot.sessionID
         )
       }
+    case .turnRefused(let turnID, let modelCallID, let terminalFrontierID):
+      return snapshot.records.contains { record in
+        guard case .turn(let turn) = record,
+          turn.turnID == turnID,
+          case .refused(let frontierID, _, let terminalModelCallID) = turn.state
+        else {
+          return false
+        }
+        return frontierID == terminalFrontierID && terminalModelCallID == modelCallID
+      }
+    case .turnReconciliationRequired(let turnID, let modelCallID, let terminalFrontierID):
+      return snapshot.records.contains { record in
+        guard case .turn(let turn) = record,
+          turn.turnID == turnID,
+          case .reconciliationRequired(
+            let frontierID,
+            _,
+            let terminalModelCallID
+          ) = turn.state
+        else {
+          return false
+        }
+        return frontierID == terminalFrontierID && terminalModelCallID == modelCallID
+      }
     case .turnToolReconciliationRequired:
       return !terminalResultEntryIDs.isEmpty
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .turnRefused,
-      .turnReconciliationRequired, .unknown:
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .unknown:
       return true
     }
   }

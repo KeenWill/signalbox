@@ -370,14 +370,19 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(cursors, ProcessDriverFixture.expectedCursors)
   }
 
-  func testSideProjectionDoesNotSelectAcceptedInputTextByTurnAlone() throws {
+  func testRefusedSideProjectionRejectsMissingTurnEvidence() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithUserEntry()
     let trigger = try ProcessProjectionFixture.refusedEvent()
     var projector = SignalboxProcessTranscriptProjector()
 
-    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-    XCTAssertTrue(projection.records.isEmpty)
-    XCTAssertTrue(projection.materializedAcceptedInputIDs.isEmpty)
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
   }
 
   func testSideProjectionRejectsMissingCompletionEvidence() throws {
@@ -1038,6 +1043,24 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testCompactionKeepsDistinctUnknownTurnPresentationIdentities() throws {
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithTranscriptBeforeUnknownTurnState()
+    )
+
+    let projection = try projector.projectAuthoritativeSnapshot(
+      ProcessProjectionFixture.snapshotWithCompactedAndNewUnknownTurn()
+    )
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.unknownKinds(in: normalizer.timelineItems),
+      ProcessProjectionFixture.twoUnknownTurnStatePresentationKinds
+    )
+    XCTAssertEqual(Set(projection.records.map(\.eventID)).count, projection.records.count)
+  }
+
   func testPlanReadUsesTypedFaithfulTimelineSummary() throws {
     let record = ProcessProjectionFixture.planReadToolRecord()
     let normalizer = try SignalboxIncrementalEventNormalizer(records: [record])
@@ -1459,24 +1482,34 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertEqual(tool.toolName, ProcessProjectionFixture.proposedToolName)
   }
 
-  func testRefusedSideProjectionExcludesModelIdentityMarker() throws {
+  func testRefusedSideProjectionRejectsMismatchedTurnState() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
     let trigger = try ProcessProjectionFixture.refusedEvent()
     var projector = SignalboxProcessTranscriptProjector()
 
-    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-
-    XCTAssertTrue(projection.records.isEmpty)
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
   }
 
-  func testModelReconciliationSideProjectionExcludesModelIdentityMarker() throws {
+  func testModelReconciliationSideProjectionRejectsMismatchedTurnState() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithCompletedModelIdentityMarker()
     let trigger = try ProcessProjectionFixture.modelReconciliationTrigger(cursor: 1)
     var projector = SignalboxProcessTranscriptProjector()
 
-    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
-
-    XCTAssertTrue(projection.records.isEmpty)
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
   }
 
   func testRefusedSideProjectionExcludesSameTurnModelUsage() throws {
@@ -2366,7 +2399,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  func testNewerSameTurnSnapshotBlockSurvivesBufferedTerminalReplay() async throws {
+  func testMismatchedSameTurnSnapshotDoesNotOverrideBufferedTerminalReplay() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
     let terminal = try ProcessProjectionFixture.refusedEvent(
@@ -2384,7 +2417,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     viewModel.apply(.event(terminal))
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.refusedActivity)
     XCTAssertFalse(viewModel.canSend)
   }
 
@@ -2549,7 +2582,7 @@ final class ProcessServiceIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  func testTerminalReplayPreservesAnotherTurnsUnknownActivity() async throws {
+  func testMismatchedSnapshotDoesNotOverrideAnotherTurnsTerminalReplay() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
     let terminal = try ProcessProjectionFixture.submittedTurnRefusedEvent()
@@ -2567,8 +2600,8 @@ final class ProcessServiceIntegrationTests: XCTestCase {
 
     viewModel.apply(.event(terminal))
 
-    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.recoveryActivity)
-    XCTAssertFalse(viewModel.canSend)
+    XCTAssertEqual(viewModel.activity, ProcessProjectionFixture.refusedActivity)
+    XCTAssertTrue(viewModel.canSend)
   }
 
   @MainActor
@@ -6182,6 +6215,9 @@ private enum ProcessProjectionFixture {
   static let futureFollowedEventKind = "future_session_event"
   static let futureTurnStateKind = "fixture_future_turn_state"
   static let futureTurnStatePresentationKind = "turn.state.\(futureTurnStateKind)"
+  static let twoUnknownTurnStatePresentationKinds = [
+    futureTurnStatePresentationKind, futureTurnStatePresentationKind,
+  ]
   static let futureCurrentModelStateKind = "fixture_future_current_model_state"
   static let futureCurrentModelStatePresentationKind =
     "current_model_call.state.\(futureCurrentModelStateKind)"
@@ -9021,6 +9057,70 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"1",
           "entry_count":"0"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithCompactedAndNewUnknownTurn() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"2"
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(ProcessDriverFixture.turn)",
+          "acceptance_position":"1",
+          "state":{"type":"\(futureTurnStateKind)","retained":"fixture"}
+        }
+        """,
+        """
+        {
+          "type":"transcript_turn",
+          "turn_id":"\(crossTurn)",
+          "acceptance_position":"2",
+          "state":{"type":"\(futureTurnStateKind)","retained":"fixture"}
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(completedUserEntry)",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"\(firstPendingID)",
+            "turn_id":"\(crossTurn)"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_content",
+          "entry_index":"0",
+          "fragment_index":"0",
+          "final_fragment":true,
+          "content_fragment":"\(userText)"
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"2",
+          "turn_count":"2",
+          "entry_count":"1"
         }
         """,
       ]
