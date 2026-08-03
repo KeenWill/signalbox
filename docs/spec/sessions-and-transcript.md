@@ -163,9 +163,11 @@ hyphen, and underscore; each segment is at most 64 bytes and a path is at most
 appends version-one `Created`, so no update rewrites history. Every
 current-placement load authenticates the contiguous history from version one
 through the selected head against each event's typed receipt and durable-command
-registry claim and rejects a head when immutable history contains a later event;
-a missing or lagging head, cross-wired history, or invalid command fact fails
-closed as typed storage corruption.
+registry claim and rejects a head when immutable history contains a later event.
+Equal creation replay likewise rejects a missing or lagging current head while
+reconstituting its immutable creation receipt. A missing or lagging head,
+cross-wired history, or invalid command fact fails closed as typed storage
+corruption.
 
 A placed requester's readable scope is its parent directory's subtree. The
 decision computes the requesting path's parent prefix once and performs one

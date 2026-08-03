@@ -48,6 +48,9 @@ const ARBITRARY_REJECTION_RECEIPT_UPDATE_COMMAND_ID_SEED: u128 = 0x111;
 const ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED: u128 = 0x227;
 const ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED: u128 = 0x12d;
 const ARBITRARY_LAGGING_HEAD_READ_UPDATE_COMMAND_ID_SEED: u128 = 0x12e;
+const ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED: u128 = 0x223;
+const ARBITRARY_APPLIED_REPLAY_CREATION_COMMAND_ID_SEED: u128 = 0x125;
+const ARBITRARY_APPLIED_REPLAY_UPDATE_COMMAND_ID_SEED: u128 = 0x126;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_SESSION_ID_SEED: u128 = 0x208;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_FIRST_COMMAND_ID_SEED: u128 = 0x114;
 const ARBITRARY_CROSS_WIRED_PROVENANCE_SECOND_SESSION_ID_SEED: u128 = 0x209;
@@ -767,7 +770,7 @@ async fn corrupt_creation_placement_provenance_fixture()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s36_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>> {
+async fn s36_inv012_cross_wired_applied_receipt_fails_closed() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session_id = session(0x205);
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -1070,16 +1073,16 @@ async fn s36_inv012_rejected_update_replay_authenticates_the_reported_current_ve
 async fn s36_inv012_applied_update_replay_requires_the_event_to_reach_the_current_head()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let session_id = session(0x223);
+    let session_id = session(ARBITRARY_APPLIED_REPLAY_SESSION_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(0x125),
+            command(ARBITRARY_APPLIED_REPLAY_CREATION_COMMAND_ID_SEED),
             session_id,
             SessionPlacement::pathless(),
         ))
         .await?;
     let update = UpdateSessionPlacement::new(
-        command(0x126),
+        command(ARBITRARY_APPLIED_REPLAY_UPDATE_COMMAND_ID_SEED),
         session_id,
         SessionPlacementVersion::INITIAL,
         scoped("projects.foo.head"),
@@ -1115,14 +1118,16 @@ struct LaggingPlacementHeadFixture {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
     session: SessionId,
+    creation_command: DurableCommandId,
 }
 
 async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let session = session(ARBITRARY_LAGGING_HEAD_READ_SESSION_ID_SEED);
+    let creation_command = command(ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED);
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation(
-            command(ARBITRARY_LAGGING_HEAD_READ_CREATION_COMMAND_ID_SEED),
+            creation_command,
             session,
             SessionPlacement::pathless(),
         ))
@@ -1149,6 +1154,7 @@ async fn lagging_placement_head_fixture() -> Result<LaggingPlacementHeadFixture,
         container,
         pool,
         session,
+        creation_command,
     })
 }
 
@@ -1182,6 +1188,31 @@ async fn s36_inv002_session_load_rejects_a_placement_head_behind_event_history()
         .expect_err("a session load rejects a placement head behind append-only history");
     let SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(reason)) = error else {
         panic!("a lagging placement head fails session load with typed corruption")
+    };
+    assert_eq!(reason, "session placement head behind event history");
+
+    fixture.pool.close().await;
+    drop(fixture.container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s36_inv002_inv012_creation_replay_rejects_a_placement_head_behind_event_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = lagging_placement_head_fixture().await?;
+    let error = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+        .handle(creation(
+            fixture.creation_command,
+            fixture.session,
+            SessionPlacement::pathless(),
+        ))
+        .await
+        .expect_err("creation replay rejects a placement head behind append-only history");
+    let CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(reason)) =
+        error
+    else {
+        panic!("a lagging placement head fails creation replay with typed corruption")
     };
     assert_eq!(reason, "session placement head behind event history");
 

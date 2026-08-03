@@ -579,6 +579,12 @@ async fn load_from_connection(
             ,pe.root_global_read_intent AS stored_root_intent
             ,placement_head.current_version AS current_placement_head_version
             ,current_placement.version AS current_placement_event_version
+            ,EXISTS (
+                SELECT 1
+                  FROM session_placement_event AS later_placement
+                 WHERE later_placement.session_id = placement_head.session_id
+                   AND later_placement.version > placement_head.current_version
+             ) AS current_placement_later_event_exists
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -730,6 +736,20 @@ fn decode_complete(
     )?;
     if placement_head != current_placement_event {
         return Err(CreateSessionCorruption::Inconsistent("current placement head event").into());
+    }
+    let history_head_state =
+        crate::session_placement::PlacementHistoryHeadState::from_later_event_exists(required(
+            &row,
+            "current_placement_later_event_exists",
+        )?);
+    match history_head_state {
+        crate::session_placement::PlacementHistoryHeadState::MatchesLatestEvent => {}
+        crate::session_placement::PlacementHistoryHeadState::BehindLaterEvent => {
+            return Err(CreateSessionCorruption::Inconsistent(
+                "session placement head behind event history",
+            )
+            .into());
+        }
     }
 
     CreateSessionReconstitutionInput::new_with_template_and_placement(
