@@ -142,6 +142,10 @@ impl QuarantineDirectory {
     pub(super) fn keep(&mut self) {
         self.clear_on_drop = false;
     }
+
+    pub(super) fn remove_on_drop(&mut self) {
+        self.clear_on_drop = true;
+    }
 }
 
 fn clear_pinned_directory(directory: &OwnedFd) -> Result<(), LocalGitFailure> {

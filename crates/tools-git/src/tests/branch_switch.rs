@@ -418,6 +418,7 @@ fn branch_switch_preserves_an_untracked_file_inside_a_replaced_directory() {
 #[test]
 fn failed_branch_switch_retains_every_obstructed_directory_quarantine() {
     let fixture = Fixture::new();
+    let obstructed_directories = ["alpha"];
     let alpha_content = b"alpha original\n";
     let omega_content = b"omega original\n";
     let foreign_content = b"foreign alpha\n";
@@ -475,11 +476,14 @@ fn failed_branch_switch_retains_every_obstructed_directory_quarantine() {
         .expect_err("concurrent operation state rejects checkout");
     fs::remove_file(fixture.root().join(".git/MERGE_HEAD"))
         .expect("concurrent merge state removes");
-    let retained_alpha = fs::read_dir(fixture.root())
+    let retained_quarantines = fs::read_dir(fixture.root())
         .expect("fixture root reads")
         .filter_map(Result::ok)
         .map(|entry| entry.path().join("entry/main.txt"))
-        .find(|path| path.is_file())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let retained_alpha = retained_quarantines
+        .first()
         .expect("obstructed alpha quarantine remains");
 
     assert_eq!(failure, LocalGitFailure::Operation);
@@ -490,6 +494,11 @@ fn failed_branch_switch_retains_every_obstructed_directory_quarantine() {
     assert_eq!(
         fs::read(retained_alpha).expect("retained alpha original reads"),
         alpha_content
+    );
+    assert_eq!(
+        retained_quarantines.len(),
+        obstructed_directories.len(),
+        "restored directories do not leave empty quarantines"
     );
     assert_eq!(
         fs::read(fixture.root().join("omega/main.txt")).expect("restored omega original reads"),
@@ -710,6 +719,10 @@ fn branch_switch_preserves_a_nonconflicting_staged_change() {
         .expect("staged blob exists");
 
     assert_eq!(blob.content(), CHANGED_CONTENT.as_bytes());
+    assert_eq!(
+        fs::read(fixture.root().join(TRACKED_PATH)).expect("staged worktree content reads"),
+        CHANGED_CONTENT.as_bytes()
+    );
 }
 
 #[test]

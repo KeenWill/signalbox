@@ -81,6 +81,20 @@ struct QuarantinedCheckoutDirectory {
     path: PathBuf,
 }
 
+struct BranchSwitchHooks<
+    BeforeReferenceLocks,
+    PostQuarantine,
+    PostCheckout,
+    PostIndexPublish,
+    BeforeHeadPublish,
+> {
+    before_reference_locks: BeforeReferenceLocks,
+    post_quarantine: PostQuarantine,
+    post_checkout: PostCheckout,
+    post_index_publish: PostIndexPublish,
+    before_head_publish: BeforeHeadPublish,
+}
+
 /// Sanitized local Git executor failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LocalGitExecutorError;
@@ -959,6 +973,8 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             if let Err(failure) = restoration {
                 transition.quarantine.keep();
                 first_failure.get_or_insert(failure);
+            } else {
+                transition.quarantine.remove_on_drop();
             }
         }
         first_failure.map_or(Ok(()), Err)
@@ -974,7 +990,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, || {}, || {}),
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                post_quarantine: || {},
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
         )
     }
 
@@ -988,7 +1010,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, || {}, || {}),
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                post_quarantine: || {},
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
         )
     }
 
@@ -1011,7 +1039,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, post_checkout, || {}, || {}),
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                post_quarantine: || {},
+                post_checkout,
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
         )
     }
 
@@ -1034,7 +1068,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &repository,
             &pinned_objects,
             arguments,
-            (|| {}, post_quarantine, || {}, || {}, || {}),
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                post_quarantine,
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
         )
     }
 
@@ -1050,7 +1090,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             &pinned_objects,
             arguments,
-            (before_reference_locks, || {}, || {}, || {}, || {}),
+            BranchSwitchHooks {
+                before_reference_locks,
+                post_quarantine: || {},
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish: || {},
+            },
         )
     }
 
@@ -1066,7 +1112,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, post_index_publish, || {}),
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                post_quarantine: || {},
+                post_checkout: || {},
+                post_index_publish,
+                before_head_publish: || {},
+            },
         )
     }
 
@@ -1089,7 +1141,13 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             &repository,
             &pinned_objects,
             arguments,
-            (|| {}, || {}, || {}, || {}, before_head_publish),
+            BranchSwitchHooks {
+                before_reference_locks: || {},
+                post_quarantine: || {},
+                post_checkout: || {},
+                post_index_publish: || {},
+                before_head_publish,
+            },
         )
     }
 
@@ -1104,21 +1162,21 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         repository: &Repository,
         pinned_objects: &PinnedObjectDatabase,
         arguments: GitBranchSwitchArguments,
-        hooks: (
+        hooks: BranchSwitchHooks<
             BeforeLocks,
             PostQuarantine,
             PostCheckout,
             PostIndexPublish,
             BeforeHeadPublish,
-        ),
+        >,
     ) -> Result<BranchResult, LocalGitFailure> {
-        let (
+        let BranchSwitchHooks {
             before_reference_locks,
             post_quarantine,
             post_checkout,
             post_index_publish,
             before_head_publish,
-        ) = hooks;
+        } = hooks;
         let mut index_lock = self.bind_locked_index(repository)?;
         let operation_state = RepositoryOperationState::capture(&self.repository_authority)?;
         operation_state.require_clean()?;
@@ -1285,7 +1343,11 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
             .target_dir(&descriptor_path(&self.repository_authority.root))
             .update_index(false)
             .refresh(false)
+            .disable_pathspec_match(true)
             .disable_filters(true);
+        for path in &checkout_paths {
+            checkout.path(path);
+        }
         checkout
             .notify_on(CheckoutNotificationType::UPDATED)
             .notify(|_, path, _, _, _| {
