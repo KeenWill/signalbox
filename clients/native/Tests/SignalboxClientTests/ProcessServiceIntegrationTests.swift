@@ -653,6 +653,17 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     XCTAssertTrue(ProcessProjectionFixture.modelCallUsageIDs(in: projection).isEmpty)
   }
 
+  func testApprovalDecisionSideProjectionPromotesSuccessorWait() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithAwaitingProposedTool()
+    let trigger = try ProcessProjectionFixture.userApprovalEvent()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    let tool = try ProcessProjectionFixture.onlyTool(in: projection)
+
+    XCTAssertEqual(tool.status, .awaitingDecision)
+  }
+
   func testContextCompactionSideProjectionIncludesItsSummary() throws {
     let snapshot = try ProcessProjectionFixture.snapshotWithContextSummary()
     let trigger = try ProcessProjectionFixture.contextCompactedTrigger()
@@ -7420,7 +7431,17 @@ private enum ProcessProjectionFixture {
   }
 
   static func snapshotWithProposedTool() throws -> SignalboxSynchronizationSnapshot {
-    try snapshotWithProposedTool(turnEvidence: [], usageEvidence: [])
+    try snapshotWithProposedTool(turnEvidence: [], usageEvidence: [], approvalMember: "")
+  }
+
+  static func snapshotWithProposedTool(
+    approvalMember: String
+  ) throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(
+      turnEvidence: [],
+      usageEvidence: [],
+      approvalMember: approvalMember
+    )
   }
 
   static func snapshotWithContiguousToolResultAndFailure() throws
@@ -7688,7 +7709,8 @@ private enum ProcessProjectionFixture {
 
   private static func snapshotWithProposedTool(
     turnEvidence: [String],
-    usageEvidence: [String]
+    usageEvidence: [String],
+    approvalMember: String = ""
   ) throws -> SignalboxSynchronizationSnapshot {
     try snapshot(
       messages: [
@@ -7740,7 +7762,7 @@ private enum ProcessProjectionFixture {
             "model_call_id":"\(ProcessDriverFixture.modelCall)",
             "tool_request_id":"\(proposedToolRequest)",
             "tool_name":"\(proposedToolName)",
-            "arguments":"{}"
+            "arguments":"{}"\(approvalMember)
           }
         }
         """,
@@ -7754,6 +7776,23 @@ private enum ProcessProjectionFixture {
         }
         """,
       ]
+    )
+  }
+
+  static func snapshotWithDelegateDenial() throws -> SignalboxSynchronizationSnapshot {
+    try snapshotWithProposedTool(
+      approvalMember:
+        """
+        ,"approval":{
+          "decision":{"type":"deny","reason":null},
+          "decider":{
+            "type":"delegate",
+            "model_selection_id":"\(delegateModelSelection)",
+            "model_call_id":"\(delegateModelCall)"
+          },
+          "rationale":"\(delegateRationale)"
+        }
+        """
     )
   }
 
@@ -11259,6 +11298,43 @@ private enum ProcessDriverUpdateRecorderError: Error {
 
 extension ProcessServiceIntegrationTests {
   @MainActor
+  func testToolApprovalDecisionPresentsDelegateProvenanceAndRationale() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithProposedTool())
+    )
+
+    viewModel.apply(.event(try ProcessProjectionFixture.delegateDenialEvent()))
+
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
+    XCTAssertEqual(tool.status, .denied)
+    XCTAssertEqual(tool.decisionReason, nil)
+    XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
+    XCTAssertEqual(tool.approvalRationale, ProcessProjectionFixture.delegateRationale)
+    XCTAssertFalse(tool.decisionAvailable)
+  }
+
+  @MainActor
+  func testAuthoritativeSnapshotPresentsHistoricalDelegateDecision() async throws {
+    let sessions = try await makeService().listSessions(includeArchived: false)
+    let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
+    let viewModel = ProcessSessionDetailViewModel(session: session) { nil }
+
+    viewModel.apply(
+      .authoritativeSnapshot(try ProcessProjectionFixture.snapshotWithDelegateDenial())
+    )
+
+    let tool = try ProcessProjectionFixture.onlyToolCard(in: viewModel.timeline)
+    XCTAssertEqual(tool.status, .denied)
+    XCTAssertEqual(tool.decisionReason, nil)
+    XCTAssertEqual(tool.approvalDecider, ProcessProjectionFixture.delegateDenialLabel)
+    XCTAssertEqual(tool.approvalRationale, ProcessProjectionFixture.delegateRationale)
+    XCTAssertFalse(tool.decisionAvailable)
+  }
+
+  @MainActor
   func testUnknownLiveSessionEventAddsStableBoundedTimelineCard() async throws {
     let sessions = try await makeService().listSessions(includeArchived: false)
     let session = try fixtureSession(MockSignalboxFixtures.activeSessionID, in: sessions)
@@ -11660,6 +11736,11 @@ extension ProcessServiceIntegrationTests {
 }
 
 extension ProcessProjectionFixture {
+  static let delegateModelSelection = "dddddddd-4444-4444-8444-444444444444"
+  static let delegateModelCall = "eeeeeeee-4444-4444-8444-444444444444"
+  static let delegateRationale = "The requested effect exceeds the delegated scope."
+  static let delegateDenialLabel =
+    "Denied by delegate; model selection \(delegateModelSelection); call \(delegateModelCall)"
   static let futureSessionEventKind = "fixture_future_session_event"
   static let formerUsageCollisionEntryIndex = UInt64(7)
   static let disjointUsageAndSemanticPresentationIDs = [Int.min + 1, Int.min / 4]
@@ -11782,6 +11863,68 @@ extension ProcessProjectionFixture {
       }
       """,
       cursor: cursor
+    )
+  }
+
+  static func delegateDenialEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(proposedToolRequest)",
+        "decision":{"type":"deny","reason":null},
+        "decider":{
+          "type":"delegate",
+          "model_selection_id":"\(delegateModelSelection)",
+          "model_call_id":"\(delegateModelCall)"
+        },
+        "rationale":"\(delegateRationale)"
+      }
+      """
+    )
+  }
+
+  static func snapshotWithAwaitingProposedTool() throws -> SignalboxSynchronizationSnapshot {
+    let snapshot = try snapshotWithProposedTool()
+    let message = try message(
+      """
+      {
+        "type":"transcript_turn",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "acceptance_position":"1",
+        "state":{
+          "type":"active_awaiting_tool_approval",
+          "tool_request_id":"\(proposedToolRequest)"
+        }
+      }
+      """
+    )
+    guard case .transcriptTurn(let turn) = message else {
+      throw ProcessDriverUpdateRecorderError.missingFixtureMessage
+    }
+    return SignalboxSynchronizationSnapshot(
+      sessionID: snapshot.sessionID,
+      cursor: snapshot.cursor,
+      records: [.turn(turn)] + snapshot.records
+    )
+  }
+
+  static func userApprovalEvent() throws -> SignalboxFollowedSessionEvent {
+    try followedEvent(
+      """
+      {
+        "type":"tool_approval_decided",
+        "turn_id":"\(ProcessDriverFixture.turn)",
+        "tool_request_id":"\(closedToolID)",
+        "decision":{"type":"approve"},
+        "decider":{
+          "type":"user",
+          "command_id":"\(delegateModelSelection)"
+        },
+        "rationale":null
+      }
+      """
     )
   }
 

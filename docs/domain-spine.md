@@ -3756,6 +3756,7 @@ pub enum ToolApprovalDecider {
 
 pub struct ToolDecisionRationale(/* private */);
 impl ToolDecisionRationale {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
@@ -3784,6 +3785,7 @@ pub struct DelegateToolApprovalError { /* private */ }
 
 pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;

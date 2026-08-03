@@ -32,17 +32,20 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
   public let pendingInputs: [SignalboxProcessPendingInput]
   public let activity: SignalboxProcessActivity
   public let materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
+  public let toolApprovalDecisionsByRequestID: [String: SignalboxTranscriptToolApproval]
 
   public init(
     records: [SignalboxStoredEvent],
     pendingInputs: [SignalboxProcessPendingInput],
     activity: SignalboxProcessActivity,
-    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>
+    materializedAcceptedInputIDs: Set<SignalboxCanonicalUUID>,
+    toolApprovalDecisionsByRequestID: [String: SignalboxTranscriptToolApproval]
   ) {
     self.records = records
     self.pendingInputs = pendingInputs
     self.activity = activity
     self.materializedAcceptedInputIDs = materializedAcceptedInputIDs
+    self.toolApprovalDecisionsByRequestID = toolApprovalDecisionsByRequestID
   }
 }
 
@@ -203,7 +206,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         diagnostic?.message ?? "The daemon reported an unrecognized session event."
       )
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired:
       content = nil
@@ -380,7 +383,25 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
       activity: unknownTurnActivity ?? activeActivity ?? latestActivity,
-      materializedAcceptedInputIDs: materializedAcceptedInputIDs
+      materializedAcceptedInputIDs: materializedAcceptedInputIDs,
+      toolApprovalDecisionsByRequestID: toolApprovalDecisions(in: snapshot)
+    )
+  }
+
+  private func toolApprovalDecisions(
+    in snapshot: SignalboxSynchronizationSnapshot
+  ) -> [String: SignalboxTranscriptToolApproval] {
+    Dictionary(
+      snapshot.records.compactMap { record in
+        guard case .entry(let message) = record,
+          case .assistantToolUse(_, _, let requestID, _, _, let approval) = message.entry,
+          let approval
+        else {
+          return nil
+        }
+        return (requestID.rawValue, approval)
+      },
+      uniquingKeysWith: { first, _ in first }
     )
   }
 
@@ -432,7 +453,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           continue
         }
         switch message.entry {
-        case .assistantToolUse(let turnID, let modelCallID, let requestID, _, _):
+        case .assistantToolUse(let turnID, let modelCallID, let requestID, _, _, _):
           let rawModelCallID = modelCallID.rawValue
           let correlation = ToolCorrelation(
             sourceSessionID: message.sourceSessionID.rawValue,
@@ -502,7 +523,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         switch message.entry {
         case .modelIdentityChanged(let turnID, _, _),
-          .assistantToolUse(let turnID, _, _, _, _), .turnCompleted(let turnID),
+          .assistantToolUse(let turnID, _, _, _, _, _), .turnCompleted(let turnID),
           .turnFailed(let turnID), .turnCancelled(let turnID):
           anchor = (turnID, message.entryIndex)
         case .toolExecutionResult, .toolDenied, .toolClosed, .imported, .unknown:
@@ -559,7 +580,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return records.reduce(into: [:]) { positions, record in
       guard case .entry(let message) = record,
         message.sourceSessionID == nativeSourceSessionID,
-        case .assistantToolUse(let turnID, _, let requestID, let toolName, _) = message.entry
+        case .assistantToolUse(let turnID, _, let requestID, let toolName, _, _) = message.entry
       else {
         return
       }
@@ -666,7 +687,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition],
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
-    guard entryIsSelected(message, selection: selection) else {
+    guard
+      entryIsSelected(
+        message,
+        awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
+        selection: selection
+      )
+    else {
       return nil
     }
     switch message.entry {
@@ -686,7 +713,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       let modelCallID,
       let requestID,
       let toolName,
-      let arguments
+      let arguments,
+      _
     ):
       let request = requestID.rawValue
       let identity = ToolIdentity(
@@ -1149,6 +1177,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
 
   private func entryIsSelected(
     _ message: SignalboxTranscriptEntryMessage,
+    awaitingToolDecisionRequestID: String?,
     selection: Selection
   ) -> Bool {
     switch selection {
@@ -1159,7 +1188,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         message,
         isAttributableTo: trigger,
         nativeSourceSessionID: nativeSourceSessionID,
-        terminalResultEntryIDs: terminalResultEntryIDs
+        terminalResultEntryIDs: terminalResultEntryIDs,
+        awaitingToolDecisionRequestID: awaitingToolDecisionRequestID
       )
     }
   }
@@ -1168,7 +1198,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     isAttributableTo trigger: SignalboxProcessSessionEvent,
     nativeSourceSessionID: SignalboxCanonicalUUID,
-    terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
+    terminalResultEntryIDs: Set<SignalboxCanonicalUUID>,
+    awaitingToolDecisionRequestID: String?
   ) -> Bool {
     guard message.sourceSessionID == nativeSourceSessionID else {
       return false
@@ -1181,7 +1212,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       switch state {
       case .proposed:
         guard
-          case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+          case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
             message.entry
         else {
           return false
@@ -1209,6 +1240,13 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       )
     case .turnToolReconciliationRequired:
       return terminalResultEntryIDs.contains(message.entryID)
+    case .toolApprovalDecided(let turnID, _, _, _, _):
+      guard let awaitingToolDecisionRequestID,
+        case .assistantToolUse(let entryTurnID, _, let requestID, _, _, _) = message.entry
+      else {
+        return false
+      }
+      return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
@@ -1266,7 +1304,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         terminalFrontierID: terminalFrontierID
       )
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnRefused,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return []
     }
@@ -1362,7 +1400,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       record -> SignalboxCanonicalUUID? in
       guard case .entry(let message) = record,
         message.sourceSessionID == snapshot.sessionID,
-        case .assistantToolUse(let entryTurnID, let modelCallID, _, _, _) = message.entry,
+        case .assistantToolUse(let entryTurnID, let modelCallID, _, _, _, _) = message.entry,
         entryTurnID == turnID
       else {
         return nil
@@ -1379,6 +1417,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           let entryTurnID,
           let modelCallID,
           let requestID,
+          _,
           _,
           _
         ) = message.entry,
@@ -1496,7 +1535,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
       return message.entryID == cancellationEntryID && entryTurnID == turnID
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .contextCompacted, .turnRefused,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnRefused,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return false
     }
@@ -1514,7 +1553,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return snapshot.records.contains { record in
           guard case .entry(let message) = record,
             message.sourceSessionID == snapshot.sessionID,
-            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _) =
+            case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
               message.entry
           else {
             return false
@@ -1641,7 +1680,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
     case .turnToolReconciliationRequired:
       return !terminalResultEntryIDs.isEmpty
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition, .unknown:
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolApprovalDecided, .unknown:
       return true
     }
   }
