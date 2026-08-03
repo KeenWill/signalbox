@@ -82,7 +82,7 @@ const MAX_OPAQUE_ID_BYTES: usize = 512;
 const MIN_INLINE_COMMENT_LINE: u32 = 1;
 const MAX_INLINE_COMMENTS: usize = 50;
 const MAX_GIT_REF_BYTES: usize = 255;
-const MAX_GITHUB_OWNER_BYTES: usize = 39;
+const MAX_GITHUB_ACCOUNT_BYTES: usize = 39;
 const ERROR_TRUNCATION_SUFFIX: &str = " … [truncated]";
 const INVALID_ARGUMENTS_DETAIL: &str = "GitHub pull-request tool arguments are invalid";
 const CREDENTIAL_UNAVAILABLE_DETAIL: &str = "GitHub credential is unavailable";
@@ -376,20 +376,20 @@ fn valid_git_ref(value: &str) -> bool {
         && gix_validate::reference::branch_name(BStr::new(reference.as_bytes())).is_ok()
 }
 
-/// Accepts one local ref or one `owner:ref` cross-repository head selector.
+/// Accepts one local ref or one `account:ref` cross-repository head selector.
 fn valid_head_selector(value: &str) -> bool {
     if valid_git_ref(value) {
         return true;
     }
     match value.split_once(':') {
-        Some((owner, reference)) => valid_github_owner(owner) && valid_git_ref(reference),
+        Some((account, reference)) => valid_github_account(account) && valid_git_ref(reference),
         None => false,
     }
 }
 
-fn valid_github_owner(value: &str) -> bool {
+fn valid_github_account(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_GITHUB_OWNER_BYTES
+        && value.len() <= MAX_GITHUB_ACCOUNT_BYTES
         && !value.starts_with('-')
         && !value.ends_with('-')
         && value
@@ -3433,20 +3433,20 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_an_owner_qualified_base_selector() {
+    fn create_rejects_an_account_qualified_base_selector() {
         let rejection = decode_create_pull_request(&normalized(serde_json::json!({
             "title": CREATE_TITLE,
             "body": CREATE_BODY,
             "head": CREATE_HEAD,
             "base": "contributor:main"
         })))
-        .expect_err("an owner-qualified base selector is rejected before dispatch");
+        .expect_err("an account-qualified base selector is rejected before dispatch");
 
         assert_eq!(rejection, InvalidGitHubArguments);
     }
 
     #[test]
-    fn create_admits_an_owner_qualified_head_selector() {
+    fn create_admits_an_account_qualified_head_selector() {
         let arguments = decode_create_pull_request(&normalized(serde_json::json!({
             "title": CREATE_TITLE,
             "body": CREATE_BODY,
