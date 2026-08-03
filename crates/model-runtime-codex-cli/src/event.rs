@@ -937,13 +937,9 @@ fn decode<T: DeserializeOwned>(value: Value) -> Result<T, DecodeFailure> {
 }
 
 fn usage(usage: crate::wire::Usage) -> Result<TokenUsage, DecodeFailure> {
-    let input_tokens = u64::try_from(usage.input_tokens)
-        .map_err(|_| DecodeFailure::new("usage input_tokens is negative"))?;
-    let output_tokens = u64::try_from(usage.output_tokens)
-        .map_err(|_| DecodeFailure::new("usage output_tokens is negative"))?;
     Ok(TokenUsage {
-        input_tokens: Some(input_tokens),
-        output_tokens: Some(output_tokens),
+        input_tokens: optional_usage(usage.input_tokens, "input_tokens")?,
+        output_tokens: optional_usage(usage.output_tokens, "output_tokens")?,
         cache_creation_input_tokens: optional_usage(
             usage.cache_write_input_tokens,
             "cache_write_input_tokens",

@@ -264,24 +264,27 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 from recorded domain rejection.
 
 New `CreateSession` records use storage version 6 and new
-`CreateSessionFromImportedFrontier` records version 4; new
+`CreateSessionFromImportedFrontier` records remain written at version 3. Version
+4 is committed-unimplemented compatibility space for that command family's
+optional runner-placement payload: no present writer or decoder provides it. New
 `ReplaceSessionDefaults` records use version 3. All three families reconstitute
 version 1 with dangerous blanket approval disabled and versions 1 and 2 with no
 system prompt. Create-session versions 1 through 3 carry no template provenance;
 version 4 and every later version require provenance for template mode and
 require its absence for explicit mode. Version 5 adds the optional session
-runner placement; version 6 composes it with path-scoped placement. Each field
-is absent before its introducing version, so an older reader rejects a newer
-creation record instead of discarding either decision. `ReplaceSessionMetadata`,
-`SubmitInput`, and `DecideToolRequest` use version 1. `CreateSession` records
-applied results only (its one preparation failure is an error, not a recorded
-rejection); `CreateSessionFromImportedFrontier` also records applied results
-only, because a missing conversation named by the frontier or a boundary absent
-from that conversation is a pre-claim admission error rather than an
-authoritative rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`,
-`SubmitInput`, and `DecideToolRequest` record both applied results and closed,
-typed rejection discriminators. Authoritative rejections claim the identifier
-exactly as applied results do.
+runner placement but remains unsupported until that payload's decoder lands;
+version 6 composes it with path-scoped placement. Each field is absent before
+its introducing version, so an older reader rejects a newer creation record
+instead of discarding either decision. `ReplaceSessionMetadata`, `SubmitInput`,
+and `DecideToolRequest` use version 1. `CreateSession` records applied results
+only (its one preparation failure is an error, not a recorded rejection);
+`CreateSessionFromImportedFrontier` also records applied results only, because a
+missing conversation named by the frontier or a boundary absent from that
+conversation is a pre-claim admission error rather than an authoritative
+rejection; `ReplaceSessionDefaults`, `ReplaceSessionMetadata`, `SubmitInput`,
+and `DecideToolRequest` record both applied results and closed, typed rejection
+discriminators. Authoritative rejections claim the identifier exactly as applied
+results do.
 
 ## Replay and equality
 
@@ -296,14 +299,15 @@ recorded result without catalog resolution. Only an unseen identity resolves the
 startup catalog and constructs the complete defaults-and-provenance payload.
 Structural equality (hand-written `PartialEq` on `CreateSession`,
 `CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, `SubmitInput`,
-`ReplaceSessionMetadata`, and `DecideToolRequest` in `crates/domain`) covers
-every caller-supplied semantic field and excludes `DurableCommandId`. Why: the
-identifier is the lookup key that names the payload, not part of the meaning it
-names. The optional session runner placement is such a field in both creation
-families, so it participates in that equality in both creation modes — including
-template-derived creation, whose daemon-resolved defaults are excluded — and a
-replay carrying a different placement, or a placement where the first handling
-had none, is conflicting reuse.
+`ReplaceSessionMetadata`, `DecideToolRequest`, and `UpdateSessionPlacement` in
+`crates/domain`) covers every caller-supplied semantic field and excludes
+`DurableCommandId`. Why: the identifier is the lookup key that names the
+payload, not part of the meaning it names. The optional session runner placement
+is such a field in both creation families, so it participates in that equality
+in both creation modes — including template-derived creation, whose
+daemon-resolved defaults are excluded — and a replay carrying a different
+placement, or a placement where the first handling had none, is conflicting
+reuse.
 
 Every command repository, including
 `crates/persistence/src/context_compaction.rs`, follows one claim protocol, with

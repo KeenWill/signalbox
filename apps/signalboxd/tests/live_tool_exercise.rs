@@ -42,12 +42,13 @@ use signalbox_process_protocol::{
     ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionPlacement,
     SystemPromptMember, ToolDecision, TurnState, decode_server_line, encode_client_line,
 };
-use signalbox_tools_basic::{SESSION_STATUS_UPDATE_NAME, WEB_FETCH_NAME};
+use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
 use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
 };
 use signalbox_tools_plan::{PLAN_READ_NAME, PLAN_WRITE_NAME};
+use signalbox_tools_web::WEB_FETCH_NAME;
 use signalboxd::{
     APPLY_PATCH_NAME, ActivatedTurnExecution, CHANGE_REQUEST_COMMENT_NAME,
     CHANGE_REQUEST_RERUN_FAILED_JOBS_NAME, CHANGE_REQUEST_SUMMARY_NAME,
@@ -399,6 +400,10 @@ fn smoke_configuration(workspace: &Path) -> SmokeResult<HubModelConfiguration> {
     let executable = std::env::current_exe()?;
     let configuration = format!(
         r#"version = 1
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+billing_kind = "subscription"
 
 [[adapter_mappings]]
 model_family = "codex"

@@ -23,10 +23,12 @@ mod model_execution;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod repo_watch;
 mod review_workflow;
 mod runner;
 mod semantic_entry;
 mod session;
+mod session_delegation;
 mod session_metadata;
 mod session_placement;
 mod session_template;
@@ -148,6 +150,20 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
+pub use repo_watch::{
+    BranchContext, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
+    DispatchSessionAction, DispatchSessionParameters, GitHubObjectId, LabelName, MergeableState,
+    PullRequestBody, PullRequestContext, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError,
+    RepoWatchDispatchContextShape, RepoWatchEvent, RepoWatchEventConstructionError,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
+    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleValidationError,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug, ReviewState,
+    ReviewThreadId, WorkflowName,
+};
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
     ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
@@ -208,9 +224,20 @@ pub use session::{
     CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
     InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
-    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
-    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
-    TranscriptFrontier,
+    SessionCreationCause, SessionCreationProvenance, SessionPlacementReconstitutionFacts,
+    SessionReconstitutionError, SessionReconstitutionFailure, SessionReconstitutionInput,
+    TranscriptAncestry, TranscriptFrontier,
+};
+pub use session_delegation::{
+    BoundChildAction, ChildRelationshipPolicy, ChildWait, DelegatedSpawnRequest,
+    DelegationAwaitRequest, DelegationContent, DelegationContentError, DelegationContentFailure,
+    DelegationEvent, DelegationEventOrdinal, DelegationLifecycle, DelegationMessage,
+    DelegationMessageDirection, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DelegationProvenance, DelegationRequestError,
+    DelegationRequestFailure, DelegationTransitionError, DelegationTransitionFailure,
+    DelegationWait, DelegationWaitMode, DescendantTerminationScope, ParentTerminationAuthority,
+    ParentTerminationCommandSource, ParentTerminationKind, RejectedDelegationTransition,
+    SessionDelegation, TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
@@ -225,7 +252,8 @@ pub use session_placement::{
     SessionPlacementError, SessionPlacementEvent, SessionPlacementEventKind, SessionPlacementPath,
     SessionPlacementPathError, SessionPlacementVersion, SessionReadRefusalReason,
     SessionReadScopeDecision, SessionReadScopeRefusal, UpdateSessionPlacement,
-    UpdateSessionPlacementRejection, UpdateSessionPlacementResult, VersionedSessionPlacement,
+    UpdateSessionPlacementApplied, UpdateSessionPlacementRejection,
+    UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, VersionedSessionPlacement,
 };
 pub use session_template::{
     SessionTemplateContentDigest, SessionTemplateName, SessionTemplateNameError,
@@ -257,10 +285,12 @@ pub use tool::{
     AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecision,
-    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
-    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
-    ToolArgumentsKind, ToolCallProposal, ToolDecisionSource, ToolDenialReason,
+    DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
+    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
+    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
+    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
+    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
+    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
     ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
     ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
@@ -274,14 +304,15 @@ pub use tool_attempt::{
     ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
     ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation, ToolAttemptReconstitutionError,
     ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
-    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
-    ToolExecutionErrorKind,
+    ToolAttemptTransitionFailure, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorDetailError,
+    ToolExecutionErrorDetailFailure, ToolExecutionErrorKind,
 };
 pub use tool_execution::{
-    AwaitingToolApproval, AwaitingToolRecovery, PreparedToolAttempt, PreparedToolBatchDecision,
-    PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError, ToolBatchDecisionFailure,
-    ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
+    AwaitingToolApproval, AwaitingToolRecovery, DelegateToolApprovalTransitionError,
+    DelegateToolApprovalTransitionFailure, PreparedDelegateToolApproval, PreparedToolAttempt,
+    PreparedToolBatchDecision, PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError,
+    ToolBatchDecisionFailure, ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionError,
     ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolResultProjectionError,
     ToolResultProjectionFailure,
@@ -355,6 +386,11 @@ define_identity!(
 define_identity!(
     /// Identifies one durable, independently browsable conversation.
     SessionId
+);
+
+define_identity!(
+    /// Identifies one immutable message within a delegated-session relation.
+    DelegationMessageId
 );
 
 define_identity!(
@@ -452,6 +488,16 @@ define_identity!(
     ReviewExternalLinkId
 );
 
+define_identity!(
+    /// Identifies one durable repository-watch event.
+    RepoWatchEventId
+);
+
+define_identity!(
+    /// Identifies one durable repository-watch dispatch audit record.
+    RepoWatchDispatchId
+);
+
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Behavior-irrelevant test plumbing shared across unit-test modules.
@@ -487,6 +533,7 @@ pub(crate) mod test_support {
         context_frontier_id -> crate::ContextFrontierId,
         semantic_transcript_entry_id -> crate::SemanticTranscriptEntryId,
         tool_request_id -> crate::ToolRequestId,
+        delegation_message_id -> crate::DelegationMessageId,
         tool_attempt_id -> crate::ToolAttemptId,
         runner_enrollment_id -> crate::RunnerEnrollmentId,
         runner_id -> crate::RunnerId,
@@ -505,9 +552,10 @@ pub(crate) mod test_support {
 mod tests {
     use super::{
         AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
-        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RunnerAuthenticationId,
-        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceManifestId,
+        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId,
+        RepoWatchEventId, RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -546,5 +594,7 @@ mod tests {
         assert_uuid_contract!(RunnerAuthenticationId);
         assert_uuid_contract!(RunnerLeaseId);
         assert_uuid_contract!(WorkspaceManifestId);
+        assert_uuid_contract!(RepoWatchEventId);
+        assert_uuid_contract!(RepoWatchDispatchId);
     }
 }

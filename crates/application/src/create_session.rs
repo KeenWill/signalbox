@@ -69,7 +69,7 @@ impl CreateSessionRequest {
             command_id,
             initial_configuration_defaults,
             template_provenance: None,
-            placement: SessionPlacement::Pathless,
+            placement: SessionPlacement::pathless(),
         })
     }
 
@@ -91,7 +91,7 @@ impl CreateSessionRequest {
             command_id,
             initial_configuration_defaults: resolved_configuration_defaults,
             template_provenance: Some(template_provenance),
-            placement: SessionPlacement::Pathless,
+            placement: SessionPlacement::pathless(),
         })
     }
 

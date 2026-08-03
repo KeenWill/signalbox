@@ -41,6 +41,11 @@ ALTER TABLE create_session_command
         root_global_read_intent = (
             placement_path IS NOT NULL AND position('.' IN placement_path) = 0
         )
+    ),
+    ADD CONSTRAINT create_session_command_placement_path_shape CHECK (
+        placement_path IS NULL
+        OR (octet_length(placement_path) BETWEEN 1 AND 4159
+            AND placement_path ~ '^[A-Za-z0-9_-]{1,64}(\.[A-Za-z0-9_-]{1,64}){0,63}$')
     );
 
 CREATE TABLE session_placement_event (
@@ -53,6 +58,7 @@ CREATE TABLE session_placement_event (
     provenance_command_id uuid NOT NULL REFERENCES durable_command(command_id) ON DELETE RESTRICT,
     recorded_at timestamptz NOT NULL,
     PRIMARY KEY (session_id, version),
+    UNIQUE (session_id, version, provenance_command_id),
     FOREIGN KEY (session_id, prior_version)
         REFERENCES session_placement_event(session_id, version) ON DELETE RESTRICT,
     CHECK (
@@ -110,19 +116,26 @@ CREATE TABLE update_session_placement_command (
             replacement_path IS NOT NULL AND position('.' IN replacement_path) = 0
         )
     ),
-    CHECK (
+    CONSTRAINT update_session_placement_command_result_shape CHECK (
         (result_kind = 'applied' AND rejection_kind IS NULL
-            AND result_version IS NOT NULL AND result_current_version IS NULL)
-        OR (result_kind = 'rejected' AND rejection_kind IS NOT NULL
+            AND result_version IS NOT NULL
+            AND result_version = expected_version + 1
+            AND result_current_version IS NULL)
+        OR (result_kind = 'rejected' AND rejection_kind = 'session_not_found'
+            AND result_version IS NULL AND result_current_version IS NULL)
+        OR (result_kind = 'rejected' AND rejection_kind = 'current_version_mismatch'
+            AND result_version IS NULL AND result_current_version IS NOT NULL
+            AND result_current_version <> expected_version)
+        OR (result_kind = 'rejected' AND rejection_kind = 'version_exhausted'
             AND result_version IS NULL
-            AND ((rejection_kind = 'session_not_found' AND result_current_version IS NULL)
-                OR (rejection_kind <> 'session_not_found' AND result_current_version IS NOT NULL)))
+            AND expected_version = 18446744073709551615
+            AND result_current_version = 18446744073709551615)
     ),
     FOREIGN KEY (command_id, command_kind, storage_version)
         REFERENCES durable_command(command_id, command_kind, storage_version)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, result_version)
-        REFERENCES session_placement_event(session_id, version)
+    FOREIGN KEY (session_id, result_version, command_id)
+        REFERENCES session_placement_event(session_id, version, provenance_command_id)
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -176,6 +189,94 @@ SELECT session_id, 1, NULL, 'created', NULL, FALSE, command_id,
 
 INSERT INTO session_current_placement (session_id, current_version)
 SELECT session_id, 1 FROM session_placement_event;
+
+CREATE FUNCTION materialize_legacy_creation_placement()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    matching_event boolean;
+    matching_head boolean;
+BEGIN
+    IF TG_TABLE_NAME = 'create_session_command' AND NEW.storage_version >= 6 THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+          FROM session_placement_event
+         WHERE session_id = NEW.created_session_id
+           AND version = 1
+           AND prior_version IS NULL
+           AND event_kind = 'created'
+           AND placement_path IS NULL
+           AND NOT root_global_read_intent
+           AND provenance_command_id = NEW.command_id
+    ) INTO matching_event;
+    SELECT EXISTS (
+        SELECT 1
+          FROM session_current_placement
+         WHERE session_id = NEW.created_session_id
+           AND current_version = 1
+    ) INTO matching_head;
+
+    IF matching_event AND matching_head THEN
+        RETURN NEW;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM session_placement_event
+         WHERE session_id = NEW.created_session_id
+    ) OR EXISTS (
+        SELECT 1 FROM session_current_placement
+         WHERE session_id = NEW.created_session_id
+    ) THEN
+        RAISE EXCEPTION
+            'legacy session % has a partial or inconsistent placement',
+            NEW.created_session_id
+            USING ERRCODE = '23514',
+                CONSTRAINT = 'legacy_creation_placement_is_consistent';
+    END IF;
+
+    INSERT INTO session_placement_event
+        (session_id, version, prior_version, event_kind, placement_path,
+         root_global_read_intent, provenance_command_id, recorded_at)
+    VALUES
+        (NEW.created_session_id, 1, NULL, 'created', NULL, FALSE,
+         NEW.command_id, transaction_timestamp());
+    INSERT INTO session_current_placement (session_id, current_version)
+    VALUES (NEW.created_session_id, 1);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER legacy_native_creation_materializes_placement
+    AFTER INSERT ON create_session_command
+    FOR EACH ROW EXECUTE FUNCTION materialize_legacy_creation_placement();
+CREATE TRIGGER legacy_imported_creation_materializes_placement
+    AFTER INSERT ON create_session_from_imported_frontier_command
+    FOR EACH ROW EXECUTE FUNCTION materialize_legacy_creation_placement();
+
+CREATE FUNCTION require_session_placement()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM session_current_placement AS placement_head
+          JOIN session_placement_event AS placement_event
+            ON placement_event.session_id = placement_head.session_id
+           AND placement_event.version = placement_head.current_version
+         WHERE placement_head.session_id = NEW.session_id
+    ) THEN
+        RAISE EXCEPTION 'session % requires a complete current placement', NEW.session_id
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'session_requires_placement';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER session_requires_placement
+    AFTER INSERT ON session
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_session_placement();
 
 CREATE OR REPLACE FUNCTION require_durable_command_typed_record()
 RETURNS trigger LANGUAGE plpgsql AS $$

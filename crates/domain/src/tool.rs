@@ -14,6 +14,7 @@ use crate::{
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_NAME_BYTES: usize = 64;
 const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1024;
+const MAX_TOOL_DECISION_RATIONALE_BYTES: usize = 4096;
 const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
 
@@ -408,6 +409,7 @@ pub struct ToolRequest {
     ordinal: ToolRequestOrdinal,
     name: ToolName,
     arguments: NormalizedToolArguments,
+    approval_posture: ToolApprovalPosture,
 }
 
 impl ToolRequest {
@@ -418,6 +420,7 @@ impl ToolRequest {
         producing_call: ModelCallId,
         ordinal: ToolRequestOrdinal,
         proposal: ToolCallProposal,
+        approval: InitialToolApproval,
     ) -> Self {
         Self {
             id,
@@ -427,6 +430,7 @@ impl ToolRequest {
             ordinal,
             name: proposal.name,
             arguments: proposal.arguments,
+            approval_posture: approval.posture(),
         }
     }
 
@@ -464,6 +468,11 @@ impl ToolRequest {
     pub const fn arguments(&self) -> &NormalizedToolArguments {
         &self.arguments
     }
+
+    /// Returns the exact per-request posture frozen when the proposal landed.
+    pub const fn approval_posture(&self) -> ToolApprovalPosture {
+        self.approval_posture
+    }
 }
 
 /// Complete independently stored facts for one logical request.
@@ -493,8 +502,15 @@ impl ToolRequestReconstitutionInput {
                 ordinal,
                 name,
                 arguments,
+                approval_posture: ToolApprovalPosture::Human,
             },
         }
+    }
+
+    /// Supplies the exact stored posture selected when this request landed.
+    pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
+        self.request.approval_posture = posture;
+        self
     }
 
     /// Returns the inert typed request for complete aggregate validation.
@@ -519,6 +535,19 @@ pub enum ToolPermissionDefault {
     Auto,
     /// A user decision is required.
     Confirm,
+    /// A user decision is required even under blanket automatic approval.
+    AlwaysConfirm,
+}
+
+/// Deployment-selected approval authority for one exact tool.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ToolApprovalPosture {
+    /// Policy may approve without a decision event.
+    Auto,
+    /// A delegate model may decide or escalate to the user.
+    Delegated,
+    /// Only the user may approve or deny.
+    Human,
 }
 
 /// Crash-relevant physical effect classification.
@@ -541,9 +570,207 @@ pub enum ToolDecisionSource {
     SessionBlanket,
     /// Reserved for a future exact per-tool session override.
     SessionOverride,
-    /// Reserved for a future advisory judge producer.
-    JudgeRecommendation,
+    /// A checked delegate-model decision.
+    Delegate,
 }
+
+impl ToolDecisionSource {
+    pub(crate) const fn requires_ordered_prefix(self) -> bool {
+        match self {
+            Self::UserCommand | Self::Delegate => true,
+            Self::PolicyAuto | Self::SessionBlanket | Self::SessionOverride => false,
+        }
+    }
+}
+
+/// Who made one explicit approval decision.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ToolApprovalDecider {
+    /// The user acted through the named durable command.
+    User {
+        /// Exact command provenance.
+        command: DurableCommandId,
+    },
+    /// The named configured model acted through the recorded call.
+    Delegate {
+        /// Exact direct model selection used by the judge.
+        model: crate::DirectModelSelection,
+        /// Dedicated recorded judge call.
+        call: ModelCallId,
+    },
+}
+
+/// One checked delegate rationale retained verbatim.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ToolDecisionRationale(String);
+
+impl ToolDecisionRationale {
+    /// Admits nonempty bounded text without U+0000.
+    pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError> {
+        if value.is_empty()
+            || value.len() > MAX_TOOL_DECISION_RATIONALE_BYTES
+            || value.contains('\0')
+        {
+            Err(ToolDecisionRationaleError { value })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Borrows the exact rationale.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact rationale.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+/// A delegate rationale was empty, oversized, or contained U+0000.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolDecisionRationaleError {
+    value: String,
+}
+
+impl ToolDecisionRationaleError {
+    /// Borrows the rejected value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the rejected value.
+    pub fn into_value(self) -> String {
+        self.value
+    }
+}
+
+impl std::fmt::Display for ToolDecisionRationaleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "tool decision rationale must be nonempty, at most {MAX_TOOL_DECISION_RATIONALE_BYTES} bytes, and contain no U+0000"
+        )
+    }
+}
+
+impl std::error::Error for ToolDecisionRationaleError {}
+
+/// Closed result vocabulary emitted by an approval judge.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DelegateApprovalRecommendation {
+    /// Permit this exact request.
+    Approve,
+    /// Permanently deny this exact request.
+    Deny,
+    /// Leave the request parked for the user.
+    EscalateToHuman,
+}
+
+/// One authority-checked delegate result with complete model provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegateToolApproval {
+    request: ToolRequestId,
+    posture: ToolApprovalPosture,
+    model: crate::DirectModelSelection,
+    call: ModelCallId,
+    recommendation: DelegateApprovalRecommendation,
+    rationale: ToolDecisionRationale,
+}
+
+impl DelegateToolApproval {
+    /// Checks the recommendation against the request's frozen posture.
+    pub fn try_new(
+        request: &ToolRequest,
+        model: crate::DirectModelSelection,
+        call: ModelCallId,
+        recommendation: DelegateApprovalRecommendation,
+        rationale: ToolDecisionRationale,
+    ) -> Result<Self, DelegateToolApprovalError> {
+        let permitted = match request.approval_posture() {
+            ToolApprovalPosture::Delegated => true,
+            ToolApprovalPosture::Human => {
+                recommendation == DelegateApprovalRecommendation::EscalateToHuman
+            }
+            ToolApprovalPosture::Auto => false,
+        };
+        if !permitted {
+            return Err(DelegateToolApprovalError {
+                posture: request.approval_posture(),
+                recommendation,
+            });
+        }
+        Ok(Self {
+            request: request.id(),
+            posture: request.approval_posture(),
+            model,
+            call,
+            recommendation,
+            rationale,
+        })
+    }
+
+    /// Returns the exact request judged.
+    pub const fn request(&self) -> ToolRequestId {
+        self.request
+    }
+
+    pub(crate) const fn posture(&self) -> ToolApprovalPosture {
+        self.posture
+    }
+
+    /// Returns the direct model selection used by the judge.
+    pub const fn model(&self) -> crate::DirectModelSelection {
+        self.model
+    }
+
+    /// Returns the dedicated judge call.
+    pub const fn call(&self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the checked recommendation.
+    pub const fn recommendation(&self) -> DelegateApprovalRecommendation {
+        self.recommendation
+    }
+
+    /// Borrows the exact judge rationale.
+    pub const fn rationale(&self) -> &ToolDecisionRationale {
+        &self.rationale
+    }
+}
+
+/// A delegate recommendation exceeded the request's frozen authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DelegateToolApprovalError {
+    posture: ToolApprovalPosture,
+    recommendation: DelegateApprovalRecommendation,
+}
+
+impl DelegateToolApprovalError {
+    /// Returns the frozen posture that rejected the recommendation.
+    pub const fn posture(self) -> ToolApprovalPosture {
+        self.posture
+    }
+
+    /// Returns the rejected recommendation.
+    pub const fn recommendation(self) -> DelegateApprovalRecommendation {
+        self.recommendation
+    }
+}
+
+impl std::fmt::Display for DelegateToolApprovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "delegate recommendation {:?} exceeds {:?} approval-posture authority",
+            self.recommendation, self.posture
+        )
+    }
+}
+
+impl std::error::Error for DelegateToolApprovalError {}
 
 /// One checked optional denial explanation.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -650,6 +877,8 @@ pub struct ToolApprovalResolution {
     request: ToolRequestId,
     decision: ToolApprovalDecision,
     source: ToolDecisionSource,
+    decider: Option<ToolApprovalDecider>,
+    rationale: Option<ToolDecisionRationale>,
 }
 
 impl ToolApprovalResolution {
@@ -658,6 +887,8 @@ impl ToolApprovalResolution {
             request,
             decision: ToolApprovalDecision::Approve,
             source: ToolDecisionSource::PolicyAuto,
+            decider: None,
+            rationale: None,
         }
     }
 
@@ -666,15 +897,41 @@ impl ToolApprovalResolution {
             request,
             decision: ToolApprovalDecision::Approve,
             source: ToolDecisionSource::SessionBlanket,
+            decider: None,
+            rationale: None,
         }
     }
 
-    const fn user(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
+    fn user(
+        command: DurableCommandId,
+        request: ToolRequestId,
+        decision: ToolApprovalDecision,
+    ) -> Self {
         Self {
             request,
             decision,
             source: ToolDecisionSource::UserCommand,
+            decider: Some(ToolApprovalDecider::User { command }),
+            rationale: None,
         }
+    }
+
+    pub(crate) fn delegate(approval: &DelegateToolApproval) -> Option<Self> {
+        let decision = match approval.recommendation {
+            DelegateApprovalRecommendation::Approve => ToolApprovalDecision::Approve,
+            DelegateApprovalRecommendation::Deny => ToolApprovalDecision::Deny { reason: None },
+            DelegateApprovalRecommendation::EscalateToHuman => return None,
+        };
+        Some(Self {
+            request: approval.request,
+            decision,
+            source: ToolDecisionSource::Delegate,
+            decider: Some(ToolApprovalDecider::Delegate {
+                model: approval.model,
+                call: approval.call,
+            }),
+            rationale: Some(approval.rationale.clone()),
+        })
     }
 
     /// Returns the resolved request.
@@ -690,6 +947,16 @@ impl ToolApprovalResolution {
     /// Returns the provenance that made the decision.
     pub const fn source(&self) -> ToolDecisionSource {
         self.source
+    }
+
+    /// Returns the explicit decider, absent only for automatic policy.
+    pub const fn decider(&self) -> Option<&ToolApprovalDecider> {
+        self.decider.as_ref()
+    }
+
+    /// Returns the delegate rationale, when a delegate decided.
+    pub const fn rationale(&self) -> Option<&ToolDecisionRationale> {
+        self.rationale.as_ref()
     }
 
     /// Returns whether this resolution permits an attempt.
@@ -708,6 +975,7 @@ pub struct ToolApprovalResolutionReconstitutionInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StoredToolApprovalEvidence {
     UserCommand(PreparedDecideToolRequest),
+    Delegate(Box<DelegateToolApproval>),
     PolicyAuto(ToolRequestId),
     SessionBlanket {
         request: ToolRequestId,
@@ -720,6 +988,13 @@ impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self {
         Self {
             evidence: StoredToolApprovalEvidence::UserCommand(command),
+        }
+    }
+
+    /// Supplies one authority-checked delegate decision and its recorded call.
+    pub fn delegate(approval: DelegateToolApproval) -> Self {
+        Self {
+            evidence: StoredToolApprovalEvidence::Delegate(Box::new(approval)),
         }
     }
 
@@ -746,16 +1021,15 @@ impl ToolApprovalResolutionReconstitutionInput {
 
     #[cfg(test)]
     pub(crate) fn user_fixture(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
-        let command = DecideToolRequest::try_new(
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(1)),
-            request,
-            decision.clone(),
-        )
-        .expect("the fixture command identity is admitted");
+        const USER_COMMAND_SEED: u128 = 1;
+
+        let command_id = DurableCommandId::from_uuid(uuid::Uuid::from_u128(USER_COMMAND_SEED));
+        let command = DecideToolRequest::try_new(command_id, request, decision.clone())
+            .expect("the fixture command identity is admitted");
         Self::user_command(PreparedDecideToolRequest {
             command,
             result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult {
-                resolution: ToolApprovalResolution::user(request, decision),
+                resolution: ToolApprovalResolution::user(command_id, request, decision),
             }),
         })
     }
@@ -774,6 +1048,9 @@ impl ToolApprovalResolutionReconstitutionInput {
                 }
                 DecideToolRequestResult::Applied(_) | DecideToolRequestResult::Rejected(_) => None,
             },
+            StoredToolApprovalEvidence::Delegate(approval) => {
+                ToolApprovalResolution::delegate(approval)
+            }
             StoredToolApprovalEvidence::PolicyAuto(request) => {
                 Some(ToolApprovalResolution::policy_auto(*request))
             }
@@ -788,7 +1065,9 @@ impl ToolApprovalResolutionReconstitutionInput {
         };
         match resolution {
             Some(resolution) => Ok(resolution),
-            None => Err(ToolApprovalResolutionReconstitutionError { input: self }),
+            None => Err(ToolApprovalResolutionReconstitutionError {
+                input: Box::new(self),
+            }),
         }
     }
 }
@@ -796,7 +1075,7 @@ impl ToolApprovalResolutionReconstitutionInput {
 /// Stored approval facts outside the implemented producer vocabulary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolApprovalResolutionReconstitutionError {
-    input: ToolApprovalResolutionReconstitutionInput,
+    input: Box<ToolApprovalResolutionReconstitutionInput>,
 }
 
 impl ToolApprovalResolutionReconstitutionError {
@@ -807,15 +1086,29 @@ impl ToolApprovalResolutionReconstitutionError {
 
     /// Returns the unchanged stored facts.
     pub fn into_input(self) -> ToolApprovalResolutionReconstitutionInput {
-        self.input
+        *self.input
     }
 }
+
+impl std::fmt::Display for ToolApprovalResolutionReconstitutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("stored tool approval evidence cannot be reconstituted")
+    }
+}
+
+impl std::error::Error for ToolApprovalResolutionReconstitutionError {}
 
 /// One initial policy outcome for a newly proposed request.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InitialToolApproval {
     /// Leave the request undecided and fail closed.
     Confirm,
+    /// Leave an `AlwaysConfirm` request undecided despite blanket posture.
+    AlwaysConfirm,
+    /// Leave the request parked for an explicitly human-only decision.
+    Human,
+    /// Leave the request parked for a delegate judge.
+    Delegated,
     /// Record automatic approval from registry policy.
     PolicyAuto,
     /// Record automatic approval from the frozen dangerous blanket.
@@ -825,9 +1118,25 @@ pub enum InitialToolApproval {
 impl InitialToolApproval {
     pub(crate) const fn resolution(self, request: ToolRequestId) -> Option<ToolApprovalResolution> {
         match self {
-            Self::Confirm => None,
+            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => None,
             Self::PolicyAuto => Some(ToolApprovalResolution::policy_auto(request)),
             Self::SessionBlanket => Some(ToolApprovalResolution::session_blanket(request)),
+        }
+    }
+
+    pub(crate) const fn posture(self) -> ToolApprovalPosture {
+        match self {
+            Self::Confirm | Self::AlwaysConfirm | Self::Human => ToolApprovalPosture::Human,
+            Self::Delegated => ToolApprovalPosture::Delegated,
+            Self::PolicyAuto | Self::SessionBlanket => ToolApprovalPosture::Auto,
+        }
+    }
+
+    /// Returns whether this outcome leaves an explicit decision outstanding.
+    pub const fn requires_decision(self) -> bool {
+        match self {
+            Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => true,
+            Self::PolicyAuto | Self::SessionBlanket => false,
         }
     }
 }
@@ -894,7 +1203,8 @@ impl DecideToolRequest {
                 provided_request: request.id,
             });
         }
-        let resolution = ToolApprovalResolution::user(self.request, self.decision.clone());
+        let resolution =
+            ToolApprovalResolution::user(self.command_id, self.request, self.decision.clone());
         Ok(PreparedDecideToolRequest {
             command: self,
             result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult { resolution }),
@@ -1152,7 +1462,10 @@ pub enum ToolRequestResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id};
+    use crate::{
+        DirectModelSelection,
+        test_support::{command_id, model_call_id, session_id, tool_request_id, turn_id},
+    };
 
     fn request(id: u128) -> ToolRequest {
         ToolRequestReconstitutionInput::new(
@@ -1308,6 +1621,114 @@ mod tests {
         assert_eq!(normalized.as_str(), value);
     }
 
+    /// INV-049: delegated approval narrows authority and can never approve or deny a
+    /// request frozen as human-only.
+    #[test]
+    fn inv049_delegate_narrows_and_never_widens_human_authority() {
+        const HUMAN_ONLY_REQUEST_SEED: u128 = 40;
+        const JUDGE_MODEL_SEED: u128 = 41;
+        const APPROVAL_CALL_SEED: u128 = 42;
+        const DENIAL_CALL_SEED: u128 = 43;
+        const ESCALATION_CALL_SEED: u128 = 44;
+        const HUMAN_AUTHORITY_RATIONALE: &str = "needs user authority";
+
+        let request = request(HUMAN_ONLY_REQUEST_SEED);
+        let model = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED));
+        let rationale = ToolDecisionRationale::try_new(String::from(HUMAN_AUTHORITY_RATIONALE))
+            .expect("fixture rationale is admitted");
+        let rejected = DelegateToolApproval::try_new(
+            &request,
+            model,
+            model_call_id(APPROVAL_CALL_SEED),
+            DelegateApprovalRecommendation::Approve,
+            rationale.clone(),
+        )
+        .expect_err("a delegate cannot approve a human-only request");
+        let rejected_denial = DelegateToolApproval::try_new(
+            &request,
+            model,
+            model_call_id(DENIAL_CALL_SEED),
+            DelegateApprovalRecommendation::Deny,
+            rationale.clone(),
+        )
+        .expect_err("a delegate cannot deny a human-only request");
+        let escalated = DelegateToolApproval::try_new(
+            &request,
+            model,
+            model_call_id(ESCALATION_CALL_SEED),
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+        )
+        .expect("escalation preserves human authority");
+
+        assert_eq!(rejected.posture(), ToolApprovalPosture::Human);
+        assert_eq!(
+            rejected.recommendation(),
+            DelegateApprovalRecommendation::Approve
+        );
+        assert_eq!(rejected_denial.posture(), ToolApprovalPosture::Human);
+        assert_eq!(
+            rejected_denial.recommendation(),
+            DelegateApprovalRecommendation::Deny
+        );
+        assert_eq!(
+            escalated.recommendation(),
+            DelegateApprovalRecommendation::EscalateToHuman
+        );
+    }
+
+    #[test]
+    fn delegate_resolution_preserves_model_call_and_rationale() {
+        const SUBJECT_REQUEST_SEED: u128 = 50;
+        const SUBJECT_SESSION_SEED: u128 = 1;
+        const SUBJECT_TURN_SEED: u128 = 2;
+        const ISSUING_CALL_SEED: u128 = 3;
+        const SUBJECT_ORDINAL: u32 = 0;
+        const SUBJECT_TOOL_NAME: &str = "current_time";
+        const SUBJECT_ARGUMENTS: &str = "{}";
+        const JUDGE_MODEL_SEED: u128 = 51;
+        const JUDGE_CALL_SEED: u128 = 52;
+        const JUDGE_RATIONALE: &str = "bounded request";
+
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(SUBJECT_REQUEST_SEED),
+            session_id(SUBJECT_SESSION_SEED),
+            turn_id(SUBJECT_TURN_SEED),
+            model_call_id(ISSUING_CALL_SEED),
+            ToolRequestOrdinal::from_u32(SUBJECT_ORDINAL),
+            ToolName::try_new(String::from(SUBJECT_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(SUBJECT_ARGUMENTS))
+                .expect("fixture arguments are valid"),
+        )
+        .with_approval_posture(ToolApprovalPosture::Delegated)
+        .into_request();
+        let model = DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED));
+        let call = model_call_id(JUDGE_CALL_SEED);
+        let rationale = ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
+            .expect("fixture rationale is admitted");
+        let approval = DelegateToolApproval::try_new(
+            &request,
+            model,
+            call,
+            DelegateApprovalRecommendation::Deny,
+            rationale.clone(),
+        )
+        .expect("delegated authority may deny");
+        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(approval)
+            .reconstitute()
+            .expect("checked delegate evidence restores its decision");
+
+        assert_eq!(
+            resolution.decider(),
+            Some(&ToolApprovalDecider::Delegate { model, call })
+        );
+        assert_eq!(resolution.rationale(), Some(&rationale));
+        assert_eq!(
+            resolution.decision(),
+            &ToolApprovalDecision::Deny { reason: None }
+        );
+    }
+
     /// S10 / INV-020: a restored session-blanket approval requires the
     /// approve-all posture frozen for that turn.
     #[test]
@@ -1356,6 +1777,13 @@ mod tests {
             applied.resolution().source(),
             ToolDecisionSource::UserCommand
         );
+        assert_eq!(
+            applied.resolution().decider(),
+            Some(&ToolApprovalDecider::User {
+                command: prepared.command().command_id(),
+            })
+        );
+        assert_eq!(applied.resolution().rationale(), None);
         assert!(applied.resolution().is_approved());
     }
 

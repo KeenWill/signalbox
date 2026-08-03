@@ -42,17 +42,55 @@ impl ProcessClient {
         self.open(request, RequestDelivery::Mutation).await
     }
 
+    pub(crate) async fn setup_request(
+        &mut self,
+        request: ClientRequest,
+    ) -> Result<Connection, ClientError> {
+        self.open(request, RequestDelivery::Setup).await
+    }
+
+    pub(crate) async fn continue_setup_request(
+        &mut self,
+        connection: &mut Connection,
+        request: ClientRequest,
+    ) -> Result<(), ClientError> {
+        let request_id = self.next_request_id()?;
+        connection
+            .send(request_id, request, RequestDelivery::Setup)
+            .await
+    }
+
+    pub(crate) async fn continue_mutation_request(
+        &mut self,
+        connection: &mut Connection,
+        request: ClientRequest,
+    ) -> Result<(), ClientError> {
+        let request_id = self.next_request_id()?;
+        connection
+            .send(request_id, request, RequestDelivery::Mutation)
+            .await
+    }
+
+    pub(crate) fn pending_request_id(&self) -> Result<RequestId, ClientError> {
+        RequestId::try_new(self.next_request_id)
+            .map_err(|_| ClientError::Protocol("request identity exhausted"))
+    }
+
+    fn next_request_id(&mut self) -> Result<RequestId, ClientError> {
+        let request_id = self.pending_request_id()?;
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .ok_or(ClientError::Protocol("request identity exhausted"))?;
+        Ok(request_id)
+    }
+
     async fn open(
         &mut self,
         request: ClientRequest,
         delivery: RequestDelivery,
     ) -> Result<Connection, ClientError> {
-        let request_id = RequestId::try_new(self.next_request_id)
-            .map_err(|_| ClientError::Protocol("request identity exhausted"))?;
-        self.next_request_id = self
-            .next_request_id
-            .checked_add(1)
-            .ok_or(ClientError::Protocol("request identity exhausted"))?;
+        let request_id = self.next_request_id()?;
         Connection::open(&self.socket, request_id, request, delivery).await
     }
 }
@@ -60,6 +98,7 @@ impl ProcessClient {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestDelivery {
     ReadOnly,
+    Setup,
     Mutation,
 }
 
@@ -78,14 +117,8 @@ impl Connection {
         request: ClientRequest,
         delivery: RequestDelivery,
     ) -> Result<Self, ClientError> {
-        let import_request = matches!(&request, ClientRequest::ImportConversation { .. });
         let version = ProtocolVersion::One;
-        let frame = ClientFrame::try_new_for_version(version, request_id, request)
-            .map_err(FrameEncodeError::Validation)?;
-        let encoded = encode_client_line(&frame).map_err(|error| match error {
-            FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
-            error => ClientError::Encode(error),
-        })?;
+        let encoded = encode_request(version, request_id, request)?;
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut connection = Self {
@@ -95,18 +128,34 @@ impl Connection {
             writer,
             partial_frame_line: Vec::new(),
         };
-        connection
-            .writer
-            .write_all(&encoded)
-            .await
-            .map_err(|error| {
-                let error = ClientError::Io(error);
-                match delivery {
-                    RequestDelivery::ReadOnly => error,
-                    RequestDelivery::Mutation => error.mutation(),
-                }
-            })?;
+        connection.write_request(&encoded, delivery).await?;
         Ok(connection)
+    }
+
+    async fn send(
+        &mut self,
+        request_id: RequestId,
+        request: ClientRequest,
+        delivery: RequestDelivery,
+    ) -> Result<(), ClientError> {
+        let encoded = encode_request(self.version, request_id, request)?;
+        self.write_request(&encoded, delivery).await?;
+        self.request_id = request_id;
+        Ok(())
+    }
+
+    async fn write_request(
+        &mut self,
+        encoded: &[u8],
+        delivery: RequestDelivery,
+    ) -> Result<(), ClientError> {
+        self.writer.write_all(encoded).await.map_err(|error| {
+            let error = ClientError::Io(error);
+            match delivery {
+                RequestDelivery::ReadOnly | RequestDelivery::Setup => error,
+                RequestDelivery::Mutation => error.mutation(),
+            }
+        })
     }
 
     pub(crate) async fn message(&mut self) -> Result<ServerMessage, ClientError> {
@@ -123,6 +172,80 @@ impl Connection {
             return Err(ClientError::Protocol("response request identity mismatch"));
         }
         Ok(frame)
+    }
+}
+
+fn encode_request(
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: ClientRequest,
+) -> Result<Vec<u8>, ClientError> {
+    let import_request = oversized_frame_is_import_source(&request);
+    let frame = ClientFrame::try_new_for_version(version, request_id, request)
+        .map_err(FrameEncodeError::Validation)?;
+    encode_client_line(&frame).map_err(|error| match error {
+        FrameEncodeError::OversizedFrame if import_request => ClientError::SourceExceedsFrame,
+        FrameEncodeError::OversizedFrame => ClientError::Encode(FrameEncodeError::OversizedFrame),
+        FrameEncodeError::Validation(error) => {
+            ClientError::Encode(FrameEncodeError::Validation(error))
+        }
+        FrameEncodeError::Json(error) => ClientError::Encode(FrameEncodeError::Json(error)),
+    })
+}
+
+fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
+    match request {
+        ClientRequest::ImportConversation { .. } => true,
+        ClientRequest::CreateSession { .. }
+        | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::ListTemplates {}
+        | ClientRequest::ListSessions {}
+        | ClientRequest::UpdateSessionPlacement { .. }
+        | ClientRequest::AttachGoal { .. }
+        | ClientRequest::ReadGoal { .. }
+        | ClientRequest::ResumeGoal { .. }
+        | ClientRequest::StopGoal { .. }
+        | ClientRequest::SupersedeGoal { .. }
+        | ClientRequest::SubmitInput { .. }
+        | ClientRequest::CompactSession { .. }
+        | ClientRequest::ReadTranscript { .. }
+        | ClientRequest::FollowSession { .. }
+        | ClientRequest::ListSessionMetadata { .. }
+        | ClientRequest::ListConversations { .. }
+        | ClientRequest::ListModelAliases {}
+        | ClientRequest::ReadSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionMetadata { .. }
+        | ClientRequest::ReplaceSessionDefaults { .. }
+        | ClientRequest::ReadSessionDefaults { .. }
+        | ClientRequest::BeginConversationImport { .. }
+        | ClientRequest::AppendConversationImport { .. }
+        | ClientRequest::CommitConversationImport {}
+        | ClientRequest::AbortConversationImport {}
+        | ClientRequest::ReadImportedConversation { .. }
+        | ClientRequest::CreateSessionFromImportedFrontier { .. }
+        | ClientRequest::ReconcileTurn { .. }
+        | ClientRequest::CreateReviewTarget { .. }
+        | ClientRequest::StartReviewRun { .. }
+        | ClientRequest::ActivateReviewPass { .. }
+        | ClientRequest::CompleteReviewPass { .. }
+        | ClientRequest::RecordReviewFindings { .. }
+        | ClientRequest::RecordReviewFindingEvent { .. }
+        | ClientRequest::ReserveReviewExternalLink { .. }
+        | ClientRequest::AttachReviewExternalLink { .. }
+        | ClientRequest::ReadReviewTarget { .. }
+        | ClientRequest::ReadReviewRun { .. }
+        | ClientRequest::ReadReviewFinding { .. }
+        | ClientRequest::ListReviewFindings { .. }
+        | ClientRequest::StartReviewOrchestration { .. }
+        | ClientRequest::RecordReviewImportOutcome { .. }
+        | ClientRequest::RecordReviewConcernOutcome { .. }
+        | ClientRequest::RecordReviewJudgmentPlan { .. }
+        | ClientRequest::RecordReviewJudgmentEffect { .. }
+        | ClientRequest::RecordReviewRepairOutcomes { .. }
+        | ClientRequest::RecordReviewPublicationOutcomes { .. }
+        | ClientRequest::ReadReviewOrchestration { .. }
+        | ClientRequest::StopTurn { .. }
+        | ClientRequest::DecideToolRequest { .. } => false,
     }
 }
 

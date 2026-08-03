@@ -73,10 +73,14 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_terminal_client";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
-/// A synthetic source larger than any complete import request can admit.
-const OVERSIZED_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
+/// A synthetic source larger than one complete import request can carry.
+const MULTIFRAME_IMPORT_BYTES: u64 = 8 * 1024 * 1024;
 const IMPORT_MODEL_CONFIGURATION: &str = r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -1411,14 +1415,14 @@ async fn s28_inv038_terminal_client_scan_selects_recursive_files_in_sorted_path_
     Ok(())
 }
 
-/// S28 / INV-038: scan mode reports an oversized selected source as skipped
-/// without truncating it or hiding the failure total.
+/// S28 / INV-038: scan mode routes a source larger than one frame to the
+/// process transport instead of rejecting or truncating it locally.
 #[tokio::test]
-async fn s28_inv038_terminal_client_scan_skips_oversized_source_without_truncation()
+async fn s28_inv038_terminal_client_scan_routes_multiframe_source_to_transport()
 -> Result<(), Box<dyn Error>> {
     let source_directory = tempfile::tempdir()?;
     let oversized_path = source_directory.path().join("oversized.jsonl");
-    std::fs::File::create(&oversized_path)?.set_len(OVERSIZED_IMPORT_BYTES)?;
+    std::fs::File::create(&oversized_path)?.set_len(MULTIFRAME_IMPORT_BYTES)?;
     let arguments = vec![
         String::from("import"),
         String::from("--format"),
@@ -1438,8 +1442,10 @@ async fn s28_inv038_terminal_client_scan_skips_oversized_source_without_truncati
     assert_eq!(
         String::from_utf8(skipped.stdout)?,
         format!(
-            "skipped path={:?} reason=the conversation import source cannot fit within the process \
-             frame bound\nscan_summary imported=0 already_imported=0 skipped=1\n",
+            concat!(
+                "skipped path={:?} reason=local process communication failed\n",
+                "scan_summary imported=0 already_imported=0 skipped=1\n",
+            ),
             oversized_path,
         )
     );
@@ -1686,6 +1692,10 @@ async fn s28_inv038_inv014_terminal_client_completes_an_offline_imported_continu
         r#"
 version = 1
 
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
@@ -1899,6 +1909,7 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     const REPORTED_OUTPUT_TOKENS: u64 = 7;
     const REPORTED_CACHE_READ_INPUT_TOKENS: u64 = 80;
     const EXPECTED_TERMINAL_CALLS: usize = 2;
+    const EXPECTED_LABELED_USAGE_LINES: usize = 4;
 
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
@@ -1909,6 +1920,10 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     let model_configuration = HubModelConfiguration::parse(&format!(
         r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -2086,31 +2101,32 @@ context_window_tokens = 200000
     assert!(transcript.contains("turn_completed"));
     assert_eq!(
         transcript.matches("usage turn=").count(),
-        EXPECTED_TERMINAL_CALLS
+        EXPECTED_LABELED_USAGE_LINES
     );
     assert!(transcript.contains(&format!(
         "terminal_calls=1 input_tokens={REPORTED_INPUT_TOKENS} \
-         input_tokens_reported_calls=1/1 output_tokens={REPORTED_OUTPUT_TOKENS} \
-         output_tokens_reported_calls=1/1 cache_creation_input_tokens=unreported \
-         cache_creation_input_tokens_reported_calls=0/1 \
+         input_tokens_present_calls=1/1 output_tokens={REPORTED_OUTPUT_TOKENS} \
+         output_tokens_present_calls=1/1 cache_creation_input_tokens=unreported \
+         cache_creation_input_tokens_present_calls=0/1 \
          cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
-         cache_read_input_tokens_reported_calls=1/1"
+         cache_read_input_tokens_present_calls=1/1"
     )));
     assert!(transcript.contains(
-        "terminal_calls=1 input_tokens=unreported input_tokens_reported_calls=0/1 \
-         output_tokens=unreported output_tokens_reported_calls=0/1 \
+        "terminal_calls=1 input_tokens=unreported input_tokens_present_calls=0/1 \
+         output_tokens=unreported output_tokens_present_calls=0/1 \
          cache_creation_input_tokens=unreported \
-         cache_creation_input_tokens_reported_calls=0/1 \
-         cache_read_input_tokens=unreported cache_read_input_tokens_reported_calls=0/1"
+         cache_creation_input_tokens_present_calls=0/1 \
+         cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/1"
     ));
     assert!(transcript.contains(&format!(
-        "usage_total scope=session terminal_calls={EXPECTED_TERMINAL_CALLS} \
-         input_tokens={REPORTED_INPUT_TOKENS} input_tokens_reported_calls=1/2 \
-         output_tokens={REPORTED_OUTPUT_TOKENS} output_tokens_reported_calls=1/2 \
+        "usage_total scope=session usage_provenance=reported \
+         terminal_calls={EXPECTED_TERMINAL_CALLS} \
+         input_tokens={REPORTED_INPUT_TOKENS} input_tokens_present_calls=1/2 \
+         output_tokens={REPORTED_OUTPUT_TOKENS} output_tokens_present_calls=1/2 \
          cache_creation_input_tokens=unreported \
-         cache_creation_input_tokens_reported_calls=0/2 \
+         cache_creation_input_tokens_present_calls=0/2 \
          cache_read_input_tokens={REPORTED_CACHE_READ_INPUT_TOKENS} \
-         cache_read_input_tokens_reported_calls=1/2"
+         cache_read_input_tokens_present_calls=1/2"
     )));
 
     shutdown.send(true)?;
@@ -2143,6 +2159,10 @@ async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn
     let model_configuration = HubModelConfiguration::parse(&format!(
         r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"
@@ -2634,6 +2654,10 @@ async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send(
     let model_configuration = HubModelConfiguration::parse(&format!(
         r#"
 version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
 
 [[adapter_mappings]]
 model_family = "anthropic"

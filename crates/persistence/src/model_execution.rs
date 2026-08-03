@@ -6,7 +6,7 @@
 //! method holds a database transaction across provider work.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
 };
@@ -46,7 +46,8 @@ use crate::{
     commit_failure_is_ambiguous,
     mapping::{
         defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        session_id_from_uuid, session_id_to_uuid, tool_request_id_to_uuid, turn_id_to_uuid,
+        session_id_from_uuid, session_id_to_uuid, tool_approval_posture_to_str,
+        tool_request_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -269,6 +270,7 @@ pub struct PostgresModelCallRepository {
     targets: ModelTargetCatalog,
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
 }
 
 impl PostgresModelCallRepository {
@@ -284,6 +286,7 @@ impl PostgresModelCallRepository {
             targets,
             credential_reference,
             credential_families: None,
+            cache_inclusive_input_targets: HashSet::new(),
         }
     }
 
@@ -293,6 +296,15 @@ impl PostgresModelCallRepository {
         credential_families: crate::ModelCredentialFamilyCatalog,
     ) -> Self {
         self.credential_families = Some(credential_families);
+        self
+    }
+
+    /// Pins which configured targets report input totals inclusive of cache.
+    pub fn with_cache_inclusive_input_targets(
+        mut self,
+        targets: HashSet<ResolvedProviderTarget>,
+    ) -> Self {
+        self.cache_inclusive_input_targets = targets;
         self
     }
 
@@ -309,6 +321,7 @@ impl PostgresModelCallRepository {
             self.targets.clone(),
             self.credential_reference.clone(),
         )
+        .with_cache_inclusive_input_targets(self.cache_inclusive_input_targets.clone())
         .with_session_credentials(self.credential_families.clone())
     }
 
@@ -437,7 +450,14 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
-        insert_prepared_call(connection, &prepared, &credential_reference).await
+        insert_prepared_call(
+            connection,
+            &prepared,
+            &credential_reference,
+            self.cache_inclusive_input_targets
+                .contains(&prepared.call().target()),
+        )
+        .await
     }
 
     /// Commits Prepared while consuming the complete locked steering inventory.
@@ -602,7 +622,14 @@ impl PostgresModelCallRepository {
                 self.credential_families.as_ref(),
             )
             .await?;
-            insert_prepared_call(&mut transaction, &prepared, &credential_reference).await?;
+            insert_prepared_call(
+                &mut transaction,
+                &prepared,
+                &credential_reference,
+                self.cache_inclusive_input_targets
+                    .contains(&prepared.call().target()),
+            )
+            .await?;
             let reloaded = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
@@ -1179,6 +1206,7 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     targets: &ModelTargetCatalog,
     credential_reference: &ModelCallCredentialReference,
     credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
+    cache_inclusive_input_targets: &HashSet<ResolvedProviderTarget>,
     projection: &PreparedToolResultProjection,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
@@ -1299,7 +1327,13 @@ where
         credential_families,
     )
     .await?;
-    insert_prepared_call(connection, &prepared, &credential_reference).await?;
+    insert_prepared_call(
+        connection,
+        &prepared,
+        &credential_reference,
+        cache_inclusive_input_targets.contains(&prepared.call().target()),
+    )
+    .await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
 }
 
@@ -2776,7 +2810,9 @@ async fn load_tool_denial_correlations(
     let rows = sqlx::query(
         "SELECT approval.request_id, approval.decision_kind,
                 approval.decision_source, approval.denial_reason,
-                approval.owner_command_id
+                approval.owner_command_id,
+                approval.delegate_model_selection_id,
+                approval.delegate_model_call_id, approval.rationale
            FROM tool_approval_decision AS approval
           WHERE approval.request_id = ANY($1)",
     )
@@ -3175,6 +3211,7 @@ pub(crate) async fn insert_prepared_call(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedInitialModelCall,
     credential_reference: &ModelCallCredentialReference,
+    input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
@@ -3265,9 +3302,10 @@ pub(crate) async fn insert_prepared_call(
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
-             context_frontier_id, credential_reference, state_kind,
+             context_frontier_id, credential_reference,
+             usage_input_includes_cache_tokens, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -3280,6 +3318,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(call.target().identity().into_uuid())
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
+    .bind(input_includes_cache_tokens)
     .execute(&mut *connection)
     .await?;
     outbox::append(
@@ -4073,11 +4112,12 @@ async fn persist_tool_round_authority(
             signalbox_domain::ToolArgumentsKind::Json => "json",
             signalbox_domain::ToolArgumentsKind::Undecodable => "undecodable",
         };
+        let approval_posture = tool_approval_posture_to_str(request.approval_posture());
         sqlx::query(
             "INSERT INTO tool_request
                 (request_id, session_id, turn_id, producing_model_call_id,
-                 request_ordinal, tool_name, arguments_kind, arguments_text)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 request_ordinal, tool_name, arguments_kind, arguments_text, approval_posture)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(tool_request_id_to_uuid(request.id()))
         .bind(session_id_to_uuid(request.session()))
@@ -4087,6 +4127,7 @@ async fn persist_tool_round_authority(
         .bind(request.name().as_str())
         .bind(arguments_kind)
         .bind(request.arguments().as_str())
+        .bind(approval_posture)
         .execute(&mut *connection)
         .await?;
     }
@@ -4162,7 +4203,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => Ok("owner_command"),
         ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
         ToolDecisionSource::SessionBlanket => Ok("session_blanket"),
-        ToolDecisionSource::SessionOverride | ToolDecisionSource::JudgeRecommendation => {
+        ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",
             ))

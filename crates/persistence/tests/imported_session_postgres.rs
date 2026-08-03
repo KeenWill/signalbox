@@ -187,7 +187,7 @@ async fn s28_inv038_inv039_first_imported_frontier_creation_commits_exact_seed_a
 /// consuming any fresh semantic identity.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generation()
+async fn s28_inv012_inv039_equal_replay_requires_its_placement_effect_without_generation()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
@@ -240,6 +240,32 @@ async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generat
         CreateSessionFromImportedFrontierOutcome::Applied(applied)
     );
     assert_eq!(replay_generation, 0);
+    sqlx::query("ALTER TABLE session_current_placement DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM session_current_placement WHERE session_id = $1")
+        .bind(*applied.session().as_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_current_placement ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(0x403)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x703)),
+            || panic!("corrupt replay must fail before semantic identity generation"),
+        )
+        .await
+        .expect_err("imported creation replay requires its current placement head");
+    let ImportedSessionRepositoryError::Corruption(ImportedSessionCorruption::Missing(field)) =
+        error
+    else {
+        panic!("missing imported placement head fails with typed corruption")
+    };
+    assert_eq!(field, "current_placement_head_version");
     Ok(())
 }
 

@@ -1,14 +1,17 @@
 name: Tool live smokes
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
+      - "crates/egress-transport/**"
       - "crates/persistence/**"
       - "crates/tools-basic/**"
       - "crates/tools-code-host/**"
       - "crates/tools-conversations/**"
       - "crates/tools-github/**"
       - "crates/tools-plan/**"
+      - "crates/tools-web/**"
       - "crates/tools-workspace/**"
       - "apps/signalboxd/**"
       - "Cargo.lock"
@@ -61,3 +64,106 @@ jobs:
         run: >-
           cargo test --no-fail-fast -p signalboxd
           --test live_tool_exercise -- --ignored
+
+  # Live web search smoke for crates/tools-web. It spends one real Brave query
+  # through the production transport, so a provider response-shape change is
+  # proven against the live API rather than assumed from the fixture suite.
+  #
+  # It is a separate job from the smokes above because it is the only one that
+  # consumes a deployment credential rather than the ambient Actions token, and
+  # a credentialed job earns its own trust boundary, environment binding, and
+  # serialization.
+  #
+  # Accepted trust boundary. The query must execute the proposed repository
+  # adapter code against the live provider; that is the purpose of the smoke.
+  # The test process that performs it therefore receives the key in its
+  # environment and could read it. The job trusts anyone with write access to
+  # this repository, the same trust already required to push executable code to
+  # main. It does not trust fork authors: GitHub withholds secrets from ordinary
+  # fork pull_request runs regardless of environment policy, so a fork run
+  # receives an empty value and takes the skip path below rather than spending
+  # or exposing anything.
+  #
+  # The environment scopes WHICH jobs may read the credential; it makes no
+  # author-trust decision, and its branch availability setting supplies no
+  # security boundary. The exclusion of forks rests on GitHub's secret
+  # withholding described above.
+  #
+  # The credential is referenced only in the final step, never echoed, never
+  # passed in argv, and never written to disk. The test binary is compiled in an
+  # earlier step whose environment does not hold it, so no build script or
+  # procedural macro executes while the key is readable.
+  web-smoke:
+    name: Web search live smoke (report only)
+    continue-on-error: true
+    permissions:
+      contents: read
+    # Repository → Settings → Environments → web-smoke holds BRAVE_API_KEY. Its
+    # availability setting is documented above and deliberately supplies no
+    # additional author-trust decision.
+    environment: web-smoke
+    # Flat and literal: the simplest form, matching codex-smoke's group. A
+    # queued invocation can be evicted by a third concurrent trigger rather
+    # than merely delayed (a concurrency group holds at most one running and
+    # one pending member, and `cancel-in-progress: false` does not protect
+    # the pending slot from replacement), but this job is report-only and
+    # non-gating, so a lost queued run costs nothing: the next push or manual
+    # dispatch re-triggers it. Single-flight credential serialization comes
+    # along incidentally with this shape; it is not the reason for it and is
+    # not load-bearing.
+    concurrency:
+      group: web-smoke
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: web-smoke
+      # Compile before the credential exists in any step environment, and
+      # capture the resulting binary path: the credentialed step below
+      # executes that binary directly rather than invoking Cargo a second
+      # time, so no further build-freshness check (and therefore no build
+      # script or procedural macro) ever runs while the key is readable, even
+      # if this crate someday tracks BRAVE_API_KEY through `option_env!` or a
+      # build script's `rerun-if-env-changed`.
+      - name: Build the smoke test binary
+        id: build
+        run: |
+          set -euo pipefail
+          executable=$(cargo test --no-fail-fast -p signalbox-tools-web --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' \
+            | tail -n1)
+          test -n "${executable}" || { echo "::error::no test executable produced"; exit 1; }
+          echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
+      # Gated inside the test rather than on this step: an absent environment
+      # secret expands to an empty value, which the smoke reports and skips on.
+      # That keeps one skip path covering CI before the secret exists, fork runs
+      # that never receive it, and local runs with no credential file.
+      #
+      # A substring filter that matches zero tests (a rename, a move, or a
+      # dropped `#[ignore]`) would otherwise let libtest exit 0 having spent no
+      # request; counting the passed tests, as the Codex smoke does, turns that
+      # silent no-op into a failure.
+      - name: Run web search smoke
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/web-smoke-result"
+          "${{ steps.build.outputs.executable }}" \
+            --ignored --nocapture web_search::live_smoke_tests \
+            2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one web search smoke test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi

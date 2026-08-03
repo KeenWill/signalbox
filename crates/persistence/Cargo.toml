@@ -43,6 +43,7 @@ testcontainers-modules = { version = "0.15.0", optional = true, default-features
 expect-test = "1.5.1"
 signalbox-conversation-import-claude-code = { path = "../conversation-import-claude-code" }
 signalbox-conversation-import-codex = { path = "../conversation-import-codex" }
+signalbox-expect-table = { path = "../expect-table" }
 
 [[test]]
 name = "conversation_import_postgres"

@@ -15,14 +15,15 @@ use crate::{
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
-    AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
-    DangerousToolAutoApproval, DecideToolRequest, EndedToolAttempt, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence, ModelCallId,
-    NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId,
+    CorrelatedToolAttemptObservation, CurrentToolAttemptState, DangerousToolAutoApproval,
+    DecideToolRequest, EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    InitialToolApproval, IssuedExecutorFence, ModelCallId, NormalizedToolArguments,
+    PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId, ToolApprovalPosture,
     ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
-    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
-    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultContent, ToolResultText,
+    ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -102,6 +103,7 @@ pub struct ToolDefinition {
     description: String,
     input_schema: ToolInputSchema,
     permission_default: ToolPermissionDefault,
+    approval_posture: Option<ToolApprovalPosture>,
     effect_class: ToolEffectClass,
 }
 
@@ -119,6 +121,7 @@ impl ToolDefinition {
             description,
             input_schema,
             permission_default,
+            approval_posture: None,
             effect_class,
         }
     }
@@ -141,6 +144,17 @@ impl ToolDefinition {
     /// Returns the registry approval default.
     pub const fn permission_default(&self) -> ToolPermissionDefault {
         self.permission_default
+    }
+
+    /// Overrides legacy blanket/registry policy for this exact tool.
+    pub const fn with_approval_posture(mut self, posture: ToolApprovalPosture) -> Self {
+        self.approval_posture = Some(posture);
+        self
+    }
+
+    /// Returns the configured per-tool posture, absent for legacy behavior.
+    pub const fn approval_posture(&self) -> Option<ToolApprovalPosture> {
+        self.approval_posture
     }
 
     /// Returns the crash-relevant effect class.
@@ -326,33 +340,33 @@ pub enum ToolCatalogValidationFailure {
 /// Exact checked content and authorization supplied to one executor effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolExecutionInvocation {
-    request: ToolRequest,
+    authority: ToolDispatchAuthority,
     definition: ToolDefinition,
-    fence: IssuedExecutorFence,
 }
 
 impl ToolExecutionInvocation {
     fn try_new(
         request: ToolRequest,
         definition: ToolDefinition,
-        authorized: &AuthorizedToolAttempt,
+        authority: ToolDispatchAuthority,
     ) -> Option<Self> {
-        let correlation = authorized.correlation();
-        (request.id() == correlation.request()
-            && request.session() == correlation.session()
-            && request.turn() == correlation.turn()
+        (request == *authority.request()
             && request.name() == definition.name()
-            && authorized.attempt().effect_class() == definition.effect_class())
+            && authority.attempt().effect_class() == definition.effect_class())
         .then_some(Self {
-            request,
+            authority,
             definition,
-            fence: authorized.executor_fence(),
         })
     }
 
     /// Borrows the immutable request content authority.
     pub const fn request(&self) -> &ToolRequest {
-        &self.request
+        self.authority.request()
+    }
+
+    /// Borrows the sealed request-bearing dispatch authority.
+    pub const fn dispatch_authority(&self) -> &ToolDispatchAuthority {
+        &self.authority
     }
 
     /// Borrows the exact declaration selected by preflight.
@@ -362,13 +376,13 @@ impl ToolExecutionInvocation {
 
     /// Returns the complete durable dispatch fence.
     pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
-        self.fence.correlation()
+        self.authority.correlation()
     }
 
     /// Binds returned executor evidence to the exact issued fence.
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence {
         CorrelatedToolExecutorEvidence {
-            fence: self.fence,
+            fence: self.authority.executor_fence(),
             evidence,
         }
     }
@@ -1217,7 +1231,7 @@ where
         &mut self,
         request: ToolRequest,
         definition: ToolDefinition,
-        authorized: AuthorizedToolAttempt,
+        authorized: ToolDispatchAuthority,
         result_entry_count: usize,
         dispatch_permit: InProcessToolDispatchPermit,
     ) -> Result<
@@ -1227,7 +1241,7 @@ where
         let effect_class = definition.effect_class();
         let dispatched_tool = definition.name().clone();
         let expected_correlation = authorized.correlation();
-        let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
+        let invocation = ToolExecutionInvocation::try_new(request, definition, authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         report_tool_dispatch(&dispatched_tool, &expected_correlation);
         let evidence = match self.executor.execute(invocation).await {
@@ -1560,6 +1574,18 @@ pub(crate) fn initial_tool_approval(
     posture: DangerousToolAutoApproval,
     definition: Option<&ToolDefinition>,
 ) -> InitialToolApproval {
+    if definition.is_some_and(|definition| {
+        definition.permission_default() == ToolPermissionDefault::AlwaysConfirm
+    }) {
+        return InitialToolApproval::AlwaysConfirm;
+    }
+    if let Some(posture) = definition.and_then(ToolDefinition::approval_posture) {
+        return match posture {
+            ToolApprovalPosture::Auto => InitialToolApproval::PolicyAuto,
+            ToolApprovalPosture::Delegated => InitialToolApproval::Delegated,
+            ToolApprovalPosture::Human => InitialToolApproval::Human,
+        };
+    }
     match posture {
         DangerousToolAutoApproval::ApproveAll => InitialToolApproval::SessionBlanket,
         DangerousToolAutoApproval::Disabled => match definition
@@ -1567,7 +1593,9 @@ pub(crate) fn initial_tool_approval(
             .unwrap_or(ToolPermissionDefault::Confirm)
         {
             ToolPermissionDefault::Auto => InitialToolApproval::PolicyAuto,
-            ToolPermissionDefault::Confirm => InitialToolApproval::Confirm,
+            ToolPermissionDefault::Confirm | ToolPermissionDefault::AlwaysConfirm => {
+                InitialToolApproval::Confirm
+            }
         },
     }
 }
@@ -1613,6 +1641,14 @@ mod tests {
             schema(),
             permission,
             effect,
+        )
+    }
+
+    fn confirmation_definition(name: &str) -> ToolDefinition {
+        definition(
+            name,
+            ToolPermissionDefault::Confirm,
+            ToolEffectClass::EffectFree,
         )
     }
 
@@ -1685,6 +1721,14 @@ mod tests {
         )
     }
 
+    #[track_caller]
+    fn current_attempt_fixture(batch: &ToolBatch) -> signalbox_domain::CurrentToolAttempt {
+        match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one current attempt"),
+        }
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum FakeError {
         Ordinary,
@@ -1754,14 +1798,14 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             attempt: ToolAttemptId,
-        ) -> Result<AuthorizedToolAttempt, Self::Error> {
+        ) -> Result<ToolDispatchAuthority, Self::Error> {
             self.events.lock().expect("event lock").push("authorize");
             if self.ambiguous_authorization {
                 self.authorization_committed = true;
                 return Err(FakeError::CommitAmbiguous);
             }
             self.batch
-                .authorize_attempt(attempt)
+                .authorize_dispatch(attempt)
                 .map_err(|_| FakeError::Ordinary)
         }
 
@@ -1775,7 +1819,7 @@ mod tests {
             if self.authorization_committed {
                 Ok(ToolAttemptAuthorizationStatus::InFlight(
                     self.batch
-                        .authorize_attempt(attempt)
+                        .authorize_dispatch(attempt)
                         .map_err(|_| FakeError::Ordinary)?,
                 ))
             } else {
@@ -2010,6 +2054,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn absent_posture_preserves_legacy_confirmation() {
+        const SUBJECT_TOOL: &str = "subject";
+
+        assert_eq!(
+            initial_tool_approval(
+                DangerousToolAutoApproval::Disabled,
+                Some(&confirmation_definition(SUBJECT_TOOL)),
+            ),
+            InitialToolApproval::Confirm
+        );
+    }
+
+    #[test]
+    fn delegated_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let delegated = confirmation_definition(SUBJECT_TOOL)
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&delegated)),
+            InitialToolApproval::Delegated
+        );
+    }
+
+    #[test]
+    fn human_posture_overrides_dangerous_session_blanket() {
+        const SUBJECT_TOOL: &str = "subject";
+        let human =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Human);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&human)),
+            InitialToolApproval::Human
+        );
+    }
+
+    #[test]
+    fn auto_posture_overrides_confirmation_policy() {
+        const SUBJECT_TOOL: &str = "subject";
+        let automatic =
+            confirmation_definition(SUBJECT_TOOL).with_approval_posture(ToolApprovalPosture::Auto);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&automatic)),
+            InitialToolApproval::PolicyAuto
+        );
+    }
+
     /// INV-020: registry automation records policy provenance, while blanket
     /// automation remains explicitly distinct from user agency.
     #[test]
@@ -2035,6 +2128,34 @@ mod tests {
         assert_ne!(
             ToolDecisionSource::PolicyAuto,
             ToolDecisionSource::UserCommand
+        );
+    }
+
+    #[test]
+    fn always_confirm_is_not_overridden_by_the_dangerous_session_blanket() {
+        let explicit = definition(
+            "explicit",
+            ToolPermissionDefault::AlwaysConfirm,
+            ToolEffectClass::ExternalEffect,
+        );
+        let configured_delegate = explicit
+            .clone()
+            .with_approval_posture(ToolApprovalPosture::Delegated);
+
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::Disabled, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(DangerousToolAutoApproval::ApproveAll, Some(&explicit)),
+            InitialToolApproval::AlwaysConfirm
+        );
+        assert_eq!(
+            initial_tool_approval(
+                DangerousToolAutoApproval::ApproveAll,
+                Some(&configured_delegate)
+            ),
+            InitialToolApproval::AlwaysConfirm
         );
     }
 
@@ -2332,10 +2453,7 @@ mod tests {
     async fn inv011_inv037_cross_wired_evidence_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
-        let prepared = match batch.attempt(batch.requests()[0].id()) {
-            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
-            _ => panic!("fixture has one prepared attempt"),
-        };
+        let prepared = current_attempt_fixture(&batch);
         let transaction = FakeTransaction {
             batch: batch.clone(),
             prepared,
@@ -2364,12 +2482,12 @@ mod tests {
             100,
         );
         let foreign_authorized = foreign_batch
-            .authorize_attempt(foreign_attempt)
+            .authorize_dispatch(foreign_attempt)
             .expect("foreign fixture authorizes");
         let foreign_invocation = ToolExecutionInvocation::try_new(
             foreign_batch.requests()[0].clone(),
             definition,
-            &foreign_authorized,
+            foreign_authorized,
         )
         .expect("foreign invocation is internally correlated");
         let executor = FixedEvidenceExecutor {
@@ -2562,13 +2680,13 @@ mod tests {
             _ => panic!("fixture has one prepared attempt"),
         };
         let authorized = batch
-            .authorize_attempt(current.attempt())
+            .authorize_dispatch(current.attempt())
             .expect("prepared fixture authorizes exactly once");
         let expected_correlation = authorized.correlation();
         let invocation = ToolExecutionInvocation::try_new(
             batch.requests()[0].clone(),
             definition("known", ToolPermissionDefault::Auto, effect_class),
-            &authorized,
+            authorized,
         )
         .expect("fixture invocation matches durable authority");
         let observation = admit_executor_evidence(
@@ -2616,12 +2734,12 @@ mod tests {
             _ => panic!("fixture has one prepared attempt"),
         };
         let authorized = batch
-            .authorize_attempt(current.attempt())
+            .authorize_dispatch(current.attempt())
             .expect("prepared fixture authorizes exactly once");
         let invocation = ToolExecutionInvocation::try_new(
             batch.requests()[0].clone(),
             definition("known", ToolPermissionDefault::Auto, effect_class),
-            &authorized,
+            authorized,
         )
         .expect("fixture invocation matches durable authority");
 
@@ -2711,10 +2829,7 @@ mod tests {
         let effect_class = ToolEffectClass::EffectFree;
         let (batch, _) = prepared_batch("{}", effect_class);
         let events = Arc::new(Mutex::new(Vec::new()));
-        let prepared = match batch.attempt(batch.requests()[0].id()) {
-            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
-            _ => panic!("fixture has one prepared attempt"),
-        };
+        let prepared = current_attempt_fixture(&batch);
         let transaction = FakeTransaction {
             batch: batch.clone(),
             prepared: prepared.clone(),
@@ -2733,10 +2848,10 @@ mod tests {
         )])
         .expect("one declaration is unambiguous");
         let authorized = batch
-            .authorize_attempt(prepared.attempt())
+            .authorize_dispatch(prepared.attempt())
             .expect("prepared fixture authorizes exactly once");
         let invocation =
-            ToolExecutionInvocation::try_new(batch.requests()[0].clone(), definition, &authorized)
+            ToolExecutionInvocation::try_new(batch.requests()[0].clone(), definition, authorized)
                 .expect("fixture invocation matches durable authority");
         let executor = FixedEvidenceExecutor {
             evidence: Some(invocation.bind(ToolExecutorEvidence::CompletedText(

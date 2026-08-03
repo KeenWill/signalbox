@@ -4,9 +4,9 @@
 commissioned goal attached to a session: its immutable statements, event-sourced
 state, user commands, model declarations, scheduler continuation, process wire,
 and terminal-client verbs. The domain and persistence surface was verified
-through PR #383 (`agent/goal-mode`). This bottom specification diff owns both
-stack slices. The scheduling, model-tool, process, and terminal surfaces were
-verified through PR #384 (`agent/goal-mode-runtime`). Identity and
+through PR #384 (`agent/goal-mode-runtime`). This bottom specification diff owns
+both stack slices. The scheduling, model-tool, process, and terminal surfaces
+were verified through PR #384 (`agent/goal-mode-runtime`). Identity and
 durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
@@ -151,7 +151,9 @@ applied receipt, and rejected reasons are closed over the operations that can
 produce them, including durable acceptance-position exhaustion for
 pursuit-starting commands. Every pursuit-starting user event reverse-correlates
 to exactly one queued goal turn, whose requested and frozen configuration
-derives from its exact defaults epoch. Model-declaration requests and
+derives from its exact defaults epoch. A continuation successor must name the
+acceptance-latest successfully completed goal turn in its generation, so an
+older turn cannot branch after resume. Model-declaration requests and
 scheduler-failure turns are single-use; composite foreign keys enforce
 user-command, model-invocation, and scheduler-turn provenance, while deferred
 constraints bind each model event to the current goal turn, the exact
