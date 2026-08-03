@@ -742,23 +742,7 @@ fn freeze_origin_configuration(
             select_definition,
             capabilities,
         ),
-        None => {
-            let origin = OriginConfiguration::freeze(checked, select_definition)
-                .map_err(OriginModelSettingsError::UnknownAlias)?;
-            let selection = origin.effective().model().selected_direct();
-            let validated_elsewhere = origin
-                .requested()
-                .model_settings()
-                .validated_for()
-                .is_some_and(|validated| validated != selection);
-            if origin.requested().per_call_model_settings()
-                != crate::ModelSettingsOverlay::inherit_all()
-                || validated_elsewhere
-            {
-                return Err(OriginModelSettingsError::MissingCapabilities { selection });
-            }
-            Ok(origin)
-        }
+        None => OriginConfiguration::freeze(checked, select_definition),
     }
 }
 
