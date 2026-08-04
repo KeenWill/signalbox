@@ -4282,14 +4282,88 @@ FOR EACH ROW WHEN (
 )
 EXECUTE FUNCTION require_semantic_entry_turn_state();
 
-ALTER TABLE outbox_event DROP CONSTRAINT outbox_event_kind_closed;
-ALTER TABLE outbox_event ADD CONSTRAINT outbox_event_kind_closed CHECK (
-    event_kind IN ('session_created', 'input_accepted', 'goal_turn_retired',
-        'turn_activated', 'turn_failed', 'model_call_transition',
-        'tool_batch_transition', 'context_compacted', 'turn_completed',
-        'turn_refused', 'turn_cancelled', 'turn_reconciliation_required',
-        'delegation_update', 'delegation_wake')
+-- Delegation owns a distinct header family so a later migration extending the
+-- baseline outbox kind inventory cannot rewrite this migration's contract.
+-- Both header families use the same allocator and delivery prefix.
+CREATE TABLE delegation_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL CHECK (
+        event_kind IN ('delegation_update', 'delegation_wake')
+    ),
+    storage_version smallint NOT NULL CHECK (storage_version = 1),
+    session_id uuid NOT NULL,
+    UNIQUE (event_sequence, event_kind, storage_version, session_id),
+    FOREIGN KEY (session_id) REFERENCES session(session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
+CREATE INDEX delegation_outbox_event_by_session_sequence
+    ON delegation_outbox_event(session_id, event_sequence);
+CREATE TRIGGER delegation_outbox_event_allocates_sequence
+BEFORE INSERT ON delegation_outbox_event
+FOR EACH ROW EXECUTE FUNCTION allocate_outbox_event_sequence();
+CREATE TRIGGER delegation_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON delegation_outbox_event
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+CREATE TRIGGER delegation_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON delegation_outbox_event
+FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE OR REPLACE FUNCTION require_outbox_sequence_event()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.last_sequence <> OLD.last_sequence + 1 THEN
+        RAISE EXCEPTION 'outbox sequence must advance exactly once per event'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.last_allocation_xid IS DISTINCT FROM pg_current_xact_id() THEN
+        RAISE EXCEPTION 'outbox allocator transaction must accompany its sequence'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM outbox_event
+         WHERE event_sequence = NEW.last_sequence
+    ) AND NOT EXISTS (
+        SELECT 1 FROM delegation_outbox_event
+         WHERE event_sequence = NEW.last_sequence
+    ) THEN
+        RAISE EXCEPTION 'outbox sequence % requires its event row', NEW.last_sequence
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION require_next_outbox_delivery()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.singleton <> OLD.singleton
+        OR NEW.delivered_through <> OLD.delivered_through + 1 THEN
+        RAISE EXCEPTION 'outbox delivery must advance by exactly one sequence'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM outbox_sequence_state
+         WHERE singleton AND last_allocation_xid = pg_current_xact_id()
+    ) THEN
+        RAISE EXCEPTION
+            'outbox delivery cannot advance in an event-producing transaction'
+            USING ERRCODE = '23514';
+    END IF;
+    NEW.last_delivery_xid := pg_current_xact_id();
+    IF NOT EXISTS (
+        SELECT 1 FROM outbox_event
+         WHERE event_sequence = NEW.delivered_through
+    ) AND NOT EXISTS (
+        SELECT 1 FROM delegation_outbox_event
+         WHERE event_sequence = NEW.delivered_through
+    ) THEN
+        RAISE EXCEPTION 'outbox delivery sequence % requires a committed event',
+            NEW.delivered_through USING ERRCODE = '23503';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TABLE delegation_update_outbox_event (
     event_sequence numeric(20, 0) PRIMARY KEY,
     event_kind text NOT NULL CHECK (event_kind = 'delegation_update'),
@@ -4460,7 +4534,9 @@ CREATE TABLE delegation_update_outbox_event (
             AND content_text IS NOT NULL)
     ),
     FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
-        REFERENCES outbox_event(event_sequence, event_kind, storage_version, session_id)
+        REFERENCES delegation_outbox_event(
+            event_sequence, event_kind, storage_version, session_id
+        )
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (spawning_tool_request_id)
         REFERENCES session_delegation(spawning_tool_request_id)
@@ -4768,7 +4844,9 @@ CREATE TABLE delegation_wake_outbox_event (
         OR (subject_kind = 'message' AND result_spawning_request_id IS NULL
             AND awaiting_tool_request_id IS NULL AND message_id IS NOT NULL)),
     FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
-        REFERENCES outbox_event(event_sequence, event_kind, storage_version, session_id)
+        REFERENCES delegation_outbox_event(
+            event_sequence, event_kind, storage_version, session_id
+        )
         ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (result_spawning_request_id)
         REFERENCES session_child_result(spawning_tool_request_id)
@@ -4874,23 +4952,11 @@ FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 CREATE TRIGGER delegation_wake_outbox_event_cannot_be_truncated
 BEFORE TRUNCATE ON delegation_wake_outbox_event
 FOR EACH STATEMENT EXECUTE FUNCTION reject_outbox_table_truncate();
-CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
+CREATE FUNCTION require_delegation_outbox_event_typed_record()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE matching_records bigint;
 BEGIN
     CASE NEW.event_kind
-        WHEN 'session_created' THEN SELECT count(*) INTO matching_records FROM session_created_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'input_accepted' THEN SELECT count(*) INTO matching_records FROM input_accepted_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'goal_turn_retired' THEN SELECT count(*) INTO matching_records FROM goal_turn_retired_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_activated' THEN SELECT count(*) INTO matching_records FROM turn_activated_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_failed' THEN SELECT count(*) INTO matching_records FROM turn_failed_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'model_call_transition' THEN SELECT count(*) INTO matching_records FROM model_call_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'tool_batch_transition' THEN SELECT count(*) INTO matching_records FROM tool_batch_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'context_compacted' THEN SELECT count(*) INTO matching_records FROM context_compacted_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_completed' THEN SELECT count(*) INTO matching_records FROM turn_completed_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_refused' THEN SELECT count(*) INTO matching_records FROM turn_refused_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_cancelled' THEN SELECT count(*) INTO matching_records FROM turn_cancelled_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_reconciliation_required' THEN SELECT count(*) INTO matching_records FROM turn_reconciliation_required_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'delegation_update' THEN SELECT count(*) INTO matching_records FROM delegation_update_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'delegation_wake' THEN SELECT count(*) INTO matching_records FROM delegation_wake_outbox_event WHERE event_sequence = NEW.event_sequence;
         ELSE RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind USING ERRCODE = '23514';
@@ -4901,7 +4967,9 @@ BEGIN
     RETURN NULL;
 END;
 $$;
-
+CREATE CONSTRAINT TRIGGER delegation_outbox_event_requires_typed_record
+AFTER INSERT ON delegation_outbox_event DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_delegation_outbox_event_typed_record();
 
 CREATE CONSTRAINT TRIGGER session_delegation_event_requires_payload
 AFTER INSERT ON session_delegation_event DEFERRABLE INITIALLY DEFERRED

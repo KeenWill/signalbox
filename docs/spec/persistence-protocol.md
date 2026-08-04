@@ -1104,8 +1104,10 @@ transactional-outbox family (INV-032 mechanism; observation semantics are
 protocol scope). The authoritative typed-record inventory is the implemented
 storage below plus the delegation-stack extension identified inline:
 
-- `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
-  `storage_version`, `session_id`) plus one typed record table per kind —
+- the baseline `outbox_event` header and delegation-owned
+  `delegation_outbox_event` header (both carrying allocator-owned
+  `event_sequence`, closed `event_kind`, `storage_version`, and `session_id`)
+  plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
   `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
@@ -1113,9 +1115,11 @@ storage below plus the delegation-stack extension identified inline:
   `context_compacted_outbox_event`, `turn_completed_outbox_event`,
   `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
   `turn_reconciliation_required_outbox_event`,
-  `runner_state_transition_outbox_event`, and the delegation stack's
+  `runner_state_transition_outbox_event`, and the delegation header's
   `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
-  deferred trigger requiring exactly one typed record per header. A
+  deferred triggers requiring exactly one typed record per header. Both header
+  families share the one allocator and delivery prefix, so their committed
+  events form one gap-free global sequence. A
   runner-transition record carries the affected runner, the positive placement
   revision, the sandbox profile, one closed transition state, and the relocation
   facts that state requires, so a follower learns of loss, suspicion, recovery,
@@ -1139,9 +1143,10 @@ storage below plus the delegation-stack extension identified inline:
   and result frontier.
 
 **Session-delegation foundation proposal.** Migration `202608020018` in the full
-delegation stack adds one version-one `delegation_update_outbox_event` typed
-table, keyed by its `event_sequence` header foreign key and closed
-`update_kind`. Its common subject is the exact `spawning_request_id`; the
+delegation stack adds one version-one `delegation_outbox_event` header and one
+version-one `delegation_update_outbox_event` typed table, keyed
+by its `event_sequence` header foreign key and closed `update_kind`. Its common
+subject is the exact `spawning_request_id`; the
 shape-specific columns carry `child_session_id` and relationship for
 `child_spawned`, `await_request_id`, child, and mode for `child_waiting`, child,
 outcome, reason, and provenance for `child_lifecycle_disposition`, those fields
@@ -1159,9 +1164,9 @@ foreign keys correlate every supplied identity to the same relationship.
 Lifecycle-disposition updates admit only parent-turn-command or
 parent-goal-command stop/cancel cascade evaluations; child-origin terminal
 events are delivered through `child_result` instead. Dispatch decodes both
-closed unions and rejects every other storage version. The header completeness
-trigger includes both record kinds, and both typed records are append-only and
-reject `TRUNCATE` with the rest of the family.
+closed unions and rejects every other storage version. The delegation-header
+completeness trigger includes both record kinds; its header and both typed
+records are append-only and reject `TRUNCATE` with the rest of the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
@@ -1173,7 +1178,7 @@ update. State without its promised update, or an update without its state, is
 therefore unrepresentable.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
-  `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
+  `BEFORE INSERT` triggers on both headers allocate `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
   deferred trigger requires the event row for every advance. Why: holding the
   allocator row lock until commit makes committed sequences contiguous and

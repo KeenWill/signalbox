@@ -4288,7 +4288,8 @@ async fn persist_delegated_child_cancellation(
 
     sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event
+                (event_kind, storage_version, session_id)
             VALUES ('delegation_update', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
@@ -4311,7 +4312,8 @@ async fn persist_delegated_child_cancellation(
     .await?;
     sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event
+                (event_kind, storage_version, session_id)
             VALUES ('delegation_wake', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )

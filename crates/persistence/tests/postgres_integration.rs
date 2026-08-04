@@ -8163,7 +8163,7 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
         .await?;
     let mut update_transaction = pool.begin().await?;
     let update_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_update', 1, $1)
          RETURNING event_sequence",
     )
@@ -8215,7 +8215,7 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
         .await?;
     let mut wake_transaction = pool.begin().await?;
     let wake_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_wake', 1, $1)
          RETURNING event_sequence",
     )
@@ -8711,7 +8711,7 @@ async fn delegation_outbox_dispatch_decodes_message_update_and_wake() -> Result<
         .await?;
     let mut update_transaction = pool.begin().await?;
     let update_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_update', 1, $1)
          RETURNING event_sequence",
     )
@@ -8779,7 +8779,7 @@ async fn delegation_outbox_dispatch_decodes_message_update_and_wake() -> Result<
         .await?;
     let mut wake_transaction = pool.begin().await?;
     let wake_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_wake', 1, $1)
          RETURNING event_sequence",
     )
