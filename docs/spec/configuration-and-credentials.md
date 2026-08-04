@@ -47,11 +47,17 @@ lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
-unimplemented functionality as labeled below. The credential-pool grammar,
-per-profile credential delivery, and pool selection are the foundation proposal
-at the bottom of their implementing stack and become verified only with those
-child pull requests; every other paragraph on this page describes behavior
-verified against the references above.
+unimplemented functionality as labeled below. The credential-profile and
+credential-pool grammar, its fail-closed admission, the deliveries this build
+supplies, and the retirement of the Anthropic key-file environment channel are
+verified against this stack's parser pull request
+(`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
+and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
+`codex_home` and `oauth` deliveries, durable quarantine, and availability
+successor calls remain the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests;
+every other paragraph on this page describes behavior verified against the
+references above.
 
 ## Process configuration
 
