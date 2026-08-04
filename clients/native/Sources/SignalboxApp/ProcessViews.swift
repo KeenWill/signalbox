@@ -1740,7 +1740,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         streamedText = nil
         errorMessage = nil
       case .sideSnapshot(let snapshot, let trigger):
-        let projection = try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+        let projection = try projector.projectSideSnapshot(
+          snapshot,
+          attributableTo: trigger
+        )
         normalizer.upsert(contentsOf: projection.records)
         toolApprovalDecisionsByRequestID.merge(
           retainedToolApprovalDecisions(projection.toolApprovalDecisionsByRequestID),
@@ -2010,6 +2013,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       activity = .init(state: .running, label: "Running")
     case .modelCallTransition(let turnID, _, let state):
+      retainUnrecognizedNestedLiveEvent(followed)
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
       }
@@ -2024,6 +2028,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       }
       applyModelCallState(state, for: turnID)
     case .toolBatchTransition(let turnID, _, let state):
+      retainUnrecognizedNestedLiveEvent(followed)
       guard admitsStateTransition(for: turnID, at: followed.cursor) else {
         return
       }
@@ -2097,7 +2102,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     case .unknown(let kind, _, let decodingDiagnostic):
       retainUnrecognizedLiveEvent(
         kind: kind,
-        decodingDiagnostic: decodingDiagnostic,
+        diagnostic: decodingDiagnostic?.message,
         cursor: followed.cursor
       )
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
@@ -2106,9 +2111,22 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
   }
 
+  private func retainUnrecognizedNestedLiveEvent(
+    _ followed: SignalboxFollowedSessionEvent
+  ) {
+    guard let event = projector.projectUnrecognizedFollowedEvent(followed) else {
+      return
+    }
+    retainUnrecognizedLiveEvent(
+      kind: event.kind,
+      diagnostic: event.diagnostic,
+      cursor: followed.cursor
+    )
+  }
+
   private func retainUnrecognizedLiveEvent(
     kind: String,
-    decodingDiagnostic: SignalboxDecodingDiagnostic?,
+    diagnostic: String?,
     cursor: SignalboxCanonicalUInt64
   ) {
     guard unrecognizedLiveTimelineItemsByCursor[cursor.rawValue] == nil else {
@@ -2116,7 +2134,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
     }
     let retainedKind = SignalboxProcessPresentation.retainedLabel(kind)
     let retainedDiagnostic = SignalboxProcessPresentation.retainedLabel(
-      decodingDiagnostic?.message
+      diagnostic
         ?? "The session event kind is not rendered by this client."
     )
     let retainedBytes = UInt(retainedKind.utf8.count + retainedDiagnostic.utf8.count)
@@ -2228,11 +2246,62 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       normalizedItems.map { ($0.id, $0) },
       uniquingKeysWith: { first, _ in first }
     )
-    for item in normalizedItems {
-      if normalizedTimelineItemIDs.insert(item.id).inserted {
-        timelinePresentationOrder.append(.normalized(item.id))
+    let normalizedKeys = normalizedItems.map { TimelinePresentationKey.normalized($0.id) }
+    let currentNormalizedIDs = Set(normalizedItems.map(\.id))
+    let retainedNormalizedIDs = normalizedTimelineItemIDs.intersection(currentNormalizedIDs)
+    var additionsBeforeRetainedID: [String: [TimelinePresentationKey]] = [:]
+    var pendingAdditions: [TimelinePresentationKey] = []
+    for key in normalizedKeys {
+      guard case .normalized(let id) = key else {
+        continue
+      }
+      if retainedNormalizedIDs.contains(id) {
+        additionsBeforeRetainedID[id] = pendingAdditions
+        pendingAdditions = []
+      } else {
+        pendingAdditions.append(key)
       }
     }
+    var refreshedPresentationOrder: [TimelinePresentationKey] = []
+    for key in timelinePresentationOrder {
+      switch key {
+      case .normalized(let id):
+        guard retainedNormalizedIDs.contains(id) else {
+          continue
+        }
+        refreshedPresentationOrder.append(contentsOf: additionsBeforeRetainedID[id] ?? [])
+        refreshedPresentationOrder.append(key)
+      case .unrecognized, .unrecognizedHistoryBoundary:
+        refreshedPresentationOrder.append(key)
+      }
+    }
+    refreshedPresentationOrder.append(contentsOf: pendingAdditions)
+    let normalizedRanks = Dictionary(
+      uniqueKeysWithValues: normalizedKeys.enumerated().map { ($0.element, $0.offset) }
+    )
+    var reorderedPresentationOrder: [TimelinePresentationKey] = []
+    var normalizedSegment: [TimelinePresentationKey] = []
+    for key in refreshedPresentationOrder {
+      switch key {
+      case .normalized:
+        normalizedSegment.append(key)
+      case .unrecognized, .unrecognizedHistoryBoundary:
+        reorderedPresentationOrder.append(
+          contentsOf: normalizedSegment.sorted {
+            normalizedRanks[$0, default: .max] < normalizedRanks[$1, default: .max]
+          }
+        )
+        normalizedSegment = []
+        reorderedPresentationOrder.append(key)
+      }
+    }
+    reorderedPresentationOrder.append(
+      contentsOf: normalizedSegment.sorted {
+        normalizedRanks[$0, default: .max] < normalizedRanks[$1, default: .max]
+      }
+    )
+    timelinePresentationOrder = reorderedPresentationOrder
+    normalizedTimelineItemIDs = currentNormalizedIDs
     timeline = timelinePresentationOrder.compactMap { key in
       switch key {
       case .normalized(let id):
@@ -2718,6 +2787,8 @@ struct ProcessSessionDetailScreen: View {
           deniedToolRequest = tool.invocationID
         }
       )
+    case .processEvidence(let notice):
+      ProcessNoticeCard(notice: notice)
     case .turnFailure(let failure):
       FailureCard(failure: failure)
     case .unknown(let unknown):
