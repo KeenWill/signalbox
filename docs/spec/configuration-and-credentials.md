@@ -576,11 +576,11 @@ Each `[[models]]` entry defines one direct selection:
 
 This build provides exactly `anthropic` and `codex_cli`. Neither adapter pins a
 profile name, and a pool may hold several profiles for either: `anthropic`
-admits the `file` delivery, and `codex_cli` admits `file`, `codex_home`, and
-`oauth`. A Codex mapping also requires `[codex_cli]` with an absolute executable
-path naming an existing regular file and an absolute, existing
-`working_directory`; construction validates that shape and platform support
-without invoking Codex or inspecting login state. The Codex CLI owns its
+admits the `file` delivery, and `codex_cli` admits `ambient`, `file`,
+`codex_home`, and `oauth`. A Codex mapping also requires `[codex_cli]` with an
+absolute executable path naming an existing regular file and an absolute,
+existing `working_directory`; construction validates that shape and platform
+support without invoking Codex or inspecting login state. The Codex CLI owns its
 external login exactly as the adapter contract specifies. OpenAI HTTP and Claude
 CLI mappings are not provided by this build.
 
@@ -624,8 +624,15 @@ acknowledged work is configuration-independent (INV-034).
 
 ## Credential deliveries
 
-A profile's closed `delivery` states how its secret reaches the provider. Three
+A profile's closed `delivery` states how its secret reaches the provider. Four
 are admitted, and an adapter admits a subset of them.
+
+**`ambient`** carries no fields. The adapter's own client resolves its login
+wherever that client keeps it, and the daemon supplies no credential material at
+all. Only `codex_cli` admits it, matching the external login the Codex CLI
+already owns. A pool holding two `ambient` profiles holds two names for one
+login rather than two accounts, so it is the one delivery that cannot express a
+multi-account pool.
 
 **`file`** names an absolute deployment-owned path, read per preparation and
 never cached, narrowed by the trailing-line-termination rule below. The
@@ -714,6 +721,13 @@ is stated rather than left to classification: treating a mid-run lapse as a
 rejected credential would quarantine a healthy account for the offence of being
 given a long task, and would do it more often the longer the work ran.
 
+This build supplies a surface for two of the four: `file` for `anthropic`, and
+`ambient` for `codex_cli`. A profile naming `codex_home` or `oauth` parses and
+is then rejected at startup as undelivered, on the same principle as the
+capacity-dependent pool keys below — configuration whose effect no surface
+provides is refused rather than admitted inert. The grammar admits all four so
+that the slice supplying a delivery needs no configuration contract change.
+
 A refresh rejected as expired, reused, or revoked is permanent. The profile is
 quarantined and re-provisioning is the only recovery, which is the same operator
 command as first provisioning. Because a restored database backup carries a
@@ -790,6 +804,17 @@ that authenticated it in `model_call.credential_reference` at the `Prepared`
 insert. A historical read therefore still resolves that call's billing kind and
 rates from the reference the call itself pinned, whatever selection chose it,
 and a pool edited across a restart cannot relabel a stored call.
+
+Selection is presently degenerate. Preparation observes no trigger and records
+no rotation state, so a mapping resolves to its pool's preferred member — the
+lowest priority value, first-listed among equals — and every call on that family
+authenticates as that member. The trigger, tie-break, and exhaustion vocabulary
+above is parsed and validated in full; the exclusion, stickiness, and rotation
+it describes are not yet performed, and a multi-member pool therefore behaves as
+its preferred member alone. Because one runtime per adapter carries one
+credential reference, two families of one adapter resolving to different
+profiles is a typed startup failure rather than a silent pin of whichever parsed
+last.
 
 Admission is fail-closed. Startup rejects a pool with no members, a duplicate
 member profile, a member naming an undeclared profile, a mapping naming an

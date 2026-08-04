@@ -65,12 +65,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "subscription"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize faithfully."

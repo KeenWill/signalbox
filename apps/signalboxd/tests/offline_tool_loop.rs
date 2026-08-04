@@ -127,12 +127,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -153,12 +163,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "fixture"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Preserve the fixture."

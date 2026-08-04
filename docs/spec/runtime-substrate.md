@@ -748,8 +748,8 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
 - The production implementation is signalboxd's `FileCredentialAccess`: each
-  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
-  production `AnthropicRuntime`.
+  resolve rereads the key file the pinned Anthropic credential profile declares
+  and feeds the production `AnthropicRuntime`.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:

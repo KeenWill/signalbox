@@ -54,7 +54,6 @@ use uuid::Uuid;
 
 const DATABASE_URL_ENVIRONMENT: &str = "SIGNALBOX_DEBUG_DATABASE_URL";
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
-const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const TRANSCRIPT_WAIT: Duration = Duration::from_secs(120);
 const SCHEDULER_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
@@ -75,7 +74,7 @@ impl fmt::Display for DebugDriverError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Usage => {
-                "set SIGNALBOX_DEBUG_DATABASE_URL and pass INPUT_TEXT SCRIPTED_REPLY, or pass --anthropic SELECTION_UUID INPUT_TEXT with SIGNALBOX_CONFIG_FILE and ANTHROPIC_API_KEY_FILE"
+                "set SIGNALBOX_DEBUG_DATABASE_URL and pass INPUT_TEXT SCRIPTED_REPLY, or pass --anthropic SELECTION_UUID INPUT_TEXT with SIGNALBOX_CONFIG_FILE"
             }
             Self::Configuration => "debug provider configuration is invalid",
             Self::Database => "debug database operation failed",
@@ -104,7 +103,6 @@ enum DebugProvider {
     Anthropic {
         selection: DirectModelSelection,
         model_configuration_file: PathBuf,
-        api_key_file: PathBuf,
     },
 }
 
@@ -247,7 +245,6 @@ impl DebugArguments {
                     model_configuration_file: required_environment_path(
                         MODEL_CONFIGURATION_FILE_ENVIRONMENT,
                     )?,
-                    api_key_file: required_environment_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT)?,
                 },
             })
         } else {
@@ -422,14 +419,20 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         DebugProvider::Anthropic {
             selection,
             model_configuration_file,
-            api_key_file,
         } => {
             let configuration = HubModelConfiguration::read(&model_configuration_file)
                 .map_err(|_| DebugDriverError::Configuration)?;
             require_anthropic_selection(&configuration, selection)?;
             let credential_access = FileCredentialAccess::new(
-                api_key_file,
-                CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+                configuration
+                    .anthropic_credential_file()
+                    .ok_or(DebugDriverError::Configuration)?
+                    .to_owned(),
+                CredentialReference::new(
+                    configuration
+                        .anthropic_credential_profile()
+                        .unwrap_or(ANTHROPIC_CREDENTIAL_REFERENCE),
+                ),
             );
             let credential_reference = ModelCallCredentialReference::new(
                 credential_access.credential_reference().as_str(),
@@ -643,12 +646,21 @@ version = 1
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "codex-subscription-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "/bin/true"

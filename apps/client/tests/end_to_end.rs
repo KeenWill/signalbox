@@ -80,12 +80,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -1694,12 +1704,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -1923,12 +1943,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -2162,12 +2192,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -2657,12 +2697,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize the prior conversation faithfully for continuation."
@@ -2863,9 +2913,6 @@ context_window_tokens = 200000
 #[ignore = "requires PostgreSQL, a local socket, and an explicitly configured real Anthropic call"]
 async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<dyn Error>> {
     let configuration_file = PathBuf::from(required_environment("SIGNALBOX_E2E_CONFIG_FILE")?);
-    let credential_file = PathBuf::from(required_environment(
-        "SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE",
-    )?);
     let selection_text = required_environment("SIGNALBOX_E2E_SELECTION_ID")?
         .into_string()
         .map_err(|_| {
@@ -2885,8 +2932,20 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
 
     let model_configuration = HubModelConfiguration::read(&configuration_file)?;
     let credential_access = FileCredentialAccess::new(
-        credential_file,
-        CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+        model_configuration
+            .anthropic_credential_file()
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "SIGNALBOX_E2E_CONFIG_FILE must map a family to the Anthropic adapter",
+                )
+            })?
+            .to_owned(),
+        CredentialReference::new(
+            model_configuration
+                .anthropic_credential_profile()
+                .unwrap_or(ANTHROPIC_CREDENTIAL_REFERENCE),
+        ),
     );
     let credential_reference =
         ModelCallCredentialReference::new(credential_access.credential_reference().as_str());

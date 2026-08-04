@@ -241,12 +241,22 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{ profile = "anthropic-primary", priority = 1 }]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [compaction]
 prompt = "Summarize."
@@ -322,21 +332,40 @@ version = 1
 
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
+file = "/run/secrets/anthropic-primary"
+
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "anthropic-primary", priority = 1 }}]
+
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "codex-subscription-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"

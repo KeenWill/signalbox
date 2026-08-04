@@ -72,7 +72,6 @@ const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
-const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 const BRAVE_API_KEY_FILE_ENVIRONMENT: &str = "BRAVE_API_KEY_FILE";
 const GITHUB_TOKEN_FILE_ENVIRONMENT: &str = "GITHUB_TOKEN_FILE";
 const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
@@ -161,7 +160,6 @@ struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
     template_configuration_file: PathBuf,
-    anthropic_api_key_file: Option<PathBuf>,
     brave_api_key_file: PathBuf,
     github_token_file: PathBuf,
     process_socket_path: PathBuf,
@@ -172,7 +170,6 @@ struct HubConfigurationValues {
     database_url: Option<OsString>,
     model_configuration_file: Option<OsString>,
     template_configuration_file: Option<OsString>,
-    anthropic_api_key_file: Option<OsString>,
     brave_api_key_file: Option<OsString>,
     github_token_file: Option<OsString>,
     process_socket_path: Option<OsString>,
@@ -185,7 +182,6 @@ impl HubConfiguration {
             database_url: env::var_os(DATABASE_URL_ENVIRONMENT),
             model_configuration_file: env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             template_configuration_file: env::var_os(TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT),
-            anthropic_api_key_file: env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
             brave_api_key_file: env::var_os(BRAVE_API_KEY_FILE_ENVIRONMENT),
             github_token_file: env::var_os(GITHUB_TOKEN_FILE_ENVIRONMENT),
             process_socket_path: env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
@@ -198,7 +194,6 @@ impl HubConfiguration {
             database_url,
             model_configuration_file,
             template_configuration_file,
-            anthropic_api_key_file,
             brave_api_key_file,
             github_token_file,
             process_socket_path,
@@ -232,8 +227,6 @@ impl HubConfiguration {
             TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
             template_configuration_file,
         )?;
-        let anthropic_api_key_file =
-            optional_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT, anthropic_api_key_file)?;
         let brave_api_key_file = required_path(BRAVE_API_KEY_FILE_ENVIRONMENT, brave_api_key_file)?;
         let github_token_file = required_path(GITHUB_TOKEN_FILE_ENVIRONMENT, github_token_file)?;
         let process_socket_path =
@@ -253,7 +246,6 @@ impl HubConfiguration {
             database_url,
             model_configuration_file,
             template_configuration_file,
-            anthropic_api_key_file,
             brave_api_key_file,
             github_token_file,
             process_socket_path,
@@ -271,19 +263,6 @@ impl HubConfiguration {
 
     fn template_configuration_file(&self) -> &Path {
         &self.template_configuration_file
-    }
-
-    fn anthropic_api_key_file(
-        &self,
-        required: bool,
-    ) -> Result<Option<PathBuf>, HubConfigurationError> {
-        if required && self.anthropic_api_key_file.is_none() {
-            return Err(HubConfigurationError::new(
-                ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ));
-        }
-        Ok(self.anthropic_api_key_file.clone())
     }
 
     fn github_token_file(&self) -> PathBuf {
@@ -341,15 +320,6 @@ fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
     let mut identity = public.as_os_str().to_owned();
     identity.push(".identity");
     Some([public, PathBuf::from(lock), PathBuf::from(identity)])
-}
-
-fn optional_path(
-    setting: &'static str,
-    value: Option<OsString>,
-) -> Result<Option<PathBuf>, HubConfigurationError> {
-    value
-        .map(|value| required_path(setting, Some(value)))
-        .transpose()
 }
 
 /// Closed startup causes admitted to operator telemetry.
@@ -945,21 +915,16 @@ async fn run_hub(
             SanitizedStartupCause::TemplateConfiguration(&error),
         )
     })?;
-    let anthropic_api_key_file = configuration
-        .anthropic_api_key_file(model_configuration.uses_anthropic_adapter())
-        .map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Configuration(&error),
-            )
-        })?;
-    let credential_access = anthropic_api_key_file.map(|path| {
+    let anthropic_credential_profile = model_configuration
+        .anthropic_credential_profile()
+        .unwrap_or(ANTHROPIC_CREDENTIAL_REFERENCE);
+    let credential_access = model_configuration.anthropic_credential_file().map(|path| {
         FileCredentialAccess::new(
-            path,
-            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+            path.to_owned(),
+            CredentialReference::new(anthropic_credential_profile),
         )
     });
-    let credential_reference = ModelCallCredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE);
+    let credential_reference = ModelCallCredentialReference::new(anthropic_credential_profile);
     let code_host_credentials = FileCredentialAccess::new(
         configuration.github_token_file(),
         CredentialReference::new(CODE_HOST_CREDENTIAL_REFERENCE),
@@ -1648,18 +1613,17 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ANTHROPIC_API_KEY_FILE_ENVIRONMENT, AnthropicConstructionError,
-        BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, GITHUB_TOKEN_FILE_ENVIRONMENT,
-        HubConfiguration, HubConfigurationError, HubConfigurationValues, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
-        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
-        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, run_scheduler_until_shutdown,
+        AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
+        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
+        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+        OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError,
+        RUNNER_SOCKET_PATH_ENVIRONMENT, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
+        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
+        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
+        drain_runtime_tasks, erase_startup_cause, migrate_scan_then_schedule, operator_filter,
+        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
@@ -1671,7 +1635,6 @@ mod tests {
             database_url: Some(OsString::from("postgres://secret")),
             model_configuration_file: Some(OsString::from("models.toml")),
             template_configuration_file: Some(OsString::from("templates.toml")),
-            anthropic_api_key_file: Some(OsString::from("key")),
             brave_api_key_file: Some(OsString::from(BRAVE_KEY_FILE_FIXTURE)),
             github_token_file: Some(OsString::from("github-token")),
             process_socket_path: Some(OsString::from("/tmp/signalbox.sock")),
@@ -1992,10 +1955,6 @@ mod tests {
             std::path::Path::new("templates.toml")
         );
         assert_eq!(
-            configuration.anthropic_api_key_file(true),
-            Ok(Some(std::path::PathBuf::from("key")))
-        );
-        assert_eq!(
             configuration.brave_api_key_file(),
             std::path::PathBuf::from(BRAVE_KEY_FILE_FIXTURE)
         );
@@ -2095,24 +2054,6 @@ mod tests {
                 RUNNER_SOCKET_PATH_ENVIRONMENT,
                 RequiredSettingFailure::Conflicts,
             )
-        );
-    }
-
-    #[test]
-    fn anthropic_credentials_are_required_only_for_an_anthropic_route() {
-        let codex_only = HubConfiguration::from_values(HubConfigurationValues {
-            anthropic_api_key_file: None,
-            runner_socket_path: None,
-            ..hub_configuration_values()
-        })
-        .expect("Anthropic credentials are optional before routes are loaded");
-        assert_eq!(codex_only.anthropic_api_key_file(false), Ok(None));
-        assert_eq!(
-            codex_only.anthropic_api_key_file(true),
-            Err(HubConfigurationError::new(
-                ANTHROPIC_API_KEY_FILE_ENVIRONMENT,
-                RequiredSettingFailure::Missing,
-            ))
         );
     }
 

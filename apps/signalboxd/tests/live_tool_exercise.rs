@@ -426,12 +426,21 @@ fn smoke_configuration(workspace: &Path) -> SmokeResult<HubModelConfiguration> {
 
 [[credential_profiles]]
 name = "codex-subscription-primary"
+adapter = "codex_cli"
 billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_pools]]
+name = "codex-main"
+tie_break = "first_listed"
+on_pool_exhausted = "park"
+members = [{{ profile = "codex-subscription-primary", priority = 1 }}]
+
 
 [[adapter_mappings]]
 model_family = "codex"
 adapter = "codex_cli"
-credential_profile = "codex-subscription-primary"
+credential_pool = "codex-main"
 
 [codex_cli]
 executable = "{}"

@@ -1,0 +1,609 @@
+//! Deployment-owned credential profiles, deliveries, and pools.
+//!
+//! `docs/spec/configuration-and-credentials.md` owns this grammar. This module
+//! parses it and admits only what the composed build can deliver: a profile
+//! naming a delivery no adapter surface provides, and a pool whose selection
+//! depends on capacity no adapter observes, are refused at startup rather than
+//! accepted inert.
+
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+    path::PathBuf,
+    sync::Arc,
+};
+
+use toml_edit::{InlineTable, Item, Table};
+
+use crate::configuration::{
+    BillingKind, HubModelConfigurationError, ModelAdapter, reject_unknown_fields, required_string,
+    validated_name,
+};
+
+/// Maximum admitted headroom reserve, leaving at least one percent usable.
+const MAX_HEADROOM_RESERVE_PERCENT: i64 = 99;
+
+/// Every delivery spelling the grammar recognizes, whether or not this build
+/// supplies a surface for it.
+const DELIVERY_KEYS: [&str; 4] = ["ambient", "file", "codex_home", "oauth"];
+
+/// Fields common to every credential profile, before its delivery adds its own.
+const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "delivery"];
+
+/// How one credential profile's secret reaches its provider.
+///
+/// The variants below are the deliveries this build supplies. The grammar also
+/// recognizes `codex_home` and `oauth`; [`CredentialDelivery::parse`] rejects
+/// them as undelivered so a deployment learns at startup that no surface
+/// honors them, rather than from a call that silently authenticated as some
+/// other account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialDelivery {
+    /// The adapter's own client resolves its login and the daemon supplies no
+    /// credential material. The Codex CLI owns its external login this way.
+    Ambient,
+    /// An absolute deployment-owned file read per preparation and never cached.
+    File {
+        /// Absolute path the deployment writes the credential value to.
+        path: PathBuf,
+        /// Process environment key a spawned adapter supplies the value under.
+        env_key: Option<Arc<str>>,
+    },
+}
+
+impl CredentialDelivery {
+    /// Exact configuration spelling of this delivery.
+    pub const fn key(&self) -> &'static str {
+        match self {
+            Self::Ambient => "ambient",
+            Self::File { .. } => "file",
+        }
+    }
+
+    /// Absolute path this delivery reads, where it reads one.
+    pub fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Ambient => None,
+            Self::File { path, .. } => Some(path),
+        }
+    }
+
+    /// Process environment key a spawned adapter supplies the value under.
+    pub fn env_key(&self) -> Option<&str> {
+        match self {
+            Self::Ambient => None,
+            Self::File { env_key, .. } => env_key.as_deref(),
+        }
+    }
+
+    fn parse(profile: &Table, adapter: ModelAdapter) -> Result<Self, HubModelConfigurationError> {
+        let key = required_string(profile, "delivery")?;
+        if !DELIVERY_KEYS.contains(&key) {
+            return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+        }
+        if !adapter.admits_delivery(key) {
+            return Err(HubModelConfigurationError::UnsupportedCredentialDelivery {
+                adapter,
+                delivery: Arc::from(key),
+            });
+        }
+        if !adapter.delivers(key) {
+            return Err(HubModelConfigurationError::UndeliveredCredentialDelivery {
+                delivery: Arc::from(key),
+            });
+        }
+        match key {
+            "ambient" => {
+                reject_unknown_fields(profile, &PROFILE_COMMON_FIELDS)?;
+                Ok(Self::Ambient)
+            }
+            _ => {
+                let mut allowed = PROFILE_COMMON_FIELDS.to_vec();
+                allowed.extend_from_slice(&["file", "env_key"]);
+                reject_unknown_fields(profile, &allowed)?;
+                let path = PathBuf::from(required_string(profile, "file")?);
+                if !path.is_absolute() {
+                    return Err(HubModelConfigurationError::InvalidCredentialDelivery);
+                }
+                let env_key = profile
+                    .get("env_key")
+                    .map(|_| validated_name(required_string(profile, "env_key")?))
+                    .transpose()?;
+                Ok(Self::File { path, env_key })
+            }
+        }
+    }
+}
+
+/// One provider account and the delivery that authenticates calls through it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialProfile {
+    name: Arc<str>,
+    adapter: ModelAdapter,
+    billing_kind: BillingKind,
+    delivery: CredentialDelivery,
+}
+
+impl CredentialProfile {
+    /// Exact deployment-owned profile name, opaque to this build.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Build-provided adapter this profile authenticates.
+    pub const fn adapter(&self) -> ModelAdapter {
+        self.adapter
+    }
+
+    /// How calls authenticated by this profile are billed.
+    pub const fn billing_kind(&self) -> BillingKind {
+        self.billing_kind
+    }
+
+    /// How this profile's secret reaches its provider.
+    pub const fn delivery(&self) -> &CredentialDelivery {
+        &self.delivery
+    }
+}
+
+/// Rule resolving equal priorities within one pool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialPoolTieBreak {
+    /// The earliest tied member in declaration order.
+    FirstListed,
+    /// Successive turns rotate through the tied members.
+    RoundRobin,
+    /// The tied member with the most remaining reported capacity.
+    LeastUsed,
+}
+
+impl CredentialPoolTieBreak {
+    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+        match value {
+            "first_listed" => Ok(Self::FirstListed),
+            "round_robin" => Ok(Self::RoundRobin),
+            "least_used" => Ok(Self::LeastUsed),
+            _ => Err(HubModelConfigurationError::InvalidCredentialPoolPolicy),
+        }
+    }
+
+    /// Reports whether resolving a tie this way needs observed capacity.
+    const fn needs_observed_capacity(self) -> bool {
+        matches!(self, Self::LeastUsed)
+    }
+}
+
+/// What a pool does for a turn when it admits no member.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialPoolExhaustion {
+    /// Park the turn in the durable wait carrying the earliest reported reset.
+    Park,
+    /// Fail the turn as a known failure.
+    Fail,
+}
+
+impl CredentialPoolExhaustion {
+    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+        match value {
+            "park" => Ok(Self::Park),
+            "fail" => Ok(Self::Fail),
+            _ => Err(HubModelConfigurationError::InvalidCredentialPoolPolicy),
+        }
+    }
+}
+
+/// Cause a pool may react to.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CredentialPoolTrigger {
+    /// The provider reported the account's quota spent.
+    QuotaExhausted,
+    /// The provider rate-limited the request.
+    RateLimited,
+    /// The provider reported itself overloaded.
+    Overloaded,
+    /// The provider rejected the credential itself.
+    CredentialRejected,
+    /// Reported remaining capacity fell below the configured reserve.
+    HeadroomLow,
+}
+
+impl CredentialPoolTrigger {
+    /// Every admitted trigger, in the order the grammar lists them.
+    pub const ALL: [Self; 5] = [
+        Self::QuotaExhausted,
+        Self::RateLimited,
+        Self::Overloaded,
+        Self::CredentialRejected,
+        Self::HeadroomLow,
+    ];
+
+    /// Exact configuration key selecting this trigger's action.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::QuotaExhausted => "on_quota_exhausted",
+            Self::RateLimited => "on_rate_limited",
+            Self::Overloaded => "on_overloaded",
+            Self::CredentialRejected => "on_credential_rejected",
+            Self::HeadroomLow => "on_headroom_low",
+        }
+    }
+
+    /// Reports whether this cause carries proof the request was not accepted,
+    /// which is what admits a successor call on the same turn.
+    const fn admits_switch_now(self) -> bool {
+        matches!(
+            self,
+            Self::QuotaExhausted | Self::RateLimited | Self::Overloaded
+        )
+    }
+
+    /// Reports whether reacting to this cause needs observed capacity.
+    const fn needs_observed_capacity(self) -> bool {
+        matches!(self, Self::HeadroomLow)
+    }
+}
+
+/// What a pool does with a member whose trigger fired.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialPoolAction {
+    /// Keep the member; the failure terminalizes as it would with no pool.
+    Stay,
+    /// Fail this turn and exclude the member from the next turn's preparation.
+    SwitchNextTurn,
+    /// Create a successor attempt against the next admitted member.
+    SwitchNow,
+    /// Keep pinned sessions; exclude the member for sessions with no prior
+    /// completed call on this pool.
+    AvoidNewSessions,
+    /// Exclude the member from every pool and across restarts until cleared.
+    Quarantine,
+}
+
+impl CredentialPoolAction {
+    fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
+        match value {
+            "stay" => Ok(Self::Stay),
+            "switch_next_turn" => Ok(Self::SwitchNextTurn),
+            "switch_now" => Ok(Self::SwitchNow),
+            "avoid_new_sessions" => Ok(Self::AvoidNewSessions),
+            "quarantine" => Ok(Self::Quarantine),
+            _ => Err(HubModelConfigurationError::UnknownCredentialPoolAction),
+        }
+    }
+}
+
+/// One profile's membership in one pool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialPoolMember {
+    profile: Arc<str>,
+    priority: NonZeroU32,
+    headroom_reserve_percent: Option<u8>,
+}
+
+impl CredentialPoolMember {
+    /// Exact profile name this membership admits.
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// Rank within this pool, where a lower value is preferred.
+    pub const fn priority(&self) -> NonZeroU32 {
+        self.priority
+    }
+
+    /// Reserve overriding the pool value for this member alone.
+    pub const fn headroom_reserve_percent(&self) -> Option<u8> {
+        self.headroom_reserve_percent
+    }
+}
+
+/// The set of profiles that may substitute for one another for one family.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialPool {
+    name: Arc<str>,
+    adapter: ModelAdapter,
+    members: Vec<CredentialPoolMember>,
+    tie_break: CredentialPoolTieBreak,
+    on_pool_exhausted: CredentialPoolExhaustion,
+    headroom_reserve_percent: Option<u8>,
+    quota_exhausted: CredentialPoolAction,
+    rate_limited: CredentialPoolAction,
+    overloaded: CredentialPoolAction,
+    credential_rejected: CredentialPoolAction,
+    headroom_low: CredentialPoolAction,
+}
+
+impl CredentialPool {
+    /// Exact deployment-owned pool name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Build-provided adapter every member of this pool authenticates.
+    pub const fn adapter(&self) -> ModelAdapter {
+        self.adapter
+    }
+
+    /// Members in declaration order.
+    pub fn members(&self) -> &[CredentialPoolMember] {
+        &self.members
+    }
+
+    /// Rule resolving equal priorities.
+    pub const fn tie_break(&self) -> CredentialPoolTieBreak {
+        self.tie_break
+    }
+
+    /// What a turn does when the pool admits no member.
+    pub const fn on_pool_exhausted(&self) -> CredentialPoolExhaustion {
+        self.on_pool_exhausted
+    }
+
+    /// Pool-wide reserve, overridable per member.
+    pub const fn headroom_reserve_percent(&self) -> Option<u8> {
+        self.headroom_reserve_percent
+    }
+
+    /// Action configured for one trigger, defaulting to
+    /// [`CredentialPoolAction::Stay`] where the document omitted its key.
+    pub const fn action(&self, trigger: CredentialPoolTrigger) -> CredentialPoolAction {
+        match trigger {
+            CredentialPoolTrigger::QuotaExhausted => self.quota_exhausted,
+            CredentialPoolTrigger::RateLimited => self.rate_limited,
+            CredentialPoolTrigger::Overloaded => self.overloaded,
+            CredentialPoolTrigger::CredentialRejected => self.credential_rejected,
+            CredentialPoolTrigger::HeadroomLow => self.headroom_low,
+        }
+    }
+
+    /// Returns the member preparation selects while no member is excluded: the
+    /// lowest priority value, earliest in declaration order among equals.
+    ///
+    /// This build observes no trigger and records no rotation state, so every
+    /// tie-break resolves here to the first-listed member of the preferred
+    /// rank. Selection proper — exclusion, stickiness, and rotation — is not
+    /// implemented, so a multi-member pool presently behaves as this member
+    /// alone.
+    pub fn preferred_member(&self) -> Option<&CredentialPoolMember> {
+        self.members.iter().min_by_key(|member| member.priority)
+    }
+}
+
+/// Parses the complete `[[credential_profiles]]` array.
+pub(crate) fn parse_credential_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, CredentialProfile>, HubModelConfigurationError> {
+    let tables = item
+        .and_then(Item::as_array_of_tables)
+        .ok_or(HubModelConfigurationError::MissingCredentialProfiles)?;
+    if tables.is_empty() {
+        return Err(HubModelConfigurationError::MissingCredentialProfiles);
+    }
+    let mut profiles = HashMap::with_capacity(tables.len());
+    for profile in tables {
+        let name = validated_name(required_string(profile, "name")?)?;
+        let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
+        let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
+        let delivery = CredentialDelivery::parse(profile, adapter)?;
+        let parsed = CredentialProfile {
+            name: Arc::clone(&name),
+            adapter,
+            billing_kind,
+            delivery,
+        };
+        if profiles.insert(Arc::clone(&name), parsed).is_some() {
+            return Err(HubModelConfigurationError::DuplicateCredentialProfile {
+                credential_profile: name,
+            });
+        }
+    }
+    Ok(profiles)
+}
+
+/// Parses the complete `[[credential_pools]]` array against declared profiles.
+pub(crate) fn parse_credential_pools(
+    item: Option<&Item>,
+    profiles: &HashMap<Arc<str>, CredentialProfile>,
+) -> Result<HashMap<Arc<str>, CredentialPool>, HubModelConfigurationError> {
+    let tables = item
+        .and_then(Item::as_array_of_tables)
+        .ok_or(HubModelConfigurationError::MissingCredentialPools)?;
+    if tables.is_empty() {
+        return Err(HubModelConfigurationError::MissingCredentialPools);
+    }
+    let mut pools = HashMap::with_capacity(tables.len());
+    for pool in tables {
+        let mut allowed = vec![
+            "name",
+            "members",
+            "tie_break",
+            "on_pool_exhausted",
+            "headroom_reserve_percent",
+        ];
+        allowed.extend(CredentialPoolTrigger::ALL.map(CredentialPoolTrigger::key));
+        reject_unknown_fields(pool, &allowed)?;
+        let name = validated_name(required_string(pool, "name")?)?;
+        let members = parse_pool_members(&name, pool.get("members"), profiles)?;
+        let adapter = pool_adapter(&name, &members, profiles)?;
+        let parsed = CredentialPool {
+            name: Arc::clone(&name),
+            adapter,
+            members,
+            tie_break: CredentialPoolTieBreak::parse(required_string(pool, "tie_break")?)?,
+            on_pool_exhausted: CredentialPoolExhaustion::parse(required_string(
+                pool,
+                "on_pool_exhausted",
+            )?)?,
+            headroom_reserve_percent: parse_headroom_reserve_percent(
+                pool.get("headroom_reserve_percent")
+                    .and_then(Item::as_value),
+            )?,
+            quota_exhausted: parse_trigger_action(pool, CredentialPoolTrigger::QuotaExhausted)?,
+            rate_limited: parse_trigger_action(pool, CredentialPoolTrigger::RateLimited)?,
+            overloaded: parse_trigger_action(pool, CredentialPoolTrigger::Overloaded)?,
+            credential_rejected: parse_trigger_action(
+                pool,
+                CredentialPoolTrigger::CredentialRejected,
+            )?,
+            headroom_low: parse_trigger_action(pool, CredentialPoolTrigger::HeadroomLow)?,
+        };
+        reject_unobserved_capacity_policy(&parsed)?;
+        if pools.insert(Arc::clone(&name), parsed).is_some() {
+            return Err(HubModelConfigurationError::DuplicateCredentialPool {
+                credential_pool: name,
+            });
+        }
+    }
+    Ok(pools)
+}
+
+fn parse_pool_members(
+    pool: &Arc<str>,
+    item: Option<&Item>,
+    profiles: &HashMap<Arc<str>, CredentialProfile>,
+) -> Result<Vec<CredentialPoolMember>, HubModelConfigurationError> {
+    let values = item
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidField)?;
+    if values.is_empty() {
+        return Err(HubModelConfigurationError::EmptyCredentialPool {
+            credential_pool: Arc::clone(pool),
+        });
+    }
+    let mut declared = HashSet::with_capacity(values.len());
+    let mut members = Vec::with_capacity(values.len());
+    for value in values {
+        let member = value
+            .as_inline_table()
+            .ok_or(HubModelConfigurationError::InvalidField)?;
+        reject_unknown_member_fields(member)?;
+        let profile = validated_name(
+            member
+                .get("profile")
+                .and_then(|value| value.as_str())
+                .ok_or(HubModelConfigurationError::InvalidField)?,
+        )?;
+        if !profiles.contains_key(&profile) {
+            return Err(HubModelConfigurationError::UnknownPoolMemberProfile {
+                credential_pool: Arc::clone(pool),
+                credential_profile: profile,
+            });
+        }
+        if !declared.insert(Arc::clone(&profile)) {
+            return Err(HubModelConfigurationError::DuplicatePoolMember {
+                credential_pool: Arc::clone(pool),
+                credential_profile: profile,
+            });
+        }
+        let priority = member
+            .get("priority")
+            .and_then(|value| value.as_integer())
+            .and_then(|value| u32::try_from(value).ok())
+            .and_then(NonZeroU32::new)
+            .ok_or_else(|| HubModelConfigurationError::InvalidMemberPriority {
+                credential_pool: Arc::clone(pool),
+            })?;
+        members.push(CredentialPoolMember {
+            profile,
+            priority,
+            headroom_reserve_percent: parse_headroom_reserve_percent(
+                member.get("headroom_reserve_percent"),
+            )?,
+        });
+    }
+    Ok(members)
+}
+
+fn reject_unknown_member_fields(member: &InlineTable) -> Result<(), HubModelConfigurationError> {
+    let allowed = ["profile", "priority", "headroom_reserve_percent"];
+    if member.iter().any(|(key, _)| !allowed.contains(&key)) {
+        Err(HubModelConfigurationError::UnknownField)
+    } else {
+        Ok(())
+    }
+}
+
+fn pool_adapter(
+    pool: &Arc<str>,
+    members: &[CredentialPoolMember],
+    profiles: &HashMap<Arc<str>, CredentialProfile>,
+) -> Result<ModelAdapter, HubModelConfigurationError> {
+    let adapters = members
+        .iter()
+        .filter_map(|member| profiles.get(&member.profile))
+        .map(CredentialProfile::adapter)
+        .collect::<HashSet<_>>();
+    let mut adapters = adapters.into_iter();
+    match (adapters.next(), adapters.next()) {
+        (Some(adapter), None) => Ok(adapter),
+        _ => Err(HubModelConfigurationError::ConflictingPoolAdapters {
+            credential_pool: Arc::clone(pool),
+        }),
+    }
+}
+
+fn parse_trigger_action(
+    pool: &Table,
+    trigger: CredentialPoolTrigger,
+) -> Result<CredentialPoolAction, HubModelConfigurationError> {
+    let Some(configured) = pool.get(trigger.key()) else {
+        return Ok(CredentialPoolAction::Stay);
+    };
+    let action = CredentialPoolAction::parse(
+        configured
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidField)?,
+    )?;
+    if action == CredentialPoolAction::SwitchNow && !trigger.admits_switch_now() {
+        return Err(
+            HubModelConfigurationError::InadmissibleCredentialPoolAction {
+                trigger: Arc::from(trigger.key()),
+            },
+        );
+    }
+    Ok(action)
+}
+
+fn parse_headroom_reserve_percent(
+    value: Option<&toml_edit::Value>,
+) -> Result<Option<u8>, HubModelConfigurationError> {
+    value
+        .map(|value| {
+            let percent = value
+                .as_integer()
+                .ok_or(HubModelConfigurationError::InvalidField)?;
+            u8::try_from(percent)
+                .ok()
+                .filter(|_| percent <= MAX_HEADROOM_RESERVE_PERCENT)
+                .ok_or(HubModelConfigurationError::InvalidHeadroomReserve)
+        })
+        .transpose()
+}
+
+/// Refuses configuration whose effect depends on remaining provider capacity
+/// this build's adapters do not report.
+///
+/// A reserve that silently never fires would read as protection the deployment
+/// does not have, so it is a startup failure instead. The grammar still admits
+/// the keys, so an adapter that later supplies the observation needs no
+/// configuration contract change.
+fn reject_unobserved_capacity_policy(
+    pool: &CredentialPool,
+) -> Result<(), HubModelConfigurationError> {
+    if pool.adapter.reports_remaining_capacity() {
+        return Ok(());
+    }
+    let reserves_headroom = pool.headroom_reserve_percent.is_some()
+        || pool
+            .members
+            .iter()
+            .any(|member| member.headroom_reserve_percent.is_some());
+    let reacts_to_headroom = CredentialPoolTrigger::HeadroomLow.needs_observed_capacity()
+        && pool.headroom_low != CredentialPoolAction::Stay;
+    if reserves_headroom || pool.tie_break.needs_observed_capacity() || reacts_to_headroom {
+        return Err(HubModelConfigurationError::UnobservedCapacityPolicy {
+            credential_pool: Arc::clone(&pool.name),
+        });
+    }
+    Ok(())
+}

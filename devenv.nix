@@ -371,6 +371,15 @@ in
              "from config/signalboxd.example.toml"
         cp "$DEVENV_ROOT/config/signalboxd.example.toml" \
            ${shellArg daemonConfigFile}
+        # The example names deployment secret paths that do not exist here, and
+        # a credential profile now carries its own path rather than reading one
+        # from the process environment. Point the seeded copy at this
+        # developer's key file once; the copy is theirs to edit afterwards.
+        seed_key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
+        sed -i.seed-backup \
+          "s|^file = \"/run/secrets/anthropic-primary\"$|file = \"$seed_key_file\"|" \
+          ${shellArg daemonConfigFile}
+        rm -f ${shellArg daemonConfigFile}.seed-backup
         chmod 644 ${shellArg daemonConfigFile}
       fi
 
@@ -450,15 +459,16 @@ in
       chmod 700 ${shellArg daemonSocketDirectory}
 
       # Deployment-owned credential channels: one file per secret. The launcher
-      # always passes all three channels; naming a
-      # path that does not exist is deliberate and safe here, because no file
-      # is read at startup. The read timing, what the file's bytes mean,
-      # and the effect of an absent file are stated in the credential
-      # lifecycle section of docs/spec/configuration-and-credentials.md.
-      # Anthropic and GitHub defaults resolve against the developer's own home
-      # directory, not the process-scoped HOME the exec below sets. Brave uses
-      # a devenv-state placeholder unless the developer supplies an override.
-      key_file="''${SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE:-$HOME/.config/signalbox/anthropic-api-key}"
+      # passes the two integration channels; the Anthropic key path lives in the
+      # seeded model catalog instead, because a credential profile now carries
+      # its own file. Naming a path that does not exist is deliberate and safe
+      # here, because no file is read at startup. The read timing, what the
+      # file's bytes mean, and the effect of an absent file are stated in the
+      # credential lifecycle section of
+      # docs/spec/configuration-and-credentials.md. The GitHub default resolves
+      # against the developer's own home directory, not the process-scoped HOME
+      # the exec below sets. Brave uses a devenv-state placeholder unless the
+      # developer supplies an override.
       search_key_file_default=${shellArg daemonBraveApiKeyFile}
       search_key_file="''${SIGNALBOX_DEV_BRAVE_API_KEY_FILE:-$search_key_file_default}"
       token_file="''${SIGNALBOX_DEV_GITHUB_TOKEN_FILE:-$HOME/.config/signalbox/github-token}"
@@ -468,7 +478,6 @@ in
         DATABASE_URL=${shellArg databaseUrl} \
         SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
         SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
-        ANTHROPIC_API_KEY_FILE="$key_file" \
         BRAVE_API_KEY_FILE="$search_key_file" \
         GITHUB_TOKEN_FILE="$token_file" \
         SIGNALBOX_SOCKET_PATH=${shellArg daemonSocketPath} \

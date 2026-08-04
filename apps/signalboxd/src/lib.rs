@@ -39,6 +39,7 @@ use tracing::Instrument;
 mod configuration;
 mod context_guard;
 mod conversation_introspection;
+mod credential_pools;
 mod daemon_tools;
 mod fenced_database;
 mod goal_mode;
@@ -59,6 +60,10 @@ pub use configuration::{
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
+};
+pub use credential_pools::{
+    CredentialDelivery, CredentialPool, CredentialPoolAction, CredentialPoolExhaustion,
+    CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger, CredentialProfile,
 };
 pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,

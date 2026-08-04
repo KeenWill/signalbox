@@ -740,9 +740,9 @@ values—`DATABASE_URL`, `SIGNALBOX_CONFIG_FILE` (the model-configuration TOML
 naming provider targets, selections, and aliases),
 `SIGNALBOX_TEMPLATE_CONFIG_FILE`, `BRAVE_API_KEY_FILE`, `GITHUB_TOKEN_FILE`, and
 `SIGNALBOX_SOCKET_PATH`—from the process environment, plus the optional
-`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. It
-additionally requires `ANTHROPIC_API_KEY_FILE` when at least one static model
-mapping selects the Anthropic adapter, as specified by
+`SIGNALBOX_RUNNER_SOCKET_PATH` override and `HOME` as specified below. A
+model-provider credential path is not among them: the credential profile a
+mapping's pool pins carries its own file, as specified by
 [configuration and credentials](configuration-and-credentials.md#process-configuration).
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against

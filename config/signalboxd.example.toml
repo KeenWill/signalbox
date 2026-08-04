@@ -21,8 +21,11 @@ version = 1
 # produces metered-equivalent cost. Keep a name's billing meaning stable, and use
 # a new name when an authentication update changes it. `delivery` states how the
 # secret reaches the provider and which further fields the profile carries;
-# anthropic admits "file", codex_cli admits "file", "codex_home", and "oauth".
-# No credential path is opened and no provider is contacted at startup.
+# anthropic admits "file", codex_cli admits "ambient", "file", "codex_home", and
+# "oauth". This build supplies a surface for "file" on anthropic and "ambient" on
+# codex_cli; the other two are rejected at startup until the slice delivering
+# them lands, rather than accepted and ignored. No credential path is opened and
+# no provider is contacted at startup.
 [[credential_profiles]]
 name = "anthropic-primary"
 adapter = "anthropic"
@@ -71,7 +74,16 @@ adapter = "anthropic"
 credential_pool = "anthropic-main"
 
 # To serve a Codex model family, add profiles, a pool, this mapping, and the
-# codex_cli table. Codex admits three deliveries; pick one per profile.
+# codex_cli table. Codex admits four deliveries; pick one per profile.
+#
+# delivery = "ambient" — the CLI resolves its own login and the daemon supplies
+# nothing. This is the delivery this build serves today, and the one that cannot
+# express a multi-account pool: two ambient profiles are two names for one login.
+# [[credential_profiles]]
+# name = "codex-ambient"
+# adapter = "codex_cli"
+# billing_kind = "subscription"
+# delivery = "ambient"
 #
 # delivery = "oauth" — the daemon owns a rotating authorization it provisioned
 # itself, and hands each invocation a scratch home holding only an access token.
