@@ -831,7 +831,7 @@ final class ProcessProtocolTests: XCTestCase {
       .parentGoalCommand(
         parentSessionID: try SignalboxCanonicalUUID(
           validating: ProcessProtocolFixture.parentSessionID),
-        goalGeneration: try SignalboxCanonicalUInt64(validating: "1"),
+        goalGeneration: SignalboxCanonicalUInt64(rawValue: 1),
         commandID: try SignalboxCanonicalUUID(validating: ProcessProtocolFixture.parentTurnID),
         descendantScope: .parentAndDescendants
       )
