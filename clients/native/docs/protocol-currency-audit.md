@@ -5,7 +5,7 @@ It is an implementation inventory, not a protocol specification. The normative
 contracts remain the repository specifications and Rust protocol types linked
 below.
 
-Verified against repository head `279ce522` on 2026-08-03.
+Verified against repository head `0469b93c` on 2026-08-03.
 
 ## Scope and method
 
@@ -38,7 +38,7 @@ Severity means user impact if the shape is encountered: **high** loses the read
 surface or its synchronization, **medium** preserves access but loses or
 misstates material information, and **low** omits secondary provenance.
 Disposition counts are by current gap rows below, not by individual wire
-variants: 25 close-now, 16 staged, and 1 report-only.
+variants: 26 close-now, 17 staged, and 1 report-only.
 
 ## Close-now gaps
 
@@ -69,6 +69,7 @@ variants: 25 close-now, 16 staged, and 1 report-only.
 | C24 | Medium   | Plan tool cards accepted display names, labels, arguments, and outputs as independent public overrides, allowing contradictory visible labels unrelated to the typed presentation state.                                                | **close-now** — represent recognized plan presentation as an internal typed variant and derive all display labels and content from it.                               |
 | C25 | High     | A terminal reconciliation batch containing an attempt-less `tool_closed` for the ambiguous request and an ordinary result for another request was rejected because only the other request supplied an attempt ID.                       | **close-now** — let a source-correlated closed member authenticate the absent attempt while still requiring the complete terminal request set.                        |
 | C26 | High     | Duplicate-member scanning was installed on the repository-wide JSON decoder, so deeply nested non-process template, artifact, or legacy payloads could fail at the process frame's conservative depth bound.                             | **close-now** — keep duplicate validation explicit at process-frame and plan-evidence boundaries while the shared decoder retains ordinary Foundation limits.         |
+| C27 | High     | A terminal reconciliation run with no named attempt was accepted when every member was denied or when multiple attempt-less members made the closed request ambiguous.                                                                     | **close-now** — require the named attempt or exactly one attempt-less member, and require that sole member to be `tool_closed`.                                        |
 
 ## Staged gaps
 
@@ -90,6 +91,7 @@ variants: 25 close-now, 16 staged, and 1 report-only.
 | S14 | High     | Native can encode only the single-frame `import_conversation` write. It lacks the four current chunked-import requests, their three acknowledgements, and typed import-rejection details, so larger sources have no native write path and import refusals degrade to a visibly unknown server message.                                                                                                                                                                                                                                                                                                     | **staged** — add transport and error presentation with a future [conversation-import](../../../docs/open-questions.md#conversation-import) UI.     |
 | S15 | Medium   | A `model_identity_changed` boundary is visible after an authoritative transcript read, but the current side-reread contract admits neither `turn_activated` as a trigger nor model-identity evidence as attributable side-read material, so a live turn may not show its model boundary until a later authoritative resynchronization.                                                                                                                                                                                                                                                                     | **staged** — changing live eligibility requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                      |
 | S16 | High     | Native omits the current session-placement member when creating a session, drops placement and its version from `session_summary`, and has no `update_session_placement` request, `session_placement_updated` receipt, or typed placement-rejection details. Native creation therefore remains explicitly pathless and cannot inspect or change scoped conversation-read visibility.                                                                                                                                                                                                                       | **staged** — add placement controls and presentation with a future [client-scope](../../../docs/open-questions.md#client-scope) surface.           |
+| S17 | High     | Current `turn_tool_reconciliation_required` names the ambiguous tool attempt, while `tool_closed` names only a request. When a complete terminal batch contains more than one attempt-less member, native cannot prove which closed request owns the named attempt.                                                                                                                                                                                                                                                                                                                                        | **staged** — adding request correlation requires a revision to the [process protocol](../../../docs/spec/process-protocol.md).                     |
 
 ## Report-only gap
 
@@ -99,8 +101,8 @@ variants: 25 close-now, 16 staged, and 1 report-only.
 
 ## Daemon-side finding
 
-The current daemon-side finding is S08 in the staged inventory. It is outside
-`clients/native/**`, and this effort does not alter daemon behavior.
+The current daemon-side findings are S08 and S17 in the staged inventory. They
+are outside `clients/native/**`, and this effort does not alter daemon behavior.
 
 ## Current shape catalog
 
