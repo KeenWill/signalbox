@@ -652,6 +652,9 @@ impl ModelCapabilities {
         selection: DirectModelSelection,
         precedence: ModelSettingsPrecedence,
     ) -> Result<ValidatedModelSettings, UnsupportedModelSetting> {
+        if precedence == ModelSettingsPrecedence::provider_defaults() {
+            return Ok(ValidatedModelSettings::provider_defaults());
+        }
         let resolved = precedence.resolve();
         self.validate_explicit(
             selection,
@@ -1464,6 +1467,21 @@ mod tests {
         );
 
         assert_eq!(reconstituted, None);
+    }
+
+    /// INV-003 / INV-053: validating the exact all-inherit chain preserves the
+    /// canonical model-independent provider-default snapshot.
+    #[test]
+    fn inv003_inv053_exact_provider_defaults_remain_model_independent() {
+        let selected = direct(1);
+        let supported = capabilities([ReasoningLevel::High], FastModeSupport::Unsupported, []);
+
+        let settings = supported
+            .validate_precedence(selected, ModelSettingsPrecedence::provider_defaults())
+            .expect("provider defaults require no model-specific capability");
+
+        assert_eq!(settings, super::ValidatedModelSettings::provider_defaults());
+        assert_eq!(settings.validated_for(), None);
     }
 
     /// S37 / INV-051: an explicit unsupported level is a typed error rather
