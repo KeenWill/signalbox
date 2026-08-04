@@ -24,7 +24,7 @@ struct MockProcessProtocolConnectionFactory: SignalboxProcessConnectionFactory {
 
 enum MockProcessProtocolFixtures {
   static let sessionCount = 8
-  static let conversationRecordCount = 2
+  static let conversationRecordCount = 3
   static let snapshotCursor = "4"
   static let firstAcceptancePosition = "1"
   static let submittedAcceptancePosition = "2"
@@ -51,6 +51,7 @@ enum MockProcessProtocolFixtures {
   static let completedToolUseEntryID = "dddddddd-0000-4000-8000-000000000007"
   static let completedToolResultEntryID = "dddddddd-0000-4000-8000-000000000008"
   static let completedToolRequestID = "abababab-0000-4000-8000-000000000002"
+  static let completedToolRequestEntryIndex = "1"
   static let completedToolAttemptID = "abababab-0000-4000-8000-000000000003"
   static let completedAttemptID = "abababab-0000-4000-8000-000000000004"
   static let completedFrontierID = "abababab-0000-4000-8000-000000000005"
@@ -805,7 +806,7 @@ private actor MockProcessProtocolState {
       content(index: "0", text: "Save the runner status report."),
       [
         "type": "transcript_entry",
-        "entry_index": "1",
+        "entry_index": MockProcessProtocolFixtures.completedToolRequestEntryIndex,
         "source_session_id": sessionID,
         "entry_id": MockProcessProtocolFixtures.completedToolUseEntryID,
         "entry": [
