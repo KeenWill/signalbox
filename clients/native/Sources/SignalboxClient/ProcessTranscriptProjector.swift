@@ -8,6 +8,7 @@ public enum SignalboxProcessTranscriptProjectionError: LocalizedError, Equatable
   case localIdentityExhausted
   case missingTriggerEvidence
   case missingTextContent
+  case mismatchedModelCallUsageTurn
   case orphanedToolResult(String)
 
   public var errorDescription: String? {
@@ -18,6 +19,8 @@ public enum SignalboxProcessTranscriptProjectionError: LocalizedError, Equatable
       return "The side transcript snapshot omitted the durable evidence named by its trigger."
     case .missingTextContent:
       return "A text transcript entry ended without its required final content fragment."
+    case .mismatchedModelCallUsageTurn:
+      return "Model-call usage was attributed to a different turn than its transcript evidence."
     case .orphanedToolResult(let requestID):
       return "Tool result \(requestID) had no preceding tool-use projection."
     }
@@ -53,12 +56,33 @@ public struct SignalboxProcessTranscriptProjection: Equatable, Sendable {
 public struct SignalboxProcessTranscriptProjector: Sendable {
   private enum PresentationIdentity: Hashable, Sendable {
     case semantic(sourceSessionID: String, entryID: String)
-    case toolRequest(String)
+    case modelCallUsage(String)
+    case turnState(String)
+  }
+
+  private struct ToolCorrelation: Hashable, Sendable {
+    let sourceSessionID: String
+    let requestID: String
+  }
+
+  private struct ToolIdentity: Hashable, Sendable {
+    let sourceSessionID: String
+    let entryID: String
+    let requestID: String
+
+    var correlation: ToolCorrelation {
+      ToolCorrelation(sourceSessionID: sourceSessionID, requestID: requestID)
+    }
+
+    var presentationIdentity: PresentationIdentity {
+      .semantic(sourceSessionID: sourceSessionID, entryID: entryID)
+    }
   }
 
   private struct ToolContext: Sendable {
     let turnID: SignalboxCanonicalUUID
     let modelCallID: SignalboxCanonicalUUID
+    let presentationOrder: SignalboxEventID
   }
 
   private struct TextAssembly: Sendable {
@@ -66,9 +90,36 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var content = ""
   }
 
+  private struct ModelCallAnchor: Sendable {
+    let recordIndex: Int
+    let entryIndex: SignalboxCanonicalUInt64
+    let turnID: SignalboxCanonicalUUID?
+  }
+
+  private struct TerminalToolResultEvidence: Sendable {
+    let entryID: SignalboxCanonicalUUID
+    let requestID: String
+    let attemptID: SignalboxCanonicalUUID?
+    let closesAttemptWithoutID: Bool
+  }
+
+  private static let presentationLaneStride = 4
+  private static let firstSemanticEventID = Int.min + 1
+  private static let semanticEventIDLimit = Int.min / 2
+  private static let firstTurnStateEventID = Int.max / 2 + 1
+  private static let maximumAnchoredEntryIndex = UInt64(
+    (firstTurnStateEventID - 3) / presentationLaneStride
+  )
+  private static let firstLeadingUsagePresentationOrder = Int.min / 2
+  private static let firstTrailingUsagePresentationOrder = (Int.max / 4) * 3
+
   private var presentationIDs: [PresentationIdentity: SignalboxEventID] = [:]
-  private var toolsByRequestID: [String: SignalboxProcessToolEvent] = [:]
-  private var toolContextsByRequestID: [String: ToolContext] = [:]
+  private var toolsByIdentity: [ToolIdentity: SignalboxProcessToolEvent] = [:]
+  private var toolContextsByIdentity: [ToolIdentity: ToolContext] = [:]
+  private var toolIdentitiesByCorrelation: [ToolCorrelation: ToolIdentity] = [:]
+  private var nextSemanticEventID = Self.firstSemanticEventID
+  private var nextSyntheticEventID = Self.firstTurnStateEventID
+  private var nextModelCallUsageEventID = Int.min / 4
 
   public init() {}
 
@@ -76,9 +127,14 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ snapshot: SignalboxSynchronizationSnapshot
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
-    candidate.toolsByRequestID = [:]
-    candidate.toolContextsByRequestID = [:]
+    candidate.toolsByIdentity = [:]
+    candidate.toolContextsByIdentity = [:]
+    candidate.toolIdentitiesByCorrelation = [:]
     let projection = try candidate.project(snapshot, selection: .all)
+    let retainedIdentities = candidate.retainedPresentationIdentities(in: snapshot)
+    candidate.presentationIDs = candidate.presentationIDs.filter {
+      retainedIdentities.contains($0.key)
+    }
     self = candidate
     return projection
   }
@@ -88,20 +144,96 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     attributableTo trigger: SignalboxFollowedSessionEvent
   ) throws -> SignalboxProcessTranscriptProjection {
     var candidate = self
-    guard candidate.containsRequiredEvidence(in: snapshot, for: trigger.event) else {
+    let terminalResultEntryIDs = candidate.terminalResultSuffixEntryIDs(
+      in: snapshot,
+      for: trigger.event
+    )
+    guard candidate.containsRequiredEvidence(
+      in: snapshot,
+      for: trigger.event,
+      terminalResultEntryIDs: terminalResultEntryIDs
+    ) else {
       throw SignalboxProcessTranscriptProjectionError.missingTriggerEvidence
     }
     let projection = try candidate.project(
       snapshot,
-      selection: .trigger(trigger.event)
+      selection: .trigger(
+        trigger.event,
+        nativeSourceSessionID: snapshot.sessionID,
+        terminalResultEntryIDs: terminalResultEntryIDs
+      )
     )
     self = candidate
     return projection
   }
 
+  public func projectUnrecognizedFollowedEvent(
+    _ followed: SignalboxFollowedSessionEvent
+  ) -> SignalboxProcessConservativeEvent? {
+    let content: (kind: String, diagnostic: String)?
+    switch followed.event {
+    case .modelCallTransition(let turnID, let modelCallID, .unknown(let kind, _)):
+      content = (
+        SignalboxProcessPresentation.retainedLabel(
+          "model_call_transition.state.\(kind)"
+        ),
+        "Turn \(turnID.rawValue), model call \(modelCallID.rawValue): "
+          + "the daemon reported an unrecognized model-call state."
+      )
+    case .modelCallTransition(
+      let turnID,
+      let modelCallID,
+      .terminal(.unknown(let disposition))
+    ):
+      content = (
+        SignalboxProcessPresentation.retainedLabel(
+          "model_call_transition.disposition.\(disposition)"
+        ),
+        "Turn \(turnID.rawValue), model call \(modelCallID.rawValue): "
+          + "the daemon reported an unrecognized terminal disposition."
+      )
+    case .toolBatchTransition(let turnID, let modelCallID, .unknown(let kind, _)):
+      content = (
+        SignalboxProcessPresentation.retainedLabel(
+          "tool_batch_transition.state.\(kind)"
+        ),
+        "Turn \(turnID.rawValue), model call \(modelCallID.rawValue): "
+          + "the daemon reported an unrecognized tool-batch state."
+      )
+    case .unknown(let kind, _, let diagnostic):
+      content = (
+        SignalboxProcessPresentation.retainedLabel(kind),
+        diagnostic?.message ?? "The daemon reported an unrecognized session event."
+      )
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
+      .turnRefused, .turnCancelled, .turnReconciliationRequired,
+      .turnToolReconciliationRequired:
+      content = nil
+    }
+    guard let content else {
+      return nil
+    }
+    return SignalboxProcessConservativeEvent(
+      kind: content.kind,
+      diagnostic: SignalboxProcessPresentation.retainedLabel(content.diagnostic)
+    )
+  }
+
   private enum Selection {
     case all
-    case trigger(SignalboxProcessSessionEvent)
+    case trigger(
+      SignalboxProcessSessionEvent,
+      nativeSourceSessionID: SignalboxCanonicalUUID,
+      terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
+    )
+
+    var includesConservativeSnapshotEvidence: Bool {
+      switch self {
+      case .all: return true
+      case .trigger: return false
+      }
+    }
   }
 
   private mutating func project(
@@ -117,8 +249,24 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var unknownTurnActivity: SignalboxProcessActivity?
     var textAssembly: TextAssembly?
     var awaitingToolDecisionRequestID: String?
+    let modelCallAnchors = modelCallAnchors(
+      in: snapshot.records,
+      nativeSourceSessionID: snapshot.sessionID
+    )
+    let turnEntryAnchors = turnEntryAnchors(
+      in: snapshot.records,
+      nativeSourceSessionID: snapshot.sessionID
+    )
+    let sessionTurnAcceptancePositions = sessionTurnAcceptancePositions(in: snapshot.records)
+    let sessionToolRequestPositions = sessionToolRequestPositions(
+      in: snapshot.records,
+      nativeSourceSessionID: snapshot.sessionID
+    )
+    let trailingModelCallUsageIDs = trailingModelCallUsageIDs(in: snapshot.records)
+    var anchoredUsageByRecordIndex: [Int: [SignalboxStoredEvent]] = [:]
+    var unanchoredUsage: [SignalboxStoredEvent] = []
 
-    for record in snapshot.records {
+    for (recordIndex, record) in snapshot.records.enumerated() {
       switch record {
       case .turn(let turn):
         latestActivity = activity(for: turn.state)
@@ -144,8 +292,41 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
           awaitingToolDecisionRequestID = requestID.rawValue
         }
-      case .modelCallUsage:
-        continue
+        if selection.includesConservativeSnapshotEvidence,
+          let unrecognized = try projectUnrecognizedTurnState(
+            turn,
+            anchorEntryIndex: turnEntryAnchors[turn.turnID.rawValue]
+          )
+        {
+          store(unrecognized, in: &projectedByID, order: &projectedOrder)
+        }
+      case .modelCallUsage(let evidence):
+        if usageIsSelected(evidence, selection: selection) {
+          let anchor = modelCallAnchors[evidence.modelCallID.rawValue]
+          guard anchor?.turnID == nil || anchor?.turnID == evidence.turnID else {
+            throw SignalboxProcessTranscriptProjectionError.mismatchedModelCallUsageTurn
+          }
+          let trailsTranscript = trailingModelCallUsageIDs.contains(
+            evidence.modelCallID.rawValue
+          )
+          let eventID = try claimModelCallUsagePresentationID(evidence)
+          let usageRecord = SignalboxStoredEvent(
+            eventID: eventID,
+            presentationOrder: try modelCallUsagePresentationOrder(
+              evidence,
+              anchorEntryIndex: anchor?.entryIndex,
+              trailingWhenUnanchored: trailsTranscript
+            ),
+            event: .processModelCallUsage(
+              SignalboxProcessModelCallUsageEvent(evidence: evidence)
+            )
+          )
+          if let anchor {
+            anchoredUsageByRecordIndex[anchor.recordIndex, default: []].append(usageRecord)
+          } else {
+            unanchoredUsage.append(usageRecord)
+          }
+        }
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
       case .content(let content):
@@ -172,18 +353,32 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .entry(let message):
         let projected = try projectEntry(
           message,
+          nativeSourceSessionID: snapshot.sessionID,
           awaitingToolDecisionRequestID: awaitingToolDecisionRequestID,
+          sessionTurnAcceptancePositions: sessionTurnAcceptancePositions,
+          sessionToolRequestPositions: sessionToolRequestPositions,
           selection: selection
         )
         if let projected {
           store(projected, in: &projectedByID, order: &projectedOrder)
         }
       }
+      for usageRecord in anchoredUsageByRecordIndex.removeValue(forKey: recordIndex) ?? [] {
+        store(usageRecord, in: &projectedByID, order: &projectedOrder)
+      }
     }
     guard textAssembly == nil else {
       throw SignalboxProcessTranscriptProjectionError.missingTextContent
     }
     pendingInputs.removeAll { materializedAcceptedInputIDs.contains($0.id) }
+    for anchorIndex in anchoredUsageByRecordIndex.keys.sorted() {
+      for usageRecord in anchoredUsageByRecordIndex[anchorIndex] ?? [] {
+        store(usageRecord, in: &projectedByID, order: &projectedOrder)
+      }
+    }
+    for usageRecord in unanchoredUsage {
+      store(usageRecord, in: &projectedByID, order: &projectedOrder)
+    }
     return SignalboxProcessTranscriptProjection(
       records: projectedOrder.compactMap { projectedByID[$0] },
       pendingInputs: pendingInputs,
@@ -210,6 +405,233 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     )
   }
 
+  private func modelCallAnchors(
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    nativeSourceSessionID: SignalboxCanonicalUUID
+  ) -> [String: ModelCallAnchor] {
+    var anchors: [String: ModelCallAnchor] = [:]
+    var modelCallsByToolCorrelation:
+      [ToolCorrelation: (id: String, turnID: SignalboxCanonicalUUID)] = [:]
+    var terminalModelCallIDsByTurnID: [String: String] = [:]
+    var textModelCall: (
+      id: String, entryIndex: SignalboxCanonicalUInt64, turnID: SignalboxCanonicalUUID?
+    )?
+    for case .turn(let turn) in records {
+      if let modelCallID = transcriptMarkerTerminalModelCallID(for: turn.state) {
+        terminalModelCallIDsByTurnID[turn.turnID.rawValue] = modelCallID.rawValue
+      }
+    }
+    for (index, record) in records.enumerated() {
+      switch record {
+      case .textEntry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          textModelCall = nil
+          continue
+        }
+        switch message.entry {
+        case .assistant(let turnID, let modelCallID):
+          textModelCall = (modelCallID.rawValue, message.entryIndex, turnID)
+        case .contextSummary(let modelCallID, _, _, _, _):
+          textModelCall = (modelCallID.rawValue, message.entryIndex, nil)
+        case .user, .imported, .unknown:
+          textModelCall = nil
+        }
+      case .content(let content):
+        guard content.finalFragment else {
+          continue
+        }
+        if let textModelCall {
+          anchors[textModelCall.id] = ModelCallAnchor(
+            recordIndex: index,
+            entryIndex: textModelCall.entryIndex,
+            turnID: textModelCall.turnID
+          )
+        }
+        textModelCall = nil
+      case .entry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
+        switch message.entry {
+        case .assistantToolUse(let turnID, let modelCallID, let requestID, _, _, _):
+          let rawModelCallID = modelCallID.rawValue
+          let correlation = ToolCorrelation(
+            sourceSessionID: message.sourceSessionID.rawValue,
+            requestID: requestID.rawValue
+          )
+          modelCallsByToolCorrelation[correlation] = (rawModelCallID, turnID)
+          anchors[rawModelCallID] = ModelCallAnchor(
+            recordIndex: index,
+            entryIndex: message.entryIndex,
+            turnID: turnID
+          )
+        case .toolExecutionResult(let requestID, _, _),
+          .toolDenied(let requestID, _), .toolClosed(let requestID, _):
+          let correlation = ToolCorrelation(
+            sourceSessionID: message.sourceSessionID.rawValue,
+            requestID: requestID.rawValue
+          )
+          if let modelCall = modelCallsByToolCorrelation[correlation] {
+            anchors[modelCall.id] = ModelCallAnchor(
+              recordIndex: index,
+              entryIndex: message.entryIndex,
+              turnID: modelCall.turnID
+            )
+          }
+        case .turnCompleted(let turnID), .turnFailed(let turnID),
+          .turnCancelled(let turnID):
+          if let modelCallID = terminalModelCallIDsByTurnID[turnID.rawValue],
+            anchors[modelCallID] == nil
+          {
+            anchors[modelCallID] = ModelCallAnchor(
+              recordIndex: index,
+              entryIndex: message.entryIndex,
+              turnID: turnID
+            )
+          }
+        case .modelIdentityChanged, .imported, .unknown:
+          break
+        }
+      case .turn, .modelCallUsage:
+        break
+      }
+    }
+    return anchors
+  }
+
+  private func turnEntryAnchors(
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    nativeSourceSessionID: SignalboxCanonicalUUID
+  ) -> [String: SignalboxCanonicalUInt64] {
+    var anchors: [String: SignalboxCanonicalUInt64] = [:]
+    for record in records {
+      let anchor: (turnID: SignalboxCanonicalUUID, entryIndex: SignalboxCanonicalUInt64)?
+      switch record {
+      case .textEntry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
+        switch message.entry {
+        case .user(_, let turnID), .assistant(let turnID, _):
+          anchor = (turnID, message.entryIndex)
+        case .contextSummary, .imported, .unknown:
+          anchor = nil
+        }
+      case .entry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
+        switch message.entry {
+        case .modelIdentityChanged(let turnID, _, _),
+          .assistantToolUse(let turnID, _, _, _, _, _), .turnCompleted(let turnID),
+          .turnFailed(let turnID), .turnCancelled(let turnID):
+          anchor = (turnID, message.entryIndex)
+        case .toolExecutionResult, .toolDenied, .toolClosed, .imported, .unknown:
+          anchor = nil
+        }
+      case .turn, .modelCallUsage, .content:
+        anchor = nil
+      }
+      guard let anchor else {
+        continue
+      }
+      if let existing = anchors[anchor.turnID.rawValue],
+        existing.rawValue <= anchor.entryIndex.rawValue
+      {
+        continue
+      }
+      anchors[anchor.turnID.rawValue] = anchor.entryIndex
+    }
+    return anchors
+  }
+
+  private func sessionTurnAcceptancePositions(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> [SignalboxCanonicalUUID: SignalboxCanonicalUInt64] {
+    records.reduce(into: [:]) { positions, record in
+      if case .turn(let turn) = record {
+        positions[turn.turnID] = turn.acceptancePosition
+      }
+    }
+  }
+
+  private func sessionToolRequestPositions(
+    in records: [SignalboxSynchronizationSnapshot.Record],
+    nativeSourceSessionID: SignalboxCanonicalUUID
+  ) -> [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition] {
+    var resultAttemptIDs: [SignalboxCanonicalUUID: SignalboxCanonicalUUID] = [:]
+    var resultOutputs: [SignalboxCanonicalUUID: String] = [:]
+    var ambiguousResultRequestIDs: Set<SignalboxCanonicalUUID> = []
+    for case .entry(let message) in records {
+      guard message.sourceSessionID == nativeSourceSessionID,
+        case .toolExecutionResult(let requestID, let attemptID, let output) = message.entry
+      else {
+        continue
+      }
+      if let previousAttemptID = resultAttemptIDs[requestID],
+        previousAttemptID != attemptID || resultOutputs[requestID] != output
+      {
+        ambiguousResultRequestIDs.insert(requestID)
+      } else {
+        resultAttemptIDs[requestID] = attemptID
+        resultOutputs[requestID] = output
+      }
+    }
+    return records.reduce(into: [:]) { positions, record in
+      guard case .entry(let message) = record,
+        message.sourceSessionID == nativeSourceSessionID,
+        case .assistantToolUse(let turnID, _, let requestID, let toolName, _, _) = message.entry
+      else {
+        return
+      }
+      positions[requestID] = SignalboxProcessToolRequestPosition(
+        turnID: turnID,
+        entryIndex: message.entryIndex,
+        toolName: toolName,
+        toolAttemptID: ambiguousResultRequestIDs.contains(requestID)
+          ? nil : resultAttemptIDs[requestID],
+        toolOutput: !ambiguousResultRequestIDs.contains(requestID)
+          ? resultOutputs[requestID] : nil
+      )
+    }
+  }
+
+  private func transcriptMarkerTerminalModelCallID(
+    for state: SignalboxTranscriptTurnState
+  ) -> SignalboxCanonicalUUID? {
+    switch state {
+    case .failed(_, _, let terminalModelCall):
+      return terminalModelCall?.modelCallID
+    case .completed(_, _, let terminalModelCallID):
+      return terminalModelCallID
+    case .cancelled(_, _, let terminalModelCallID):
+      return terminalModelCallID
+    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
+      .reconciliationRequired, .toolReconciliationRequired, .unknown:
+      return nil
+    }
+  }
+
+  private func trailingModelCallUsageIDs(
+    in records: [SignalboxSynchronizationSnapshot.Record]
+  ) -> Set<String> {
+    var modelCallIDs: Set<String> = []
+    for case .turn(let turn) in records {
+      switch turn.state {
+      case .activeAwaitingModelCallRecovery(_, let modelCallID),
+        .refused(_, _, let modelCallID),
+        .reconciliationRequired(_, _, let modelCallID):
+        modelCallIDs.insert(modelCallID.rawValue)
+      case .queued, .activeRunning, .activeAwaitingToolApproval,
+        .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
+        .toolReconciliationRequired, .unknown:
+        break
+      }
+    }
+    return modelCallIDs
+  }
+
   private mutating func projectText(
     _ message: SignalboxTranscriptTextEntryMessage,
     content: String,
@@ -218,43 +640,51 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     guard textIsSelected(message, selection: selection) else {
       return nil
     }
-    let role: SignalboxMessageRole
-    let unrecognizedKind: String?
+    let event: SignalboxConversationEvent
     switch message.entry {
     case .user:
-      role = .user
-      unrecognizedKind = nil
-    case .assistant, .contextSummary:
-      role = .assistant
-      unrecognizedKind = nil
+      event = .processMessage(SignalboxProcessMessageEvent(role: .user, text: content))
+    case .assistant:
+      event = .processMessage(SignalboxProcessMessageEvent(role: .assistant, text: content))
+    case .contextSummary:
+      event = .processContextSummary(SignalboxProcessContextSummaryEvent(text: content))
     case .imported(_, _, let speaker):
-      (role, unrecognizedKind) = importedPresentation(speaker)
-    case .unknown(let kind, _, _):
-      role = .unknown
-      unrecognizedKind = SignalboxProcessPresentation.retainedLabel(kind)
-    }
-    let eventID = try claimPresentationID(
-      .semantic(
-        sourceSessionID: message.sourceSessionID.rawValue,
-        entryID: message.entryID.rawValue
-      ),
-      entryIndex: message.entryIndex
-    )
-    return SignalboxStoredEvent(
-      eventID: eventID,
-      event: .processMessage(
+      let presentation = importedPresentation(speaker)
+      event = .processMessage(
         SignalboxProcessMessageEvent(
-          role: role,
+          role: presentation.role,
           text: content,
-          unrecognizedKind: unrecognizedKind
+          unrecognizedKind: presentation.unrecognizedKind,
+          sourceAttribution: presentation.sourceAttribution
         )
       )
+    case .unknown(let kind, _, _):
+      event = .processMessage(
+        SignalboxProcessMessageEvent(
+          role: .unknown,
+          text: content,
+          unrecognizedKind: SignalboxProcessPresentation.retainedLabel(kind)
+        )
+      )
+    }
+    let identity = PresentationIdentity.semantic(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      entryID: message.entryID.rawValue
+    )
+    return SignalboxStoredEvent(
+      eventID: try claimSemanticEventID(identity),
+      presentationOrder: try semanticPresentationOrder(message.entryIndex),
+      event: event
     )
   }
 
   private mutating func projectEntry(
     _ message: SignalboxTranscriptEntryMessage,
+    nativeSourceSessionID: SignalboxCanonicalUUID,
     awaitingToolDecisionRequestID: String?,
+    sessionTurnAcceptancePositions: [SignalboxCanonicalUUID: SignalboxCanonicalUInt64],
+    sessionToolRequestPositions:
+      [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition],
     selection: Selection
   ) throws -> SignalboxStoredEvent? {
     guard
@@ -270,11 +700,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .modelIdentityChanged(let turnID, let defaultsVersion, let selectedModelID):
       return try semanticRecord(
         message,
-        event: .processConservative(
-          SignalboxProcessConservativeEvent(
-            kind: "model_identity_changed",
-            diagnostic:
-              "Turn \(turnID.rawValue) selected model \(selectedModelID.rawValue) at defaults version \(defaultsVersion.rawValue); source session \(message.sourceSessionID.rawValue), entry \(message.entryID.rawValue)."
+        event: .processModelIdentity(
+          try SignalboxProcessModelIdentityEvent(
+            turnID: turnID,
+            defaultsVersion: defaultsVersion,
+            selectedModelID: selectedModelID
           )
         )
       )
@@ -287,42 +717,58 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       _
     ):
       let request = requestID.rawValue
+      let identity = ToolIdentity(
+        sourceSessionID: message.sourceSessionID.rawValue,
+        entryID: message.entryID.rawValue,
+        requestID: request
+      )
       let event = SignalboxProcessToolEvent(
         toolRequestID: SignalboxToolInvocationID(rawValue: request),
+        turnID: turnID,
+        sessionTurnAcceptancePositions: sessionTurnAcceptancePositions,
+        sessionToolRequestPositions: sessionToolRequestPositions,
         toolName: toolName,
         arguments: arguments,
         output: nil,
         status: .proposed
       )
-      toolsByRequestID[request] = event
-      toolContextsByRequestID[request] = ToolContext(
+      toolsByIdentity[identity] = event
+      let presentationOrder = try semanticPresentationOrder(message.entryIndex)
+      toolContextsByIdentity[identity] = ToolContext(
         turnID: turnID,
-        modelCallID: modelCallID
+        modelCallID: modelCallID,
+        presentationOrder: presentationOrder
       )
-      let eventID = try claimPresentationID(
-        .toolRequest(request),
-        entryIndex: message.entryIndex
-      )
+      toolIdentitiesByCorrelation[identity.correlation] = identity
+      let eventID = try claimSemanticEventID(identity.presentationIdentity)
       return toolRecord(
         event,
-        awaitsDecision: request == awaitingToolDecisionRequestID,
-        eventID: eventID
+        awaitsDecision: message.sourceSessionID == nativeSourceSessionID
+          && request == awaitingToolDecisionRequestID,
+        eventID: eventID,
+        presentationOrder: presentationOrder
       )
-    case .toolExecutionResult(let requestID, _, let content):
+    case .toolExecutionResult(let requestID, let toolAttemptID, let content):
       return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
+        toolAttemptID: toolAttemptID,
         output: content,
         status: .completed
       )
     case .toolDenied(let requestID, let content):
       return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
+        toolAttemptID: nil,
         output: content,
         status: .denied
       )
     case .toolClosed(let requestID, let content):
       return try updateTool(
+        sourceSessionID: message.sourceSessionID.rawValue,
         requestID: requestID.rawValue,
+        toolAttemptID: nil,
         output: content,
         status: .closed
       )
@@ -333,15 +779,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           SignalboxProcessTurnFailureEvent(reason: "Turn failed.")
         )
       )
-    case .imported(_, _, _, let contentKind):
+    case .imported(_, _, let sourceSpeaker, let contentKind):
+      guard let presentationKind = importedContentKind(contentKind) else {
+        return try semanticRecord(
+          message,
+          event: .processConservative(
+            SignalboxProcessConservativeEvent(
+              kind: SignalboxProcessPresentation.retainedLabel(
+                "imported_\(contentKind.rawValue)"
+              ),
+              diagnostic: "The transcript contains an unrecognized imported content kind."
+            )
+          )
+        )
+      }
       return try semanticRecord(
         message,
-        event: .processConservative(
-          SignalboxProcessConservativeEvent(
-            kind: SignalboxProcessPresentation.retainedLabel(
-              "imported_\(contentKind.rawValue)"
-            ),
-            diagnostic: "The process snapshot preserves this imported content conservatively."
+        event: .processImportedContent(
+          SignalboxProcessImportedContentEvent(
+            contentKind: presentationKind,
+            sourceSpeaker: importedSpeakerLabel(sourceSpeaker)
           )
         )
       )
@@ -371,35 +828,59 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private mutating func updateTool(
+    sourceSessionID: String,
     requestID: String,
+    toolAttemptID: SignalboxCanonicalUUID?,
     output: String,
     status: SignalboxProcessToolStatus
   ) throws -> SignalboxStoredEvent {
-    guard let prior = toolsByRequestID[requestID] else {
+    let correlation = ToolCorrelation(
+      sourceSessionID: sourceSessionID,
+      requestID: requestID
+    )
+    guard let identity = toolIdentitiesByCorrelation[correlation],
+      let prior = toolsByIdentity[identity]
+    else {
       throw SignalboxProcessTranscriptProjectionError.orphanedToolResult(requestID)
     }
     let updated = SignalboxProcessToolEvent(
       toolRequestID: prior.toolRequestID,
+      turnID: prior.turnID,
+      sessionTurnAcceptancePositions: prior.sessionTurnAcceptancePositions,
+      sessionToolRequestPositions: prior.sessionToolRequestPositions,
+      toolAttemptID: toolAttemptID,
       toolName: prior.toolName,
       arguments: prior.arguments,
       output: output,
       status: status
     )
-    toolsByRequestID[requestID] = updated
-    guard let eventID = presentationIDs[.toolRequest(requestID)] else {
+    toolsByIdentity[identity] = updated
+    guard let eventID = presentationIDs[identity.presentationIdentity],
+      let presentationOrder = toolContextsByIdentity[identity]?.presentationOrder
+    else {
       throw SignalboxProcessTranscriptProjectionError.orphanedToolResult(requestID)
     }
-    return toolRecord(updated, awaitsDecision: false, eventID: eventID)
+    return toolRecord(
+      updated,
+      awaitsDecision: false,
+      eventID: eventID,
+      presentationOrder: presentationOrder
+    )
   }
 
   private mutating func toolRecord(
     _ event: SignalboxProcessToolEvent,
     awaitsDecision: Bool,
-    eventID: SignalboxEventID
+    eventID: SignalboxEventID,
+    presentationOrder: SignalboxEventID
   ) -> SignalboxStoredEvent {
     let status = awaitsDecision ? SignalboxProcessToolStatus.awaitingDecision : event.status
     let presented = SignalboxProcessToolEvent(
       toolRequestID: event.toolRequestID,
+      turnID: event.turnID,
+      sessionTurnAcceptancePositions: event.sessionTurnAcceptancePositions,
+      sessionToolRequestPositions: event.sessionToolRequestPositions,
+      toolAttemptID: event.toolAttemptID,
       toolName: event.toolName,
       arguments: event.arguments,
       output: event.output,
@@ -407,6 +888,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     )
     return SignalboxStoredEvent(
       eventID: eventID,
+      presentationOrder: presentationOrder,
       event: .processTool(presented)
     )
   }
@@ -415,31 +897,232 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     _ message: SignalboxTranscriptEntryMessage,
     event: SignalboxConversationEvent
   ) throws -> SignalboxStoredEvent {
-    SignalboxStoredEvent(
-      eventID: try claimPresentationID(
-        .semantic(
-          sourceSessionID: message.sourceSessionID.rawValue,
-          entryID: message.entryID.rawValue
-        ),
-        entryIndex: message.entryIndex
-      ),
+    let identity = PresentationIdentity.semantic(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      entryID: message.entryID.rawValue
+    )
+    return SignalboxStoredEvent(
+      eventID: try claimSemanticEventID(identity),
+      presentationOrder: try semanticPresentationOrder(message.entryIndex),
       event: event
     )
   }
 
-  private mutating func claimPresentationID(
-    _ identity: PresentationIdentity,
-    entryIndex: SignalboxCanonicalUInt64
+  private mutating func claimSemanticEventID(
+    _ identity: PresentationIdentity
   ) throws -> SignalboxEventID {
     if let existing = presentationIDs[identity] {
       return existing
     }
-    guard entryIndex.rawValue < UInt64(Int.max) else {
+    guard nextSemanticEventID < Self.semanticEventIDLimit else {
       throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
     }
-    let claimed = SignalboxEventID(rawValue: Int(entryIndex.rawValue) + 1)
+    let claimed = SignalboxEventID(rawValue: nextSemanticEventID)
+    nextSemanticEventID += 1
     presentationIDs[identity] = claimed
     return claimed
+  }
+
+  private func semanticPresentationOrder(
+    _ entryIndex: SignalboxCanonicalUInt64
+  ) throws -> SignalboxEventID {
+    guard entryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    return SignalboxEventID(
+      rawValue: Int(entryIndex.rawValue) * Self.presentationLaneStride + 1
+    )
+  }
+
+  private mutating func claimTrailingPresentationID(
+    _ identity: PresentationIdentity
+  ) throws -> SignalboxEventID {
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    guard nextSyntheticEventID < Int.max else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: nextSyntheticEventID)
+    nextSyntheticEventID += 1
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
+  private mutating func claimTurnStatePresentationID(
+    _ identity: PresentationIdentity
+  ) throws -> SignalboxEventID {
+    try claimTrailingPresentationID(identity)
+  }
+
+  private func turnStatePresentationOrder(
+    eventID: SignalboxEventID,
+    anchorEntryIndex: SignalboxCanonicalUInt64?
+  ) throws -> SignalboxEventID {
+    guard let anchorEntryIndex else {
+      return eventID
+    }
+    guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    return SignalboxEventID(
+      rawValue: Int(anchorEntryIndex.rawValue) * Self.presentationLaneStride
+    )
+  }
+
+  private mutating func claimModelCallUsagePresentationID(
+    _ evidence: SignalboxTranscriptModelCallUsage
+  ) throws -> SignalboxEventID {
+    let identity = PresentationIdentity.modelCallUsage(evidence.modelCallID.rawValue)
+    if let existing = presentationIDs[identity] {
+      return existing
+    }
+    guard nextModelCallUsageEventID < 0 else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let claimed = SignalboxEventID(rawValue: nextModelCallUsageEventID)
+    nextModelCallUsageEventID += 1
+    presentationIDs[identity] = claimed
+    return claimed
+  }
+
+  private func modelCallUsagePresentationOrder(
+    _ evidence: SignalboxTranscriptModelCallUsage,
+    anchorEntryIndex: SignalboxCanonicalUInt64?,
+    trailingWhenUnanchored: Bool
+  ) throws -> SignalboxEventID {
+    if let anchorEntryIndex {
+      guard anchorEntryIndex.rawValue <= Self.maximumAnchoredEntryIndex else {
+        throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+      }
+      return SignalboxEventID(
+        rawValue: Int(anchorEntryIndex.rawValue) * Self.presentationLaneStride + 2
+      )
+    }
+    guard evidence.modelCallIndex.rawValue < UInt64(Int.max / 4) else {
+      throw SignalboxProcessTranscriptProjectionError.localIdentityExhausted
+    }
+    let base =
+      trailingWhenUnanchored
+      ? Self.firstTrailingUsagePresentationOrder
+      : Self.firstLeadingUsagePresentationOrder
+    return SignalboxEventID(
+      rawValue: base + Int(evidence.modelCallIndex.rawValue)
+    )
+  }
+
+  private mutating func projectUnrecognizedTurnState(
+    _ turn: SignalboxTranscriptTurn,
+    anchorEntryIndex: SignalboxCanonicalUInt64?
+  ) throws -> SignalboxStoredEvent? {
+    let content: (kind: String, diagnostic: String)?
+    switch turn.state {
+    case .unknown(let kind, _, let diagnostic):
+      content = (
+        SignalboxProcessPresentation.retainedLabel("turn.state.\(kind)"),
+        "Turn \(turn.turnID.rawValue): "
+          + (diagnostic?.message ?? "the snapshot retained an unrecognized turn state.")
+      )
+    case .activeRunning(_, let currentModelCall):
+      guard let currentModelCall else {
+        content = nil
+        break
+      }
+      switch currentModelCall.state {
+      case .unknown(let kind, _):
+        content = (
+          SignalboxProcessPresentation.retainedLabel(
+            "current_model_call.state.\(kind)"
+          ),
+          "Turn \(turn.turnID.rawValue), model call \(currentModelCall.modelCallID.rawValue): "
+            + "the snapshot retained an unrecognized current model-call state."
+        )
+      case .prepared, .inFlight, .cancellationRequested:
+        content = nil
+      }
+    case .failed(_, _, let terminalModelCall):
+      guard let terminalModelCall else {
+        content = nil
+        break
+      }
+      switch terminalModelCall.disposition {
+      case .unknown(let disposition):
+        content = (
+          SignalboxProcessPresentation.retainedLabel(
+            "model_call_transition.disposition.\(disposition)"
+          ),
+          "Turn \(turn.turnID.rawValue), model call \(terminalModelCall.modelCallID.rawValue): "
+            + "the snapshot retained an unrecognized terminal disposition."
+        )
+      case .knownFailed:
+        guard case .unknown(let cause)? = terminalModelCall.cause else {
+          content = nil
+          break
+        }
+        content = (
+          SignalboxProcessPresentation.retainedLabel(
+            "model_call_failure.cause.\(cause)"
+          ),
+          "Turn \(turn.turnID.rawValue), model call \(terminalModelCall.modelCallID.rawValue): "
+            + "the snapshot retained an unrecognized provider-failure cause."
+        )
+      case .cancelled:
+        content = nil
+      }
+    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
+      .reconciliationRequired, .toolReconciliationRequired:
+      content = nil
+    }
+    guard let content else {
+      return nil
+    }
+    let eventID = try claimTurnStatePresentationID(.turnState(turn.turnID.rawValue))
+    return SignalboxStoredEvent(
+      eventID: eventID,
+      presentationOrder: try turnStatePresentationOrder(
+        eventID: eventID,
+        anchorEntryIndex: anchorEntryIndex
+      ),
+      event: .processConservative(
+        SignalboxProcessConservativeEvent(
+          kind: content.kind,
+          diagnostic: SignalboxProcessPresentation.retainedLabel(content.diagnostic)
+        )
+      )
+    )
+  }
+
+  private func usageIsSelected(
+    _ evidence: SignalboxTranscriptModelCallUsage,
+    selection: Selection
+  ) -> Bool {
+    switch selection {
+    case .all:
+      return true
+    case .trigger(let trigger, _, _):
+      switch trigger {
+      case .modelCallTransition(let turnID, let modelCallID, .terminal),
+        .turnCompleted(let turnID, let modelCallID, _, _):
+        return turnID == evidence.turnID && modelCallID == evidence.modelCallID
+      case .modelCallTransition(_, _, .prepared),
+        .modelCallTransition(_, _, .inFlight),
+        .modelCallTransition(_, _, .cancellationRequested),
+        .modelCallTransition(_, _, .unknown):
+        return false
+      case .toolBatchTransition(_, _, let state):
+        switch state {
+        case .proposed, .resultsProjected, .recoveryRequired, .unknown:
+          return false
+        }
+      case .contextCompacted(_, let modelCallID, _, _, _):
+        return modelCallID == evidence.modelCallID
+      case .sessionCreated, .inputAccepted, .turnActivated, .turnFailed, .turnRefused,
+        .turnCancelled, .toolApprovalDecided, .turnReconciliationRequired,
+        .turnToolReconciliationRequired, .unknown:
+        return false
+      }
+    }
   }
 
   private func textIsSelected(
@@ -449,7 +1132,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch selection {
     case .all:
       return true
-    case .trigger(let trigger):
+    case .trigger(let trigger, let nativeSourceSessionID, _):
+      guard message.sourceSessionID == nativeSourceSessionID else {
+        return false
+      }
       switch message.entry {
       case .user:
         return false
@@ -489,27 +1175,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
   }
 
-  private func turnID(
-    for trigger: SignalboxProcessSessionEvent
-  ) -> SignalboxCanonicalUUID? {
-    switch trigger {
-    case .inputAccepted(_, let turnID, _, _),
-      .turnActivated(let turnID, _),
-      .modelCallTransition(let turnID, _, _),
-      .toolBatchTransition(let turnID, _, _),
-      .toolApprovalDecided(let turnID, _, _, _, _),
-      .turnCompleted(let turnID, _, _, _),
-      .turnFailed(let turnID, _, _),
-      .turnRefused(let turnID, _, _),
-      .turnCancelled(let turnID, _, _),
-      .turnReconciliationRequired(let turnID, _, _),
-      .turnToolReconciliationRequired(let turnID, _, _):
-      return turnID
-    case .sessionCreated, .contextCompacted, .unknown:
-      return nil
-    }
-  }
-
   private func entryIsSelected(
     _ message: SignalboxTranscriptEntryMessage,
     awaitingToolDecisionRequestID: String?,
@@ -518,10 +1183,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch selection {
     case .all:
       return true
-    case .trigger(let trigger):
+    case .trigger(let trigger, let nativeSourceSessionID, let terminalResultEntryIDs):
       return entry(
         message,
         isAttributableTo: trigger,
+        nativeSourceSessionID: nativeSourceSessionID,
+        terminalResultEntryIDs: terminalResultEntryIDs,
         awaitingToolDecisionRequestID: awaitingToolDecisionRequestID
       )
     }
@@ -530,8 +1197,16 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   private func entry(
     _ message: SignalboxTranscriptEntryMessage,
     isAttributableTo trigger: SignalboxProcessSessionEvent,
+    nativeSourceSessionID: SignalboxCanonicalUUID,
+    terminalResultEntryIDs: Set<SignalboxCanonicalUUID>,
     awaitingToolDecisionRequestID: String?
   ) -> Bool {
+    guard message.sourceSessionID == nativeSourceSessionID else {
+      return false
+    }
+    if case .modelIdentityChanged = message.entry {
+      return false
+    }
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
@@ -544,19 +1219,27 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryTurnID == turnID && entryModelCallID == modelCallID
       case .resultsProjected:
-        return toolEntry(message.entry, belongsTo: turnID, modelCallID: modelCallID)
+        return toolEntry(message, belongsTo: turnID, modelCallID: modelCallID)
       case .recoveryRequired, .unknown:
         return false
       }
-    case .turnCompleted(let turnID, _, let completionEntryID, _):
-      return message.entryID == completionEntryID
-        || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
-    case .turnFailed(let turnID, let failureEntryID, _):
-      return message.entryID == failureEntryID
-        || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
-    case .turnCancelled(let turnID, let cancellationEntryID, _):
-      return message.entryID == cancellationEntryID
-        || toolEntry(message.entry, belongsTo: turnID, modelCallID: nil)
+    case .turnCompleted:
+      return isExactTerminalMarker(
+        message,
+        for: trigger,
+        nativeSourceSessionID: nativeSourceSessionID
+      )
+    case .turnFailed, .turnCancelled:
+      return isExactTerminalMarker(
+        message,
+        for: trigger,
+        nativeSourceSessionID: nativeSourceSessionID
+      ) || (
+        message.sourceSessionID == nativeSourceSessionID
+          && terminalResultEntryIDs.contains(message.entryID)
+      )
+    case .turnToolReconciliationRequired:
+      return terminalResultEntryIDs.contains(message.entryID)
     case .toolApprovalDecided(let turnID, _, _, _, _):
       guard let awaitingToolDecisionRequestID,
         case .assistantToolUse(let entryTurnID, _, let requestID, _, _, _) = message.entry
@@ -564,14 +1247,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
-    case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
-      guard
-        case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
-        let context = toolContextsByRequestID[requestID.rawValue]
-      else {
-        return false
-      }
-      return entryAttemptID == toolAttemptID && context.turnID == turnID
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
@@ -579,12 +1254,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
   }
 
   private func toolEntry(
-    _ entry: SignalboxTranscriptEntry,
+    _ message: SignalboxTranscriptEntryMessage,
     belongsTo turnID: SignalboxCanonicalUUID,
     modelCallID: SignalboxCanonicalUUID?
   ) -> Bool {
     let requestID: String
-    switch entry {
+    switch message.entry {
     case .toolExecutionResult(let request, _, _),
       .toolDenied(let request, _),
       .toolClosed(let request, _):
@@ -594,7 +1269,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     case .modelIdentityChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
       return false
     }
-    guard let context = toolContextsByRequestID[requestID],
+    let correlation = ToolCorrelation(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      requestID: requestID
+    )
+    guard let identity = toolIdentitiesByCorrelation[correlation],
+      let context = toolContextsByIdentity[identity],
       context.turnID == turnID
     else {
       return false
@@ -602,9 +1282,273 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     return modelCallID.map { context.modelCallID == $0 } ?? true
   }
 
-  private func containsRequiredEvidence(
+  private func terminalResultSuffixEntryIDs(
     in snapshot: SignalboxSynchronizationSnapshot,
     for trigger: SignalboxProcessSessionEvent
+  ) -> Set<SignalboxCanonicalUUID> {
+    let turnID: SignalboxCanonicalUUID
+    switch trigger {
+    case .turnFailed(let triggerTurnID, _, _):
+      turnID = triggerTurnID
+    case .turnCancelled(let triggerTurnID, _, _):
+      turnID = triggerTurnID
+    case .turnToolReconciliationRequired(
+      let triggerTurnID,
+      let toolAttemptID,
+      let terminalFrontierID
+    ):
+      return reconciliationResultSuffixEntryIDs(
+        in: snapshot,
+        turnID: triggerTurnID,
+        requiredAttemptID: toolAttemptID,
+        terminalFrontierID: terminalFrontierID
+      )
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnRefused,
+      .turnReconciliationRequired, .unknown:
+      return []
+    }
+    guard let markerIndex = snapshot.records.firstIndex(where: { record in
+      guard case .entry(let message) = record else {
+        return false
+      }
+      return isExactTerminalMarker(
+        message,
+        for: trigger,
+        nativeSourceSessionID: snapshot.sessionID
+      )
+    }) else {
+      return []
+    }
+    var entryIDs: Set<SignalboxCanonicalUUID> = []
+    for record in snapshot.records[..<markerIndex].reversed() {
+      guard case .entry(let message) = record,
+        message.sourceSessionID == snapshot.sessionID,
+        toolEntry(message, belongsTo: turnID, modelCallID: nil)
+      else {
+        break
+      }
+      entryIDs.insert(message.entryID)
+    }
+    return entryIDs
+  }
+
+  private func reconciliationResultSuffixEntryIDs(
+    in snapshot: SignalboxSynchronizationSnapshot,
+    turnID: SignalboxCanonicalUUID,
+    requiredAttemptID: SignalboxCanonicalUUID,
+    terminalFrontierID: SignalboxCanonicalUUID
+  ) -> Set<SignalboxCanonicalUUID> {
+    let frontierMatches = snapshot.records.contains { record in
+      guard case .turn(let turn) = record,
+        turn.turnID == turnID,
+        case .toolReconciliationRequired(
+          let snapshotFrontierID,
+          _,
+          let snapshotToolAttemptID
+        ) = turn.state
+      else {
+        return false
+      }
+      return snapshotFrontierID == terminalFrontierID
+        && snapshotToolAttemptID == requiredAttemptID
+    }
+    guard frontierMatches else {
+      return []
+    }
+    guard let terminalRequestIDs = terminalToolRequestIDs(
+      in: snapshot,
+      turnID: turnID
+    ) else {
+      return []
+    }
+    var currentSuffix: [TerminalToolResultEvidence] = []
+    var terminalSuffix: Set<SignalboxCanonicalUUID> = []
+    for record in snapshot.records {
+      if let evidence = terminalToolResultEvidence(
+        for: record,
+        in: snapshot,
+        turnID: turnID
+      ) {
+        currentSuffix.append(evidence)
+      } else if !currentSuffix.isEmpty {
+        if terminalResultRun(
+          currentSuffix,
+          matches: terminalRequestIDs,
+          requiredAttemptID: requiredAttemptID
+        ) {
+          terminalSuffix = Set(currentSuffix.map(\.entryID))
+        }
+        currentSuffix = []
+      }
+    }
+    if terminalResultRun(
+      currentSuffix,
+      matches: terminalRequestIDs,
+      requiredAttemptID: requiredAttemptID
+    ) {
+      terminalSuffix = Set(currentSuffix.map(\.entryID))
+    }
+    return terminalSuffix
+  }
+
+  private func terminalToolRequestIDs(
+    in snapshot: SignalboxSynchronizationSnapshot,
+    turnID: SignalboxCanonicalUUID
+  ) -> Set<String>? {
+    let terminalModelCallID = snapshot.records.reversed().compactMap {
+      record -> SignalboxCanonicalUUID? in
+      guard case .entry(let message) = record,
+        message.sourceSessionID == snapshot.sessionID,
+        case .assistantToolUse(let entryTurnID, let modelCallID, _, _, _, _) = message.entry,
+        entryTurnID == turnID
+      else {
+        return nil
+      }
+      return modelCallID
+    }.first
+    guard let terminalModelCallID else {
+      return nil
+    }
+    let requestIDs = Set(snapshot.records.compactMap { record -> String? in
+      guard case .entry(let message) = record,
+        message.sourceSessionID == snapshot.sessionID,
+        case .assistantToolUse(
+          let entryTurnID,
+          let modelCallID,
+          let requestID,
+          _,
+          _,
+          _
+        ) = message.entry,
+        entryTurnID == turnID,
+        modelCallID == terminalModelCallID
+      else {
+        return nil
+      }
+      return requestID.rawValue
+    })
+    return requestIDs.isEmpty ? nil : requestIDs
+  }
+
+  private func terminalToolResultEvidence(
+    for record: SignalboxSynchronizationSnapshot.Record,
+    in snapshot: SignalboxSynchronizationSnapshot,
+    turnID: SignalboxCanonicalUUID
+  ) -> TerminalToolResultEvidence? {
+    guard case .entry(let message) = record,
+      message.sourceSessionID == snapshot.sessionID,
+      toolEntry(message, belongsTo: turnID, modelCallID: nil)
+    else {
+      return nil
+    }
+    switch message.entry {
+    case .toolExecutionResult(let requestID, let attemptID, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: attemptID,
+        closesAttemptWithoutID: false
+      )
+    case .toolDenied(let requestID, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: nil,
+        closesAttemptWithoutID: false
+      )
+    case .toolClosed(let requestID, _):
+      return TerminalToolResultEvidence(
+        entryID: message.entryID,
+        requestID: requestID.rawValue,
+        attemptID: nil,
+        closesAttemptWithoutID: true
+      )
+    case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+      .turnCancelled, .imported, .unknown:
+      return nil
+    }
+  }
+
+  private func terminalResultRun(
+    _ evidence: [TerminalToolResultEvidence],
+    matches terminalRequestIDs: Set<String>,
+    requiredAttemptID: SignalboxCanonicalUUID
+  ) -> Bool {
+    guard evidence.count == terminalRequestIDs.count,
+      Set(evidence.map(\.requestID)) == terminalRequestIDs
+    else {
+      return false
+    }
+    let attemptIDs = evidence.compactMap(\.attemptID)
+    if attemptIDs.contains(requiredAttemptID) {
+      return true
+    }
+    let attemptLessEvidence = evidence.filter { $0.attemptID == nil }
+    return attemptLessEvidence.count == 1
+      && attemptLessEvidence[0].closesAttemptWithoutID
+  }
+
+  private func retainedPresentationIdentities(
+    in snapshot: SignalboxSynchronizationSnapshot
+  ) -> Set<PresentationIdentity> {
+    Set(snapshot.records.compactMap { record in
+      switch record {
+      case .turn(let turn):
+        return .turnState(turn.turnID.rawValue)
+      case .modelCallUsage(let usage):
+        return .modelCallUsage(usage.modelCallID.rawValue)
+      case .entry(let message):
+        return .semantic(
+          sourceSessionID: message.sourceSessionID.rawValue,
+          entryID: message.entryID.rawValue
+        )
+      case .textEntry(let message):
+        return .semantic(
+          sourceSessionID: message.sourceSessionID.rawValue,
+          entryID: message.entryID.rawValue
+        )
+      case .content:
+        return nil
+      }
+    })
+  }
+
+  private func isExactTerminalMarker(
+    _ message: SignalboxTranscriptEntryMessage,
+    for trigger: SignalboxProcessSessionEvent,
+    nativeSourceSessionID: SignalboxCanonicalUUID
+  ) -> Bool {
+    guard message.sourceSessionID == nativeSourceSessionID else {
+      return false
+    }
+    switch trigger {
+    case .turnCompleted(let turnID, _, let completionEntryID, _):
+      guard case .turnCompleted(let entryTurnID) = message.entry else {
+        return false
+      }
+      return message.entryID == completionEntryID && entryTurnID == turnID
+    case .turnFailed(let turnID, let failureEntryID, _):
+      guard case .turnFailed(let entryTurnID) = message.entry else {
+        return false
+      }
+      return message.entryID == failureEntryID && entryTurnID == turnID
+    case .turnCancelled(let turnID, let cancellationEntryID, _):
+      guard case .turnCancelled(let entryTurnID) = message.entry else {
+        return false
+      }
+      return message.entryID == cancellationEntryID && entryTurnID == turnID
+    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnRefused,
+      .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
+      return false
+    }
+  }
+
+  private func containsRequiredEvidence(
+    in snapshot: SignalboxSynchronizationSnapshot,
+    for trigger: SignalboxProcessSessionEvent,
+    terminalResultEntryIDs: Set<SignalboxCanonicalUUID>
   ) -> Bool {
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
@@ -612,6 +1556,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .proposed:
         return snapshot.records.contains { record in
           guard case .entry(let message) = record,
+            message.sourceSessionID == snapshot.sessionID,
             case .assistantToolUse(let entryTurnID, let entryModelCallID, _, _, _, _) =
               message.entry
           else {
@@ -620,40 +1565,49 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           return entryTurnID == turnID && entryModelCallID == modelCallID
         }
       case .resultsProjected:
-        let expectedRequestIDs = Set(
-          toolContextsByRequestID.compactMap {
-            requestID, context -> String? in
-            guard context.turnID == turnID, context.modelCallID == modelCallID else {
+        let expectedCorrelations = Set(
+          toolContextsByIdentity.compactMap {
+            identity, context -> ToolCorrelation? in
+            guard identity.sourceSessionID == snapshot.sessionID.rawValue,
+              context.turnID == turnID,
+              context.modelCallID == modelCallID
+            else {
               return nil
             }
-            return requestID
+            return identity.correlation
           })
-        guard !expectedRequestIDs.isEmpty else {
+        guard !expectedCorrelations.isEmpty else {
           return false
         }
-        let projectedRequestIDs = Set(
+        let projectedCorrelations = Set(
           snapshot.records.compactMap {
-            record -> String? in
-            guard case .entry(let message) = record else {
+            record -> ToolCorrelation? in
+            guard case .entry(let message) = record,
+              message.sourceSessionID == snapshot.sessionID
+            else {
               return nil
             }
             switch message.entry {
             case .toolExecutionResult(let requestID, _, _), .toolDenied(let requestID, _),
               .toolClosed(let requestID, _):
-              return requestID.rawValue
+              return ToolCorrelation(
+                sourceSessionID: message.sourceSessionID.rawValue,
+                requestID: requestID.rawValue
+              )
             case .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
               .turnCancelled, .imported,
               .unknown:
               return nil
             }
           })
-        return expectedRequestIDs.isSubset(of: projectedRequestIDs)
+        return expectedCorrelations.isSubset(of: projectedCorrelations)
       case .recoveryRequired, .unknown:
         return true
       }
     case .contextCompacted(_, let modelCallID, _, let summaryEntryID, _):
       return snapshot.records.contains {
         guard case .textEntry(let message) = $0,
+          message.sourceSessionID == snapshot.sessionID,
           message.entryID == summaryEntryID,
           case .contextSummary(let entryModelCallID, _, _, _, _) = message.entry
         else {
@@ -661,9 +1615,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
         return entryModelCallID == modelCallID
       }
-    case .turnCompleted(let turnID, let modelCallID, let completionEntryID, _):
+    case .turnCompleted(let turnID, let modelCallID, _, _):
       let hasAssistantText = snapshot.records.contains {
         guard case .textEntry(let message) = $0,
+          message.sourceSessionID == snapshot.sessionID,
           case .assistant(let entryTurnID, let entryModelCallID) = message.entry
         else {
           return false
@@ -671,72 +1626,159 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return entryTurnID == turnID && entryModelCallID == modelCallID
       }
       let hasCompletionMarker = snapshot.records.contains {
-        guard case .entry(let message) = $0,
-          message.entryID == completionEntryID,
-          case .turnCompleted(let entryTurnID) = message.entry
-        else {
+        guard case .entry(let message) = $0 else {
           return false
         }
-        return entryTurnID == turnID
+        return isExactTerminalMarker(
+          message,
+          for: trigger,
+          nativeSourceSessionID: snapshot.sessionID
+        )
       }
-      return hasAssistantText && hasCompletionMarker
-    case .turnFailed(let turnID, let failureEntryID, _):
+      return hasCompletionMarker && hasAssistantText
+    case .turnFailed:
       return snapshot.records.contains {
-        guard case .entry(let message) = $0,
-          message.entryID == failureEntryID,
-          case .turnFailed(let entryTurnID) = message.entry
-        else {
+        guard case .entry(let message) = $0 else {
           return false
         }
-        return entryTurnID == turnID
+        return isExactTerminalMarker(
+          message,
+          for: trigger,
+          nativeSourceSessionID: snapshot.sessionID
+        )
       }
-    case .turnCancelled(let turnID, let cancellationEntryID, _):
+    case .turnCancelled:
       return snapshot.records.contains {
-        guard case .entry(let message) = $0,
-          message.entryID == cancellationEntryID,
-          case .turnCancelled(let entryTurnID) = message.entry
+        guard case .entry(let message) = $0 else {
+          return false
+        }
+        return isExactTerminalMarker(
+          message,
+          for: trigger,
+          nativeSourceSessionID: snapshot.sessionID
+        )
+      }
+    case .turnRefused(let turnID, let modelCallID, let terminalFrontierID):
+      return snapshot.records.contains { record in
+        guard case .turn(let turn) = record,
+          turn.turnID == turnID,
+          case .refused(let frontierID, _, let terminalModelCallID) = turn.state
         else {
           return false
         }
-        return entryTurnID == turnID
+        return frontierID == terminalFrontierID && terminalModelCallID == modelCallID
       }
-    case .turnToolReconciliationRequired(let turnID, let toolAttemptID, _):
-      return snapshot.records.contains {
-        guard case .entry(let message) = $0,
-          case .toolExecutionResult(let requestID, let entryAttemptID, _) = message.entry,
-          let context = toolContextsByRequestID[requestID.rawValue]
+    case .turnReconciliationRequired(let turnID, let modelCallID, let terminalFrontierID):
+      return snapshot.records.contains { record in
+        guard case .turn(let turn) = record,
+          turn.turnID == turnID,
+          case .reconciliationRequired(
+            let frontierID,
+            _,
+            let terminalModelCallID
+          ) = turn.state
         else {
           return false
         }
-        return entryAttemptID == toolAttemptID && context.turnID == turnID
+        return frontierID == terminalFrontierID && terminalModelCallID == modelCallID
       }
+    case .turnToolReconciliationRequired:
+      return !terminalResultEntryIDs.isEmpty
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolApprovalDecided, .turnRefused, .turnReconciliationRequired, .unknown:
+      .toolApprovalDecided, .unknown:
       return true
     }
   }
 
   private func importedPresentation(
     _ speaker: SignalboxImportedSourceSpeaker
-  ) -> (role: SignalboxMessageRole, unrecognizedKind: String?) {
+  ) -> (
+    role: SignalboxMessageRole,
+    unrecognizedKind: String?,
+    sourceLabel: String,
+    sourceAttribution: SignalboxProcessMessageSourceAttribution?
+  ) {
     switch speaker {
     case .attested(.user):
-      return (.user, nil)
+      return (
+        .user,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedUserRole.presentationLabel,
+        .importedUserRole
+      )
     case .attested(.assistant):
-      return (.assistant, nil)
+      return (
+        .assistant,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedAssistantRole.presentationLabel,
+        .importedAssistantRole
+      )
     case .attested(.unknown(let value)):
+      let label = SignalboxProcessPresentation.retainedLabel(
+        "Unrecognized speaker (\(value))"
+      )
       return (
         .unknown,
-        SignalboxProcessPresentation.retainedLabel("Unrecognized speaker (\(value))")
+        label,
+        label,
+        nil
       )
     case .unknown(let kind, _):
+      let label = SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
       return (
         .unknown,
-        SignalboxProcessPresentation.retainedLabel("Unknown speaker (\(kind))")
+        label,
+        label,
+        nil
       )
-    case .notAttested, .attestedAbsent:
-      return (.unknown, nil)
+    case .notAttested:
+      return (
+        .unknown,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedSpeakerNotAttested.presentationLabel,
+        .importedSpeakerNotAttested
+      )
+    case .attestedAbsent:
+      return (
+        .unknown,
+        nil,
+        SignalboxProcessMessageSourceAttribution.importedSpeakerAbsent.presentationLabel,
+        .importedSpeakerAbsent
+      )
     }
+  }
+
+  private func importedContentKind(
+    _ kind: SignalboxImportedContentKind
+  ) -> SignalboxProcessImportedContentKind? {
+    switch kind {
+    case .sourceEvent:
+      return .sourceEvent
+    case .sourceMessageBlock:
+      return .sourceMessageBlock
+    case .text:
+      return .text
+    case .toolCall:
+      return .toolCall
+    case .toolResult:
+      return .toolResult
+    case .thinking:
+      return .thinking
+    case .redactedThinking:
+      return .redactedThinking
+    case .document:
+      return .document
+    case .messageContentAbsent:
+      return .messageContentAbsent
+    case .unknown:
+      return nil
+    }
+  }
+
+  private func importedSpeakerLabel(
+    _ speaker: SignalboxImportedSourceSpeaker
+  ) -> String {
+    importedPresentation(speaker).sourceLabel
   }
 
   private func activity(
