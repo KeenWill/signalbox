@@ -143,6 +143,7 @@ ALTER TABLE outbox_event
                 'turn_failed',
                 'model_call_transition',
                 'tool_batch_transition',
+                'tool_approval_decided',
                 'context_compacted',
                 'turn_completed',
                 'turn_refused',
@@ -280,6 +281,10 @@ BEGIN
         WHEN 'tool_batch_transition' THEN
             SELECT count(*) INTO matching_records
               FROM tool_batch_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_approval_decided' THEN
+            SELECT count(*) INTO matching_records
+              FROM tool_approval_decided_outbox_event
              WHERE event_sequence = NEW.event_sequence;
         WHEN 'context_compacted' THEN
             SELECT count(*) INTO matching_records
