@@ -179,7 +179,18 @@ impl EffectiveConfiguration {
 
     /// Constructs the complete value with model settings validated for its
     /// frozen direct selection.
-    pub const fn with_model_settings(
+    pub fn with_model_settings(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
+    ) -> Option<Self> {
+        let validated_for = model_settings.validated_for();
+        (validated_for.is_none() || validated_for == Some(model.selected_direct())).then(|| {
+            Self::from_validated_model_settings(model, dangerous_tool_auto_approval, model_settings)
+        })
+    }
+
+    const fn from_validated_model_settings(
         model: FrozenModelSelection,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         model_settings: ValidatedModelSettings,
@@ -736,7 +747,7 @@ impl OriginConfiguration {
         Ok(Self {
             requested,
             session_defaults_version,
-            effective: EffectiveConfiguration::with_model_settings(
+            effective: EffectiveConfiguration::from_validated_model_settings(
                 model,
                 requested.dangerous_tool_auto_approval(),
                 requested.model_settings(),
@@ -799,7 +810,7 @@ impl OriginConfiguration {
         Ok(Self {
             requested: request,
             session_defaults_version,
-            effective: EffectiveConfiguration::with_model_settings(
+            effective: EffectiveConfiguration::from_validated_model_settings(
                 model,
                 request.dangerous_tool_auto_approval(),
                 model_settings,
@@ -859,7 +870,7 @@ impl OriginConfiguration {
         Some(Self {
             requested: request,
             session_defaults_version,
-            effective: EffectiveConfiguration::with_model_settings(
+            effective: EffectiveConfiguration::from_validated_model_settings(
                 frozen_model,
                 request.dangerous_tool_auto_approval(),
                 stored_settings,
@@ -1462,6 +1473,52 @@ mod tests {
             KnownProviderFailureRetry::Disabled
         );
         assert_eq!(configuration.model_fallback(), ModelFallback::Disabled);
+    }
+
+    /// INV-003 / INV-051: a complete effective configuration rejects settings
+    /// validated for another frozen direct model while retaining canonical,
+    /// model-independent provider defaults.
+    #[test]
+    fn inv003_inv051_effective_configuration_rejects_crosswired_model_settings() {
+        let validated_selection = direct(1);
+        let frozen_selection = FrozenModelSelection::Direct(direct(2));
+        let level = ReasoningLevel::High;
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([level]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            validated_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(level),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture setting is supported by its validating model");
+
+        let crosswired = EffectiveConfiguration::with_model_settings(
+            frozen_selection,
+            DangerousToolAutoApproval::Disabled,
+            settings,
+        );
+        let provider_defaults = EffectiveConfiguration::with_model_settings(
+            frozen_selection,
+            DangerousToolAutoApproval::Disabled,
+            ValidatedModelSettings::provider_defaults(),
+        );
+
+        assert_eq!(crosswired, None);
+        assert_eq!(
+            provider_defaults,
+            Some(EffectiveConfiguration::baseline(frozen_selection))
+        );
     }
 
     /// INV-008: configuration equality is structural semantic value equality

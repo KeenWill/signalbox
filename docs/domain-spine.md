@@ -1520,11 +1520,11 @@ impl EffectiveConfiguration {
         model: FrozenModelSelection,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
-    pub const fn with_model_settings(
+    pub fn with_model_settings(
         model: FrozenModelSelection,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         model_settings: ValidatedModelSettings,
-    ) -> Self;
+    ) -> Option<Self>;
     // accessors: model(), parameters(), known_provider_failure_retry(), model_fallback(),
     // dangerous_tool_auto_approval(), model_settings()
 }
