@@ -7,19 +7,6 @@ restarts, disconnects, and device switches; terminal, web, macOS, and iOS
 clients connect to it from anywhere, and runners you operate execute tools on
 your own machines.
 
-What it is being built to do:
-
-- **Sessions you can shape.** Steer a running turn mid-flight, fork a
-  conversation from any earlier point, and delegate work into sub-sessions.
-- **Tools where the work lives.** Outbound-connected runners execute tools on
-  your workstations, servers, and sandboxes — the machine that holds the files,
-  not necessarily the one you are typing on.
-- **Approvals you can inspect.** Risky tool use waits for an explicit decision
-  bound to exactly the action requested.
-- **Honest reliability.** Reconnecting never presents a draft as final;
-  interrupted work is recorded as what actually happened, ambiguity included,
-  with provenance for who or what caused each change.
-
 The [vision](docs/vision.md) and [target model](docs/target-model.md) describe
 the purpose, deployment shape, and destination in full; the target model details
 these capabilities directionally — accepted records decide them — and several
@@ -27,10 +14,7 @@ these capabilities directionally — accepted records decide them — and severa
 [open decisions](docs/open-questions.md).
 
 > **Status:** early implementation phase; APIs, protocols, and storage details
-> are not yet stable. The initial domain and persistence slices now support a
-> local daemon process protocol, terminal client, scheduler, and offline and
-> Anthropic model-call paths. Remote runners and graphical clients remain future
-> milestones.
+> are not yet stable.
 
 ```text
  Terminal       Web       macOS / iOS
@@ -134,15 +118,19 @@ The daemon's default Anthropic key path is
 `$HOME/.config/signalbox/anthropic-api-key` and its default code-host token path
 is `$HOME/.config/signalbox/github-token`, overridable with
 `SIGNALBOX_DEV_ANTHROPIC_API_KEY_FILE` and `SIGNALBOX_DEV_GITHUB_TOKEN_FILE`
-respectively. No credential material is committed or generated. The
+respectively. The devenv Brave key path defaults to
+`$DEVENV_STATE/dev-instance/brave-api-key` and is overridable with
+`SIGNALBOX_DEV_BRAVE_API_KEY_FILE`. No credential material is committed or
+generated. The
 [credential lifecycle](docs/spec/configuration-and-credentials.md#credential-lifecycle)
 owns when those files are read, what their bytes mean, and how absence is
 handled. Provision the default code-host path from the GitHub CLI, and create
-the Anthropic path for editing, with these one-line commands:
+the Anthropic and Brave paths for editing, with these one-line commands:
 
 ```console
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/github-token"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; gh auth token >"$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 install -d -m 700 "$HOME/.config/signalbox" && (umask 077; destination="$HOME/.config/signalbox/anthropic-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
+install -d -m 700 "$DEVENV_STATE/dev-instance" && (umask 077; destination="$DEVENV_STATE/dev-instance/brave-api-key"; temporary="$(mktemp "$destination.XXXXXX")" || exit; trap 'rm -f "$temporary"' EXIT; if [ -e "$destination" ]; then cp "$destination" "$temporary" || exit; fi; editor="${EDITOR:-vi}"; EDITOR="$editor" sh -c 'set -f; $EDITOR "$1"' sh "$temporary" && mv "$temporary" "$destination" && trap - EXIT)
 ```
 
 Most of `devenv.nix` exists to satisfy the ambient-configuration refusals that

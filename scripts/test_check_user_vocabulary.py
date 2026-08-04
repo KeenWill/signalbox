@@ -69,6 +69,7 @@ def main() -> int:
         legacy_actor = (
             root / "crates" / "persistence" / "src" / "session_metadata.rs"
         )
+        storage_mapping = root / "crates" / "persistence" / "src" / "mapping.rs"
         mixed_storage_path = (
             root / "apps" / "signalboxd" / "tests" / "offline_tool_loop.rs"
         )
@@ -300,6 +301,9 @@ def main() -> int:
         legacy_actor.write_text(
             fixture_text(legacy_actor_lines), encoding="utf-8"
         )
+        storage_mapping.write_text(
+            'const DECISION_SOURCE: &str = "owner_command";\n', encoding="utf-8"
+        )
         git(root, "init", "--quiet")
         git(
             root,
@@ -308,6 +312,7 @@ def main() -> int:
             "crates/application/src/conversation_import.rs",
             "crates/domain/src/session.rs",
             "crates/persistence/src/session_metadata.rs",
+            "crates/persistence/src/mapping.rs",
             "crates/tools-code-host/src/code_host/review_slog/convergence.rs",
             "crates/tools-code-host/src/code_host/review_slog/example.rs",
             "crates/tools-github/src/lib.rs",

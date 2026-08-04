@@ -16,7 +16,9 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DeliveryRequest,
+    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
     DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
     GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
@@ -77,8 +79,9 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
         load_active_batch_from_connection, load_continuation_round_evidence,
-        load_recovery_batch_by_attempt, load_steering_continuation_round_evidence,
-        load_terminal_result_attempts, load_terminal_result_denials, persist_ended_attempt,
+        load_foreground_delegation_outcome, load_recovery_batch_by_attempt,
+        load_steering_continuation_round_evidence, load_terminal_result_attempts,
+        load_terminal_result_denials, persist_ended_attempt,
     },
 };
 
@@ -231,6 +234,86 @@ mod tests {
             error,
             SubmitInputRepositoryError::CommitAmbiguous(_)
         ));
+    }
+
+    #[test]
+    fn delegation_child_result_decoder_restores_exact_typed_outcome() {
+        let child = Uuid::from_u128(0xd101);
+        let turn = Uuid::from_u128(0xd102);
+        let content = DelegationContent::try_new(String::from("checked result"))
+            .expect("fixture content is valid");
+        let outcome = DelegationOutcome::reconstitute(
+            decode_delegation_outcome_kind("result_returned")
+                .expect("fixture outcome kind is supported"),
+            Some(content.clone()),
+            decode_delegation_outcome_reason("child_completed")
+                .expect("fixture reason is supported"),
+            decode_delegation_provenance("child_turn", child, Some(turn), None, None)
+                .expect("fixture provenance is complete"),
+        )
+        .expect("fixture outcome is internally consistent");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
+        assert_eq!(outcome.content(), Some(&content));
+        assert_eq!(
+            outcome.reconstitution_provenance(),
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: session_id_from_uuid(child),
+                turn: turn_id_from_uuid(turn),
+            }
+        );
+    }
+
+    #[test]
+    fn delegation_parent_result_decoder_restores_command_provenance() {
+        let parent = Uuid::from_u128(0xd111);
+        let turn = Uuid::from_u128(0xd112);
+        let command = Uuid::from_u128(0xd113);
+        let outcome = DelegationOutcome::reconstitute(
+            decode_delegation_outcome_kind("continue_running")
+                .expect("fixture outcome kind is supported"),
+            None,
+            decode_delegation_outcome_reason("parent_stopped_parent_and_descendants")
+                .expect("fixture reason is supported"),
+            decode_delegation_provenance(
+                "parent_turn_command",
+                parent,
+                Some(turn),
+                None,
+                Some(command),
+            )
+            .expect("fixture provenance is complete"),
+        )
+        .expect("fixture outcome is internally consistent");
+
+        assert_eq!(outcome.kind(), DelegationOutcomeKind::ContinueRunning);
+        assert_eq!(outcome.content(), None);
+        assert_eq!(
+            outcome.reconstitution_provenance(),
+            DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                session: session_id_from_uuid(parent),
+                turn: turn_id_from_uuid(turn),
+                command: durable_command_id_from_uuid(command)
+                    .expect("fixture command identity is valid"),
+            }
+        );
+    }
+
+    #[test]
+    fn delegation_result_decoder_rejects_incomplete_parent_provenance() {
+        let error = decode_delegation_provenance(
+            "parent_goal_command",
+            Uuid::from_u128(0xd121),
+            None,
+            None,
+            Some(Uuid::from_u128(0xd122)),
+        )
+        .expect_err("parent goal provenance requires its generation");
+
+        assert_eq!(
+            error,
+            SubmitInputCorruption::Inconsistent("delegation result provenance")
+        );
     }
 }
 
@@ -702,28 +785,19 @@ where
         | SubmitInputResult::Rejected(_) => None,
     };
     let interrupt_outcome = if let Some(interrupt) = interrupt {
-        let active_turn = scheduling
-            .as_ref()
-            .and_then(AcceptedInputSchedulingProjection::active_turn_execution);
-        let executing_tool_batch = match active_turn {
-            Some(active)
-                if matches!(
-                    active.phase(),
-                    signalbox_domain::ActiveTurnPhase::Running { .. }
-                ) =>
-            {
-                load_active_batch_from_connection(connection, interrupt.session(), active.turn())
-                    .await
-                    .map_err(map_tool_loop_error)?
-                    .filter(|batch| {
-                        matches!(
-                            batch.phase(),
-                            signalbox_domain::ToolBatchPhase::Executing { .. }
-                        )
-                    })
-            }
-            Some(_) | None => None,
-        };
+        let executing_tool_batch = load_active_batch_from_connection(
+            connection,
+            interrupt.session(),
+            interrupt.proof().predecessor(),
+        )
+        .await
+        .map_err(map_tool_loop_error)?
+        .filter(|batch| {
+            matches!(
+                batch.phase(),
+                signalbox_domain::ToolBatchPhase::Executing { .. }
+            )
+        });
         if let Some(mut batch) = executing_tool_batch {
             if let Some(current) =
                 batch
@@ -769,45 +843,99 @@ where
                 .map(signalbox_domain::ToolRequest::id)
                 .collect::<Vec<_>>();
             let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
-            let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
-                "applied interrupt lacks active scheduling state",
-            ))?;
-            let active_turn =
-                scheduling
-                    .active_turn_execution()
-                    .ok_or(SubmitInputCorruption::Inconsistent(
-                        "applied interrupt lacks active turn execution",
-                    ))?;
-            let identities = attach_interrupt_reclassification_candidates_for_active(
-                cancellation_identities,
-                &active_turn,
-                &mut next_reclassified_turn,
-            )
-            .map_err(|_| {
-                SubmitInputCorruption::Inconsistent("tool interrupt reclassification candidates")
-            })?;
-            Some(ModelCallInterruptOutcome::Cancelled(
-                scheduling
-                    .apply_interrupt_to_tool_batch(
-                        batch,
-                        result_entries,
-                        result_frontier,
-                        interrupt,
-                        identities,
+            let child_wait =
+                batch
+                    .requests()
+                    .iter()
+                    .find_map(|request| match batch.attempt(request.id()) {
+                        Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt)) => {
+                            match attempt.end() {
+                                signalbox_domain::ToolAttemptEnd::AwaitingChild {
+                                    spawning_request,
+                                    child,
+                                } => Some((request.id(), *spawning_request, *child)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    });
+            if child_wait.is_none() && scheduling.is_some() {
+                let Some(scheduling) = scheduling else {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "tool interrupt scheduling projection",
                     )
-                    .map_err(|error| {
-                        let context = match error {
-                            signalbox_domain::ModelCallClosureError::InterruptCorrelationMismatch => {
-                                "applied interrupt does not correlate with executing tool batch"
-                            }
-                            signalbox_domain::ModelCallClosureError::AttemptStateMismatch => {
-                                "applied interrupt does not match executing tool attempt state"
-                            }
-                            _ => "applied interrupt cannot close executing tool batch",
-                        };
-                        SubmitInputCorruption::Inconsistent(context)
-                    })?,
-            ))
+                    .into());
+                };
+                let active_turn = scheduling.active_turn_execution().ok_or(
+                    SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ),
+                )?;
+                let identities = attach_interrupt_reclassification_candidates_for_active(
+                    cancellation_identities,
+                    &active_turn,
+                    &mut next_reclassified_turn,
+                )
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "tool interrupt reclassification candidates",
+                    )
+                })?;
+                Some(ModelCallInterruptOutcome::Cancelled(
+                    scheduling
+                        .apply_interrupt_to_tool_batch(
+                            batch,
+                            result_entries,
+                            result_frontier,
+                            interrupt,
+                            identities,
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt cannot close executing tool batch",
+                            )
+                        })?,
+                ))
+            } else {
+                let projection = match child_wait {
+                    Some((awaiting_request, spawning_request, child)) => batch
+                        .prepare_delegation_cancellation_projection(
+                            result_entries,
+                            result_frontier,
+                            load_foreground_delegation_outcome(
+                                connection,
+                                interrupt.session(),
+                                awaiting_request,
+                                spawning_request,
+                                child,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?,
+                        ),
+                    None => batch.prepare_cancellation_projection(result_entries, result_frontier),
+                }
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "executing tool batch cannot project cancellation",
+                    )
+                })?;
+                let execution =
+                    require_live_execution_for_restart(connection, interrupt.session()).await?;
+                let identities = attach_interrupt_reclassification_candidates(
+                    cancellation_identities,
+                    &execution,
+                    &mut next_reclassified_turn,
+                )?;
+                Some(ModelCallInterruptOutcome::Cancelled(
+                    execution
+                        .apply_interrupt_to_tool_batch(interrupt, projection, identities)
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt cannot close executing tool batch",
+                            )
+                        })?,
+                ))
+            }
         } else {
             let recovery_operation = scheduling
                 .as_ref()
@@ -1119,15 +1247,35 @@ async fn prepare_against_locked_state(
     let prepared = if active_turn_id.is_some() {
         command.prepare_with_active_turn(&scheduling, accepted_input, turn, select_definition)
     } else {
-        let previous_position = sqlx::query_scalar::<_, Decimal>(
-            "SELECT acceptance_position
-               FROM accepted_input
-              WHERE session_id = $1
-              ORDER BY acceptance_position DESC
-              LIMIT 1",
+        let delegated_active = sqlx::query(
+            "SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
+                    attempt.interrupt_command_id
+               FROM turn_lifecycle AS lifecycle
+               LEFT JOIN turn_attempt AS attempt
+                 ON attempt.turn_attempt_id = lifecycle.current_attempt_id
+                AND attempt.turn_id = lifecycle.turn_id
+                AND attempt.session_id = lifecycle.session_id
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.origin_kind = 'delegation'
+                AND lifecycle.state_kind = 'active'",
         )
         .bind(session_id_to_uuid(command.session()))
         .fetch_optional(&mut *connection)
+        .await?;
+        let previous_position = sqlx::query_scalar::<_, Option<Decimal>>(
+            "SELECT max(accepted_position)
+               FROM (
+                    SELECT acceptance_position AS accepted_position
+                      FROM accepted_input
+                     WHERE session_id = $1
+                    UNION ALL
+                    SELECT acceptance_position AS accepted_position
+                      FROM turn_lifecycle
+                     WHERE session_id = $1
+               ) AS session_positions",
+        )
+        .bind(session_id_to_uuid(command.session()))
+        .fetch_one(&mut *connection)
         .await?
         .map(|value| {
             input_position_from_numeric(value).map_err(|reason| {
@@ -1138,13 +1286,50 @@ async fn prepare_against_locked_state(
             })
         })
         .transpose()?;
-        command.prepare_when_no_active_turn(
-            &session,
-            accepted_input,
-            turn,
-            previous_position,
-            select_definition,
-        )
+        match delegated_active {
+            Some(active) => {
+                let active_turn = turn_id_from_uuid(required(&active, "turn_id")?);
+                let phase: String = required(&active, "active_phase_kind")?;
+                let awaiting_approval = match phase.as_str() {
+                    "running"
+                    | "awaiting_child"
+                    | "awaiting_model_call_recovery"
+                    | "awaiting_tool_recovery" => false,
+                    "awaiting_tool_approval" => true,
+                    value => {
+                        return Err(SubmitInputCorruption::Unsupported {
+                            field: "delegated active phase",
+                            value: value.to_owned(),
+                        }
+                        .into());
+                    }
+                };
+                let existing_interrupt = active
+                    .try_get::<Option<Uuid>, _>("interrupt_command_id")?
+                    .map(durable_command_id_from_uuid)
+                    .transpose()
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent("delegated active interrupt command")
+                    })?;
+                command.prepare_with_delegated_active_turn(
+                    &session,
+                    active_turn,
+                    previous_position,
+                    existing_interrupt,
+                    awaiting_approval,
+                    accepted_input,
+                    turn,
+                    select_definition,
+                )
+            }
+            None => command.prepare_when_no_active_turn(
+                &session,
+                accepted_input,
+                turn,
+                previous_position,
+                select_definition,
+            ),
+        }
     };
 
     prepared
@@ -1206,6 +1391,7 @@ pub(crate) async fn load_scheduling_projection(
             (SELECT count(*)
                FROM turn_lifecycle
               WHERE session_id = $1
+                AND origin_kind = 'accepted_input'
                 AND goal_turn_is_runtime_relevant(
                     session_id, turn_id
                 )) AS lifecycle_count",
@@ -2921,42 +3107,115 @@ pub(crate) async fn load_scheduling_projection(
         .collect::<Vec<_>>();
     let semantic_rows = sqlx::query(
         "SELECT
-            source_session_id,
-            semantic_entry_id,
-            payload_kind,
-            origin_accepted_input_id,
-            steering_source_turn_id,
-            failed_turn_id,
-            cancelled_turn_id,
-            assistant_text_value,
-            producing_model_call_id,
-            assistant_tool_request_id,
-            tool_result_request_id,
-            tool_result_attempt_id,
-            completed_turn_id,
-            imported_conversation_id,
-            imported_transcript_entry_id,
-            assistant_response_part_ordinal,
-            model_identity_turn_id,
-            model_identity_defaults_version,
-            model_identity_direct_selection_id,
-            context_summary_value,
-            context_summary_producing_call_id,
-            context_summary_first_source_session_id,
-            context_summary_first_entry_id,
-            context_summary_through_source_session_id,
-            context_summary_through_entry_id
-         FROM semantic_transcript_entry
-        WHERE payload_kind <> 'imported_entry'
+            entry.source_session_id,
+            entry.semantic_entry_id,
+            entry.payload_kind,
+            entry.origin_accepted_input_id,
+            entry.steering_source_turn_id,
+            entry.failed_turn_id,
+            entry.cancelled_turn_id,
+            entry.assistant_text_value,
+            entry.producing_model_call_id,
+            entry.assistant_tool_request_id,
+            entry.tool_result_request_id,
+            entry.tool_result_attempt_id,
+            entry.completed_turn_id,
+            entry.imported_conversation_id,
+            entry.imported_transcript_entry_id,
+            entry.assistant_response_part_ordinal,
+            entry.model_identity_turn_id,
+            entry.model_identity_defaults_version,
+            entry.model_identity_direct_selection_id,
+            entry.context_summary_value,
+            entry.context_summary_producing_call_id,
+            entry.context_summary_first_source_session_id,
+            entry.context_summary_first_entry_id,
+            entry.context_summary_through_source_session_id,
+            entry.context_summary_through_entry_id,
+            entry.delegated_task_spawning_tool_request_id,
+            entry.delegation_message_id,
+            entry.delegation_result_awaiting_tool_request_id,
+            entry.delegation_result_spawning_tool_request_id,
+            delegated_task.task_content AS delegated_task_content,
+            task_relation.parent_session_id AS delegated_task_parent_session_id,
+            task_relation.parent_turn_id AS delegated_task_parent_turn_id,
+            delegated_message.spawning_tool_request_id AS delegation_message_spawning_request_id,
+            message_delivery.recipient_session_id AS delegation_message_recipient_session_id,
+            message_delivery.delivery_sequence AS delegation_message_delivery_sequence,
+            delegated_message.content_text AS delegation_message_content,
+            CASE delegated_message.direction
+                WHEN 'parent_to_child' THEN message_relation.parent_session_id
+                WHEN 'child_to_parent' THEN message_relation.child_session_id
+            END AS delegation_message_sender_session_id,
+            delegated_wait.child_session_id AS delegation_result_child_session_id,
+            delegated_wait.wait_mode AS delegation_result_wait_mode,
+            result_delivery.delivery_sequence AS delegation_result_delivery_sequence,
+            delegated_result.outcome_kind AS delegation_result_outcome_kind,
+            delegated_result.content_text AS delegation_result_content,
+            result_event.reason_kind AS delegation_result_reason_kind,
+            result_event.provenance_kind AS delegation_result_provenance_kind,
+            result_event.provenance_session_id AS delegation_result_provenance_session_id,
+            result_event.provenance_turn_id AS delegation_result_provenance_turn_id,
+            result_event.provenance_goal_generation AS delegation_result_provenance_goal_generation,
+            result_event.provenance_command_id AS delegation_result_provenance_command_id
+         FROM semantic_transcript_entry AS entry
+         LEFT JOIN session_delegation_initial_task AS delegated_task
+           ON delegated_task.spawning_tool_request_id =
+                  entry.delegated_task_spawning_tool_request_id
+          AND entry.payload_kind = 'delegated_task'
+          AND delegated_task.child_session_id = entry.source_session_id
+          AND delegated_task.semantic_entry_id = entry.semantic_entry_id
+         LEFT JOIN session_delegation AS task_relation
+           ON task_relation.spawning_tool_request_id =
+                  delegated_task.spawning_tool_request_id
+          AND entry.payload_kind = 'delegated_task'
+         LEFT JOIN session_message_delivery AS message_delivery
+           ON message_delivery.message_id = entry.delegation_message_id
+          AND entry.payload_kind = 'delegation_message'
+          AND message_delivery.recipient_session_id = entry.source_session_id
+         LEFT JOIN session_message AS delegated_message
+           ON delegated_message.message_id = message_delivery.message_id
+          AND entry.payload_kind = 'delegation_message'
+          AND delegated_message.spawning_tool_request_id =
+                  message_delivery.spawning_tool_request_id
+         LEFT JOIN session_delegation AS message_relation
+           ON message_relation.spawning_tool_request_id =
+                  delegated_message.spawning_tool_request_id
+          AND entry.payload_kind = 'delegation_message'
+         LEFT JOIN session_child_result_delivery AS result_delivery
+           ON result_delivery.awaiting_tool_request_id =
+                  entry.delegation_result_awaiting_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
+          AND result_delivery.spawning_tool_request_id =
+                  entry.delegation_result_spawning_tool_request_id
+          AND result_delivery.parent_session_id = entry.source_session_id
+         LEFT JOIN session_delegation_wait AS delegated_wait
+           ON delegated_wait.awaiting_tool_request_id =
+                  result_delivery.awaiting_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
+          AND delegated_wait.spawning_tool_request_id =
+                  result_delivery.spawning_tool_request_id
+          AND delegated_wait.parent_session_id = result_delivery.parent_session_id
+         LEFT JOIN session_child_result AS delegated_result
+           ON delegated_result.spawning_tool_request_id =
+                  result_delivery.spawning_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
+         LEFT JOIN session_delegation_event AS result_event
+           ON result_event.spawning_tool_request_id =
+                  delegated_result.spawning_tool_request_id
+          AND entry.payload_kind = 'delegation_result'
+          AND result_event.event_ordinal = delegated_result.event_ordinal
+          AND result_event.event_kind = delegated_result.event_kind
+        WHERE entry.payload_kind <> 'imported_entry'
           AND (
-            source_session_id = $3
-            OR (source_session_id, semantic_entry_id) IN (
+            entry.source_session_id = $3
+            OR (entry.source_session_id, entry.semantic_entry_id) IN (
             SELECT required.source_session_id, required.semantic_entry_id
               FROM UNNEST($1::uuid[], $2::uuid[])
                 AS required(source_session_id, semantic_entry_id)
             )
         )
-        ORDER BY source_session_id, semantic_entry_id",
+        ORDER BY entry.source_session_id, entry.semantic_entry_id",
     )
     .bind(&semantic_source_sessions)
     .bind(&semantic_entry_ids)
@@ -3013,6 +3272,238 @@ pub(crate) async fn load_scheduling_projection(
             row.try_get("context_summary_through_source_session_id")?;
         let summary_through_entry: Option<Uuid> =
             row.try_get("context_summary_through_entry_id")?;
+        let delegated_task_spawning_request: Option<Uuid> =
+            row.try_get("delegated_task_spawning_tool_request_id")?;
+        let delegated_task_content: Option<String> = row.try_get("delegated_task_content")?;
+        let delegated_task_parent_session: Option<Uuid> =
+            row.try_get("delegated_task_parent_session_id")?;
+        let delegated_task_parent_turn: Option<Uuid> =
+            row.try_get("delegated_task_parent_turn_id")?;
+        let delegation_message: Option<Uuid> = row.try_get("delegation_message_id")?;
+        let delegation_message_spawning_request: Option<Uuid> =
+            row.try_get("delegation_message_spawning_request_id")?;
+        let delegation_message_sender: Option<Uuid> =
+            row.try_get("delegation_message_sender_session_id")?;
+        let delegation_message_recipient: Option<Uuid> =
+            row.try_get("delegation_message_recipient_session_id")?;
+        let delegation_message_delivery_sequence: Option<Decimal> =
+            row.try_get("delegation_message_delivery_sequence")?;
+        let delegation_message_content: Option<String> =
+            row.try_get("delegation_message_content")?;
+        let delegation_result_awaiting_request: Option<Uuid> =
+            row.try_get("delegation_result_awaiting_tool_request_id")?;
+        let delegation_result_spawning_request: Option<Uuid> =
+            row.try_get("delegation_result_spawning_tool_request_id")?;
+        let delegation_result_child: Option<Uuid> =
+            row.try_get("delegation_result_child_session_id")?;
+        let delegation_result_wait_mode: Option<String> =
+            row.try_get("delegation_result_wait_mode")?;
+        let delegation_result_delivery_sequence: Option<Decimal> =
+            row.try_get("delegation_result_delivery_sequence")?;
+        let delegation_result_outcome: Option<String> =
+            row.try_get("delegation_result_outcome_kind")?;
+        let delegation_result_content: Option<String> = row.try_get("delegation_result_content")?;
+        let delegation_result_reason: Option<String> =
+            row.try_get("delegation_result_reason_kind")?;
+        let delegation_result_provenance_kind: Option<String> =
+            row.try_get("delegation_result_provenance_kind")?;
+        let delegation_result_provenance_session: Option<Uuid> =
+            row.try_get("delegation_result_provenance_session_id")?;
+        let delegation_result_provenance_turn: Option<Uuid> =
+            row.try_get("delegation_result_provenance_turn_id")?;
+        let delegation_result_provenance_goal: Option<Decimal> =
+            row.try_get("delegation_result_provenance_goal_generation")?;
+        let delegation_result_provenance_command: Option<Uuid> =
+            row.try_get("delegation_result_provenance_command_id")?;
+        let legacy_payload_present = origin.is_some()
+            || steering_source_turn.is_some()
+            || failed_turn.is_some()
+            || cancelled_turn.is_some()
+            || assistant_text.is_some()
+            || producing_call.is_some()
+            || tool_request.is_some()
+            || tool_result_attempt.is_some()
+            || completed_turn.is_some()
+            || imported_conversation.is_some()
+            || imported_transcript_entry.is_some()
+            || assistant_response_part_ordinal.is_some()
+            || model_identity_turn.is_some()
+            || model_identity_defaults_version.is_some()
+            || model_identity_direct_selection.is_some()
+            || summary_value.is_some()
+            || summary_call.is_some()
+            || summary_first_session.is_some()
+            || summary_first_entry.is_some()
+            || summary_through_session.is_some()
+            || summary_through_entry.is_some();
+        if payload_kind == "delegated_task" {
+            let (Some(spawning_request), Some(parent_session), Some(parent_turn), Some(content)) = (
+                delegated_task_spawning_request,
+                delegated_task_parent_session,
+                delegated_task_parent_turn,
+                delegated_task_content,
+            ) else {
+                return Err(SubmitInputCorruption::Inconsistent("delegated task payload").into());
+            };
+            if legacy_payload_present
+                || tool_result_request.is_some()
+                || delegation_message.is_some()
+                || delegation_result_awaiting_request.is_some()
+                || delegation_result_spawning_request.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent("delegated task payload").into());
+            }
+            let content = delegation_content(content, "delegated_task_content")?;
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::DelegatedTask {
+                    spawning_request: ToolRequestId::from_uuid(spawning_request),
+                    parent_session: session_id_from_uuid(parent_session),
+                    parent_turn: turn_id_from_uuid(parent_turn),
+                    content,
+                },
+            ));
+            continue;
+        }
+        if payload_kind == "delegation_message" {
+            let (
+                Some(message),
+                Some(spawning_request),
+                Some(sender),
+                Some(recipient),
+                Some(delivery_sequence),
+                Some(content),
+            ) = (
+                delegation_message,
+                delegation_message_spawning_request,
+                delegation_message_sender,
+                delegation_message_recipient,
+                delegation_message_delivery_sequence,
+                delegation_message_content,
+            )
+            else {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("delegation message payload").into(),
+                );
+            };
+            if legacy_payload_present
+                || tool_result_request.is_some()
+                || delegated_task_spawning_request.is_some()
+                || delegation_result_awaiting_request.is_some()
+                || delegation_result_spawning_request.is_some()
+                || recipient != source_session_uuid
+            {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("delegation message payload").into(),
+                );
+            }
+            let delivery_sequence = NonZeroU64::new(
+                positive_u64_from_numeric(delivery_sequence)
+                    .map_err(|_| SubmitInputCorruption::Inconsistent("delegation delivery"))?,
+            )
+            .ok_or(SubmitInputCorruption::Inconsistent("delegation delivery"))?;
+            let content = delegation_content(content, "delegation_message_content")?;
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::DelegationMessage {
+                    spawning_request: ToolRequestId::from_uuid(spawning_request),
+                    message: DelegationMessageId::from_uuid(message),
+                    sender: session_id_from_uuid(sender),
+                    recipient: source_session,
+                    delivery_sequence,
+                    content,
+                },
+            ));
+            continue;
+        }
+        if payload_kind == "delegation_result" {
+            let (
+                Some(awaiting_request),
+                Some(spawning_request),
+                Some(child),
+                Some(wait_mode),
+                Some(outcome_kind),
+                Some(reason),
+                Some(provenance_kind),
+                Some(provenance_session),
+            ) = (
+                delegation_result_awaiting_request,
+                delegation_result_spawning_request,
+                delegation_result_child,
+                delegation_result_wait_mode.as_deref(),
+                delegation_result_outcome.as_deref(),
+                delegation_result_reason.as_deref(),
+                delegation_result_provenance_kind.as_deref(),
+                delegation_result_provenance_session,
+            )
+            else {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("delegation result payload").into(),
+                );
+            };
+            let mode = decode_delegation_wait_mode(wait_mode)?;
+            let delivery_sequence = delegation_result_delivery_sequence
+                .map(|value| {
+                    positive_u64_from_numeric(value)
+                        .ok()
+                        .and_then(NonZeroU64::new)
+                        .ok_or(SubmitInputCorruption::Inconsistent("delegation delivery"))
+                })
+                .transpose()?;
+            if legacy_payload_present
+                || delegated_task_spawning_request.is_some()
+                || delegation_message.is_some()
+                || (mode == DelegationWaitMode::Foreground
+                    && (tool_result_request != Some(awaiting_request)
+                        || delivery_sequence.is_some()))
+                || (mode == DelegationWaitMode::Background
+                    && (tool_result_request.is_some() || delivery_sequence.is_none()))
+            {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("delegation result payload").into(),
+                );
+            }
+            let content = delegation_result_content
+                .map(|value| delegation_content(value, "delegation_result_content"))
+                .transpose()?;
+            let outcome = DelegationOutcome::reconstitute(
+                decode_delegation_outcome_kind(outcome_kind)?,
+                content,
+                decode_delegation_outcome_reason(reason)?,
+                decode_delegation_provenance(
+                    provenance_kind,
+                    provenance_session,
+                    delegation_result_provenance_turn,
+                    delegation_result_provenance_goal,
+                    delegation_result_provenance_command,
+                )?,
+            )
+            .ok_or(SubmitInputCorruption::Inconsistent(
+                "delegation result outcome",
+            ))?;
+            semantic_entries.push(SemanticTranscriptEntryReconstitutionInput::new(
+                entry,
+                source_session,
+                InitialSemanticTranscriptEntryPayload::DelegationResult {
+                    awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+                    spawning_request: ToolRequestId::from_uuid(spawning_request),
+                    child: session_id_from_uuid(child),
+                    mode,
+                    delivery_sequence,
+                    outcome: Box::new(outcome),
+                },
+            ));
+            continue;
+        }
+        if delegated_task_spawning_request.is_some()
+            || delegation_message.is_some()
+            || delegation_result_awaiting_request.is_some()
+            || delegation_result_spawning_request.is_some()
+        {
+            return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
+        }
         if payload_kind == "context_summary" {
             if origin.is_some()
                 || steering_source_turn.is_some()
@@ -3461,6 +3952,106 @@ pub(crate) async fn load_scheduling_projection(
         })
 }
 
+fn delegation_content(
+    value: String,
+    field: &'static str,
+) -> Result<DelegationContent, SubmitInputCorruption> {
+    DelegationContent::try_new(value).map_err(|_| SubmitInputCorruption::Inconsistent(field))
+}
+
+fn decode_delegation_wait_mode(value: &str) -> Result<DelegationWaitMode, SubmitInputCorruption> {
+    match value {
+        "foreground" => Ok(DelegationWaitMode::Foreground),
+        "background" => Ok(DelegationWaitMode::Background),
+        _ => Err(SubmitInputCorruption::Unsupported {
+            field: "delegation wait mode",
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn decode_delegation_outcome_kind(
+    value: &str,
+) -> Result<DelegationOutcomeKind, SubmitInputCorruption> {
+    match value {
+        "result_returned" => Ok(DelegationOutcomeKind::ResultReturned),
+        "child_failed" => Ok(DelegationOutcomeKind::ChildFailed),
+        "child_stopped" => Ok(DelegationOutcomeKind::ChildStopped),
+        "child_cancelled" => Ok(DelegationOutcomeKind::ChildCancelled),
+        "already_terminal" => Ok(DelegationOutcomeKind::AlreadyTerminal),
+        "continue_running" => Ok(DelegationOutcomeKind::ContinueRunning),
+        _ => Err(SubmitInputCorruption::Unsupported {
+            field: "delegation outcome",
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn decode_delegation_outcome_reason(
+    value: &str,
+) -> Result<DelegationOutcomeReason, SubmitInputCorruption> {
+    match value {
+        "child_completed" => Ok(DelegationOutcomeReason::ChildCompleted),
+        "child_execution_failed" => Ok(DelegationOutcomeReason::ChildExecutionFailed),
+        "child_result_unavailable" => Ok(DelegationOutcomeReason::ChildResultUnavailable),
+        "child_cancelled" => Ok(DelegationOutcomeReason::ChildCancelled),
+        "parent_stopped_parent_and_descendants" => Ok(DelegationOutcomeReason::ParentStopped {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        }),
+        "parent_cancelled_parent_and_descendants" => Ok(DelegationOutcomeReason::ParentCancelled {
+            scope: DescendantTerminationScope::ParentAndDescendants,
+        }),
+        _ => Err(SubmitInputCorruption::Unsupported {
+            field: "delegation outcome reason",
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn decode_delegation_provenance(
+    kind: &str,
+    session: Uuid,
+    turn: Option<Uuid>,
+    generation: Option<Decimal>,
+    command: Option<Uuid>,
+) -> Result<DelegationProvenanceReconstitutionInput, SubmitInputCorruption> {
+    match (kind, turn, generation, command) {
+        ("child_turn", Some(turn), None, None) => {
+            Ok(DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: session_id_from_uuid(session),
+                turn: turn_id_from_uuid(turn),
+            })
+        }
+        ("parent_turn_command", Some(turn), None, Some(command)) => {
+            Ok(DelegationProvenanceReconstitutionInput::ParentTurnCommand {
+                session: session_id_from_uuid(session),
+                turn: turn_id_from_uuid(turn),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("delegation provenance command")
+                })?,
+            })
+        }
+        ("parent_goal_command", None, Some(generation), Some(command)) => {
+            let generation = positive_u64_from_numeric(generation)
+                .ok()
+                .and_then(NonZeroU64::new)
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "delegation provenance generation",
+                ))?;
+            Ok(DelegationProvenanceReconstitutionInput::ParentGoalCommand {
+                session: session_id_from_uuid(session),
+                generation: GoalGeneration::new(generation),
+                command: durable_command_id_from_uuid(command).map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("delegation provenance command")
+                })?,
+            })
+        }
+        _ => Err(SubmitInputCorruption::Inconsistent(
+            "delegation result provenance",
+        )),
+    }
+}
+
 fn map_imported_scheduling_error(
     error: crate::create_session_from_imported_frontier::ImportedSessionRepositoryError,
 ) -> SubmitInputRepositoryError {
@@ -3584,7 +4175,7 @@ fn accepted_origin_source_turn(delivery: DeliveryRequest) -> Option<TurnId> {
     }
 }
 
-fn decode_goal_origin_configuration(
+pub(crate) fn decode_goal_origin_configuration(
     row: &PgRow,
     expected_session: SessionId,
 ) -> Result<OriginConfiguration, SubmitInputRepositoryError> {

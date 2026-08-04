@@ -28,8 +28,10 @@ use signalbox_tools_github::{
 };
 use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
 use signalbox_tools_web::{
-    ReqwestWebFetchTransport, WEB_FETCH_NAME, WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool,
-    WebFetchTransport,
+    ReqwestWebFetchTransport, ReqwestWebSearchTransport, WEB_FETCH_NAME, WEB_SEARCH_NAME,
+    WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
+    WebSearchConfiguration, WebSearchExecutor, WebSearchProvider, WebSearchTool,
+    WebSearchTransport,
 };
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WORKSPACE_MUTATION_TOOL_NAMES, WORKSPACE_READ_TOOL_NAMES,
@@ -127,6 +129,7 @@ impl WorkspaceMutationFileSystem for PinnedWorkspaceFileSystem {
 
 struct ComposedToolFamilies<
     Transport,
+    SearchTransport,
     Writer,
     Credentials,
     HostTransport,
@@ -136,6 +139,7 @@ struct ComposedToolFamilies<
     PlanPort,
 > {
     web_fetch: WebFetchTool<Transport>,
+    web_search: WebSearchTool<Credentials, SearchTransport>,
     status: SessionStatusTool<Writer>,
     code_host: CodeHostTools<Credentials, HostTransport>,
     github: Option<GitHubTools<Credentials, GitHubTransportType>>,
@@ -146,10 +150,29 @@ struct ComposedToolFamilies<
     goal: Option<GoalDeclarationTool>,
 }
 
+/// Credential channels required by the daemon's base tool composition.
+pub struct BaseDaemonCredentialInputs<Credentials> {
+    /// Credential access for authenticated web search.
+    pub web_search: Credentials,
+    /// Credential access shared by the base code-host tools.
+    pub code_host: Credentials,
+}
+
+/// Credential channels required when every mapped daemon family is composed.
+pub struct MappedDaemonCredentialInputs<Credentials> {
+    /// Credential access for authenticated web search.
+    pub web_search: Credentials,
+    /// Credential access for code-host tools.
+    pub code_host: Credentials,
+    /// Credential access for the mapped GitHub family.
+    pub github: Credentials,
+}
+
 /// The complete daemon-local declarations and their matching dispatch executor.
 pub struct DaemonTools<
     Clock,
     Transport,
+    SearchTransport,
     Writer,
     Credentials,
     HostTransport,
@@ -162,6 +185,7 @@ pub struct DaemonTools<
     executor: DaemonToolExecutor<
         Clock,
         Transport,
+        SearchTransport,
         Writer,
         Credentials,
         HostTransport,
@@ -176,6 +200,7 @@ impl<Clock>
     DaemonTools<
         Clock,
         ReqwestWebFetchTransport,
+        ReqwestWebSearchTransport,
         PostgresSessionStatusWriter,
         FileCredentialAccess,
         GitHubCodeHostTransport,
@@ -186,22 +211,33 @@ impl<Clock>
     >
 {
     /// Composes every production tool family from explicit deployment inputs.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new_production(
         clock: Clock,
         pool: PgPool,
-        credentials: FileCredentialAccess,
+        credentials: MappedDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
         github_egress_policy: GitHubEgressPolicy,
         workspace_root: &Path,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
+        let MappedDaemonCredentialInputs {
+            web_search,
+            code_host,
+            github,
+        } = credentials;
         let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
+        let web_search = WebSearchTool::try_new_production(
+            web_search,
+            WebSearchConfiguration::new(WebSearchProvider::Brave),
+        )
+        .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
         let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let code_host = CodeHostTools::try_new(credentials.clone(), code_host_transport)
+        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
-        let github = GitHubTools::try_new_production(credentials, github_egress_policy)
+        let github = GitHubTools::try_new_production(github, github_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace = PinnedWorkspaceFileSystem::try_new(workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
@@ -220,6 +256,7 @@ impl<Clock>
             clock,
             ComposedToolFamilies {
                 web_fetch,
+                web_search,
                 status,
                 code_host,
                 github: Some(github),
@@ -237,17 +274,26 @@ impl<Clock>
     pub fn try_new_without_tool_mappings(
         clock: Clock,
         pool: PgPool,
-        credentials: FileCredentialAccess,
+        credentials: BaseDaemonCredentialInputs<FileCredentialAccess>,
         code_host_transport: GitHubCodeHostTransport,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
+        let BaseDaemonCredentialInputs {
+            web_search,
+            code_host,
+        } = credentials;
         let web_fetch = WebFetchTool::try_new_production(web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
+        let web_search = WebSearchTool::try_new_production(
+            web_search,
+            WebSearchConfiguration::new(WebSearchProvider::Brave),
+        )
+        .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
         let status = SessionStatusTool::try_new_postgres(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
         let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
-        let code_host = CodeHostTools::try_new(credentials, code_host_transport)
+        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
@@ -255,6 +301,7 @@ impl<Clock>
             clock,
             ComposedToolFamilies {
                 web_fetch,
+                web_search,
                 status,
                 code_host,
                 github: None,
@@ -271,6 +318,7 @@ impl<Clock>
 impl<
     Clock,
     Transport,
+    SearchTransport,
     Writer,
     Credentials,
     HostTransport,
@@ -282,6 +330,7 @@ impl<
     DaemonTools<
         Clock,
         Transport,
+        SearchTransport,
         Writer,
         Credentials,
         HostTransport,
@@ -298,10 +347,10 @@ where
     pub fn try_new(
         clock: Clock,
         transport: Transport,
+        credentials: MappedDaemonCredentialInputs<Credentials>,
+        web_search_transport: SearchTransport,
         writer: Writer,
-        code_host_credentials: Credentials,
         code_host_transport: HostTransport,
-        github_credentials: Credentials,
         github_transport: GitHubTransportType,
         github_egress_policy: GitHubEgressPolicy,
         filesystem: FileSystem,
@@ -310,15 +359,25 @@ where
         plan_port: PlanPort,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
+        let MappedDaemonCredentialInputs {
+            web_search,
+            code_host,
+            github,
+        } = credentials;
         let web_fetch = WebFetchTool::try_new(transport, web_fetch_egress_policy)
             .map_err(|_| DaemonToolsConstructionError::WebFetch)?;
+        let web_search = WebSearchTool::try_new(
+            web_search,
+            web_search_transport,
+            WebSearchConfiguration::new(WebSearchProvider::Brave),
+        )
+        .map_err(|_| DaemonToolsConstructionError::WebSearch)?;
         let status = SessionStatusTool::try_new(writer)
             .map_err(|_| DaemonToolsConstructionError::SessionStatus)?;
-        let code_host = CodeHostTools::try_new(code_host_credentials, code_host_transport)
+        let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
-        let github =
-            GitHubTools::try_new(github_credentials, github_transport, github_egress_policy)
-                .map_err(|_| DaemonToolsConstructionError::GitHub)?;
+        let github = GitHubTools::try_new(github, github_transport, github_egress_policy)
+            .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace_read = WorkspaceReadTools::try_new(filesystem.clone(), workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
         let workspace_mutation = WorkspaceMutationTools::try_new(filesystem, workspace_root)
@@ -330,6 +389,7 @@ where
             clock,
             ComposedToolFamilies {
                 web_fetch,
+                web_search,
                 status,
                 code_host,
                 github: Some(github),
@@ -346,6 +406,7 @@ where
         clock: Clock,
         families: ComposedToolFamilies<
             Transport,
+            SearchTransport,
             Writer,
             Credentials,
             HostTransport,
@@ -357,6 +418,7 @@ where
     ) -> Result<Self, DaemonToolsConstructionError> {
         let ComposedToolFamilies {
             web_fetch,
+            web_search,
             status,
             code_host,
             github,
@@ -373,6 +435,7 @@ where
             .map_err(|_| DaemonToolsConstructionError::Echo)?
             .into_parts();
         let (web_fetch_catalog, web_fetch) = web_fetch.into_parts();
+        let (web_search_catalog, web_search) = web_search.into_parts();
         let (status_catalog, session_status) = status.into_parts();
         let (code_host_catalog, code_host) = code_host.into_parts();
         let github = github.map(GitHubTools::into_parts);
@@ -385,6 +448,7 @@ where
             current_time_catalog,
             echo_catalog,
             web_fetch_catalog,
+            web_search_catalog,
             status_catalog,
             code_host_catalog,
             plan_catalog,
@@ -406,6 +470,7 @@ where
                 current_time,
                 echo,
                 web_fetch,
+                web_search,
                 session_status,
                 code_host,
                 github: github.map(|(_, executor)| executor),
@@ -428,6 +493,7 @@ where
         DaemonToolExecutor<
             Clock,
             Transport,
+            SearchTransport,
             Writer,
             Credentials,
             HostTransport,
@@ -450,6 +516,8 @@ pub enum DaemonToolsConstructionError {
     Echo,
     /// The web-fetch declaration or transport was invalid.
     WebFetch,
+    /// The web-search declaration or transport was invalid.
+    WebSearch,
     /// The session-status declaration was invalid.
     SessionStatus,
     /// The code-host declarations, credential boundary, or transport were
@@ -477,6 +545,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::CurrentTime => "current_time tool construction failed",
             Self::Echo => "echo tool construction failed",
             Self::WebFetch => "web_fetch tool construction failed",
+            Self::WebSearch => "web_search tool construction failed",
             Self::SessionStatus => "session_status_update tool construction failed",
             Self::CodeHost => "code-host tool suite construction failed",
             Self::GitHub => "GitHub pull-request tool suite construction failed",
@@ -544,15 +613,9 @@ impl DaemonToolCatalog {
         postures: impl IntoIterator<Item = (ToolName, ToolApprovalPosture)>,
         composition: DaemonToolComposition,
     ) -> Result<(), ConfiguredApprovalPostureError> {
-        for (name, posture) in postures {
+        for (name, _posture) in postures {
             if !configured_composition_contains(&name, composition) {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
-            }
-            match posture {
-                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
-                ToolApprovalPosture::Delegated => {
-                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
-                }
             }
         }
         Ok(())
@@ -567,12 +630,6 @@ impl DaemonToolCatalog {
             let Some(entry) = self.entries.get_mut(&name) else {
                 return Err(ConfiguredApprovalPostureError::UnknownTool { name });
             };
-            match posture {
-                ToolApprovalPosture::Auto | ToolApprovalPosture::Human => {}
-                ToolApprovalPosture::Delegated => {
-                    return Err(ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name });
-                }
-            }
             entry.definition = entry.definition.clone().with_approval_posture(posture);
         }
         Ok(self)
@@ -593,6 +650,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
     name == CURRENT_TIME_NAME
         || name == ECHO_NAME
         || name == WEB_FETCH_NAME
+        || name == WEB_SEARCH_NAME
         || name == SESSION_STATUS_UPDATE_NAME
         || name == GOAL_DECLARE_NAME
         || CODE_HOST_TOOL_NAMES.contains(&name)
@@ -608,15 +666,13 @@ struct DuplicateDaemonTool;
 pub enum ConfiguredApprovalPostureError {
     /// The configured name is absent from the composed catalog.
     UnknownTool { name: ToolName },
-    /// Delegated judging is not wired into this runtime yet.
-    DelegatedJudgeUnavailable { name: ToolName },
 }
 
 impl ConfiguredApprovalPostureError {
     /// Borrows the configured tool name without exposing it to startup telemetry.
     pub const fn name(&self) -> &ToolName {
         match self {
-            Self::UnknownTool { name } | Self::DelegatedJudgeUnavailable { name } => name,
+            Self::UnknownTool { name } => name,
         }
     }
 }
@@ -625,9 +681,6 @@ impl fmt::Display for ConfiguredApprovalPostureError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::UnknownTool { .. } => "configured approval posture names an unknown tool",
-            Self::DelegatedJudgeUnavailable { .. } => {
-                "delegated approval posture requires judge wiring"
-            }
         })
     }
 }
@@ -706,6 +759,7 @@ where
 pub struct DaemonToolExecutor<
     Clock,
     Transport,
+    SearchTransport,
     Writer,
     Credentials,
     HostTransport,
@@ -717,6 +771,7 @@ pub struct DaemonToolExecutor<
     current_time: CurrentTimeExecutor<Clock>,
     echo: EchoExecutor,
     web_fetch: WebFetchExecutor<Transport>,
+    web_search: WebSearchExecutor<Credentials, SearchTransport>,
     session_status: SessionStatusExecutor<Writer>,
     code_host: CodeHostExecutor<Credentials, HostTransport>,
     github: Option<GitHubExecutor<Credentials, GitHubTransportType>>,
@@ -764,6 +819,7 @@ impl ClassifyOperatorFailure for DaemonToolExecutorError {
 impl<
     Clock,
     Transport,
+    SearchTransport,
     Writer,
     Credentials,
     HostTransport,
@@ -775,6 +831,7 @@ impl<
     for DaemonToolExecutor<
         Clock,
         Transport,
+        SearchTransport,
         Writer,
         Credentials,
         HostTransport,
@@ -786,6 +843,7 @@ impl<
 where
     Clock: CurrentTimeClock,
     Transport: WebFetchTransport,
+    SearchTransport: WebSearchTransport,
     Writer: SessionStatusWriter,
     Credentials: CredentialAccess,
     HostTransport: CodeHostTransport,
@@ -813,6 +871,11 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             WEB_FETCH_NAME => self
                 .web_fetch
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            WEB_SEARCH_NAME => self
+                .web_search
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
@@ -908,6 +971,22 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct OfflineSearchTransport;
+
+    impl WebSearchTransport for OfflineSearchTransport {
+        async fn search(
+            &mut self,
+            _request: signalbox_tools_web::WebSearchRequest,
+            credential: &CredentialValue,
+        ) -> signalbox_tools_web::WebSearchTransportOutcome {
+            signalbox_tools_web::WebSearchTransportOutcome::failed(
+                signalbox_tools_web::WebSearchTransportFailure::RequestFailed,
+                credential,
+            )
+        }
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct OfflineWriterError;
 
@@ -997,8 +1076,9 @@ mod tests {
         async fn read_conversation(
             &mut self,
             _request: signalbox_tools_conversations::ConversationTranscriptRequest,
-        ) -> Result<Option<signalbox_tools_conversations::TranscriptPage>, Self::Error> {
-            Ok(None)
+        ) -> Result<signalbox_tools_conversations::ConversationTranscriptRead, Self::Error>
+        {
+            Ok(signalbox_tools_conversations::ConversationTranscriptRead::NotFound)
         }
 
         async fn read_imported_conversation(
@@ -1054,6 +1134,58 @@ mod tests {
         );
     }
 
+    /// The shipped posture table and daemon catalog compose both egress tools
+    /// into user-approved requests while their declarations stay fail-closed.
+    #[test]
+    fn shipped_web_postures_resolve_both_daemon_tools_to_human_approval() {
+        let configuration_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml");
+        let configuration = crate::HubModelConfiguration::read(&configuration_path)
+            .expect("checked-in configuration is valid");
+        let (web_fetch_catalog, _executor) =
+            WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::deny_all())
+                .expect("offline web fetch tool compiles")
+                .into_parts();
+        let (web_search_catalog, _executor) = WebSearchTool::try_new(
+            OfflineCredentials,
+            OfflineSearchTransport,
+            WebSearchConfiguration::new(WebSearchProvider::Brave),
+        )
+        .expect("offline web search tool compiles")
+        .into_parts();
+        let catalog = DaemonToolCatalog::try_new([web_fetch_catalog, web_search_catalog])
+            .expect("web tool names are distinct")
+            .with_approval_postures(configuration.tool_approval_postures())
+            .expect("shipped postures name composed tools");
+        let web_fetch =
+            ToolName::try_new(String::from(WEB_FETCH_NAME)).expect("web fetch name is valid");
+        let web_search =
+            ToolName::try_new(String::from(WEB_SEARCH_NAME)).expect("web search name is valid");
+        let web_fetch_definition = catalog
+            .definition(&web_fetch)
+            .expect("web fetch remains composed");
+        let web_search_definition = catalog
+            .definition(&web_search)
+            .expect("web search remains composed");
+
+        assert_eq!(
+            web_fetch_definition.approval_posture(),
+            Some(ToolApprovalPosture::Human)
+        );
+        assert_eq!(
+            web_search_definition.approval_posture(),
+            Some(ToolApprovalPosture::Human)
+        );
+        assert_eq!(
+            web_fetch_definition.permission_default(),
+            signalbox_domain::ToolPermissionDefault::Confirm
+        );
+        assert_eq!(
+            web_search_definition.permission_default(),
+            signalbox_domain::ToolPermissionDefault::Confirm
+        );
+    }
+
     #[test]
     fn composed_catalog_rejects_an_unknown_posture_name() {
         let (echo_catalog, _executor) = EchoTool::try_new()
@@ -1099,22 +1231,18 @@ mod tests {
     }
 
     #[test]
-    fn composition_prevalidation_rejects_delegated_without_judge_wiring() {
+    fn composition_prevalidation_accepts_delegated_posture() {
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
-        let rejected = DaemonToolCatalog::validate_approval_postures_for_composition(
-            [(echo.clone(), ToolApprovalPosture::Delegated)],
+
+        DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(echo, ToolApprovalPosture::Delegated)],
             DaemonToolComposition::Base,
         )
-        .expect_err("delegated posture fails before database construction");
-
-        assert_eq!(
-            rejected,
-            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
-        );
+        .expect("the production composition wires delegated judging");
     }
 
     #[test]
-    fn composed_catalog_rejects_delegated_posture_without_judge_wiring() {
+    fn composed_catalog_applies_delegated_posture() {
         let (echo_catalog, _executor) = EchoTool::try_new()
             .expect("echo fixture compiles")
             .into_parts();
@@ -1122,13 +1250,16 @@ mod tests {
             .expect("single-tool fixture has unique names");
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
 
-        let rejected = catalog
+        let configured = catalog
             .with_approval_postures([(echo.clone(), ToolApprovalPosture::Delegated)])
-            .expect_err("delegated posture fails closed without judge dispatch");
+            .expect("the composed catalog accepts delegated judging");
 
         assert_eq!(
-            rejected,
-            ConfiguredApprovalPostureError::DelegatedJudgeUnavailable { name: echo }
+            configured
+                .definition(&echo)
+                .expect("the fixture tool remains composed")
+                .approval_posture(),
+            Some(ToolApprovalPosture::Delegated)
         );
     }
 
@@ -1187,6 +1318,12 @@ mod tests {
     fn daemon_catalog_without_mappings_contains_only_base_families() {
         let web_fetch = WebFetchTool::try_new(OfflineTransport, WebFetchEgressPolicy::deny_all())
             .expect("offline web fetch tool compiles");
+        let web_search = WebSearchTool::try_new(
+            OfflineCredentials,
+            OfflineSearchTransport,
+            WebSearchConfiguration::new(WebSearchProvider::Brave),
+        )
+        .expect("offline web search tool compiles");
         let status =
             SessionStatusTool::try_new(OfflineWriter).expect("offline status tool compiles");
         let code_host = CodeHostTools::try_new(OfflineCredentials, OfflineCodeHostTransport)
@@ -1195,6 +1332,7 @@ mod tests {
             || SystemTime::UNIX_EPOCH,
             ComposedToolFamilies {
                 web_fetch,
+                web_search,
                 status,
                 code_host,
                 github: None::<GitHubTools<OfflineCredentials, OfflineGitHubTransport>>,
@@ -1237,6 +1375,7 @@ mod tests {
                 REVIEW_GATE_CHECK_NAME,
                 SESSION_STATUS_UPDATE_NAME,
                 WEB_FETCH_NAME,
+                WEB_SEARCH_NAME,
             ]
         );
     }
@@ -1249,10 +1388,14 @@ mod tests {
         let (catalog, _executor) = DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
+            OfflineSearchTransport,
             OfflineWriter,
-            OfflineCredentials,
             OfflineCodeHostTransport,
-            OfflineCredentials,
             OfflineGitHubTransport,
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
@@ -1306,6 +1449,7 @@ mod tests {
                 SEARCH_FILES_NAME,
                 SESSION_STATUS_UPDATE_NAME,
                 WEB_FETCH_NAME,
+                WEB_SEARCH_NAME,
                 WRITE_FILE_NAME,
             ]
         );

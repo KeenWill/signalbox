@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
+    num::NonZeroU64,
 };
 
 use rust_decimal::Decimal;
@@ -21,39 +22,46 @@ use signalbox_application::{
     RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
-    AcceptedInputDisposition, AcceptedInputId, ActiveTurnPhase, AmbiguousModelCallTurn,
-    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurn,
-    CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
-    CorrelatedModelCallTerminalObservation, DirectModelSelection, DurableCommandId,
+    AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
+    ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
+    AssistantText, AuthorizedModelCall, CancelledModelCallTurn, CancelledToolRoundModelCallTurn,
+    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, DirectModelSelection, DurableCommandId,
     FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
     FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
     ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
     ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
     ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition,
+    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
     PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
-    PreparedModelCallRequest, PreparedToolResultProjection, ProviderModelCallFailureCause,
-    ProviderModelIdentity, ProviderReportedTokenUsage, ReclassifiedPendingSteeringTurn,
-    ReconciliationRequiredModelCallTurn, ReconciliationRequiredToolTurn, RefusedModelCallTurn,
-    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
-    StopRequestedModelCallTurn, ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource,
-    ToolRequest, ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId, UserContent,
+    PreparedDelegatedTurnActivation, PreparedModelCallRequest, PreparedToolResultProjection,
+    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
+    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
+    ReconciliationRequiredToolTurn, RefusedModelCallTurn,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
+    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
+    ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
+    ToolRoundModelCallTurn, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
-        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        session_id_from_uuid, session_id_to_uuid, tool_approval_posture_to_str,
+        ToolApprovalDecisionSourceStorageKind, accepted_input_id_from_uuid,
+        dangerous_tool_auto_approval_to_str, defaults_version_to_numeric,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
+        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_decision_source_to_str, tool_approval_posture_to_str,
         tool_request_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
-        SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection,
-        require_recorded_batch,
+        SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
+        load_scheduling_projection, require_recorded_batch,
     },
 };
 
@@ -325,10 +333,24 @@ impl PostgresModelCallRepository {
         .with_session_credentials(self.credential_families.clone())
     }
 
+    /// Derives approval-judge storage from this repository's exact database
+    /// and model configuration.
+    pub fn approval_judge_repository(
+        &self,
+    ) -> crate::approval_judge::PostgresApprovalJudgeRepository {
+        crate::approval_judge::PostgresApprovalJudgeRepository::new(
+            self.pool.clone(),
+            self.targets.clone(),
+            self.credential_reference.clone(),
+            self.credential_families.clone(),
+            self.cache_inclusive_input_targets.clone(),
+        )
+    }
+
     /// Reconstitutes the exact first-call operation for one read-only activation preview.
     pub async fn preview_activation_operation(
         &self,
-        preview: &signalbox_domain::PreparedAcceptedInputTurnActivation,
+        preview: &signalbox_domain::PreparedTurnActivation,
         call: ModelCallId,
     ) -> Result<ProspectiveModelCall, ModelCallRepositoryError> {
         let session_id = preview.turn().session();
@@ -370,7 +392,7 @@ impl PostgresModelCallRepository {
         let tool_denial_correlations =
             load_tool_denial_correlations(&mut transaction, &frontier_entries).await?;
         let execution = ModelCallExecutionReconstitutionInput::new(
-            preview.turn().clone(),
+            preview.turn(),
             self.targets.clone(),
             preview.starting_snapshot().clone(),
             frontier_entries,
@@ -1337,7 +1359,7 @@ where
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
 }
 
-async fn resolve_session_credential(
+pub(crate) async fn resolve_session_credential(
     connection: &mut PgConnection,
     session: SessionId,
     target: ResolvedProviderTarget,
@@ -2458,19 +2480,35 @@ fn pending_reclassification_candidates(
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
-    pending_reclassification_candidates_for_active(execution.active_turn(), next_turn)
+    pending_reclassification_candidates_from_parts(
+        execution.active_turn().turn(),
+        execution.active_turn().pending_steering(),
+        next_turn,
+    )
 }
 
 fn pending_reclassification_candidates_for_active(
     active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
+    pending_reclassification_candidates_from_parts(
+        active_turn.turn(),
+        active_turn.pending_steering(),
+        next_turn,
+    )
+}
+
+fn pending_reclassification_candidates_from_parts(
+    source_turn: TurnId,
+    pending_steering: &[signalbox_domain::PendingSteeringInput],
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
     let mut proposed_turns = BTreeSet::new();
     let mut reclassifications = Vec::new();
-    for pending in active_turn.pending_steering() {
+    for pending in pending_steering {
         let accepted_input = pending.accepted_input();
         let proposed_turn = next_turn(accepted_input);
-        record_reclassified_turn_candidate(active_turn.turn(), proposed_turn, &mut proposed_turns)?;
+        record_reclassified_turn_candidate(source_turn, proposed_turn, &mut proposed_turns)?;
         reclassifications.push(PendingSteeringReclassificationIdentity::new(
             accepted_input,
             proposed_turn,
@@ -2691,19 +2729,26 @@ async fn require_live_execution_with_targets(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
-    let active_turn = scheduling
-        .active_turn_execution()
-        .ok_or(ModelCallRepositoryError::NoLiveExecution)?;
+    let delegated = load_delegated_live_turn(connection, requested_session, &scheduling).await?;
+    let (active_turn, starting_snapshot) = match delegated {
+        Some(value) => value,
+        None => {
+            let active = scheduling
+                .active_turn_execution()
+                .ok_or(ModelCallRepositoryError::NoLiveExecution)?;
+            let starting = scheduling
+                .resolved_snapshot(active.start().frontier().snapshot())
+                .cloned()
+                .ok_or(ModelCallCorruption::Missing("starting snapshot"))?;
+            (active.into(), starting)
+        }
+    };
     if !matches!(
         active_turn.phase(),
         signalbox_domain::ActiveTurnPhase::Running { .. }
     ) {
         return Err(ModelCallRepositoryError::NoLiveExecution);
     }
-    let starting_snapshot = scheduling
-        .resolved_snapshot(active_turn.start().frontier().snapshot())
-        .cloned()
-        .ok_or(ModelCallCorruption::Missing("starting snapshot"))?;
     let (pinned_target, calls) =
         load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
     let call_snapshot = match calls
@@ -2729,13 +2774,12 @@ async fn require_live_execution_with_targets(
                 .ok_or(ModelCallCorruption::Missing("frontier semantic entry"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let pending_steering = active_turn
-        .pending_steering()
-        .iter()
-        .map(signalbox_domain::PendingSteeringInput::accepted_input)
-        .collect::<Vec<_>>();
-    let origin_contents =
-        load_origin_contents(connection, &frontier_entries, &pending_steering).await?;
+    let origin_contents = load_origin_contents(
+        connection,
+        &frontier_entries,
+        active_turn.pending_steering(),
+    )
+    .await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
     let tool_denial_correlations =
@@ -2791,6 +2835,345 @@ async fn require_live_execution_with_targets(
         let (_, failure) = error.into_parts();
         ModelCallCorruption::Execution(failure).into()
     })
+}
+
+async fn load_delegated_live_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+) -> Result<
+    Option<(
+        signalbox_domain::ActivatedTurn,
+        ResolvedContextFrontierSnapshot,
+    )>,
+    ModelCallRepositoryError,
+> {
+    let row = sqlx::query(
+        "SELECT
+            task.spawning_tool_request_id,
+            task.turn_id,
+            task.semantic_entry_id,
+            task.task_content,
+            relation.parent_session_id,
+            relation.parent_turn_id,
+            lifecycle.starting_frontier_id,
+            lifecycle.current_attempt_id,
+            attempt.state_kind AS attempt_state_kind,
+            defaults.session_id AS goal_defaults_session_id,
+            task.defaults_version AS queued_defaults_version,
+            defaults.version AS goal_defaults_version,
+            defaults.model_selection_kind AS goal_defaults_model_kind,
+            defaults.direct_model_selection_id AS goal_defaults_direct_id,
+            defaults.model_alias_id AS goal_defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            task.requested_model_kind,
+            task.requested_direct_model_selection_id,
+            task.requested_model_alias_id,
+            task.frozen_model_kind,
+            task.frozen_direct_model_selection_id,
+            task.frozen_model_alias_id,
+            task.frozen_alias_selected_direct_id
+         FROM turn_lifecycle AS lifecycle
+         JOIN session_delegation_initial_task AS task
+           ON task.turn_id = lifecycle.turn_id
+          AND task.child_session_id = lifecycle.session_id
+          AND task.admission_position = lifecycle.acceptance_position
+         JOIN session_delegation AS relation
+           ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+          AND relation.child_session_id = task.child_session_id
+         JOIN turn_attempt AS attempt
+           ON attempt.turn_attempt_id = lifecycle.current_attempt_id
+          AND attempt.turn_id = lifecycle.turn_id
+          AND attempt.session_id = lifecycle.session_id
+         JOIN session_defaults_version AS defaults
+           ON defaults.session_id = task.child_session_id
+          AND defaults.version = task.defaults_version
+        WHERE lifecycle.session_id = $1
+          AND lifecycle.origin_kind = 'delegation'
+          AND lifecycle.state_kind = 'active'
+          AND lifecycle.active_phase_kind = 'running'",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return load_delegated_live_wake_turn(connection, session, scheduling).await;
+    };
+    let turn = TurnId::from_uuid(required(&row, "turn_id")?);
+    let spawning_request =
+        signalbox_domain::ToolRequestId::from_uuid(required(&row, "spawning_tool_request_id")?);
+    let task = DelegationContent::try_new(required(&row, "task_content")?)
+        .map_err(|_| ModelCallCorruption::Inconsistent("delegated task content"))?;
+    let configuration =
+        decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
+    let starting_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
+    let initial_attempt =
+        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "current_attempt_id")?);
+    let task_entry = SemanticTranscriptEntryReconstitutionInput::new(
+        SemanticTranscriptEntryId::from_uuid(required(&row, "semantic_entry_id")?),
+        session,
+        SemanticTranscriptEntryPayload::DelegatedTask {
+            spawning_request,
+            parent_session: SessionId::from_uuid(required(&row, "parent_session_id")?),
+            parent_turn: TurnId::from_uuid(required(&row, "parent_turn_id")?),
+            content: task.clone(),
+        },
+    );
+    let prepared = PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
+        session,
+        turn,
+        spawning_request,
+        task,
+        task_entry,
+        configuration,
+        starting_frontier,
+        initial_attempt,
+    })
+    .ok_or(ModelCallCorruption::Inconsistent(
+        "delegated live-turn projection",
+    ))?;
+    let phase = match required::<String>(&row, "attempt_state_kind")?.as_str() {
+        "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(turn, initial_attempt),
+        "running" => ActiveTurnSchedulingReconstitutionInput::running(turn, initial_attempt),
+        value => {
+            return Err(ModelCallCorruption::Unsupported {
+                field: "delegated turn attempt state",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
+    let (active, _, prepared_snapshot) =
+        prepared
+            .with_reconstituted_phase(phase)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated live-turn phase",
+            ))?;
+    let active = active
+        .with_pending_steering(load_delegated_pending_steering(connection, session, turn).await?)
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated pending steering",
+        ))?;
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated starting snapshot",
+        ))?;
+    if stored_snapshot != prepared_snapshot {
+        return Err(ModelCallCorruption::Inconsistent("delegated starting snapshot").into());
+    }
+    Ok(Some((active.into(), stored_snapshot)))
+}
+
+async fn load_delegated_live_wake_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+) -> Result<
+    Option<(
+        signalbox_domain::ActivatedTurn,
+        ResolvedContextFrontierSnapshot,
+    )>,
+    ModelCallRepositoryError,
+> {
+    let row = sqlx::query(
+        "SELECT
+            wake.turn_id,
+            wake.first_delivery_sequence,
+            wake.through_delivery_sequence,
+            predecessor.turn_id AS predecessor_turn_id,
+            predecessor.terminal_frontier_id AS predecessor_frontier_id,
+            lifecycle.starting_frontier_id,
+            lifecycle.current_attempt_id,
+            attempt.state_kind AS attempt_state_kind,
+            defaults.session_id AS goal_defaults_session_id,
+            wake.defaults_version AS queued_defaults_version,
+            defaults.version AS goal_defaults_version,
+            defaults.model_selection_kind AS goal_defaults_model_kind,
+            defaults.direct_model_selection_id AS goal_defaults_direct_id,
+            defaults.model_alias_id AS goal_defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            wake.requested_model_kind,
+            wake.requested_direct_model_selection_id,
+            wake.requested_model_alias_id,
+            wake.frozen_model_kind,
+            wake.frozen_direct_model_selection_id,
+            wake.frozen_model_alias_id,
+            wake.frozen_alias_selected_direct_id
+         FROM session_delegation_wake_turn_origin AS wake
+         JOIN turn_lifecycle AS lifecycle
+           ON lifecycle.turn_id = wake.turn_id
+          AND lifecycle.session_id = wake.recipient_session_id
+          AND lifecycle.acceptance_position = wake.admission_position
+          AND lifecycle.origin_kind = 'delegation'
+          AND lifecycle.state_kind = 'active'
+          AND lifecycle.active_phase_kind = 'running'
+         JOIN turn_lifecycle AS predecessor
+           ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
+          AND predecessor.session_id = lifecycle.session_id
+          AND predecessor.state_kind = 'terminal'
+          AND predecessor.terminal_disposition_kind IN (
+                'failed', 'completed', 'refused', 'cancelled',
+                'reconciliation_required'
+          )
+         JOIN turn_attempt AS attempt
+           ON attempt.turn_attempt_id = lifecycle.current_attempt_id
+          AND attempt.turn_id = lifecycle.turn_id
+          AND attempt.session_id = lifecycle.session_id
+         JOIN session_defaults_version AS defaults
+           ON defaults.session_id = wake.recipient_session_id
+          AND defaults.version = wake.defaults_version
+        WHERE wake.recipient_session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let first_numeric: Decimal = required(&row, "first_delivery_sequence")?;
+    let through_numeric: Decimal = required(&row, "through_delivery_sequence")?;
+    let first = NonZeroU64::new(
+        positive_u64_from_numeric(first_numeric)
+            .map_err(|_| ModelCallCorruption::Inconsistent("wake delivery range"))?,
+    )
+    .ok_or(ModelCallCorruption::Inconsistent("wake delivery range"))?;
+    let through = NonZeroU64::new(
+        positive_u64_from_numeric(through_numeric)
+            .map_err(|_| ModelCallCorruption::Inconsistent("wake delivery range"))?,
+    )
+    .ok_or(ModelCallCorruption::Inconsistent("wake delivery range"))?;
+    let delivery_rows = sqlx::query_as::<_, (Decimal, Uuid)>(
+        "SELECT pending.delivery_sequence,
+                delegation_delivery_semantic_entry(
+                    pending.recipient_session_id, pending.delivery_sequence
+                )
+           FROM session_pending_delivery AS pending
+          WHERE pending.recipient_session_id = $1
+            AND pending.delivery_sequence BETWEEN $2 AND $3
+          ORDER BY pending.delivery_sequence",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(first_numeric)
+    .bind(through_numeric)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut deliveries = Vec::with_capacity(delivery_rows.len());
+    for (_, entry) in delivery_rows {
+        let reference = SemanticTranscriptEntryRef::from_source(
+            session,
+            SemanticTranscriptEntryId::from_uuid(entry),
+        );
+        let semantic = scheduling
+            .semantic_entry(reference)
+            .ok_or(ModelCallCorruption::Missing("wake semantic entry"))?;
+        deliveries.push(SemanticTranscriptEntryReconstitutionInput::new(
+            semantic.identity(),
+            semantic.source_session(),
+            semantic.payload().clone(),
+        ));
+    }
+    let turn = TurnId::from_uuid(required(&row, "turn_id")?);
+    let predecessor = TurnId::from_uuid(required(&row, "predecessor_turn_id")?);
+    let predecessor_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "predecessor_frontier_id")?);
+    let predecessor_snapshot = scheduling
+        .resolved_snapshot(predecessor_frontier)
+        .cloned()
+        .ok_or(ModelCallCorruption::Missing("wake predecessor snapshot"))?;
+    let configuration =
+        decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
+    let starting_frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
+    let initial_attempt =
+        signalbox_domain::TurnAttemptId::from_uuid(required(&row, "current_attempt_id")?);
+    let prepared =
+        PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
+            session,
+            turn,
+            first_delivery_sequence: first,
+            through_delivery_sequence: through,
+            deliveries,
+            predecessor,
+            predecessor_snapshot,
+            configuration,
+            starting_frontier,
+            initial_attempt,
+        })
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake live-turn projection",
+        ))?;
+    let phase = match required::<String>(&row, "attempt_state_kind")?.as_str() {
+        "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(turn, initial_attempt),
+        "running" => ActiveTurnSchedulingReconstitutionInput::running(turn, initial_attempt),
+        value => {
+            return Err(ModelCallCorruption::Unsupported {
+                field: "delegated wake turn attempt state",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
+    let (active, _, prepared_snapshot) =
+        prepared
+            .with_reconstituted_phase(phase)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated wake live-turn phase",
+            ))?;
+    let active = active
+        .with_pending_steering(load_delegated_pending_steering(connection, session, turn).await?)
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake pending steering",
+        ))?;
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake starting snapshot",
+        ))?;
+    if stored_snapshot != prepared_snapshot {
+        return Err(ModelCallCorruption::Inconsistent("delegated wake starting snapshot").into());
+    }
+    Ok(Some((active.into(), stored_snapshot)))
+}
+
+async fn load_delegated_pending_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Vec<PendingSteeringInput>, ModelCallRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT accepted_input_id, acceptance_position
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'pending_steering'
+            AND expected_active_turn_id = $2
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let accepted_input = accepted_input_id_from_uuid(required(&row, "accepted_input_id")?);
+            let position = input_position_from_numeric(required(&row, "acceptance_position")?)
+                .map_err(|_| ModelCallCorruption::Inconsistent("delegated steering position"))?;
+            PendingSteeringInput::reconstitute(
+                AcceptedInputLifecycle::new(
+                    accepted_input,
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: signalbox_domain::SteeringBinding::new(turn),
+                    },
+                ),
+                position,
+                turn,
+            )
+            .ok_or_else(|| ModelCallCorruption::Inconsistent("delegated pending steering").into())
+        })
+        .collect()
 }
 
 async fn load_tool_denial_correlations(
@@ -2936,8 +3319,12 @@ enum StoredAcceptedInputProvenance {
 async fn load_origin_contents(
     connection: &mut PgConnection,
     entries: &[SemanticTranscriptEntry],
-    pending_steering: &[AcceptedInputId],
+    pending_steering: &[PendingSteeringInput],
 ) -> Result<Vec<ModelCallOriginContent>, ModelCallRepositoryError> {
+    let pending_by_accepted = pending_steering
+        .iter()
+        .map(|pending| (pending.accepted_input(), pending))
+        .collect::<BTreeMap<_, _>>();
     let accepted_inputs = entries
         .iter()
         .filter_map(|entry| match entry.payload() {
@@ -2946,6 +3333,9 @@ async fn load_origin_contents(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. }
@@ -2957,7 +3347,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::Imported { .. } => None,
         })
-        .chain(pending_steering.iter().copied())
+        .chain(pending_by_accepted.keys().copied())
         .collect::<BTreeSet<_>>();
     if accepted_inputs.is_empty() {
         return Ok(Vec::new());
@@ -2984,12 +3374,24 @@ async fn load_origin_contents(
     let mut loaded = BTreeSet::new();
     let mut command_by_accepted = BTreeMap::new();
     let mut goal_content_by_accepted = BTreeMap::new();
+    let mut pending_content_by_accepted = BTreeMap::new();
     for row in rows {
         let accepted: Uuid = required(&row, "accepted_input_id")?;
         if !accepted_input_uuids.contains(&accepted) || !loaded.insert(accepted) {
             return Err(ModelCallCorruption::Inconsistent("accepted receipt inventory").into());
         }
         let accepted = AcceptedInputId::from_uuid(accepted);
+        if pending_by_accepted.contains_key(&accepted) {
+            let content = UserContent::try_text(required(&row, "content_text")?)
+                .map_err(|_| ModelCallCorruption::Inconsistent("pending steering content"))?;
+            if pending_content_by_accepted
+                .insert(accepted, content)
+                .is_some()
+            {
+                return Err(ModelCallCorruption::Inconsistent("accepted receipt inventory").into());
+            }
+            continue;
+        }
         let command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_turn: Option<Uuid> = row.try_get("goal_turn_id")?;
         let provenance = match (command, goal_turn) {
@@ -3031,18 +3433,26 @@ async fn load_origin_contents(
     accepted_inputs
         .into_iter()
         .map(|accepted| {
-            let content = match goal_content_by_accepted.remove(&accepted) {
-                Some(content) => ModelCallOriginContent::from_goal_turn(accepted, content),
-                None => {
-                    let command = command_by_accepted
+            let content = match pending_content_by_accepted.remove(&accepted) {
+                Some(content) => ModelCallOriginContent::from_pending_steering(
+                    pending_by_accepted
                         .get(&accepted)
-                        .ok_or(ModelCallCorruption::Missing("accepted command correlation"))?;
-                    let submit = recorded
-                        .get(command)
-                        .ok_or(ModelCallCorruption::Missing("accepted submit command"))?;
-                    ModelCallOriginContent::from_recorded_submit(submit)
-                        .ok_or(ModelCallCorruption::Inconsistent("accepted input content"))?
-                }
+                        .ok_or(ModelCallCorruption::Missing("pending steering correlation"))?,
+                    content,
+                ),
+                None => match goal_content_by_accepted.remove(&accepted) {
+                    Some(content) => ModelCallOriginContent::from_goal_turn(accepted, content),
+                    None => {
+                        let command = command_by_accepted
+                            .get(&accepted)
+                            .ok_or(ModelCallCorruption::Missing("accepted command correlation"))?;
+                        let submit = recorded
+                            .get(command)
+                            .ok_or(ModelCallCorruption::Missing("accepted submit command"))?;
+                        ModelCallOriginContent::from_recorded_submit(submit)
+                            .ok_or(ModelCallCorruption::Inconsistent("accepted input content"))?
+                    }
+                },
             };
             if content.accepted_input() != accepted {
                 return Err(ModelCallCorruption::Inconsistent("accepted content identity").into());
@@ -3355,6 +3765,9 @@ async fn load_tool_conversation_entries(
                 attempt_ids.insert(*attempt);
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -3452,6 +3865,9 @@ async fn load_tool_conversation_entries(
                 resolved.push(ResolvedToolConversationEntry::Closed { source, request });
             }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -3670,13 +4086,17 @@ async fn persist_terminal_outcome_with_usage(
             persist_tool_round(connection, round, usage).await
         }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
-            persist_cancelled_tool_round(connection, cancelled, usage).await
+            persist_cancelled_tool_round(connection, cancelled, usage).await?;
+            persist_delegated_child_cancellation(connection, cancelled.session(), cancelled.turn())
+                .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
             persist_failed(connection, failed, usage, provider_failure_cause).await
         }
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
-            persist_cancelled(connection, cancelled, usage).await
+            persist_cancelled(connection, cancelled, usage).await?;
+            persist_delegated_child_cancellation(connection, cancelled.session(), cancelled.turn())
+                .await
         }
         ModelCallTerminalOutcome::Refused(refused) => {
             persist_refused(connection, refused, usage).await
@@ -3688,6 +4108,160 @@ async fn persist_terminal_outcome_with_usage(
             persist_ambiguous(connection, ambiguous, usage).await
         }
     }
+}
+
+async fn persist_delegated_child_cancellation(
+    connection: &mut PgConnection,
+    child: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT task.spawning_tool_request_id, relation.parent_session_id
+           FROM session_delegation_initial_task AS task
+           JOIN session_delegation AS relation
+             ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+            AND relation.child_session_id = task.child_session_id
+          WHERE task.child_session_id = $1
+            AND task.turn_id = $2",
+    )
+    .bind(session_id_to_uuid(child))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some((spawning_request, parent)) = relation else {
+        return Ok(());
+    };
+    sqlx::query("SELECT 1 FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(parent)
+        .execute(&mut *connection)
+        .await?;
+    let event_ordinal = sqlx::query_scalar::<_, Decimal>(
+        "SELECT COALESCE(max(event_ordinal), 0) + 1
+           FROM session_delegation_event
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(spawning_request)
+    .fetch_one(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id)
+         VALUES ($1, $2, 'outcome_recorded', 'child_cancelled',
+                 'child_cancelled', 'child_turn', $3, $4)",
+    )
+    .bind(spawning_request)
+    .bind(event_ordinal)
+    .bind(session_id_to_uuid(child))
+    .bind(turn_id_to_uuid(turn))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind)
+         VALUES ($1, $2, 'outcome_recorded', 'child_cancelled')",
+    )
+    .bind(spawning_request)
+    .bind(event_ordinal)
+    .execute(&mut *connection)
+    .await?;
+
+    let waits = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT awaiting_tool_request_id, wait_mode
+           FROM session_delegation_wait
+          WHERE spawning_tool_request_id = $1
+          ORDER BY awaiting_tool_request_id",
+    )
+    .bind(spawning_request)
+    .fetch_all(&mut *connection)
+    .await?;
+    for (awaiting_request, mode) in waits {
+        let delivery_sequence = match mode.as_str() {
+            "foreground" => None,
+            "background" => Some(
+                sqlx::query_scalar::<_, Decimal>(
+                    "WITH next_delivery AS (
+                        SELECT COALESCE(max(delivery_sequence), 0) + 1 AS sequence
+                          FROM session_pending_delivery
+                         WHERE recipient_session_id = $1
+                     )
+                     INSERT INTO session_pending_delivery
+                        (recipient_session_id, delivery_sequence, delivery_kind)
+                     SELECT $1, sequence, 'background_result'
+                       FROM next_delivery
+                     RETURNING delivery_sequence",
+                )
+                .bind(parent)
+                .fetch_one(&mut *connection)
+                .await?,
+            ),
+            value => {
+                return Err(ModelCallCorruption::Unsupported {
+                    field: "delegation wait mode",
+                    value: value.to_owned(),
+                }
+                .into());
+            }
+        };
+        sqlx::query(
+            "INSERT INTO session_child_result_delivery
+                (awaiting_tool_request_id, spawning_tool_request_id,
+                 parent_session_id, delivery_sequence, delivery_kind)
+             VALUES ($1, $2, $3, $4,
+                     CASE WHEN $4::numeric IS NULL
+                          THEN NULL ELSE 'background_result' END)",
+        )
+        .bind(awaiting_request)
+        .bind(spawning_request)
+        .bind(parent)
+        .bind(delivery_sequence)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            VALUES ('delegation_update', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id,
+             result_spawning_request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_result', $2, $3, 'child_cancelled', 'child_cancelled',
+                'child_turn', $3, $4, $2
+           FROM header",
+    )
+    .bind(parent)
+    .bind(spawning_request)
+    .bind(session_id_to_uuid(child))
+    .bind(turn_id_to_uuid(turn))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event (event_kind, storage_version, session_id)
+            VALUES ('delegation_wake', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_wake_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             spawning_tool_request_id, subject_kind,
+             result_spawning_request_id, awaiting_tool_request_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $2, 'result', $2, NULL
+           FROM header",
+    )
+    .bind(parent)
+    .bind(spawning_request)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 async fn persist_reconciliation_required(
@@ -4198,17 +4772,17 @@ fn encode_tool_approval(decision: &ToolApprovalDecision) -> (&'static str, Optio
 fn encode_tool_decision_source(
     source: ToolDecisionSource,
 ) -> Result<&'static str, ModelCallRepositoryError> {
-    match source {
-        // Applied migrations freeze this legacy storage discriminator.
-        ToolDecisionSource::UserCommand => Ok("owner_command"),
-        ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
-        ToolDecisionSource::SessionBlanket => Ok("session_blanket"),
+    let storage_kind = match source {
+        ToolDecisionSource::UserCommand => ToolApprovalDecisionSourceStorageKind::UserCommand,
+        ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
+        ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
-            Err(ModelCallRepositoryError::InvalidTransition(
+            return Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",
-            ))
+            ));
         }
-    }
+    };
+    Ok(tool_approval_decision_source_to_str(storage_kind))
 }
 
 async fn persist_cancelled(
@@ -4581,41 +5155,59 @@ async fn persist_reclassified_pending_steering(
                 ),
             };
         let queue_rows = sqlx::query(
-            "WITH RECURSIVE source_configuration AS (
-                SELECT stored.*
-                  FROM queued_input_origin AS stored
-                 WHERE stored.turn_id = $5
-                   AND stored.session_id = $3
-                UNION
-                SELECT ancestor.*
-                  FROM source_configuration AS current
-                  JOIN queued_input_origin AS ancestor
-                    ON ancestor.turn_id = current.source_configuration_turn_id
-                   AND ancestor.session_id = current.session_id
+            "WITH exact_configuration AS (
+                SELECT configuration.*
+                  FROM turn_origin_exact_model_configuration($5, $3) AS configuration
              )
              INSERT INTO queued_input_origin
                 (turn_id, accepted_input_id, session_id, acceptance_position,
-                 priority_kind, source_configuration_turn_id)
+                 priority_kind, source_configuration_turn_id, defaults_version,
+                 requested_model_kind, requested_direct_model_selection_id,
+                 requested_model_alias_id, frozen_model_kind,
+                 frozen_direct_model_selection_id, frozen_model_alias_id,
+                 frozen_alias_selected_direct_id, model_parameters,
+                 known_provider_failure_retry, model_fallback,
+                 dangerous_tool_auto_approval)
              SELECT
                 $1, accepted.accepted_input_id, accepted.session_id,
-                accepted.acceptance_position, 'ordinary', source.turn_id
+                accepted.acceptance_position, 'ordinary', source.turn_id,
+                CASE WHEN source.turn_id IS NULL THEN exact.defaults_version END,
+                CASE WHEN source.turn_id IS NULL THEN exact.requested_model_kind END,
+                CASE WHEN source.turn_id IS NULL
+                     THEN exact.requested_direct_model_selection_id END,
+                CASE WHEN source.turn_id IS NULL
+                     THEN exact.requested_model_alias_id END,
+                CASE WHEN source.turn_id IS NULL THEN exact.frozen_model_kind END,
+                CASE WHEN source.turn_id IS NULL
+                     THEN exact.frozen_direct_model_selection_id END,
+                CASE WHEN source.turn_id IS NULL
+                     THEN exact.frozen_model_alias_id END,
+                CASE WHEN source.turn_id IS NULL
+                     THEN exact.frozen_alias_selected_direct_id END,
+                CASE WHEN source.turn_id IS NULL THEN 'provider_defaults' END,
+                CASE WHEN source.turn_id IS NULL THEN 'disabled' END,
+                CASE WHEN source.turn_id IS NULL THEN 'disabled' END,
+                CASE WHEN source.turn_id IS NULL THEN $10 END
                FROM accepted_input AS accepted
-               JOIN queued_input_origin AS source
+               JOIN turn_lifecycle AS lifecycle
+                 ON lifecycle.turn_id = $5
+                AND lifecycle.session_id = accepted.session_id
+               CROSS JOIN exact_configuration AS exact
+               LEFT JOIN queued_input_origin AS source
                  ON source.turn_id = $5
                 AND source.session_id = accepted.session_id
-               JOIN source_configuration AS resolved
-                 ON resolved.source_configuration_turn_id IS NULL
               WHERE accepted.accepted_input_id = $2
                 AND accepted.session_id = $3
                 AND accepted.acceptance_position = $4
                 AND accepted.disposition_kind = 'reclassified_as_turn_origin'
                 AND accepted.origin_turn_id = $1
                 AND accepted.expected_active_turn_id = $5
-                AND source.acceptance_position < accepted.acceptance_position
-                AND resolved.frozen_model_kind = $6
-                AND resolved.frozen_direct_model_selection_id IS NOT DISTINCT FROM $7
-                AND resolved.frozen_model_alias_id IS NOT DISTINCT FROM $8
-                AND resolved.frozen_alias_selected_direct_id IS NOT DISTINCT FROM $9",
+                AND lifecycle.acceptance_position < accepted.acceptance_position
+                AND (source.turn_id IS NOT NULL OR lifecycle.origin_kind = 'delegation')
+                AND exact.frozen_model_kind = $6
+                AND exact.frozen_direct_model_selection_id IS NOT DISTINCT FROM $7
+                AND exact.frozen_model_alias_id IS NOT DISTINCT FROM $8
+                AND exact.frozen_alias_selected_direct_id IS NOT DISTINCT FROM $9",
         )
         .bind(turn_id_to_uuid(successor.turn()))
         .bind(successor.accepted_input().id().into_uuid())
@@ -4628,6 +5220,11 @@ async fn persist_reclassified_pending_steering(
         .bind(frozen_direct)
         .bind(frozen_alias)
         .bind(frozen_alias_selected)
+        .bind(dangerous_tool_auto_approval_to_str(
+            successor
+                .effective_configuration()
+                .dangerous_tool_auto_approval(),
+        ))
         .execute(&mut *connection)
         .await?
         .rows_affected();

@@ -44,10 +44,12 @@ compaction-call evidence were verified through PR #312
 preparation machinery, configured prompt, and provider-native input-counting
 implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
-automatic machinery. The runner-placement rendering and executable session-tool
-snapshot paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
-Invariant tags cite [docs/invariants.md](../invariants.md).
+automatic machinery. Session-delegation semantic rendering and its
+provider-neutral bridge were verified against this PR (`agent/delegation`). The
+runner-placement rendering and executable session-tool snapshot paragraphs are
+the foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. Invariant tags cite
+[docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -226,9 +228,7 @@ messages:
   assistant tool calls and user tool results after resolving their referenced
   request, attempt, and decision records through [tool-loop](tool-loop.md).
 
-**Committed unimplemented functionality (session-delegation foundation
-proposal).** No present renderer admits the delegation semantic variants. The
-implementing delegation child pull requests add these mappings:
+The renderer admits the delegation semantic variants with these mappings:
 
 - `DelegatedTask` renders as a structured provider-neutral delegated-task
   message retaining the child, parent session and turn, and exact spawning

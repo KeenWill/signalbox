@@ -1316,7 +1316,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+    case .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .sessionCreated, .inputAccepted, .modelCallTransition, .turnActivated:
@@ -1468,6 +1468,8 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       if case .queued = turn.state {
         queuedTurnIDs.insert(turn.turnID)
       } else if case .queuedDelegated = turn.state {
+        queuedTurnIDs.insert(turn.turnID)
+      } else if case .queuedDelegationWake = turn.state {
         queuedTurnIDs.insert(turn.turnID)
       }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
@@ -1680,8 +1682,9 @@ extension SignalboxTranscriptTurnState {
 
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued, .queuedDelegated: return .impossible
+    case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
     case .unknown: return .permitted
+    case .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1716,8 +1719,9 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .queuedDelegated, .activeRunning, .activeAwaitingModelCallRecovery,
-      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .activeRunning, .activeAwaitingChild,
+      .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
       .toolReconciliationRequired:
       return false
@@ -1730,13 +1734,15 @@ extension SignalboxTranscriptTurnState {
       return UInt(content.utf8.count)
     case .queuedDelegated(_, _, _, let content):
       return UInt(content.utf8.count)
+    case .queuedDelegationWake:
+      return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
+    case .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return 0
     }
@@ -1834,8 +1840,20 @@ extension SignalboxTranscriptEntry {
 
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .assistantToolUse(_, _, _, let toolName, let arguments):
-      return UInt(toolName.utf8.count).saturatedAdding(UInt(arguments.utf8.count))
+    case .assistantToolUse(_, _, _, let toolName, let arguments, let approval):
+      let approvalBytes: UInt
+      switch approval?.decision {
+      case .deny(let reason):
+        approvalBytes = UInt(reason?.utf8.count ?? 0)
+          .saturatedAdding(UInt(approval?.rationale?.utf8.count ?? 0))
+      case .approve:
+        approvalBytes = UInt(approval?.rationale?.utf8.count ?? 0)
+      case nil:
+        approvalBytes = 0
+      }
+      return UInt(toolName.utf8.count)
+        .saturatedAdding(UInt(arguments.utf8.count))
+        .saturatedAdding(approvalBytes)
     case .toolExecutionResult(_, _, let content),
       .toolDenied(_, let content),
       .toolClosed(_, let content):
@@ -1978,7 +1996,7 @@ extension SignalboxProcessSessionEvent {
     case .unknown(let kind, _, let diagnostic):
       return (kind, diagnostic)
     case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired:
       return nil
@@ -2000,6 +2018,9 @@ extension SignalboxProcessSessionEvent {
       return state.retainedUTF8Bytes
     case .toolBatchTransition(_, _, let state):
       return state.retainedUTF8Bytes
+    case .toolApprovalDecided(_, _, let decision, _, let rationale):
+      return decision.retainedUTF8Bytes
+        .saturatedAdding(UInt(rationale?.utf8.count ?? 0))
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
@@ -2009,6 +2030,15 @@ extension SignalboxProcessSessionEvent {
       .turnToolReconciliationRequired:
       return 0
     }
+  }
+}
+
+extension SignalboxToolApprovalEventDecision {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .deny(let reason) = self {
+      return UInt(reason?.utf8.count ?? 0)
+    }
+    return 0
   }
 }
 
@@ -2059,7 +2089,8 @@ extension SignalboxTranscriptTurnState {
         kind: "transcript_turn.state.\(kind)",
         decodingDiagnostic: nil
       )
-    case .queued, .queuedDelegated, .activeAwaitingModelCallRecovery,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .activeAwaitingChild,
+      .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:

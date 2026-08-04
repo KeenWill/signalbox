@@ -13,20 +13,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-    AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AppliedInterruptCommandResult, AppliedInterruptProof, AssistantResponsePart, AssistantText,
-    AttemptEnd, AwaitingToolRecovery, CancellationStopDisposition, ContextFrontierId,
-    CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState,
-    DangerousToolAutoApproval, DirectModelSelection, EffectiveConfiguration, EndedModelCall,
-    EndedToolAttempt, EndedTurnAttempt, FrozenModelSelection, InitialToolApproval,
-    ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs,
-    OriginConfiguration, PinnedProviderTarget, PinnedProviderTargetReconstitutionInput,
-    PreparedToolResultProjection, ReconciliationMarker, ReconstitutedModelCall,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
-    SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
-    ToolApprovalDecision, ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    AcceptedInputTurnStart, ActivatedTurn, ActiveTurnPhase, AppliedInterruptCommandResult,
+    AppliedInterruptProof, AssistantResponsePart, AssistantText, AttemptEnd, AwaitingToolRecovery,
+    CancellationStopDisposition, ContextFrontierId, CurrentModelCall, CurrentModelCallState,
+    CurrentTurnAttempt, CurrentTurnAttemptState, DangerousToolAutoApproval, DelegationWaitMode,
+    DirectModelSelection, EffectiveConfiguration, EndedModelCall, EndedToolAttempt,
+    EndedTurnAttempt, FrozenModelSelection, InitialToolApproval, ModelCallDisposition, ModelCallId,
+    ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, PreparedToolResultProjection,
+    ReconciliationMarker, ReconstitutedModelCall, ReconstitutedSubmitInput,
+    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
+    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryPayload, SessionId, SteeringBinding, SteeringReclassificationReason,
+    SubmitInputResult, SubmitInputTurnOriginReconstitutionInput, ToolApprovalDecision,
+    ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
     ToolUsingAssistantResponse, TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId,
     UnstoppedAttemptDisposition, UserContent,
 };
@@ -149,6 +149,17 @@ impl ModelCallOriginContent {
         }
     }
 
+    /// Binds content for one checked pending-steering tail member.
+    pub fn from_pending_steering(
+        pending: &crate::PendingSteeringInput,
+        content: UserContent,
+    ) -> Self {
+        Self {
+            accepted_input: pending.accepted_input(),
+            content,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn from_validated_parts(
         accepted_input: AcceptedInputId,
@@ -209,7 +220,7 @@ impl ModelTargetResolutionError {
 /// Complete domain facts for reconstituting one live model-call execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCallExecutionReconstitutionInput {
-    active_turn: ActivatedAcceptedInputTurn,
+    active_turn: ActivatedTurn,
     targets: ModelTargetCatalog,
     starting_snapshot: ResolvedContextFrontierSnapshot,
     continuation_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
@@ -226,7 +237,7 @@ pub struct ModelCallExecutionReconstitutionInput {
 impl ModelCallExecutionReconstitutionInput {
     /// Supplies the complete purpose-specific active-turn projection.
     pub fn new(
-        active_turn: ActivatedAcceptedInputTurn,
+        active_turn: impl Into<ActivatedTurn>,
         targets: ModelTargetCatalog,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         frontier_entries: Vec<SemanticTranscriptEntry>,
@@ -235,7 +246,7 @@ impl ModelCallExecutionReconstitutionInput {
         calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self {
         Self {
-            active_turn,
+            active_turn: active_turn.into(),
             targets,
             starting_snapshot,
             continuation_snapshot: None,
@@ -438,7 +449,7 @@ impl ModelCallExecutionReconstitutionError {
 /// One checked live initial model-call execution aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCallExecution {
-    active_turn: ActivatedAcceptedInputTurn,
+    active_turn: ActivatedTurn,
     session: SessionId,
     turn: TurnId,
     configuration: OriginConfiguration,
@@ -456,7 +467,7 @@ pub struct ModelCallExecution {
 
 impl ModelCallExecution {
     /// Borrows the checked active-turn facts that establish ownership.
-    pub const fn active_turn(&self) -> &ActivatedAcceptedInputTurn {
+    pub const fn active_turn(&self) -> &ActivatedTurn {
         &self.active_turn
     }
 
@@ -688,6 +699,9 @@ impl ModelCallExecution {
                     .get(accepted_input)
                     .map(|content| (*accepted_input, content.clone())),
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+                | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+                | SemanticTranscriptEntryPayload::DelegationResult { .. }
                 | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
                 | SemanticTranscriptEntryPayload::ContextSummary { .. }
                 | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3265,6 +3279,9 @@ fn reconstitute(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3639,6 +3656,9 @@ fn frontier_closes_latest_tool_round(
         .filter_map(|entry| match entry.payload() {
             SemanticTranscriptEntryPayload::AssistantToolUse { request, .. } => Some(*request),
             SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult { .. }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
@@ -3674,8 +3694,19 @@ fn frontier_closes_latest_tool_round(
             SemanticTranscriptEntryPayload::ToolDenied {
                 request: result_request,
             } => result_request == request && tool_denial_correlations.contains(result_request),
+            SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request,
+                mode: DelegationWaitMode::Foreground,
+                ..
+            } => awaiting_request == request,
             SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+            | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+            | SemanticTranscriptEntryPayload::DelegationResult {
+                mode: DelegationWaitMode::Background,
+                ..
+            }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -3705,6 +3736,9 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
             Some(*producing_call)
         }
         SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
+        | SemanticTranscriptEntryPayload::DelegatedTask { .. }
+        | SemanticTranscriptEntryPayload::DelegationMessage { .. }
+        | SemanticTranscriptEntryPayload::DelegationResult { .. }
         | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
         | SemanticTranscriptEntryPayload::ContextSummary { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
@@ -3737,7 +3771,7 @@ fn frontier_contains_tool_round(
 }
 
 fn reclassify_pending_steering(
-    active_turn: &ActivatedAcceptedInputTurn,
+    active_turn: &ActivatedTurn,
     identities: &[PendingSteeringReclassificationIdentity],
 ) -> Result<Box<[ReclassifiedPendingSteeringTurn]>, ModelCallClosureError> {
     let pending = active_turn.pending_steering();
@@ -4083,7 +4117,7 @@ fn assemble_stopped_tool_round(
 }
 
 pub(crate) fn apply_interrupt_to_recovery_wait(
-    active_turn: ActivatedAcceptedInputTurn,
+    active_turn: ActivatedTurn,
     call: EndedModelCall,
     attempt: EndedTurnAttempt,
     source_snapshot: ResolvedContextFrontierSnapshot,
@@ -4141,7 +4175,7 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
 }
 
 pub(crate) fn apply_interrupt_to_tool_recovery_wait(
-    active_turn: ActivatedAcceptedInputTurn,
+    active_turn: ActivatedTurn,
     wait: AwaitingToolRecovery,
     tool_attempt: EndedToolAttempt,
     attempt: EndedTurnAttempt,
@@ -4225,7 +4259,7 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
 }
 
 pub(crate) fn apply_interrupt_to_executing_tool_batch(
-    active_turn: ActivatedAcceptedInputTurn,
+    active_turn: ActivatedTurn,
     batch: crate::ToolBatch,
     result_entries: Vec<SemanticTranscriptEntryId>,
     result_frontier: ContextFrontierId,
@@ -4496,9 +4530,11 @@ mod tests {
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
-        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, DeliveryRequest,
-        ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
-        NormalizedToolArguments, PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
+        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+        DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+        DelegationProvenanceReconstitutionInput, DeliveryRequest, ModelCallReconstitutionState,
+        ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+        PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
         SessionCreationProvenance, SessionReconstitutionInput, ToolApprovalDecision,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
@@ -4584,6 +4620,96 @@ mod tests {
         .reconstitute()
         .expect("session facts are correlated");
         execution_from_activation(session)
+    }
+
+    fn delegation_result_entry(
+        execution: &ModelCallExecution,
+        mode: DelegationWaitMode,
+    ) -> SemanticTranscriptEntry {
+        let content = DelegationContent::try_new(String::from("checked child result"))
+            .expect("fixture result content is valid");
+        let outcome = DelegationOutcome::reconstitute(
+            DelegationOutcomeKind::ResultReturned,
+            Some(content),
+            DelegationOutcomeReason::ChildCompleted,
+            DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: session_id(31),
+                turn: turn_id(32),
+            },
+        )
+        .expect("child result tuple is canonical");
+        SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(33),
+            execution.session(),
+            SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request: tool_request_id(35),
+                spawning_request: tool_request_id(34),
+                child: session_id(31),
+                mode,
+                delivery_sequence: None,
+                outcome: Box::new(outcome),
+            },
+        )
+    }
+
+    #[test]
+    fn foreground_delegation_result_closes_exact_tool_continuation_round() {
+        let execution = active_execution();
+        let tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(30),
+            execution.session(),
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(29),
+                request: tool_request_id(35),
+            },
+        );
+        let entries = execution
+            .frontier_entries()
+            .cloned()
+            .chain([
+                tool_use,
+                delegation_result_entry(&execution, DelegationWaitMode::Foreground),
+            ])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frontier_closes_latest_tool_round(
+                &execution.starting_snapshot,
+                &entries,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn background_delegation_result_does_not_complete_tool_continuation_round() {
+        let execution = active_execution();
+        let tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(30),
+            execution.session(),
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(29),
+                request: tool_request_id(35),
+            },
+        );
+        let entries = execution
+            .frontier_entries()
+            .cloned()
+            .chain([
+                tool_use,
+                delegation_result_entry(&execution, DelegationWaitMode::Background),
+            ])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            frontier_closes_latest_tool_round(
+                &execution.starting_snapshot,
+                &entries,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            ),
+            Ok(false)
+        );
     }
 
     fn execution_from_activation(session: Session) -> ModelCallExecution {

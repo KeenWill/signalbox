@@ -1,7 +1,11 @@
 # Configuration and credentials
 
-The delegated tool-approval posture and judge-selection configuration is
-verified against this PR (`agent/approval-judge-config`).
+The delegated tool-approval posture, judge selection, and daemon composition are
+verified against the implementing stack through this PR
+(`agent/approval-judge-daemon`).
+
+The daemon web-tool composition, Brave credential channel, and shipped human
+postures are verified against PR #433 (`agent/web-search-wiring`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -37,8 +41,9 @@ export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
 verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
 pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Invariant law lives in
-[docs/invariants.md](../invariants.md), cited here by tag. The runner
+#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
+are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
+lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
@@ -46,7 +51,7 @@ unimplemented functionality as labeled below.
 
 ## Process configuration
 
-`signalboxd` reads five unconditionally required deployment values, the optional
+`signalboxd` reads six unconditionally required deployment values, the optional
 runner-socket override, and the conditionally required Anthropic key path from
 the process environment at startup, and also consults `HOME`:
 
@@ -65,6 +70,8 @@ the process environment at startup, and also consults `HOME`:
 - `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
   key value. It is required only when at least one static model mapping selects
   the Anthropic adapter; a Codex-only configuration does not consult it.
+- `BRAVE_API_KEY_FILE` — path to the file holding the current Brave Search API
+  key value used by the daemon-composed `web_search` tool.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current token shared by the
   GitHub-backed code-host and pull-request tool adapters.
 - `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
@@ -126,10 +133,10 @@ not survive to the log: `run_hub` collapses every catalog-parse and
 adapter-construction variant (and likewise connection and migration errors) into
 a generic `Infrastructure` class carrying only its phase, so an operator cannot
 distinguish an unreadable catalog from an unknown field, bad version, or invalid
-limit (see Open edges). The six deployment paths are accepted without I/O at
+limit (see Open edges). The seven deployment paths are accepted without I/O at
 environment parsing time; both catalogs and every template prompt file are read
-during startup. Neither credential file is read at startup (see credential
-lifecycle below).
+during startup. No credential file is read at startup (see credential lifecycle
+below).
 
 The deployed daemon supplies no Anthropic endpoint or timeout knob; it
 constructs the adapter with its defaults. The
@@ -474,29 +481,22 @@ arguments cannot widen either admission rule.
 The optional `[tool_approval_postures]` table maps an exact composed tool name
 to one of `auto`, `delegated`, or `human`. The parser rejects non-string or
 unknown posture values, and startup rejects a structurally valid name that is
-absent from the selected composition. That name check and the temporary
-`delegated` refusal run in the pre-database configuration pass. An absent table
-or omitted tool name preserves that declaration's legacy permission-default and
-session-blanket behavior exactly. Subject to the `AlwaysConfirm` human-only rule
-owned by
+absent from the selected composition. That name check runs in the pre-database
+configuration pass. An absent table or omitted tool name preserves that
+declaration's legacy permission-default and session-blanket behavior exactly.
+Subject to the `AlwaysConfirm` human-only rule owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources),
 an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
-blanket is enabled. Until judge wiring lands, daemon startup rejects a
-configured `delegated` override.
-
-Committed unimplemented functionality: `delegated` will park with delegated
-authority for the approval-judge wiring. That wiring must not expose a delegated
-request to the ordinary user-decision path before escalation.
+blanket is enabled. `delegated` parks the request, invokes the approval judge,
+and exposes the ordinary user-decision path only after escalation or a terminal
+judge failure.
 
 The optional `[approval_judge]` table has exactly one `selection_id`, and the
-configuration parser requires it to name a configured direct selection.
-
-Committed unimplemented functionality: no present runtime consumes the
-approval-judge selection or dispatches an approval-judge call. The implementing
-daemon-wiring slice must use the selected model through the ordinary adapter,
-credential-profile, and target-resolution machinery; when the table is absent,
-it must use the judged session call's direct selection unchanged, never a
+configuration parser requires it to name a configured direct selection. The
+daemon uses that selection through the ordinary adapter, credential-profile,
+target-resolution, and usage-limit machinery. When the table is absent, the
+judge call uses the request-producing call's direct selection unchanged, never a
 hardcoded lower tier.
 
 When no explicit posture is configured, composition preserves each compiled
@@ -505,14 +505,14 @@ durable approval flow. Exact-revision code-host and pull-request reads and all
 workspace reads default to `Auto`; code-host mutations, GitHub review
 publication, and every workspace mutation default to `Confirm`. Reading the
 invoking session's transcript defaults to `Auto`, while listing conversations
-and reading another native or imported conversation default to `Confirm`. With
-the session posture disabled, a confirmed request creates the ordinary durable
-approval wait exposed by the process protocol; execution does not enter its
-transport or filesystem boundary until a per-request approval is recorded. A
-session frozen with `ApproveAll` instead receives the existing explicit
-`SessionBlanket` approval and does not park. Only the explicit
-`[tool_approval_postures]` table changes a declaration's resolved posture;
-family composition itself does not.
+and reading another native or imported conversation default to `Confirm`.
+`web_search` and `web_fetch` also default to `Confirm`; the checked-in example
+maps both exact names to `human`. The runtime meaning and precedence of those
+declaration defaults, the explicit posture, the session blanket, and the durable
+approval wait are owned by
+[Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
+Only the explicit `[tool_approval_postures]` table changes a declaration's
+resolved posture; family composition itself does not.
 
 The conversation adapter uses the existing application listing service and the
 established persistence projections for native semantic transcripts and
@@ -520,10 +520,16 @@ immutable imported conversations. It exposes only persisted visible semantic
 content in tool results: source-attested imported text remains text, while
 unattested, non-text, thinking, redacted-thinking, document, and absent-content
 entries are content-silent typed markers. Native reads stream from the
-repeatable-read projection. Imported reads currently materialize the complete
-immutable aggregate, including its persisted raw source records, before the
-adapter projects normalized visible entries and enforces the tool page's entry
-and byte bounds; raw source records are never returned in the tool result.
+repeatable-read projection. A selected native read carries the trusted invoking
+session separately from the model-selected target. The adapter loads both
+current placement epochs before opening the transcript in that same snapshot; an
+out-of-directory target returns typed refusal evidence naming the requesting
+directory and `outside_requesting_directory_subtree`, never an empty page.
+Pathless requesters retain the pre-placement behavior and a loudly acknowledged
+root placement reads every target. Imported reads currently materialize the
+complete immutable aggregate, including its persisted raw source records, before
+the adapter projects normalized visible entries and enforces the tool page's
+entry and byte bounds; raw source records are never returned in the tool result.
 
 Each `[[models]]` entry defines one direct selection:
 
@@ -792,17 +798,18 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The composition constants are
-  `anthropic-primary`, `codex-subscription-primary`, and `github-primary`; model
-  configuration may declare additional non-secret profiles.
+  `anthropic-primary`, `codex-subscription-primary`, `brave-search-primary`, and
+  `github-primary`; model configuration may declare additional non-secret
+  profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  the Anthropic and GitHub references to their corresponding deployment paths
-  and reads the file for every Anthropic model-call, code-host operation, or
-  pull-request tool operation preparation; nothing is cached. Why: atomic file
-  replacement rotates either credential without restarting signalboxd, and an
-  in-flight operation keeps the value it authenticated with. Resolution is
-  reference-scoped: a foreign reference fails typed `Unmapped`; a missing file
-  is `Unavailable`; an unreadable file is `Unreadable` — all reference-only
-  errors.
+  the Anthropic, Brave Search, and GitHub references to their corresponding
+  deployment paths and reads the file for every Anthropic model call, web
+  search, code-host operation, or pull-request tool operation preparation;
+  nothing is cached. Why: atomic file replacement rotates any credential without
+  restarting signalboxd, and an in-flight operation keeps the value it
+  authenticated with. Resolution is reference-scoped: a foreign reference fails
+  typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
+  `Unreadable` — all reference-only errors.
 - **External Codex login.** A Codex mapping's profile names the
   operator-selected ambient Codex CLI login. The default example uses
   `codex-subscription-primary`. The daemon and adapter neither locate nor read
@@ -821,9 +828,9 @@ deployment-side rules that code cannot enforce are stated in
   file holding nothing but termination narrows to an empty value, which the
   adapter boundary then refuses exactly as it already refuses an empty file;
   narrowing never invents a credential.
-- **No startup preflight.** signalboxd never reads either credential file at
-  boot, so a missing or unsynced credential cannot block startup or the recovery
-  scan. Why: recovery of acknowledged work must not depend on any provider or
+- **No startup preflight.** signalboxd never reads a credential file at boot, so
+  a missing or unsynced credential cannot block startup or the recovery scan.
+  Why: recovery of acknowledged work must not depend on any provider or
   integration credential (INV-034).
 - **Session credential history.** First handling of every native or imported
   session-creation command appends event ordinal 1 to that session's credential

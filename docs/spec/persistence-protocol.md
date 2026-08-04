@@ -30,11 +30,14 @@ extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
 PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
-and the session-placement event, current head, and creation transaction were
-verified through PR #415 (`agent/scoped-visibility-creation`); and the exact
-stop-command descendant scopes, delegated transcript origins, foreground-result
-closure, pre-outbox cascade locks, typed delegation wake origins, and the exact
-delegation update and wake obligations were verified through this PR
+the approval-judge lifecycle transactions were verified through this PR
+(`agent/approval-judge-execution-support`); the approval-decision outbox is
+verified against this implementing change; the session-placement event, current
+head, and creation transaction were verified through PR #415
+(`agent/scoped-visibility-creation`); and the exact stop-command descendant
+scopes, delegated transcript origins, foreground-result closure, pre-outbox
+cascade locks, typed delegation wake origins, and exact delegation update and
+wake obligations were verified through this PR
 (`agent/delegation-persistence-schema`). This page covers the Postgres
 representation in `crates/persistence` (source and migrations), migration
 discipline, durable command storage and replay equality, the fail-closed
@@ -202,9 +205,13 @@ Implemented table families (across the forward-only migrations):
   certifies both tips;
 - migration `202608020015` freezes `approval_posture` on each tool request,
   records dedicated approval-judge calls in the global model-call identity
-  namespace only while their request is the current active approval wait, and
+  namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale; and
+  recommendation, and rationale;
+- migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
+  family, appends one migration-boundary event for each explicit decision that
+  already exists, and requires every later explicit decision to install exactly
+  one ordered lifecycle effect and outbox event atomically; and
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -610,12 +617,17 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 
-- **Approval-judge preparation**: the schema guard first attempts to lock the
-  `tool_request` row `FOR UPDATE`, then locks the exact active `turn_lifecycle`
-  row `FOR UPDATE`, and only then checks for an existing decision and validates
-  the prepared call. This matches the decision insert's implicit request lock
-  before its lifecycle update, so opposing approval transactions cannot hold
-  those rows in reverse order.
+- **Approval-judge transactions** (prepare, authorize, complete, and fail): the
+  `session_scheduler` row `FOR UPDATE` is always the first Rust-issued explicit
+  lock. Preparation then inserts the call; its schema guard takes the exact
+  `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
+  `FOR UPDATE`, before checking for an existing decision and validating the
+  prepared call. Completion performs its guarded lifecycle transition under the
+  scheduler lock; at commit, the deferred decision-authority trigger then takes
+  the `tool_request` row `FOR UPDATE`. Authorization and failure need no
+  additional explicit lock. The shared scheduler-first prefix prevents
+  approval-judge, tool-loop, and lifecycle-transition transactions from holding
+  these rows in reverse order.
 
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
@@ -992,7 +1004,17 @@ Initial task work is one delegated-task origin row plus its semantic entry and
 first queued turn. The origin references the spawning request and repeats no
 independent actor claim; deferred checks resolve that request's checked task,
 parent session and turn, child relationship, semantic entry, and turn starting
-frontier as one closed shape. No accepted-input row is inserted.
+frontier as one closed shape. It stores the exact requested and frozen model
+configuration inherited from the parent turn, including a direct override or a
+frozen alias definition and its selected direct model; an equal effective model
+does not authorize reconstructing the request as a session default. No
+accepted-input row is inserted. The ordinary eligibility pass recognizes that
+typed origin directly, activates it without fabricating an accepted input, and
+starts model execution from the existing delegated-task semantic entry as the
+child's one-member initial frontier. The same typed path activates an idle
+recipient's delivery-range wake after its exact terminal predecessor, appending
+the contiguous checked message or background-result entries to that predecessor
+frontier.
 
 `session_delegation_event` is an append-only per-relationship ordinal stream.
 Its closed kind/shape checks require every lifecycle disposition to carry one
@@ -1037,13 +1059,14 @@ as neither one.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous
-recipient delivery range and a frozen direct model selection. While the turn is
-queued, later deliveries may only extend that range; activation freezes it. The
-selection and defaults version must equal the exact terminal predecessor's
-effective configuration. The starting frontier extends that predecessor with
-every typed message or background-result semantic entry in delivery order, with
-the final delivery as the lifecycle origin entry. The schema admits at most one
-queued delegation-origin turn per recipient.
+recipient delivery range and the terminal predecessor's exact requested and
+frozen model configuration. While the turn is queued, later deliveries may only
+extend that range; activation freezes it. The requested selection, frozen
+selection, and defaults version must equal the exact terminal predecessor's
+configuration. The starting frontier extends that predecessor with every typed
+message or background-result semantic entry in delivery order, with the final
+delivery as the lifecycle origin entry. The schema admits at most one queued
+delegation-origin turn per recipient.
 
 Parent-and-descendants termination locks the root and complete reachable session
 frontier before inserting the applied parent command and therefore before any
@@ -1054,10 +1077,13 @@ do not invert the session/outbox lock order or omit an edge that committed while
 the cascade waited. The command and every evaluated edge commit together; a
 crash can leave all prior durable state or the complete typed evaluation, never
 an unrecorded partial cascade. Parent-alone takes no descendant authority.
-Background and bound-keep-running edges still receive a continue-running event
-when evaluated. An already-terminal edge receives its typed already-terminal
-event and traversal continues through that child's outgoing relationships, so a
-terminal intermediate session cannot hide live descendants.
+Deferred reverse constraints also reject an applied descendant-scoped root
+command that lacks its exact cascade row, so an omitted cascade writer fails
+closed instead of silently degrading to parent-alone. Background and
+bound-keep-running edges still receive a continue-running event when evaluated.
+An already-terminal edge receives its typed already-terminal event and traversal
+continues through that child's outgoing relationships, so a terminal
+intermediate session cannot hide live descendants.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Every result
@@ -1067,7 +1093,12 @@ the nudge while that session is already active. When a foreground wait is
 registered after its result and original wake already committed, the wait
 transaction writes a fresh result wake keyed by the awaiting request and ordered
 after the wait update. The ordinary nudge remains best effort and the durable
-predicate is authoritative after restart.
+predicate is authoritative after restart. A foreground hit does not try to
+activate a new turn: it locks and reconstitutes the exact `awaiting_child` tool
+batch, consumes the matching typed result into a `DelegationResult` semantic
+entry, and reopens the same turn under a fresh continued turn attempt. The tool
+loop then performs its ordinary serialized continuation from that checked
+frontier.
 
 ## Transactional outbox
 
@@ -1081,9 +1112,10 @@ storage below plus the delegation-stack extension identified inline:
   `session_created_outbox_event`, `input_accepted_outbox_event`,
   `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
   `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
-  `tool_batch_transition_outbox_event`, `context_compacted_outbox_event`,
-  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
-  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
+  `tool_batch_transition_outbox_event`, `tool_approval_decided_outbox_event`,
+  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
+  `turn_reconciliation_required_outbox_event`,
   `runner_state_transition_outbox_event`, and the delegation stack's
   `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
   deferred trigger requiring exactly one typed record per header. A

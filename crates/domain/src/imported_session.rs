@@ -788,10 +788,14 @@ struct ValidatedImportedSeedProjection {
 }
 
 const fn delegated_imported_session_mismatch(provenance: SessionCreationProvenance) -> bool {
-    match provenance.cause() {
-        SessionCreationCause::UserInitiated => false,
-        SessionCreationCause::Delegated { .. } => true,
-    }
+    matches!(
+        (provenance.cause(), provenance.ancestry()),
+        (
+            SessionCreationCause::Delegated { .. },
+            TranscriptAncestry::SingleSource { .. }
+                | TranscriptAncestry::ImportedConversation { .. }
+        )
+    )
 }
 
 fn validate_imported_seed_projection(
@@ -2099,6 +2103,41 @@ mod tests {
         assert_eq!(
             error.failure(),
             ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+        assert_eq!(error.input(), &unchanged);
+    }
+
+    /// S18 / INV-003: delegated no-ancestry facts remain a request to use the
+    /// wrong reconstitution seam, rather than claiming imported ancestry.
+    #[test]
+    fn s18_inv003_bounded_delegated_no_ancestry_is_not_imported() {
+        let (_, _, prepared) = prepared_fixture();
+        let mut input = bounded_input(&prepared);
+        input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
+
+        assert_bounded_failure(
+            input,
+            BoundedImportedSessionReconstitutionFailure::AncestryNotImported,
+        );
+    }
+
+    /// S18 / INV-003: the full imported-session seam preserves the same
+    /// no-ancestry classification for delegated creation.
+    #[test]
+    fn s18_inv003_full_delegated_no_ancestry_is_not_imported() {
+        let (conversation, _, prepared) = prepared_fixture();
+        let mut input = current_input(&conversation, &prepared);
+        input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("delegated no-ancestry facts do not use the imported seam");
+
+        assert_eq!(
+            error.failure(),
+            ImportedSessionReconstitutionFailure::Seed(
+                ImportedSessionSeedReconstitutionFailure::AncestryNotImported
+            )
         );
         assert_eq!(error.input(), &unchanged);
     }
