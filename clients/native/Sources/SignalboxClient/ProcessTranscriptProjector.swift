@@ -1481,8 +1481,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return false
     }
     let attemptIDs = evidence.compactMap(\.attemptID)
-    return attemptIDs.isEmpty || attemptIDs.contains(requiredAttemptID)
-      || evidence.contains(where: \.closesAttemptWithoutID)
+    if attemptIDs.contains(requiredAttemptID) {
+      return true
+    }
+    let attemptLessEvidence = evidence.filter { $0.attemptID == nil }
+    return attemptLessEvidence.count == 1
+      && attemptLessEvidence[0].closesAttemptWithoutID
   }
 
   private func retainedPresentationIdentities(

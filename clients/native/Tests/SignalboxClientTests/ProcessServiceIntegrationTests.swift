@@ -556,6 +556,40 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testToolReconciliationSideProjectionRejectsAttemptlessDeniedSuffix() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithAttemptlessDeniedReconciliationResults()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
+  func testToolReconciliationSideProjectionRejectsUncorrelatedClosedSuffix() throws {
+    let snapshot = try ProcessProjectionFixture
+      .snapshotWithDeniedAndUncorrelatedClosedReconciliationResults()
+    let trigger = try ProcessProjectionFixture.toolReconciliationTrigger()
+    var projector = SignalboxProcessTranscriptProjector()
+    _ = try projector.projectAuthoritativeSnapshot(snapshot)
+
+    XCTAssertThrowsError(
+      try projector.projectSideSnapshot(snapshot, attributableTo: trigger)
+    ) { error in
+      XCTAssertEqual(
+        error as? SignalboxProcessTranscriptProjectionError,
+        .missingTriggerEvidence
+      )
+    }
+  }
+
   func testToolReconciliationSideProjectionRejectsStaleSameTurnResultRun() throws {
     let snapshot = try ProcessProjectionFixture
       .snapshotWithStaleSameTurnReconciliationResult()
@@ -6149,6 +6183,7 @@ private enum ProcessProjectionFixture {
   static let laterTurnToolName = "inspect_later_fixture"
   static let reconciliationClosedEntry = "33333333-3333-4333-8333-333333333333"
   static let reconciliationClosedOutput = "Ambiguous fixture tool closed."
+  static let reconciliationDeniedOutput = "Fixture tool request denied."
   static let reconciliationSuffixToolNames = [
     proposedToolName, reconciliationSuffixToolName,
   ]
@@ -10088,6 +10123,76 @@ private enum ProcessProjectionFixture {
         """,
       ]
     )
+  }
+
+  static func snapshotWithAttemptlessDeniedReconciliationResults() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try reconciliationResultSnapshot(
+      trailingEntries: [],
+      entryCount: 4,
+      resultEntries: [
+        toolDeniedMessage(
+          index: 2,
+          entryID: reconciliationClosedEntry,
+          requestID: proposedToolRequest
+        ),
+        toolDeniedMessage(
+          index: 3,
+          entryID: reconciliationSuffixResultEntry,
+          requestID: reconciliationSuffixToolRequest
+        ),
+      ]
+    )
+  }
+
+  static func snapshotWithDeniedAndUncorrelatedClosedReconciliationResults() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try reconciliationResultSnapshot(
+      trailingEntries: [],
+      entryCount: 4,
+      resultEntries: [
+        toolDeniedMessage(
+          index: 2,
+          entryID: reconciliationClosedEntry,
+          requestID: proposedToolRequest
+        ),
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"3",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(reconciliationSuffixResultEntry)",
+          "entry":{
+            "type":"tool_closed",
+            "tool_request_id":"\(reconciliationSuffixToolRequest)",
+            "content":"\(reconciliationClosedOutput)"
+          }
+        }
+        """,
+      ]
+    )
+  }
+
+  private static func toolDeniedMessage(
+    index: UInt64,
+    entryID: String,
+    requestID: String
+  ) -> String {
+    """
+    {
+      "type":"transcript_entry",
+      "entry_index":"\(index)",
+      "source_session_id":"\(ProcessDriverFixture.session)",
+      "entry_id":"\(entryID)",
+      "entry":{
+        "type":"tool_denied",
+        "tool_request_id":"\(requestID)",
+        "content":"\(reconciliationDeniedOutput)"
+      }
+    }
+    """
   }
 
   static func snapshotWithClosedReconciliationResultAndLaterTurnEntry() throws
