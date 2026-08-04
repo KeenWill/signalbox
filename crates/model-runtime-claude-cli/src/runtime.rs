@@ -267,10 +267,10 @@ impl ClaudeCliRuntime {
             }
         };
         if let Some(capabilities) = capabilities {
-            operation.resolved_target = match capabilities
+            let (target, request_fast_mode) = match capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)
             {
-                Ok(target) => target.clone(),
+                Ok(application) => application,
                 Err(error) => {
                     return PreparationOutcome::Failed {
                         correlation,
@@ -280,6 +280,8 @@ impl ClaudeCliRuntime {
                     };
                 }
             };
+            operation.resolved_target = target.clone();
+            operation.settings.fast_mode = request_fast_mode;
         }
         let reasoning_effort = match claude_reasoning_effort(&operation.settings) {
             Ok(reasoning_effort) => reasoning_effort,
