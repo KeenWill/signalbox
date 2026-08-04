@@ -2039,12 +2039,13 @@ mod tests {
 
     #[test]
     fn distinct_adapter_environment_override_is_admitted() {
-        let overrides = vec![CliEnvironmentOverride::new("FIXTURE_OUTPUT_LIMIT", "64")];
+        let override_name = "FIXTURE_OUTPUT_LIMIT";
+        let overrides = vec![CliEnvironmentOverride::new(override_name, "64")];
 
         let admitted = validated_environment_overrides(overrides, ["PATH"])
             .expect("the fixed control is distinct from inherited names");
 
-        assert_eq!(admitted[0].name(), "FIXTURE_OUTPUT_LIMIT");
+        assert_eq!(admitted[0].name(), override_name);
     }
 
     /// Assembles the environment with exactly `name=value` set and returns the
