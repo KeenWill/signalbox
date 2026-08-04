@@ -612,6 +612,26 @@ struct ToolInvocationCard: View {
                             }
                         }
                     }
+                    if let approvalDecider = tool.approvalDecider {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Approval decision")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(approvalDecider)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                            if let decisionReason = tool.decisionReason {
+                                Text("Reason: \(decisionReason)")
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                            if let approvalRationale = tool.approvalRationale {
+                                Text("Rationale: \(approvalRationale)")
+                                    .font(.caption)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
                     CodeBlock(title: "Output", content: tool.outputPreview)
                     #if os(iOS)
                     if let output = tool.output, !output.isEmpty {
