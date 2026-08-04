@@ -3756,6 +3756,7 @@ pub enum ToolApprovalDecider {
 
 pub struct ToolDecisionRationale(/* private */);
 impl ToolDecisionRationale {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDecisionRationaleError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
@@ -3784,6 +3785,7 @@ pub struct DelegateToolApprovalError { /* private */ }
 
 pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
+    pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
@@ -5752,20 +5754,33 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
+pub struct RepoWatchCheckCompletionGeneration { /* private */ }
+impl RepoWatchCheckCompletionGeneration {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchCheckCompletionGenerationError>;
+    // accessors: as_str()
+}
+
+pub struct RepoWatchCheckCompletionGenerationError;
+
 pub struct RepoWatchCheckSuiteObservation { /* private */ }
 impl RepoWatchCheckSuiteObservation {
-    pub const fn new(id: GitHubObjectId, outcome: ChecksOutcome) -> Self;
-    // accessors: id(), outcome()
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        outcome: ChecksOutcome,
+    ) -> Self;
+    // accessors: id(), completion_generation(), outcome()
 }
 
 pub struct RepoWatchCheckRunObservation { /* private */ }
 impl RepoWatchCheckRunObservation {
     pub const fn new(
         id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
         name: CheckRunName,
         conclusion: CheckConclusion,
     ) -> Self;
-    // accessors: id(), name(), conclusion()
+    // accessors: id(), completion_generation(), name(), conclusion()
 }
 
 pub struct RepoWatchReviewObservation { /* private */ }
@@ -9087,7 +9102,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
-| application: repo_watch                            | 31 (incl. 4 traits)  |
+| application: repo_watch                            | 33 (incl. 4 traits)  |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
 | application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
@@ -9097,4 +9112,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **236**              |
+| **signalbox-application total**                    | **238**              |

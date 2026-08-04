@@ -17,7 +17,8 @@ use reqwest::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead, RepoWatchCheckRunObservation,
+    EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
+    RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
@@ -910,6 +911,8 @@ impl GitHubRepositoryPoller {
                 if suite.status == "completed" {
                     observations.push(RepoWatchCheckSuiteObservation::new(
                         object_id(suite.id)?,
+                        RepoWatchCheckCompletionGeneration::try_new(suite.updated_at)
+                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                         normalize_checks_outcome(suite.conclusion.as_deref())?,
                     ));
                 }
@@ -948,6 +951,11 @@ impl GitHubRepositoryPoller {
                 if run.status == "completed" {
                     observations.push(RepoWatchCheckRunObservation::new(
                         object_id(run.id)?,
+                        RepoWatchCheckCompletionGeneration::try_new(
+                            run.completed_at
+                                .ok_or(RepositoryWatchAttemptError::Normalization)?,
+                        )
+                        .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                         CheckRunName::try_new(run.name)
                             .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                         normalize_conclusion(run.conclusion.as_deref())?,
@@ -1865,6 +1873,7 @@ struct CheckSuiteResponse {
     id: u64,
     status: String,
     conclusion: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1878,6 +1887,7 @@ struct CheckRunResponse {
     status: String,
     name: String,
     conclusion: Option<String>,
+    completed_at: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2090,6 +2100,9 @@ mod tests {
     const PULL_AUTHOR: &str = "pull-author";
     const PULL_LABEL: &str = "watch-me";
     const CHECK_RUN_NAME: &str = "build";
+    const CHECK_SUITE_COMPLETION_GENERATION: &str = "2026-08-03T12:34:56Z";
+    const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:07Z";
+    const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
     const REVIEWER: &str = "signal-reviewer";
     const REVIEW_THREAD: &str = "PRRT_fixture_open";
@@ -2161,9 +2174,15 @@ mod tests {
                 {
                     "id": COMPLETED_CHECK_SUITE_IDS[0],
                     "status": "completed",
-                    "conclusion": "success"
+                    "conclusion": "success",
+                    "updated_at": CHECK_SUITE_COMPLETION_GENERATION
                 },
-                { "id": QUEUED_CHECK_SUITE_ID, "status": "queued", "conclusion": null }
+                {
+                    "id": QUEUED_CHECK_SUITE_ID,
+                    "status": "queued",
+                    "conclusion": null,
+                    "updated_at": QUEUED_CHECK_SUITE_UPDATED_AT
+                }
             ]
         })
         .to_string()
@@ -2176,13 +2195,15 @@ mod tests {
                     "id": COMPLETED_CHECK_RUN_IDS[0],
                     "status": "completed",
                     "name": CHECK_RUN_NAME,
-                    "conclusion": "failure"
+                    "conclusion": "failure",
+                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
                 },
                 {
                     "id": IN_PROGRESS_CHECK_RUN_ID,
                     "status": "in_progress",
                     "name": IN_PROGRESS_CHECK_RUN_NAME,
-                    "conclusion": null
+                    "conclusion": null,
+                    "completed_at": null
                 }
             ]
         })
@@ -2888,6 +2909,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_complete_poll_preserves_check_suite_completion_generation() {
+        let observation = complete_typed_observation().await;
+        let pull = &observation.state().pull_requests()[0];
+
+        assert_eq!(
+            pull.completed_check_suites()[0]
+                .completion_generation()
+                .as_str(),
+            CHECK_SUITE_COMPLETION_GENERATION
+        );
+    }
+
+    #[tokio::test]
     async fn a_complete_poll_normalizes_completed_check_runs() {
         let observation = complete_typed_observation().await;
         let pull = &observation.state().pull_requests()[0];
@@ -2903,6 +2937,19 @@ mod tests {
         assert_eq!(
             pull.completed_check_runs()[0].conclusion(),
             EXPECTED_CHECK_RUN_CONCLUSION
+        );
+    }
+
+    #[tokio::test]
+    async fn a_complete_poll_preserves_check_run_completion_generation() {
+        let observation = complete_typed_observation().await;
+        let pull = &observation.state().pull_requests()[0];
+
+        assert_eq!(
+            pull.completed_check_runs()[0]
+                .completion_generation()
+                .as_str(),
+            CHECK_RUN_COMPLETION_GENERATION
         );
     }
 

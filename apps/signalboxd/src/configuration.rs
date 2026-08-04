@@ -909,6 +909,12 @@ impl HubModelConfiguration {
         self.approval_judge_selection.unwrap_or(judged)
     }
 
+    /// Returns the explicit approval-judge selection, leaving the producing
+    /// call to supply the default when configuration omits the table.
+    pub const fn configured_approval_judge_selection(&self) -> Option<DirectModelSelection> {
+        self.approval_judge_selection
+    }
+
     /// Returns explicitly configured daemon tool dependencies, when present.
     pub const fn daemon_tools(&self) -> Option<&DaemonToolConfiguration> {
         self.daemon_tools.as_ref()

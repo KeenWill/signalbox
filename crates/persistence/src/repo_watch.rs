@@ -11,10 +11,11 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use signalbox_application::{
-    RepoWatchBranchHead, RepoWatchCheckRunObservation, RepoWatchCheckSuiteObservation,
-    RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewObservation, RepoWatchThreadObservation, RepoWatchWorkflowRunObservation,
+    RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchObservation, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
+    RepoWatchWorkflowRunObservation,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -669,6 +670,7 @@ struct PullRequestStateRecord {
 #[serde(deny_unknown_fields)]
 struct CheckSuiteRecord {
     id: u64,
+    completion_generation: String,
     outcome: String,
 }
 
@@ -676,6 +678,7 @@ struct CheckSuiteRecord {
 #[serde(deny_unknown_fields)]
 struct CheckRunRecord {
     id: u64,
+    completion_generation: String,
     name: String,
     conclusion: String,
 }
@@ -829,6 +832,7 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
             .iter()
             .map(|suite| CheckSuiteRecord {
                 id: suite.id().get(),
+                completion_generation: suite.completion_generation().as_str().to_owned(),
                 outcome: repo_watch_checks_outcome_to_str(suite.outcome()).to_owned(),
             })
             .collect(),
@@ -837,6 +841,7 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
             .iter()
             .map(|run| CheckRunRecord {
                 id: run.id().get(),
+                completion_generation: run.completion_generation().as_str().to_owned(),
                 name: run.name().as_str().to_owned(),
                 conclusion: repo_watch_check_conclusion_to_str(run.conclusion()).to_owned(),
             })
@@ -1004,6 +1009,13 @@ fn decode_pull_request_state(
         .map(|suite| {
             Ok(RepoWatchCheckSuiteObservation::new(
                 github_object_id(suite.id, "check_suite.id")?,
+                RepoWatchCheckCompletionGeneration::try_new(suite.completion_generation).map_err(
+                    |_| {
+                        RepoWatchPersistenceCorruption::InvalidCursorField(
+                            "check_suite.completion_generation",
+                        )
+                    },
+                )?,
                 repo_watch_checks_outcome_from_str(&suite.outcome).ok_or(
                     RepoWatchPersistenceCorruption::UnknownCursorDiscriminator(
                         "check_suite.outcome",
@@ -1018,6 +1030,13 @@ fn decode_pull_request_state(
         .map(|run| {
             Ok(RepoWatchCheckRunObservation::new(
                 github_object_id(run.id, "check_run.id")?,
+                RepoWatchCheckCompletionGeneration::try_new(run.completion_generation).map_err(
+                    |_| {
+                        RepoWatchPersistenceCorruption::InvalidCursorField(
+                            "check_run.completion_generation",
+                        )
+                    },
+                )?,
                 CheckRunName::try_new(run.name)?,
                 repo_watch_check_conclusion_from_str(&run.conclusion).ok_or(
                     RepoWatchPersistenceCorruption::UnknownCursorDiscriminator(
@@ -1227,23 +1246,26 @@ impl EncodedEvent {
             reaction_content: None,
             reaction_change: None,
         };
-        if let RepoWatchEventTarget::PullRequest(context) = event.target() {
-            encoded.pull_request_number = Some(Decimal::from(context.number().get()));
-            encoded.head_sha = Some(context.head_sha().as_str().to_owned());
-            encoded.head_repository = Some(context.head_repository().as_str().to_owned());
-            encoded.base_branch = Some(context.base_branch().as_str().to_owned());
-            encoded.head_branch = Some(context.head_branch().as_str().to_owned());
-            encoded.title = Some(context.title().as_str().to_owned());
-            encoded.body = Some(context.body().as_str().to_owned());
-            encoded.labels = Some(
-                context
-                    .labels()
-                    .iter()
-                    .map(|label| label.as_str().to_owned())
-                    .collect(),
-            );
-            encoded.draft = Some(context.draft());
-            encoded.author = context.author().map(|author| author.as_str().to_owned());
+        match event.target() {
+            RepoWatchEventTarget::PullRequest(context) => {
+                encoded.pull_request_number = Some(Decimal::from(context.number().get()));
+                encoded.head_sha = Some(context.head_sha().as_str().to_owned());
+                encoded.head_repository = Some(context.head_repository().as_str().to_owned());
+                encoded.base_branch = Some(context.base_branch().as_str().to_owned());
+                encoded.head_branch = Some(context.head_branch().as_str().to_owned());
+                encoded.title = Some(context.title().as_str().to_owned());
+                encoded.body = Some(context.body().as_str().to_owned());
+                encoded.labels = Some(
+                    context
+                        .labels()
+                        .iter()
+                        .map(|label| label.as_str().to_owned())
+                        .collect(),
+                );
+                encoded.draft = Some(context.draft());
+                encoded.author = context.author().map(|author| author.as_str().to_owned());
+            }
+            RepoWatchEventTarget::Branch => {}
         }
         match event.kind() {
             RepoWatchEventKindV1::PullRequestOpened

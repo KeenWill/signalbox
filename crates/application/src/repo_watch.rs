@@ -40,20 +40,67 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
+const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
+
+/// Opaque provider generation for one completed check execution.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchCheckCompletionGeneration(String);
+
+impl RepoWatchCheckCompletionGeneration {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchCheckCompletionGenerationError> {
+        if value.is_empty() || value.len() > MAX_CHECK_COMPLETION_GENERATION_BYTES {
+            return Err(RepoWatchCheckCompletionGenerationError);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Invalid provider check-completion generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchCheckCompletionGenerationError;
+
+impl fmt::Display for RepoWatchCheckCompletionGenerationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "repository-watch check completion generation must contain 1 to {MAX_CHECK_COMPLETION_GENERATION_BYTES} bytes"
+        )
+    }
+}
+
+impl Error for RepoWatchCheckCompletionGenerationError {}
+
 /// One completed check-suite identity and its aggregate outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCheckSuiteObservation {
     id: GitHubObjectId,
+    completion_generation: RepoWatchCheckCompletionGeneration,
     outcome: ChecksOutcome,
 }
 
 impl RepoWatchCheckSuiteObservation {
-    pub const fn new(id: GitHubObjectId, outcome: ChecksOutcome) -> Self {
-        Self { id, outcome }
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        outcome: ChecksOutcome,
+    ) -> Self {
+        Self {
+            id,
+            completion_generation,
+            outcome,
+        }
     }
 
     pub const fn id(&self) -> GitHubObjectId {
         self.id
+    }
+
+    pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration {
+        &self.completion_generation
     }
 
     pub const fn outcome(&self) -> ChecksOutcome {
@@ -65,14 +112,21 @@ impl RepoWatchCheckSuiteObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCheckRunObservation {
     id: GitHubObjectId,
+    completion_generation: RepoWatchCheckCompletionGeneration,
     name: CheckRunName,
     conclusion: CheckConclusion,
 }
 
 impl RepoWatchCheckRunObservation {
-    pub const fn new(id: GitHubObjectId, name: CheckRunName, conclusion: CheckConclusion) -> Self {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        name: CheckRunName,
+        conclusion: CheckConclusion,
+    ) -> Self {
         Self {
             id,
+            completion_generation,
             name,
             conclusion,
         }
@@ -80,6 +134,10 @@ impl RepoWatchCheckRunObservation {
 
     pub const fn id(&self) -> GitHubObjectId {
         self.id
+    }
+
+    pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration {
+        &self.completion_generation
     }
 
     pub const fn name(&self) -> &CheckRunName {
@@ -715,11 +773,10 @@ fn derive_check_events(
     events: &mut Vec<RepoWatchEvent>,
 ) -> Result<(), RepoWatchDifferError> {
     for suite in current.completed_check_suites() {
-        if !previous
-            .completed_check_suites()
-            .iter()
-            .any(|prior| prior.id() == suite.id())
-        {
+        if !previous.completed_check_suites().iter().any(|prior| {
+            prior.id() == suite.id()
+                && prior.completion_generation() == suite.completion_generation()
+        }) {
             push_pull_request_event(
                 repository,
                 current.context(),
@@ -732,11 +789,9 @@ fn derive_check_events(
         }
     }
     for run in current.completed_check_runs() {
-        if !previous
-            .completed_check_runs()
-            .iter()
-            .any(|prior| prior.id() == run.id())
-        {
+        if !previous.completed_check_runs().iter().any(|prior| {
+            prior.id() == run.id() && prior.completion_generation() == run.completion_generation()
+        }) {
             push_pull_request_event(
                 repository,
                 current.context(),
@@ -1535,6 +1590,10 @@ mod tests {
     const CHANGED_BASE_HEAD: &str = "4444444444444444444444444444444444444444";
     const REVIEW_COMMIT: &str = "5555555555555555555555555555555555555555";
     const CHECK_NAME: &str = "required";
+    const CHECK_COMPLETION_GENERATION: &str = "2026-08-02T12:00:00Z";
+    const NEXT_CHECK_COMPLETION_GENERATION: &str = "2026-08-02T12:05:00Z";
+    const OVERLONG_CHECK_COMPLETION_GENERATION: &str =
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     const WORKFLOW_NAME: &str = "continuous-integration";
     const RENAMED_WORKFLOW_NAME: &str = "continuous-integration-renamed";
     const THREAD_ID: &str = "PRRT_fixture";
@@ -1630,6 +1689,12 @@ mod tests {
 
     fn reviewer(value: &str) -> Result<RepoWatchAuthorLogin, RepoWatchTextError> {
         RepoWatchAuthorLogin::try_new(String::from(value))
+    }
+
+    fn completion_generation(
+        value: &str,
+    ) -> Result<RepoWatchCheckCompletionGeneration, RepoWatchCheckCompletionGenerationError> {
+        RepoWatchCheckCompletionGeneration::try_new(String::from(value))
     }
 
     fn pull_request(facts: PullRequestFacts) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
@@ -1877,16 +1942,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_check_completion_generation_is_rejected() {
+        let result = RepoWatchCheckCompletionGeneration::try_new(String::new());
+
+        assert_eq!(result, Err(RepoWatchCheckCompletionGenerationError));
+    }
+
+    #[test]
+    fn overlong_check_completion_generation_is_rejected() {
+        let result = RepoWatchCheckCompletionGeneration::try_new(String::from(
+            OVERLONG_CHECK_COMPLETION_GENERATION,
+        ));
+
+        assert_eq!(result, Err(RepoWatchCheckCompletionGenerationError));
+    }
+
+    #[test]
     fn initial_observation_emits_only_opened_and_current_mergeability() -> Result<(), Box<dyn Error>>
     {
         let current = observation(
             vec![pull_request(PullRequestFacts {
                 completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
                     object_id(CHECK_SUITE_ID),
+                    completion_generation(CHECK_COMPLETION_GENERATION)?,
                     ChecksOutcome::Success,
                 )],
                 completed_check_runs: vec![RepoWatchCheckRunObservation::new(
                     object_id(CHECK_RUN_ID),
+                    completion_generation(CHECK_COMPLETION_GENERATION)?,
                     CheckRunName::try_new(String::from(CHECK_NAME))?,
                     CheckConclusion::Success,
                 )],
@@ -2040,6 +2123,7 @@ mod tests {
         )?;
         let current_check_run = RepoWatchCheckRunObservation::new(
             object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
             CheckRunName::try_new(String::from(CHECK_NAME))?,
             CheckConclusion::TimedOut,
         );
@@ -2049,6 +2133,7 @@ mod tests {
                 mergeable_state: MergeableState::Conflicting,
                 completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
                     object_id(CHECK_SUITE_ID),
+                    completion_generation(CHECK_COMPLETION_GENERATION)?,
                     ChecksOutcome::Failure,
                 )],
                 completed_check_runs: vec![current_check_run.clone()],
@@ -2083,6 +2168,95 @@ mod tests {
             &RepoWatchEventKindV1::CheckRunCompleted {
                 name: current_check_run.name().clone(),
                 conclusion: current_check_run.conclusion(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recompleted_check_suite_with_same_provider_id_emits_again() -> Result<(), Box<dyn Error>> {
+        let previous_suite = RepoWatchCheckSuiteObservation::new(
+            object_id(CHECK_SUITE_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            ChecksOutcome::Success,
+        );
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_suites: vec![previous_suite],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current_suite = RepoWatchCheckSuiteObservation::new(
+            object_id(CHECK_SUITE_ID),
+            completion_generation(NEXT_CHECK_COMPLETION_GENERATION)?,
+            ChecksOutcome::Success,
+        );
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_suites: vec![current_suite.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::ChecksCompleted {
+                outcome: current_suite.outcome(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recompleted_check_run_with_same_provider_id_emits_again() -> Result<(), Box<dyn Error>> {
+        let previous_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Success,
+        );
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![previous_run],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(NEXT_CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::Success,
+        );
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![current_run.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::CheckRunCompleted {
+                name: current_run.name().clone(),
+                conclusion: current_run.conclusion(),
             }
         );
         Ok(())
@@ -2208,19 +2382,83 @@ mod tests {
     }
 
     #[test]
-    fn labels_base_advance_and_reactions_emit_current_context_facts() -> Result<(), Box<dyn Error>>
-    {
+    fn label_changes_emit_current_context_facts() -> Result<(), Box<dyn Error>> {
         let old_label = label(LABEL_OLD)?;
         let new_label = label(LABEL_READY)?;
-        let previous_reaction = reaction()?;
         let previous = observation(
             vec![pull_request(PullRequestFacts {
                 labels: vec![old_label.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: vec![new_label.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::Labeled { label: new_label }
+        );
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::Unlabeled { label: old_label }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn base_advance_emits_current_context_fact() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            vec![pull_request(PullRequestFacts::matching(
+                PULL_REQUEST_NUMBER,
+            ))?],
+            Vec::new(),
+            vec![branch_head(INITIAL_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+        let current_pull_request = pull_request(PullRequestFacts::matching(PULL_REQUEST_NUMBER))?;
+        let expected_branch = current_pull_request.context().base_branch().clone();
+        let current = observation(
+            vec![current_pull_request],
+            Vec::new(),
+            vec![branch_head(CHANGED_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::BaseAdvanced {
+                branch: expected_branch,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reaction_changes_emit_current_context_facts() -> Result<(), Box<dyn Error>> {
+        let previous_reaction = reaction()?;
+        let previous = observation(
+            vec![pull_request(PullRequestFacts {
                 reactions: vec![previous_reaction.clone()],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],
             Vec::new(),
-            vec![branch_head(INITIAL_BASE_HEAD)?],
+            Vec::new(),
             vec![reviewer(REVIEWER)?],
         )?;
         let added_reaction = RepoWatchReactionObservation::new(
@@ -2232,34 +2470,19 @@ mod tests {
         );
         let current = observation(
             vec![pull_request(PullRequestFacts {
-                labels: vec![new_label.clone()],
                 reactions: vec![added_reaction.clone()],
                 ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
             })?],
             Vec::new(),
-            vec![branch_head(CHANGED_BASE_HEAD)?],
+            Vec::new(),
             vec![reviewer(REVIEWER)?],
         )?;
 
         let events = derive(Some(&previous), &current)?;
 
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 2);
         assert_eq!(
             events[0].kind(),
-            &RepoWatchEventKindV1::Labeled { label: new_label }
-        );
-        assert_eq!(
-            events[1].kind(),
-            &RepoWatchEventKindV1::Unlabeled { label: old_label }
-        );
-        assert_eq!(
-            events[2].kind(),
-            &RepoWatchEventKindV1::BaseAdvanced {
-                branch: BranchName::try_new(String::from(BASE_BRANCH))?,
-            }
-        );
-        assert_eq!(
-            events[3].kind(),
             &RepoWatchEventKindV1::ReactionChanged {
                 subject: added_reaction.subject(),
                 reactor: added_reaction.reactor().clone(),
@@ -2268,7 +2491,7 @@ mod tests {
             }
         );
         assert_eq!(
-            events[4].kind(),
+            events[1].kind(),
             &RepoWatchEventKindV1::ReactionChanged {
                 subject: previous_reaction.subject(),
                 reactor: previous_reaction.reactor().clone(),

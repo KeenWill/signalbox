@@ -45,8 +45,9 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
-        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        session_id_from_uuid, session_id_to_uuid, tool_approval_posture_to_str,
+        ToolApprovalDecisionSourceStorageKind, defaults_version_to_numeric,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_to_str, tool_approval_posture_to_str,
         tool_request_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent, ToolBatchOutboxState},
@@ -4212,17 +4213,17 @@ fn encode_tool_approval(decision: &ToolApprovalDecision) -> (&'static str, Optio
 fn encode_tool_decision_source(
     source: ToolDecisionSource,
 ) -> Result<&'static str, ModelCallRepositoryError> {
-    match source {
-        // Applied migrations freeze this legacy storage discriminator.
-        ToolDecisionSource::UserCommand => Ok("owner_command"),
-        ToolDecisionSource::PolicyAuto => Ok("policy_auto"),
-        ToolDecisionSource::SessionBlanket => Ok("session_blanket"),
+    let storage_kind = match source {
+        ToolDecisionSource::UserCommand => ToolApprovalDecisionSourceStorageKind::UserCommand,
+        ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
+        ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
-            Err(ModelCallRepositoryError::InvalidTransition(
+            return Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",
-            ))
+            ));
         }
-    }
+    };
+    Ok(tool_approval_decision_source_to_str(storage_kind))
 }
 
 async fn persist_cancelled(
