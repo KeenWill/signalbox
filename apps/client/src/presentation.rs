@@ -1782,6 +1782,19 @@ impl<'a> Output<'a> {
                 first_delivery_sequence.value(),
                 through_delivery_sequence.value()
             ),
+            TurnState::DelegationTerminated {
+                spawning_request_id,
+                outcome,
+                reason,
+                provenance,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=delegation_terminated \
+                 spawning_request={spawning_request_id} outcome={} reason={} provenance={}",
+                delegation_outcome(*outcome),
+                delegation_reason(*reason),
+                delegation_provenance(provenance)
+            ),
             TurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,

@@ -25,9 +25,10 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ContextFrontierId,
-    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest, EndedTurnAttempt,
-    InitialSemanticTranscriptEntryPayload, ModelCallDisposition, NonEmptyIssuedOperationRefs,
-    OriginConfiguration, ReconstitutedImportedSession, ReconstitutedModelCall,
+    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
+    DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
+    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
@@ -1281,9 +1282,12 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     compaction_calls: Vec<crate::ContextCompactionModelCallReconstitutionInput>,
     compactions: Vec<crate::ContextCompactionReconstitutionInput>,
     consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    delegated_consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
     continuation_rounds: Vec<ContinuationRoundReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
+    preceding_non_accepted_terminal:
+        Option<(SessionId, TurnId, ContextFrontierId, DirectModelSelection)>,
 }
 
 impl AcceptedInputSchedulingReconstitutionInput {
@@ -1306,10 +1310,26 @@ impl AcceptedInputSchedulingReconstitutionInput {
             compaction_calls: Vec::new(),
             compactions: Vec::new(),
             consumed_steering: Vec::new(),
+            delegated_consumed_steering: Vec::new(),
             steering_continuation_rounds: Vec::new(),
             continuation_rounds: Vec::new(),
             active_acceptance_tail,
+            preceding_non_accepted_terminal: None,
         }
+    }
+
+    /// Supplies the immediate terminal predecessor when it is not an
+    /// accepted-input-origin turn, together with the retained terminal
+    /// frontier and its selected model identity.
+    pub fn with_preceding_non_accepted_terminal(
+        mut self,
+        session: SessionId,
+        turn: TurnId,
+        terminal_frontier: ContextFrontierId,
+        selected: DirectModelSelection,
+    ) -> Self {
+        self.preceding_non_accepted_terminal = Some((session, turn, terminal_frontier, selected));
+        self
     }
 
     /// Supplies the complete independently checked imported seed projection
@@ -1348,6 +1368,16 @@ impl AcceptedInputSchedulingReconstitutionInput {
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self {
         self.consumed_steering = consumed_steering;
+        self
+    }
+
+    /// Supplies consumed steering whose source is a delegation-origin turn
+    /// outside this accepted-input scheduling projection.
+    pub fn with_delegated_consumed_steering_facts(
+        mut self,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self {
+        self.delegated_consumed_steering = consumed_steering;
         self
     }
 
@@ -1409,6 +1439,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// Returns every consumed-steering subject fact supplied as complete.
     pub fn consumed_steering(&self) -> &[ConsumedSteeringReconstitutionInput] {
         &self.consumed_steering
+    }
+
+    /// Returns consumed steering owned by delegation-origin turns.
+    pub fn delegated_consumed_steering(&self) -> &[ConsumedSteeringReconstitutionInput] {
+        &self.delegated_consumed_steering
     }
 
     /// Returns every steering continuation-round evidence fact supplied.
@@ -2092,6 +2127,11 @@ pub struct AcceptedInputSchedulingProjection {
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
+    preceding_non_accepted_terminal: Option<(
+        TurnId,
+        ResolvedContextFrontierSnapshot,
+        DirectModelSelection,
+    )>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2571,6 +2611,7 @@ pub struct ActivatedDelegatedTurn {
     start: AcceptedInputTurnStart,
     phase: ActiveTurnPhase,
     pending_steering: Box<[PendingSteeringInput]>,
+    consumed_steering: Box<[ConsumedSteeringInput]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2649,8 +2690,38 @@ impl ActivatedDelegatedTurn {
         Some(self)
     }
 
+    /// Attaches every stored steering input consumed by this delegated turn.
+    pub fn with_consumed_steering(
+        mut self,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Option<Self> {
+        self.consumed_steering = consumed_steering
+            .into_iter()
+            .map(|consumed| {
+                (consumed.session() == self.session
+                    && consumed.source_turn() == self.turn
+                    && matches!(
+                        consumed.accepted_input().disposition(),
+                        AcceptedInputDisposition::ConsumedAsSteering { .. }
+                    ))
+                .then(|| ConsumedSteeringInput {
+                    accepted_input: consumed.accepted_input().clone(),
+                    acceptance_position: consumed.acceptance_position(),
+                    source_turn: consumed.source_turn(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_boxed_slice();
+        Some(self)
+    }
+
     pub fn pending_steering(&self) -> &[PendingSteeringInput] {
         &self.pending_steering
+    }
+
+    /// Returns consumed steering in immutable acceptance order.
+    pub fn consumed_steering(&self) -> &[ConsumedSteeringInput] {
+        &self.consumed_steering
     }
 }
 
@@ -2763,7 +2834,7 @@ impl ActivatedTurn {
     pub fn consumed_steering(&self) -> &[ConsumedSteeringInput] {
         match self {
             Self::Accepted(turn) => turn.consumed_steering(),
-            Self::Delegated(_) => &[],
+            Self::Delegated(turn) => turn.consumed_steering(),
         }
     }
 
@@ -2772,9 +2843,9 @@ impl ActivatedTurn {
         match self {
             Self::Accepted(turn) => Self::Accepted(turn.with_phase_for_test(phase)),
             Self::Delegated(turn) => {
-                let mut turn = turn.clone();
-                turn.phase = phase;
-                Self::Delegated(turn)
+                let mut delegated = turn.clone();
+                delegated.phase = phase;
+                Self::Delegated(delegated)
             }
         }
     }
@@ -2784,9 +2855,9 @@ impl ActivatedTurn {
         match self {
             Self::Accepted(turn) => Self::Accepted(turn.with_start_for_test(start)),
             Self::Delegated(turn) => {
-                let mut turn = turn.clone();
-                turn.start = start;
-                Self::Delegated(turn)
+                let mut delegated = turn.clone();
+                delegated.start = start;
+                Self::Delegated(delegated)
             }
         }
     }
@@ -2830,7 +2901,28 @@ impl ActivatedTurn {
     ) -> Self {
         match self {
             Self::Accepted(turn) => Self::Accepted(turn.with_consumed_steering_for_test(consumed)),
-            Self::Delegated(_) => panic!("delegated turns do not carry consumed accepted input"),
+            Self::Delegated(turn) => {
+                let consumed = consumed
+                    .into_vec()
+                    .into_iter()
+                    .map(|(accepted_input, acceptance_position, call)| {
+                        ConsumedSteeringReconstitutionInput::new(
+                            turn.session,
+                            AcceptedInputLifecycle::new(
+                                accepted_input,
+                                AcceptedInputDisposition::ConsumedAsSteering { call },
+                            ),
+                            acceptance_position,
+                            turn.turn,
+                        )
+                    })
+                    .collect();
+                Self::Delegated(
+                    turn.clone()
+                        .with_consumed_steering(consumed)
+                        .expect("the test steering targets the delegated turn"),
+                )
+            }
         }
     }
 }
@@ -2915,6 +3007,7 @@ impl PreparedDelegatedTurnActivation {
                 start,
                 phase,
                 pending_steering: Box::new([]),
+                consumed_steering: Box::new([]),
             },
             starting_entries: vec![task_entry],
             starting_snapshot,
@@ -2979,6 +3072,7 @@ impl PreparedDelegatedTurnActivation {
                     current_attempt: CurrentTurnAttempt::prepared(input.initial_attempt),
                 },
                 pending_steering: Box::new([]),
+                consumed_steering: Box::new([]),
             },
             starting_entries: entries,
             starting_snapshot,
@@ -3808,6 +3902,21 @@ fn reconstitute_inner(
         }
     }
 
+    let preceding_non_accepted_terminal = match input.preceding_non_accepted_terminal {
+        Some((stored_session, turn, terminal_frontier, selected)) => {
+            if stored_session != session || records_by_turn.contains_key(&turn) {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch { turn },
+                );
+            }
+            let snapshot = snapshots.get(&terminal_frontier).cloned().ok_or(
+                AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+            )?;
+            Some((turn, snapshot, selected))
+        }
+        None => None,
+    };
+
     let mut compaction_calls = BTreeMap::new();
     let mut compaction_snapshots = BTreeSet::new();
     for candidate in &input.compaction_calls {
@@ -4335,6 +4444,43 @@ fn reconstitute_inner(
             accepted_input,
         ));
     }
+    for consumed in &input.delegated_consumed_steering {
+        let accepted_input = consumed.accepted_input.id();
+        if consumed.session != session {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringSessionMismatch {
+                    accepted_input,
+                },
+            );
+        }
+        if !consumed_inputs.insert(accepted_input) {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::DuplicateConsumedSteering {
+                    accepted_input,
+                },
+            );
+        }
+        let Some((_, semantic_source_turn)) = steering_by_input.remove(&accepted_input) else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input,
+                },
+            );
+        };
+        if !matches!(
+            consumed.accepted_input.disposition(),
+            AcceptedInputDisposition::ConsumedAsSteering { .. }
+        ) || semantic_source_turn != consumed.source_turn
+            || accepted_input_turns.contains_key(&accepted_input)
+            || records_by_turn.contains_key(&consumed.source_turn)
+        {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input,
+                },
+            );
+        }
+    }
     if let Some((_, (entry, _))) = steering_by_input.first_key_value() {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::SteeringSemanticEntryMismatch {
@@ -4543,8 +4689,12 @@ fn reconstitute_inner(
     }
 
     let mut turns = Vec::with_capacity(total_order.len());
-    let mut previous_terminal: Option<(TurnId, ResolvedContextFrontierSnapshot)> = None;
-    let mut previous_selected = None;
+    let mut previous_terminal = preceding_non_accepted_terminal
+        .as_ref()
+        .map(|(turn, snapshot, _)| (*turn, snapshot.clone()));
+    let mut previous_selected = preceding_non_accepted_terminal
+        .as_ref()
+        .map(|(_, _, selected)| *selected);
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
@@ -4552,6 +4702,11 @@ fn reconstitute_inner(
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
     referenced_snapshots.extend(initial_seed_frontier);
+    referenced_snapshots.extend(
+        preceding_non_accepted_terminal
+            .as_ref()
+            .map(|(_, snapshot, _)| snapshot.frontier().snapshot()),
+    );
     let mut attempt_owners = BTreeMap::new();
     let mut claimed_continuation_rounds = BTreeSet::new();
 
@@ -6142,6 +6297,7 @@ fn reconstitute_inner(
         active_model_call_recovery,
         active_tool_recovery_attempt,
         active_executing_tool_batch,
+        preceding_non_accepted_terminal,
     })
 }
 
@@ -7168,13 +7324,23 @@ fn prepare_earliest_queued_activation(
         .effective()
         .model()
         .selected_direct();
-    let previous_selected = index.checked_sub(1).map(|predecessor| {
-        projection.turns[predecessor]
-            .origin_configuration
-            .effective()
-            .model()
-            .selected_direct()
-    });
+    let previous_selected = index.checked_sub(1).map_or_else(
+        || {
+            projection
+                .preceding_non_accepted_terminal
+                .as_ref()
+                .map(|(_, _, selected)| *selected)
+        },
+        |predecessor| {
+            Some(
+                projection.turns[predecessor]
+                    .origin_configuration
+                    .effective()
+                    .model()
+                    .selected_direct(),
+            )
+        },
+    );
     let model_identity_entry = previous_selected
         .filter(|previous| *previous != selected)
         .map(|_| {
@@ -7213,7 +7379,9 @@ fn prepare_earliest_queued_activation(
         .iter()
         .map(SemanticTranscriptEntry::reference)
         .collect::<Vec<_>>();
-    let (lineage, starting_snapshot) = if index == 0 {
+    let (lineage, starting_snapshot) = if index == 0
+        && projection.preceding_non_accepted_terminal.is_none()
+    {
         let seed = projection
             .initial_seed_frontier
             .and_then(|frontier| projection.snapshots.get(&frontier));
@@ -7252,15 +7420,31 @@ fn prepare_earliest_queued_activation(
         };
         (AcceptedInputStartingLineage::FirstInSession, snapshot)
     } else {
-        let predecessor = &projection.turns[index - 1];
-        let predecessor_turn = predecessor.turn;
-        let Some(terminal_frontier) = predecessor.terminal_frontier() else {
-            return Err(fail(
-                projection,
-                AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
-                    predecessor: predecessor_turn,
-                },
-            ));
+        let (predecessor_turn, terminal_frontier) = match index.checked_sub(1) {
+            Some(predecessor_index) => {
+                let predecessor = &projection.turns[predecessor_index];
+                let predecessor_turn = predecessor.turn;
+                let Some(terminal_frontier) = predecessor.terminal_frontier() else {
+                    return Err(fail(
+                        projection,
+                        AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                            predecessor: predecessor_turn,
+                        },
+                    ));
+                };
+                (predecessor_turn, terminal_frontier)
+            }
+            None => {
+                let Some((predecessor_turn, terminal_frontier, _)) =
+                    projection.preceding_non_accepted_terminal.as_ref()
+                else {
+                    return Err(fail(
+                        projection,
+                        AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                    ));
+                };
+                (*predecessor_turn, terminal_frontier)
+            }
         };
         let compacted = projection
             .latest_compaction_result
@@ -7280,7 +7464,7 @@ fn prepare_earliest_queued_activation(
         };
         (
             AcceptedInputStartingLineage::After {
-                immediate_predecessor: predecessor.turn,
+                immediate_predecessor: predecessor_turn,
             },
             snapshot,
         )
@@ -7558,6 +7742,66 @@ mod tests {
             origin.first().unwrap().reference(),
             snapshot.ordered_entries().next().unwrap()
         );
+    }
+
+    #[test]
+    fn delegated_activation_reconstitutes_consumed_steering() {
+        let child = current_session();
+        let child_turn = turn_id(408);
+        let task = DelegationContent::try_new(String::from("inspect delegated steering"))
+            .expect("fixture task is valid");
+        let task_entry = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_transcript_entry_id(409),
+            child.id(),
+            SemanticTranscriptEntryPayload::DelegatedTask {
+                spawning_request: tool_request_id(410),
+                parent_session: session_id(411),
+                parent_turn: turn_id(412),
+                content: task.clone(),
+            },
+        );
+        let prepared = PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
+            session: child.id(),
+            turn: child_turn,
+            spawning_request: tool_request_id(410),
+            task,
+            task_entry,
+            configuration: configuration(&child),
+            starting_frontier: context_frontier_id(413),
+            initial_attempt: turn_attempt_id(414),
+        })
+        .expect("exact delegated task facts prepare activation");
+        let consumed_input = accepted_input_id(415);
+        let consuming_call = model_call_id(416);
+        let position = SessionInputPosition::try_from_u64(2).unwrap();
+        let consumed = ConsumedSteeringReconstitutionInput::new(
+            child.id(),
+            AcceptedInputLifecycle::new(
+                consumed_input,
+                AcceptedInputDisposition::ConsumedAsSteering {
+                    call: consuming_call,
+                },
+            ),
+            position,
+            child_turn,
+        );
+
+        let active = prepared
+            .into_parts()
+            .0
+            .with_consumed_steering(vec![consumed])
+            .expect("stored steering targets the delegated turn");
+
+        assert_eq!(active.consumed_steering().len(), 1);
+        assert_eq!(
+            active.consumed_steering()[0].accepted_input(),
+            consumed_input
+        );
+        assert_eq!(
+            active.consumed_steering()[0].acceptance_position(),
+            position
+        );
+        assert_eq!(active.consumed_steering()[0].source_turn(), child_turn);
     }
 
     #[test]

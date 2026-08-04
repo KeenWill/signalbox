@@ -10117,6 +10117,17 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             first_delivery_sequence: CanonicalU64::new(*first_delivery_sequence),
             through_delivery_sequence: CanonicalU64::new(*through_delivery_sequence),
         },
+        ProcessTurnState::DelegationTerminated {
+            spawning_request,
+            outcome,
+            reason,
+            provenance,
+        } => TurnState::DelegationTerminated {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            outcome: wire_delegation_outcome(*outcome),
+            reason: wire_delegation_reason(*reason),
+            provenance: wire_delegation_provenance(*provenance),
+        },
         ProcessTurnState::ActiveRunning {
             current_attempt,
             current_model_call,

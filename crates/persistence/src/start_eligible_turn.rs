@@ -544,6 +544,7 @@ async fn prepare_delegated_preview(
                 SELECT 1 FROM turn_lifecycle AS active
                  WHERE active.session_id = task.child_session_id
                    AND active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
           )
           AND NOT EXISTS (
                 SELECT 1 FROM context_compaction_model_call AS compaction
@@ -627,7 +628,9 @@ async fn prepare_delegated_wake_preview(
             wake.first_delivery_sequence,
             wake.through_delivery_sequence,
             predecessor.turn_id AS predecessor_turn_id,
-            predecessor.terminal_frontier_id AS predecessor_frontier_id,
+            turn_lifecycle_effective_terminal_frontier(
+                predecessor.session_id, predecessor.turn_id
+            ) AS predecessor_frontier_id,
             defaults.session_id AS goal_defaults_session_id,
             wake.defaults_version AS queued_defaults_version,
             defaults.version AS goal_defaults_version,
@@ -654,10 +657,15 @@ async fn prepare_delegated_wake_preview(
                 wake.recipient_session_id, wake.turn_id
            )
           AND predecessor.session_id = wake.recipient_session_id
-          AND predecessor.state_kind = 'terminal'
-          AND predecessor.terminal_disposition_kind IN (
-                'failed', 'completed', 'refused', 'cancelled',
-                'reconciliation_required'
+          AND (
+                predecessor.delegation_runtime_terminal
+                OR (
+                    predecessor.state_kind = 'terminal'
+                    AND predecessor.terminal_disposition_kind IN (
+                        'failed', 'completed', 'refused', 'cancelled',
+                        'reconciliation_required'
+                    )
+                )
           )
          JOIN session_defaults_version AS defaults
            ON defaults.session_id = wake.recipient_session_id
@@ -670,6 +678,7 @@ async fn prepare_delegated_wake_preview(
                 SELECT 1 FROM turn_lifecycle AS active
                  WHERE active.session_id = wake.recipient_session_id
                    AND active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
           )
           AND NOT EXISTS (
                 SELECT 1 FROM context_compaction_model_call AS compaction
@@ -1102,6 +1111,7 @@ async fn insert_prepared_accepted_activation(
                   FROM turn_lifecycle AS active
                  WHERE active.session_id = candidate.session_id
                    AND active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
             )
             AND accepted_input_turn_is_first_nonterminal(
                 candidate.session_id,
@@ -1128,7 +1138,10 @@ async fn insert_prepared_accepted_activation(
                           FROM turn_lifecycle AS predecessor
                          WHERE predecessor.turn_id = $2::uuid
                            AND predecessor.session_id = candidate.session_id
-                           AND predecessor.state_kind = 'terminal'
+                           AND (
+                                predecessor.state_kind = 'terminal'
+                                OR predecessor.delegation_runtime_terminal
+                           )
                     )
                 )
             )",
@@ -1310,6 +1323,7 @@ async fn insert_prepared_delegated_activation(
                     SELECT 1 FROM turn_lifecycle AS active
                      WHERE active.session_id = candidate.session_id
                        AND active.state_kind = 'active'
+                       AND NOT active.delegation_runtime_terminal
                 )
                 AND EXISTS (
                     SELECT 1 FROM session_delegation_initial_task AS task
@@ -1356,6 +1370,7 @@ async fn insert_prepared_delegated_activation(
                     SELECT 1 FROM turn_lifecycle AS active
                      WHERE active.session_id = candidate.session_id
                        AND active.state_kind = 'active'
+                       AND NOT active.delegation_runtime_terminal
                 )
                 AND EXISTS (
                     SELECT 1 FROM session_delegation_wake_turn_origin AS wake

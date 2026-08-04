@@ -851,6 +851,21 @@ cancelled-turn evidence cannot be selected as a stopped outcome. Detached child
 work stays independently schedulable after the parent's turn or goal has
 terminalized.
 
+**SPEC PROPOSAL — immediate descendant terminalization.** A bound `Stop` or
+`Cancel` policy action commits an authoritative logical terminal proof for the
+child in the same transaction as the parent command, relationship disposition,
+delivered child result, and wake. That proof carries the exact parent-command
+authority and is terminal even when a provider or tool operation was already
+physically in flight. The child is no longer scheduler work: an immutable
+one-to-one lifecycle projection releases its active or queued index slot, while
+the retained turn reads as the typed parent-terminated outcome and remains the
+immediate terminal predecessor of later independent work. Its retained terminal
+frontier preserves that execution lineage for accepted-input and delegation-wake
+activation. Physical cancellation latency cannot revive it, replace its result,
+or change the typed stop/cancel provenance. A background or bound `KeepRunning`
+edge has no such proof and remains schedulable. This proposal is accepted with
+the implementing stack's merge.
+
 Startup and the periodic sweep recognize child waits, pending delegation inbox
 content, and undelivered results from durable rows. They neither infer a result
 from child transcript state nor depend on process-local wake memory.

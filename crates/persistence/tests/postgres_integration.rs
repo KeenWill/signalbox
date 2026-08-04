@@ -8216,7 +8216,7 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
         .await?;
     let mut update_transaction = pool.begin().await?;
     let update_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_update', 1, $1)
          RETURNING event_sequence",
     )
@@ -8268,7 +8268,7 @@ async fn delegation_outbox_dispatch_decodes_update_and_wake_shapes() -> Result<(
         .await?;
     let mut wake_transaction = pool.begin().await?;
     let wake_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_wake', 1, $1)
          RETURNING event_sequence",
     )
@@ -8764,7 +8764,7 @@ async fn delegation_outbox_dispatch_decodes_message_update_and_wake() -> Result<
         .await?;
     let mut update_transaction = pool.begin().await?;
     let update_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_update', 1, $1)
          RETURNING event_sequence",
     )
@@ -8832,7 +8832,7 @@ async fn delegation_outbox_dispatch_decodes_message_update_and_wake() -> Result<
         .await?;
     let mut wake_transaction = pool.begin().await?;
     let wake_sequence: Decimal = sqlx::query_scalar(
-        "INSERT INTO outbox_event (event_kind, storage_version, session_id)
+        "INSERT INTO delegation_outbox_event (event_kind, storage_version, session_id)
          VALUES ('delegation_wake', 1, $1)
          RETURNING event_sequence",
     )
@@ -12464,7 +12464,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
             },
         )
         .await?;
-    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+    let Some(ModelCallTerminalOutcome::Completed(completed)) = outcome else {
         panic!("the source call must complete");
     };
     assert_eq!(completed.reclassified_pending_steering().len(), 1);
@@ -16143,6 +16143,53 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
         steering.binding().source_turn(),
         TurnId::from_uuid(child_turn)
     );
+
+    let consuming_call = ModelCallId::from_uuid(Uuid::from_u128(0xd418));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed_call) = model_calls
+        .prepare_initial_call(
+            SessionId::from_uuid(child),
+            consuming_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd419)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xd41a)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xd41b)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd41c)),
+                    TurnId::from_uuid(Uuid::from_u128(0xd41d)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("delegated steering must checkpoint with its consuming call");
+    };
+    assert_eq!(checkpointed_call, consuming_call);
+    let PrepareInitialModelCallOutcome::Ready {
+        request: reloaded_call,
+        ..
+    } = model_calls
+        .prepare_initial_call(
+            SessionId::from_uuid(child),
+            ModelCallId::from_uuid(Uuid::from_u128(0xd41e)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd41f)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xd420)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xd421)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd422)),
+                    TurnId::from_uuid(Uuid::from_u128(0xd423)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("delegated consumed steering must reload its prepared call");
+    };
+    assert_eq!(reloaded_call.call().id(), consuming_call);
 
     let interrupt = submit
         .handle(

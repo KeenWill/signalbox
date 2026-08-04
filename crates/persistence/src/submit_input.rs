@@ -1088,6 +1088,10 @@ where
         }
         None => {}
     }
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        .bind(durable_command_id_to_uuid(command_id))
+        .execute(&mut *connection)
+        .await?;
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
@@ -2684,12 +2688,17 @@ pub(crate) async fn load_scheduling_projection(
         load_active_acceptance_tail(connection, session_id, &turns).await?;
 
     let consumed_steering_rows = sqlx::query(
-        "SELECT session_id, accepted_input_id, acceptance_position, expected_active_turn_id,
-                consuming_model_call_id
-           FROM accepted_input
-          WHERE session_id = $1
-            AND disposition_kind = 'consumed_as_steering'
-          ORDER BY acceptance_position",
+        "SELECT accepted.session_id, accepted.accepted_input_id,
+                accepted.acceptance_position, accepted.expected_active_turn_id,
+                accepted.consuming_model_call_id
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS source
+             ON source.turn_id = accepted.expected_active_turn_id
+            AND source.session_id = accepted.session_id
+            AND source.origin_kind = 'accepted_input'
+          WHERE accepted.session_id = $1
+            AND accepted.disposition_kind = 'consumed_as_steering'
+          ORDER BY accepted.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_all(&mut *connection)
@@ -2701,6 +2710,36 @@ pub(crate) async fn load_scheduling_projection(
         required_model_calls.insert(call.into_uuid());
         *consumed_counts_by_call.entry(call.into_uuid()).or_default() += 1;
         consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
+            session_id_from_uuid(required(&row, "session_id")?),
+            AcceptedInputLifecycle::new(
+                accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
+                AcceptedInputDisposition::ConsumedAsSteering { call },
+            ),
+            decode_position(&row, "acceptance_position")?,
+            turn_id_from_uuid(required(&row, "expected_active_turn_id")?),
+        ));
+    }
+    let delegated_consumed_steering_rows = sqlx::query(
+        "SELECT accepted.session_id, accepted.accepted_input_id,
+                accepted.acceptance_position, accepted.expected_active_turn_id,
+                accepted.consuming_model_call_id
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS source
+             ON source.turn_id = accepted.expected_active_turn_id
+            AND source.session_id = accepted.session_id
+            AND source.origin_kind = 'delegation'
+          WHERE accepted.session_id = $1
+            AND accepted.disposition_kind = 'consumed_as_steering'
+          ORDER BY accepted.acceptance_position",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut delegated_consumed_steering =
+        Vec::with_capacity(delegated_consumed_steering_rows.len());
+    for row in delegated_consumed_steering_rows {
+        let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
+        delegated_consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
             session_id_from_uuid(required(&row, "session_id")?),
             AcceptedInputLifecycle::new(
                 accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
@@ -3015,6 +3054,35 @@ pub(crate) async fn load_scheduling_projection(
             ContextCompactionRange::inclusive(first, through),
             SemanticTranscriptEntryId::from_uuid(required(&row, "summary_entry_id")?),
         ));
+    }
+
+    let preceding_non_accepted_terminal = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "SELECT terminal.child_turn_id,
+                terminal.terminal_frontier_id,
+                effective.direct_selection_id
+           FROM session_delegation_logical_terminal AS terminal
+           JOIN LATERAL turn_origin_effective_model_configuration(
+                terminal.child_turn_id, terminal.child_session_id
+           ) AS effective ON true
+          WHERE terminal.child_session_id = $1
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle AS successor
+                 WHERE successor.session_id = terminal.child_session_id
+                   AND successor.turn_id <> terminal.child_turn_id
+                   AND goal_turn_is_runtime_relevant(
+                        successor.session_id, successor.turn_id
+                   )
+                   AND accepted_input_turn_queue_predecessor(
+                        successor.session_id, successor.turn_id
+                   ) = terminal.child_turn_id
+            )",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_optional(&mut *connection)
+    .await?;
+    if let Some((_, terminal_frontier, _)) = preceding_non_accepted_terminal {
+        required_frontiers.insert(terminal_frontier);
     }
 
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
@@ -3939,10 +4007,19 @@ pub(crate) async fn load_scheduling_projection(
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
     }
+    if let Some((turn, terminal_frontier, selected)) = preceding_non_accepted_terminal {
+        input = input.with_preceding_non_accepted_terminal(
+            session_id,
+            TurnId::from_uuid(turn),
+            ContextFrontierId::from_uuid(terminal_frontier),
+            DirectModelSelection::from_uuid(selected),
+        );
+    }
     input
         .with_model_call_facts(pinned_targets, model_calls)
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)
+        .with_delegated_consumed_steering_facts(delegated_consumed_steering)
         .with_steering_continuation_rounds(steering_continuation_rounds)
         .with_continuation_rounds(continuation_rounds)
         .reconstitute()
