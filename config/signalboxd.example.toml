@@ -26,6 +26,7 @@ version = 1
 name = "anthropic-primary"
 adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
 file = "/run/secrets/anthropic-primary"
 
 # A second account for the same provider. Pointing two profiles at one secret
@@ -35,6 +36,7 @@ file = "/run/secrets/anthropic-primary"
 name = "anthropic-overflow"
 adapter = "anthropic"
 billing_kind = "api_metered"
+delivery = "file"
 file = "/run/secrets/anthropic-overflow"
 
 # A pool is the set of profiles that may substitute for one another. Priority
@@ -68,13 +70,47 @@ adapter = "anthropic"
 credential_pool = "anthropic-main"
 
 # To serve a Codex model family, add profiles, a pool, this mapping, and the
-# codex_cli table. Two Codex profiles are two logins because each names its own
-# codex_home; two profiles sharing one codex_home fail startup.
+# codex_cli table. Codex admits three deliveries; pick one per profile.
+#
+# delivery = "oauth" — the daemon owns a rotating authorization it provisioned
+# itself, and hands each invocation a scratch home holding only an access token.
+# This is the delivery that supports several subscription accounts in one pool:
+# nothing is shared or written back, so concurrent invocations cannot collide.
+# The OAuth client and endpoints are yours to choose; nothing here is a
+# build-provided constant. Provision with:
+#   signalbox credential provision --profile codex-subscription-primary
 # [[credential_profiles]]
 # name = "codex-subscription-primary"
 # adapter = "codex_cli"
 # billing_kind = "subscription"
-# codex_home = "/var/lib/signalbox/codex/primary"
+# delivery = "oauth"
+# client_id = "<the OAuth client this deployment presents>"
+# token_url = "https://<provider>/oauth/token"
+# device_authorization_url = "https://<provider>/deviceauth/usercode"
+# scopes = ["<scope>"]
+#
+# delivery = "codex_home" — the daemon uses a login an operator established by
+# hand. Admitted only as the sole member of its pool, and every invocation
+# against it is serialised: that store has no cross-process locking, and two
+# concurrent refreshes can permanently invalidate the login. Convenient for a
+# single-account development instance; not a way to run several accounts.
+# [[credential_profiles]]
+# name = "codex-local"
+# adapter = "codex_cli"
+# billing_kind = "subscription"
+# delivery = "codex_home"
+# codex_home = "/var/lib/signalbox/codex/local"
+#
+# delivery = "file" — an API key, read per preparation and supplied to the fresh
+# process under env_key. Metered rather than subscription, and the one Codex
+# delivery the ordinary rotation policy covers end to end.
+# [[credential_profiles]]
+# name = "codex-api"
+# adapter = "codex_cli"
+# billing_kind = "api_metered"
+# delivery = "file"
+# file = "/run/secrets/codex-api"
+# env_key = "OPENAI_API_KEY"
 #
 # [[credential_pools]]
 # name = "codex-main"

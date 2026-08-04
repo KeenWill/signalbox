@@ -239,11 +239,25 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   headroom, and whether a free probe exists that does not consume the quota it
   reports, remains undecided. Blocks capacity-aware selection, not availability
   failover. (S22)
-- **Durable quarantine and explicit re-check.** A member excluded by
-  `quarantine` is forgotten at restart, and no command re-admits one before
-  then. Whether quarantine should outlive a process, and what evidence would
-  clear it, remains undecided. Blocks operator-driven recovery from a rejected
-  credential. (S22)
+- **Zero-cost liveness probes.** Quarantine semantics are decided and owned by
+  [credential pools and selection](spec/configuration-and-credentials.md#credential-pools-and-selection):
+  durable, profile-scoped, cleared by an operator command or by a probe that
+  calls no model. What remains open is whether any adapter can offer such a
+  probe. Absent one, an operator command is the only clearing path. Blocks
+  automatic recovery from a rejected credential, not recovery itself. (S22)
+- **Access-token-only dispatch for the Codex CLI.** The `oauth` delivery hands
+  each invocation a store carrying an access token and no refresh token. That
+  the Codex CLI executes from such a store is established by its configurable
+  credential-store mode and its documented access-token login, but not by
+  observation. If it declines, `oauth` is unavailable for that adapter and
+  `codex_home` with its serialisation constraint is the only subscription
+  delivery. (S22)
+- **Reuse-detection blast radius.** Whether a provider rejecting a reused
+  refresh token invalidates only that token or the whole authorization family is
+  not determinable from either CLI's source. It does not affect the `oauth`
+  delivery, which has exactly one refresher, but it bounds how bad a
+  `codex_home` concurrency violation is: single-token rejection is recoverable,
+  family revocation is account loss. (S22)
 - **Detailed provider provenance representation.** Model identifier
   normalization is decided: the
   [provider-target identity rule](spec/model-call-execution.md#provider-target-identity)

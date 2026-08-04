@@ -431,15 +431,15 @@ fail-closed:
   from model spelling.
 - At least one `[[credential_profiles]]` entry is required. Each exact `name`
   carries the build-provided `adapter` it authenticates, one closed
-  `billing_kind` (`api_metered` or `subscription`), and the delivery its adapter
-  requires: an `anthropic` profile names an absolute `file`, and a `codex_cli`
-  profile an absolute `codex_home`. Duplicate names, unknown adapters, unknown
-  kinds, a delivery field belonging to the other adapter, a relative path, and
-  unknown fields are rejected. Neither path is opened at startup, matching the
-  no-preflight rule below. Billing kind belongs to authentication, not to the
-  adapter a mapping selects. A profile name is opaque to code: no build-provided
-  constant is compared against it, so a deployment names its accounts as it
-  chooses.
+  `billing_kind` (`api_metered` or `subscription`), and one closed `delivery`
+  whose own fields [credential deliveries](#credential-deliveries) owns.
+  Duplicate names, unknown adapters, unknown kinds, an unknown delivery, a
+  delivery its adapter does not admit, and unknown fields are rejected. No
+  credential path is opened and no provider is contacted at startup, matching
+  the no-preflight rule below. Billing kind belongs to authentication, not to
+  the adapter a mapping selects. A profile name is opaque to code: no
+  build-provided constant is compared against it, so a deployment names its
+  accounts as it chooses.
 - At least one `[[credential_pools]]` entry is required.
   [Credential pools and selection](#credential-pools-and-selection) owns its
   complete grammar and admission rules.
@@ -575,19 +575,14 @@ Each `[[models]]` entry defines one direct selection:
   for that model.
 
 This build provides exactly `anthropic` and `codex_cli`. Neither adapter pins a
-profile name, and a pool may hold several profiles for either. An Anthropic
-profile carries the deployment path its secret value arrives through (see
-[credential lifecycle](#credential-lifecycle)). A Codex profile instead carries
-an absolute `codex_home`, the directory holding the login store its fresh
-processes read, so two Codex profiles are two distinct logins rather than one
-shared ambient context; two profiles naming the same `codex_home` are a startup
-failure, because they are one login under two names and their separate billing
-and availability accounting would be fiction. A Codex mapping also requires
-`[codex_cli]` with an absolute executable path naming an existing regular file
-and an absolute, existing `working_directory`; construction validates that shape
-and platform support without invoking Codex or inspecting login state. The Codex
-CLI owns its external login exactly as the adapter contract specifies. OpenAI
-HTTP and Claude CLI mappings are not provided by this build.
+profile name, and a pool may hold several profiles for either: `anthropic`
+admits the `file` delivery, and `codex_cli` admits `file`, `codex_home`, and
+`oauth`. A Codex mapping also requires `[codex_cli]` with an absolute executable
+path naming an existing regular file and an absolute, existing
+`working_directory`; construction validates that shape and platform support
+without invoking Codex or inspecting login state. The Codex CLI owns its
+external login exactly as the adapter contract specifies. OpenAI HTTP and Claude
+CLI mappings are not provided by this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -627,6 +622,72 @@ restart path instead rebuilds its target catalog from the stored calls
 themselves, deliberately not from configuration — part of why recovery of
 acknowledged work is configuration-independent (INV-034).
 
+## Credential deliveries
+
+A profile's closed `delivery` states how its secret reaches the provider. Three
+are admitted, and an adapter admits a subset of them.
+
+**`file`** names an absolute deployment-owned path, read per preparation and
+never cached, narrowed by the trailing-line-termination rule below. The
+`anthropic` adapter forms an HTTP header from the value; `codex_cli` supplies it
+to the fresh process under the profile's `env_key`. This is the delivery for
+every credential that has an external source of truth — provider API keys, and
+any long-lived bearer token a provider's own tooling mints for unattended use.
+[Credential operations policy](#credential-operations-policy) applies to it
+unchanged.
+
+**`codex_home`** names an absolute directory holding a login store the
+provider's CLI owns, reads, and writes. The daemon supplies it as that process's
+credential home and never opens it. It exists so a deployment can point the
+daemon at a login an operator already established interactively, provisioning
+nothing. It carries three constraints. A `codex_home` profile is admitted only
+as the sole member of its pool, and the daemon serialises every invocation
+against it, because that store has no cross-process locking and two concurrent
+token refreshes can permanently invalidate the login. One directory may not
+appear on two profiles. And the operations policy does not apply, because
+rotation happens inside the store rather than at an external source of truth. A
+process the daemon did not start — an operator running the CLI by hand against
+the same directory — is outside what serialisation can protect.
+
+**`oauth`** is a rotating authorization the daemon owns. The profile carries the
+`client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
+requires. These are configuration, never build-provided constants: which OAuth
+client a deployment presents is the operator's decision and is recorded in the
+operator's own document, not asserted by this build.
+
+Provisioning is explicit and never automatic. An operator-invoked command
+creates a scratch credential home, runs the adapter's own CLI device
+authorization inside it, relays the user code and verification URL, and on
+success harvests the resulting refresh token and non-secret account metadata
+into one transaction before destroying the scratch home. The interactive flow
+therefore stays in the provider's own client. Because each authorization mints
+an independent token family, provisioning neither disturbs nor depends on any
+other login for that account: an operator's existing CLI logins on this or any
+other machine keep working, and deleting the profile's stored authorization ends
+only the daemon's own family.
+
+The daemon is the sole refresher of a stored authorization. A refresh takes a
+row lock, re-reads the stored token, exchanges it, and persists the returned
+token before the new access token is used anywhere. The store is updated in
+place and the previous refresh token is overwritten rather than retained: a
+superseded token is unusable, and keeping one would only preserve material whose
+sole remaining effect is to invalidate the live authorization if it were ever
+replayed. Access tokens are held in memory; a restart costs one refresh per
+profile and keeps them out of the database entirely.
+
+Dispatch supplies each invocation a scratch credential home containing the
+access token and **no refresh token**, discarded when the process ends. Nothing
+the CLI can do refreshes, rotates, or writes back, so concurrent invocations
+share no mutable authorization state and the reuse hazard that constrains
+`codex_home` does not arise.
+
+A refresh rejected as expired, reused, or revoked is permanent. The profile is
+quarantined and re-provisioning is the only recovery, which is the same operator
+command as first provisioning. Because a restored database backup carries a
+superseded refresh token, restore quarantines every `oauth` profile pending
+re-provision rather than attempting to resume a chain the provider has already
+moved past.
+
 ## Credential pools and selection
 
 A credential pool is the set of profiles that may substitute for one another for
@@ -660,7 +721,7 @@ The five admitted actions are:
 | `switch_next_turn`   | The turn fails as it would with no pool. The next turn's preparation excludes this member.                                                            |
 | `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)). |
 | `avoid_new_sessions` | Sessions already pinned to the member keep it; preparation for a session with no prior completed call on this pool excludes it.                       |
-| `quarantine`         | The member is excluded from every selection until a restart or an explicit re-check clears it.                                                        |
+| `quarantine`         | The member is excluded from every selection, in every pool and across restarts, until an operator clears it.                                          |
 
 `switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
 `on_overloaded`, because only those causes carry proof that the request was not
@@ -677,9 +738,17 @@ session's most recent completed call on that pool pinned, so a session stays on
 one account until a trigger displaces it. When the pool admits no member,
 `on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
 the earliest reset the pool's members reported, and `fail` fails the turn as a
-known failure. Quarantine is process-local and rebuilt from observation, so a
-restart re-admits a quarantined member and learns again. Why: recovery of
-acknowledged work must not depend on retained credential judgments (INV-034).
+known failure. Quarantine is durable and scoped to the profile rather than to
+the pool that observed it, because a rejected credential is a property of the
+account: a profile ranked in two pools is excluded from both. It is cleared only
+by an explicit operator command, or by a probe that costs nothing and calls no
+model where the adapter offers one — never by a timer, since a revoked
+credential does not heal on a schedule, and never by a restart. Why an operator
+command rather than rediscovery: for a `codex_home` or `oauth` profile the
+repair is an interactive re-authorization the operator performs, so the operator
+knows the moment it is fixed, and rediscovering it instead would spend a real
+model call to learn what they could have said. Reading a quarantine record is
+never on the recovery path for acknowledged work, so INV-034 is unaffected.
 
 The durable record is unchanged in kind. A session's credential history event
 carries a complete family-to-pool snapshot where it previously carried a
@@ -904,23 +973,26 @@ deployment-side rules that code cannot enforce are stated in
   are `brave-search-primary` and `github-primary`; every model-provider
   reference is a configured profile name this build never spells.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds a
-  map of references to deployment paths — one entry per `anthropic` profile plus
-  the two integration constants — and reads the file for every Anthropic model
-  call, web search, code-host operation, or pull-request tool operation
-  preparation; nothing is cached. Why: atomic file replacement rotates any
-  credential without restarting signalboxd, and an in-flight operation keeps the
-  value it authenticated with. Resolution stays reference-scoped: a reference
-  absent from the map fails typed `Unmapped`; a missing file is `Unavailable`;
-  an unreadable file is `Unreadable` — all reference-only errors, so a failure
-  names an account without disclosing which path served it.
-- **External Codex login.** A Codex profile names an operator-selected Codex CLI
-  login by the `codex_home` directory holding it. The daemon and adapter neither
-  locate, read, nor validate that store and invent no credential-value shape;
-  each fresh CLI process resolves login state for itself under the adapter's
-  existing environment contract, with the profile's `codex_home` supplied as
-  that process's credential home. Two Codex profiles are therefore two logins
-  the CLI resolves independently, which is what lets one pool hold several. The
-  profile's configured billing kind labels derived cost; adapter kind does not.
+  map of references to deployment paths — one entry per profile whose delivery
+  is `file`, whatever its adapter, plus the two integration constants — and
+  reads the file for every model call, web search, code-host operation, or
+  pull-request tool operation preparation that resolves one; nothing is cached.
+  Why: atomic file replacement rotates any credential without restarting
+  signalboxd, and an in-flight operation keeps the value it authenticated with.
+  Resolution stays reference-scoped: a reference absent from the map fails typed
+  `Unmapped`; a missing file is `Unavailable`; an unreadable file is
+  `Unreadable` — all reference-only errors, so a failure names an account
+  without disclosing which path served it.
+- **External and daemon-owned CLI logins.** A `codex_home` profile names a login
+  store the daemon never opens: the fresh CLI process resolves its own state
+  under the adapter's existing environment contract, with the profile's
+  directory supplied as that process's credential home. An `oauth` profile
+  inverts this — the daemon holds the rotating authorization and hands each
+  process a scratch home carrying only an access token. Either way the adapter
+  invents no credential-value shape of its own, and either way two profiles are
+  two independent logins, which is what lets one pool hold several. The
+  profile's configured billing kind labels derived cost; adapter kind and
+  delivery do not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -976,15 +1048,24 @@ deployment-side rules that code cannot enforce are stated in
   daemon; definitive code-host rejection is likewise fixed under its own detail,
   while an uncertain mutation acknowledgement follows the tool loop's
   external-effect ambiguity contract.
-- **Durable references, never values.** Postgres never stores a credential
-  value. Each model call durably pins its non-secret credential reference at the
-  `Prepared` insert (`model_call.credential_reference`), immutable thereafter
-  under the authorization-facts trigger; the column is total (`NOT NULL` and
-  non-empty), because every insert writes it and no database predates the stack.
-  Resuming a stored `Prepared` call re-supplies the stored reference. Tool
-  attempts store neither integration references nor values: the immutable
-  compiled code-host declaration selects `github-primary` again when execution
-  resumes.
+- **Durable references, and one narrow class of value.** Postgres stores a
+  credential value only where that credential rotates and the daemon is its sole
+  owner — exactly the `oauth` delivery in
+  [credential deliveries](#credential-deliveries), and nothing else. Every other
+  credential is reference-only. Each model call durably pins its non-secret
+  credential reference at the `Prepared` insert
+  (`model_call.credential_reference`), immutable thereafter under the
+  authorization-facts trigger; the column is total (`NOT NULL` and non-empty),
+  because every insert writes it and no database predates the stack. Resuming a
+  stored `Prepared` call re-supplies the stored reference. Tool attempts store
+  neither integration references nor values: the immutable compiled code-host
+  declaration selects `github-primary` again when execution resumes. Why the
+  exception is exactly this shape: a `file` credential has an external source of
+  truth, so storing a copy would create a second one and violate the
+  one-source-of-truth rule below. A rotating refresh token has no external
+  source of truth available — the provider replaces it on every use, and no
+  operator edit can produce the current value — so the store that holds it *is*
+  the source of truth, and there is nowhere else for it to live.
 
 **Committed unimplemented functionality — explicit session credential update.**
 No present API, process message, or command updates session credentials. A
@@ -1144,18 +1225,24 @@ Operational rules the daemon deployment must honor; code cannot enforce them
 Runner credential files instead follow the same-host `0600` contract above and
 are outside this cluster-delivery policy:
 
-- **One source of truth per secret.** 1Password owns runtime credentials: the
-  vault item a reference resolves to is the source of truth, and rotation is an
-  edit to it. sops-age-in-git owns bootstrap and deployment material (including
-  the operator's own credential): the encrypted file in git is the source of
-  truth, and rotation history is git history. Maintaining the same value in both
-  channels is a defect. Kubernetes Secret objects are delivery artifacts of
-  whichever channel produced them, never sources of truth; hand-editing one is a
-  defect because the next sync overwrites it. This split governs exactly the
-  provider and integration runtime credentials plus the bootstrap and deployment
-  material the channels themselves depend on, not every cluster-delivered
-  secret: user-client authentication, runner enrollment, and the database
-  credential are separate open decisions outside it (see Open edges).
+- **One source of truth per secret.** 1Password owns `file`-delivered runtime
+  credentials: the vault item a reference resolves to is the source of truth,
+  and rotation is an edit to it. sops-age-in-git owns bootstrap and deployment
+  material (including the operator's own credential): the encrypted file in git
+  is the source of truth, and rotation history is git history. Maintaining the
+  same value in both channels is a defect. A `codex_home` or `oauth` credential
+  has no vault item at all, and giving it one would be that same defect in its
+  most damaging form: the provider replaces a rotating token on every use, so a
+  vault copy is stale the moment it is taken and replaying it invalidates the
+  live authorization. For those two deliveries the store the daemon or the CLI
+  writes is the source of truth, re-provisioning is the rotation, and the vault
+  holds nothing. Kubernetes Secret objects are delivery artifacts of whichever
+  channel produced them, never sources of truth; hand-editing one is a defect
+  because the next sync overwrites it. This split governs exactly the provider
+  and integration runtime credentials plus the bootstrap and deployment material
+  the channels themselves depend on, not every cluster-delivered secret:
+  user-client authentication, runner enrollment, and the database credential are
+  separate open decisions outside it (see Open edges).
 - **Acyclic bootstrap chain.** The operator-held age identity (custodied outside
   git and outside automated sync) decrypts the sops channel; the sops channel
   delivers the operator's credential; the operator syncs the 1Password channel;
@@ -1211,6 +1298,7 @@ are outside this cluster-delivery policy:
   action are rejected at startup rather than silently inert. The observation
   itself is routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
-- Quarantine is process-local, so a restart re-admits a member whose credential
-  a provider rejected and learns that again from the next preparation. No
-  durable quarantine record and no explicit re-check command exist.
+- A quarantine clears only through the operator command; no adapter in this
+  build offers a zero-cost liveness probe the daemon can use to clear one
+  automatically, so the second clearing path the section above admits has no
+  present implementation.
