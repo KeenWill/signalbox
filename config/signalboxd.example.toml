@@ -19,9 +19,10 @@ version = 1
 # whatever the deployment calls them. billing_kind states how calls through this
 # account are billed: api_metered produces real dollar cost, subscription
 # produces metered-equivalent cost. Keep a name's billing meaning stable, and use
-# a new name when an authentication update changes it. An anthropic profile
-# names the file holding its key; a codex_cli profile names the directory holding
-# its login store. Neither path is opened at startup.
+# a new name when an authentication update changes it. `delivery` states how the
+# secret reaches the provider and which further fields the profile carries;
+# anthropic admits "file", codex_cli admits "file", "codex_home", and "oauth".
+# No credential path is opened and no provider is contacted at startup.
 [[credential_profiles]]
 name = "anthropic-primary"
 adapter = "anthropic"
