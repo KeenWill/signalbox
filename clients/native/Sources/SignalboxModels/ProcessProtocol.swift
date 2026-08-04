@@ -3007,7 +3007,7 @@ private struct SignalboxTaggedPayload: Decodable {
 /// `current_model_call` or `terminal_model_call` has one shape and no
 /// discriminator, so it names its admitted fields directly and rejects every
 /// other member rather than letting a synthesized decoder discard it.
-private struct SignalboxUntaggedPayload: Decodable {
+struct SignalboxUntaggedPayload: Decodable {
   let payload: [String: SignalboxJSONValue]
 
   init(from decoder: Decoder) throws {
@@ -3052,7 +3052,7 @@ private struct SignalboxUntaggedPayload: Decodable {
 }
 
 extension CodingUserInfoKey {
-  fileprivate static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
+  static let signalboxDuplicateObjectPaths = CodingUserInfoKey(
     rawValue: "org.signalbox.process-protocol.duplicate-object-paths"
   )!
 }
@@ -3091,9 +3091,9 @@ extension Decoder {
   }
 }
 
-private struct SignalboxJSONDuplicateMemberScanner {
+struct SignalboxJSONDuplicateMemberScanner {
   private let bytes: [UInt8]
-  private let stringDecoder = SignalboxJSONCoding.decoder()
+  private let stringDecoder = JSONDecoder()
   private var index = 0
   private var duplicateObjectPaths: Set<[String]> = []
 
