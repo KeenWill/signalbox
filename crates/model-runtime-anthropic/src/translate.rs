@@ -22,8 +22,16 @@ use crate::wire::{
 /// parallel tool use disabled, so exactly one contract value returns.
 /// [`ModelOperation::validate`] reserves the contract name from ordinary
 /// tools before anything is sent.
+#[cfg(test)]
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
+) -> Result<MessagesRequest, PreparationFailure> {
+    build_request_with_fast_mode(operation, operation.settings.fast_mode)
+}
+
+pub(crate) fn build_request_with_fast_mode<C>(
+    operation: &ModelOperation<C>,
+    request_fast_mode: FastMode,
 ) -> Result<MessagesRequest, PreparationFailure> {
     if let Err(error) = operation.validate() {
         return Err(PreparationFailure::UnsupportedOperation {
@@ -68,7 +76,7 @@ pub(crate) fn build_request<C>(
         .reasoning_level
         .map(anthropic_effort)
         .transpose()?;
-    let service_tier = anthropic_service_tier(operation)?;
+    let service_tier = anthropic_service_tier(operation, request_fast_mode)?;
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
@@ -83,7 +91,7 @@ pub(crate) fn build_request<C>(
         top_p: operation.settings.top_p,
         output_config: effort.map(|effort| OutputConfig { effort }),
         service_tier,
-        speed: (operation.settings.fast_mode == FastMode::Enabled).then_some("fast"),
+        speed: (request_fast_mode == FastMode::Enabled).then_some("fast"),
         tools,
         tool_choice,
         stream: operation.delivery == DeliveryMode::Streamed,
@@ -107,6 +115,7 @@ fn anthropic_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFa
 
 fn anthropic_service_tier<C>(
     operation: &ModelOperation<C>,
+    request_fast_mode: FastMode,
 ) -> Result<Option<&'static str>, PreparationFailure> {
     match (
         operation.settings.fast_mode,
@@ -118,8 +127,10 @@ fn anthropic_service_tier<C>(
                     .to_string(),
             })
         }
-        (FastMode::Enabled, None)
-        | (FastMode::Enabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
+        (FastMode::Enabled, None) => {
+            Ok((request_fast_mode == FastMode::Enabled).then_some("standard_only"))
+        }
+        (FastMode::Enabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))) => {
             Ok(Some("standard_only"))
         }
         (FastMode::Disabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto))) => {
@@ -405,7 +416,7 @@ mod tests {
         ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::build_request;
+    use super::{build_request, build_request_with_fast_mode};
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -664,6 +675,18 @@ mod tests {
 
         assert!(matches!(
             build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn mapped_fast_mode_still_rejects_anthropic_auto_tier() {
+        let mut operation = operation("call-mapped-incompatible-settings");
+        operation.settings.fast_mode = FastMode::Enabled;
+        operation.settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto));
+
+        assert!(matches!(
+            build_request_with_fast_mode(&operation, FastMode::Disabled),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }

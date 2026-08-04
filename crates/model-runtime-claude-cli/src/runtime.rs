@@ -266,8 +266,9 @@ impl ClaudeCliRuntime {
                 };
             }
         };
+        let mut request_fast_mode = operation.settings.fast_mode;
         if let Some(capabilities) = capabilities {
-            let (target, request_fast_mode) = match capabilities
+            let (target, effective_request_fast_mode) = match capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)
             {
                 Ok(application) => application,
@@ -281,7 +282,7 @@ impl ClaudeCliRuntime {
                 }
             };
             operation.resolved_target = target.clone();
-            operation.settings.fast_mode = request_fast_mode;
+            request_fast_mode = effective_request_fast_mode;
         }
         let reasoning_effort = match claude_reasoning_effort(&operation.settings) {
             Ok(reasoning_effort) => reasoning_effort,
@@ -318,19 +319,17 @@ impl ClaudeCliRuntime {
                 };
             }
         };
-        let support = match create_support_files(
-            &self.mcp_bridge_executable,
-            &translated,
-            operation.settings.fast_mode,
-        ) {
-            Ok(support) => support,
-            Err(detail) => {
-                return PreparationOutcome::Defect {
-                    correlation,
-                    defect: PreparationDefect::RequestConstructionFailed { detail },
-                };
-            }
-        };
+        let support =
+            match create_support_files(&self.mcp_bridge_executable, &translated, request_fast_mode)
+            {
+                Ok(support) => support,
+                Err(detail) => {
+                    return PreparationOutcome::Defect {
+                        correlation,
+                        defect: PreparationDefect::RequestConstructionFailed { detail },
+                    };
+                }
+            };
         let prompt = std::mem::take(&mut translated.prompt);
         PreparationOutcome::Prepared(ClaudeCliPreparedRequest {
             executable: self.executable.clone(),
