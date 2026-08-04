@@ -12,13 +12,18 @@ use signalbox_domain::{
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision, SessionReadScopeRefusal,
-    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, VersionedSessionPlacement,
+    ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId, ToolDecisionRationale,
+    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
-    mapping::{model_settings_from_json, session_id_from_uuid, session_id_to_uuid},
+    mapping::{
+        ToolApprovalDecisionSourceStorageKind, durable_command_id_from_uuid,
+        model_settings_from_json, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_decision_source_from_str,
+    },
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
@@ -726,6 +731,8 @@ pub enum ProcessTranscriptEntry {
         name: String,
         /// Exact stored normalized or scrubbed undecodable arguments.
         arguments: String,
+        /// Explicit decision provenance, absent while pending and for automatic policy.
+        approval: Option<ProcessToolApproval>,
     },
     /// Executed tool result reference.
     ToolExecutionResult {
@@ -835,6 +842,31 @@ pub enum ProcessTranscriptEntry {
         /// Conservative normalized content kind.
         content_kind: ProcessImportedContentKind,
     },
+}
+
+/// One explicit approval decision projected with an assistant tool proposal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessToolApproval {
+    decision: ToolApprovalDecision,
+    decider: ToolApprovalDecider,
+    rationale: Option<ToolDecisionRationale>,
+}
+
+impl ProcessToolApproval {
+    /// Borrows the exact recorded decision.
+    pub const fn decision(&self) -> &ToolApprovalDecision {
+        &self.decision
+    }
+
+    /// Returns the exact user or delegate provenance.
+    pub const fn decider(&self) -> ToolApprovalDecider {
+        self.decider
+    }
+
+    /// Borrows the delegate rationale, absent for a user decision.
+    pub const fn rationale(&self) -> Option<&ToolDecisionRationale> {
+        self.rationale.as_ref()
+    }
 }
 
 /// One complete transcript and cursor observation.
@@ -1532,7 +1564,12 @@ impl ProcessReadRepository {
                 result_attempt.error_kind AS result_error_kind,
                 result_attempt.error_detail AS result_error_detail,
                 transcript_approval.decision_kind AS transcript_decision_kind,
-                transcript_approval.denial_reason AS transcript_denial_reason
+                transcript_approval.decision_source AS transcript_decision_source,
+                transcript_approval.denial_reason AS transcript_denial_reason,
+                transcript_approval.owner_command_id AS transcript_user_command_id,
+                transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
+                transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
+                transcript_approval.rationale AS transcript_decision_rationale
                FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
                     WITH ORDINALITY AS selected(
                         member_position,
@@ -2917,7 +2954,12 @@ async fn open_transcript_entry_cursor(
             result_attempt.error_kind AS result_error_kind,
             result_attempt.error_detail AS result_error_detail,
             transcript_approval.decision_kind AS transcript_decision_kind,
-            transcript_approval.denial_reason AS transcript_denial_reason
+            transcript_approval.decision_source AS transcript_decision_source,
+            transcript_approval.denial_reason AS transcript_denial_reason,
+            transcript_approval.owner_command_id AS transcript_user_command_id,
+            transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
+            transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
+            transcript_approval.rationale AS transcript_decision_rationale
            FROM (
                 SELECT
                     resolved.*,
@@ -3045,6 +3087,7 @@ fn decode_transcript_entry(
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+    let transcript_approval = decode_process_tool_approval(row)?;
 
     if payload_kind == "context_summary" {
         let (
@@ -3193,6 +3236,7 @@ fn decode_transcript_entry(
             request: ToolRequestId::from_uuid(request),
             name,
             arguments,
+            approval: transcript_approval,
         });
     }
 
@@ -3523,6 +3567,102 @@ fn decode_transcript_entry(
         }
     };
     Ok(projected)
+}
+
+fn decode_process_tool_approval(
+    row: &PgRow,
+) -> Result<Option<ProcessToolApproval>, ProcessReadError> {
+    let decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
+    let source: Option<String> = row.try_get("transcript_decision_source")?;
+    let denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
+    let user_command: Option<Uuid> = row.try_get("transcript_user_command_id")?;
+    let delegate_model: Option<Uuid> = row.try_get("transcript_delegate_model_selection_id")?;
+    let delegate_call: Option<Uuid> = row.try_get("transcript_delegate_model_call_id")?;
+    let rationale: Option<String> = row.try_get("transcript_decision_rationale")?;
+    let Some(source) = source else {
+        if decision_kind.is_some()
+            || denial_reason.is_some()
+            || user_command.is_some()
+            || delegate_model.is_some()
+            || delegate_call.is_some()
+            || rationale.is_some()
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "tool approval projection without source",
+            )
+            .into());
+        }
+        return Ok(None);
+    };
+    let source_kind = tool_approval_decision_source_from_str(&source).ok_or_else(|| {
+        ProcessReadError::from(ProcessReadCorruption::Unsupported {
+            field: "tool approval decision source",
+            value: source,
+        })
+    })?;
+    let decision = match decision_kind.as_deref() {
+        Some("approve") if denial_reason.is_none() => ToolApprovalDecision::Approve,
+        Some("deny") => ToolApprovalDecision::Deny {
+            reason: denial_reason
+                .map(ToolDenialReason::try_new)
+                .transpose()
+                .map_err(|_| ProcessReadCorruption::Inconsistent("tool denial reason"))?,
+        },
+        _ => {
+            return Err(ProcessReadCorruption::Inconsistent("tool approval decision kind").into());
+        }
+    };
+    match (
+        source_kind,
+        user_command,
+        delegate_model,
+        delegate_call,
+        rationale,
+    ) {
+        (
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            | ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+            None,
+            None,
+            None,
+            None,
+        ) if decision == ToolApprovalDecision::Approve => Ok(None),
+        (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
+            Ok(Some(ProcessToolApproval {
+                decision,
+                decider: ToolApprovalDecider::User {
+                    command: durable_command_id_from_uuid(command).map_err(|_| {
+                        ProcessReadCorruption::Inconsistent("tool approval user command")
+                    })?,
+                },
+                rationale: None,
+            }))
+        }
+        (
+            ToolApprovalDecisionSourceStorageKind::Delegate,
+            None,
+            Some(model),
+            Some(call),
+            Some(rationale),
+        ) => Ok(Some(ProcessToolApproval {
+            decision,
+            decider: ToolApprovalDecider::Delegate {
+                model: DirectModelSelection::from_uuid(model),
+                call: ModelCallId::from_uuid(call),
+            },
+            rationale: Some(
+                ToolDecisionRationale::try_new(rationale)
+                    .map_err(|_| ProcessReadCorruption::Inconsistent("tool decision rationale"))?,
+            ),
+        })),
+        (
+            ToolApprovalDecisionSourceStorageKind::PolicyAuto
+            | ToolApprovalDecisionSourceStorageKind::SessionBlanket
+            | ToolApprovalDecisionSourceStorageKind::UserCommand
+            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            ..,
+        ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
+    }
 }
 
 fn decode_imported_source_speaker(
