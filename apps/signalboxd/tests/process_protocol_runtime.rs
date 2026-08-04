@@ -366,7 +366,7 @@ fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
-fn provider_default_model_settings(selection_id: CanonicalUuid) -> ModelSettingsSnapshot {
+fn provider_default_model_settings() -> ModelSettingsSnapshot {
     ModelSettingsSnapshot {
         precedence: ModelSettingsPrecedence {
             per_call: ModelSettingsOverlay::inherit_all(),
@@ -382,7 +382,7 @@ fn provider_default_model_settings(selection_id: CanonicalUuid) -> ModelSettings
         reasoning_source: None,
         fast_mode_source: None,
         service_tier_source: None,
-        validated_for_selection_id: Some(selection_id),
+        validated_for_selection_id: None,
     }
 }
 
@@ -2184,7 +2184,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
-            model_settings: provider_default_model_settings(replacement_selection),
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -2201,7 +2201,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
-            model_settings: provider_default_model_settings(replacement_selection),
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -5229,7 +5229,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
     else {
         panic!("prompted creation must return its session");
     };
-    assert_eq!(model_settings, provider_default_model_settings(selection));
+    assert_eq!(model_settings, provider_default_model_settings());
 
     connection
         .request_version(
@@ -5250,7 +5250,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
-            model_settings: provider_default_model_settings(selection),
+            model_settings: provider_default_model_settings(),
             system_prompt: Some(prompt.clone()),
         }
     );
@@ -5283,7 +5283,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
-            model_settings: provider_default_model_settings(selection),
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -5307,7 +5307,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
-            model_settings: provider_default_model_settings(selection),
+            model_settings: provider_default_model_settings(),
             system_prompt: Some(prompt),
         }
     );
