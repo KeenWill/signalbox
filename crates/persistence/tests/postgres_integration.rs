@@ -12426,7 +12426,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
             },
         )
         .await?;
-    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+    let Some(ModelCallTerminalOutcome::Completed(completed)) = outcome else {
         panic!("the source call must complete");
     };
     assert_eq!(completed.reclassified_pending_steering().len(), 1);

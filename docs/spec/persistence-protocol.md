@@ -1084,6 +1084,17 @@ An already-terminal edge receives its typed already-terminal event and traversal
 continues through that child's outgoing relationships, so a terminal
 intermediate session cannot hide live descendants.
 
+**SPEC PROPOSAL — cascade terminal authority.** For each newly stopped or
+cancelled edge, the cascade transaction appends one immutable logical-terminal
+row keyed by spawning request, child session/initial turn, and root command.
+The row foreign-keys the exact per-edge parent-termination authority and cannot
+commit without the matching parent-provenanced relationship event, unique child
+result, update, deliveries, and wake. Runtime eligibility excludes this proof;
+it does not rewrite the child's retained physical execution evidence. Provider
+observation commit rereads the proof under the session lock and discards a late
+response instead of persisting it. This proposal is accepted with the
+implementing stack's merge.
+
 The scheduler sweep treats a deliverable foreground result, an undelivered
 background result, and a pending message inbox as durable hints. Result/message
 commit also writes a parent- or recipient-scoped `delegation_wake` outbox event

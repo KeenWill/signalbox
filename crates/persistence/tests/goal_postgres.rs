@@ -12,16 +12,22 @@ use std::error::Error;
 use support::blocked_backends_reached;
 
 use signalbox_application::{
-    StartEligibleTurnOutcome, StartupScanIdGenerator, StartupScanSessionOutcome,
+    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
+    CommitModelCallObservationTransaction, ModelCallCredentialReference,
+    ModelCallTerminalIdentityCandidates, StartEligibleTurnOutcome, StartupScanIdGenerator,
+    StartupScanSessionOutcome,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
-    CancelledModelCallTurnIdentities, ContextFrontierId, CreateSession, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
+    AssistantText, CancelledModelCallTurnIdentities, CompletedModelCallIdentities,
+    ContextFrontierId, CreateSession, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, FrozenAliasDefinition,
     Goal, GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
-    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelSelectionRequest,
-    PreparedCreateSession, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, PreparedCreateSession, ProviderModelIdentity,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
     ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
@@ -33,6 +39,7 @@ use signalbox_persistence::{
     },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     outbox::{
         DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
     },
@@ -119,6 +126,121 @@ fn creation_with_model(model: ModelSelectionRequest) -> PreparedCreateSession {
     )
     .prepare(session(SESSION))
     .expect("user-initiated creation without ancestry is preparable")
+}
+
+fn creation_fixture(command_id: u128, session_id: u128, selection: u128) -> PreparedCreateSession {
+    CreateSession::new(
+        command(command_id),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(Uuid::from_u128(selection)),
+        )),
+    )
+    .prepare(session(session_id))
+    .expect("user-initiated creation without ancestry is preparable")
+}
+
+struct DelegationFixture {
+    spawning_request: u128,
+    parent_session: u128,
+    parent_turn: u128,
+    child_session: u128,
+    child_turn: u128,
+    task_entry: u128,
+    selection: u128,
+    policy_kind: &'static str,
+    on_parent_stopped: Option<&'static str>,
+    on_parent_cancelled: Option<&'static str>,
+}
+
+async fn insert_queued_delegation_fixture(
+    pool: &PgPool,
+    fixture: DelegationFixture,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(Uuid::from_u128(fixture.spawning_request))
+    .bind(Uuid::from_u128(fixture.parent_session))
+    .bind(Uuid::from_u128(fixture.parent_turn))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind,
+             on_parent_stopped, on_parent_cancelled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(Uuid::from_u128(fixture.spawning_request))
+    .bind(Uuid::from_u128(fixture.parent_session))
+    .bind(Uuid::from_u128(fixture.parent_turn))
+    .bind(Uuid::from_u128(fixture.child_session))
+    .bind(fixture.policy_kind)
+    .bind(fixture.on_parent_stopped)
+    .bind(fixture.on_parent_cancelled)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ($1, $2, 'delegation', NULL, 1, 'queued')",
+    )
+    .bind(Uuid::from_u128(fixture.child_turn))
+    .bind(Uuid::from_u128(fixture.child_session))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, 'direct', $5, 'direct', $5, $6)",
+    )
+    .bind(Uuid::from_u128(fixture.spawning_request))
+    .bind(Uuid::from_u128(fixture.child_session))
+    .bind(Uuid::from_u128(fixture.child_turn))
+    .bind(Uuid::from_u128(fixture.task_entry))
+    .bind(Uuid::from_u128(fixture.selection))
+    .bind("queued cascade fixture task")
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(Uuid::from_u128(fixture.child_session))
+    .bind(Uuid::from_u128(fixture.task_entry))
+    .bind(Uuid::from_u128(fixture.spawning_request))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 fn statement(value: &str) -> GoalStatement {
@@ -2628,6 +2750,255 @@ async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dy
             .fetch_one(&pool)
             .await?;
     assert_eq!(turns_after_release, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012 / INV-032: an applied descendant-scoped goal stop
+/// atomically records every edge, logically terminalizes the bound child with
+/// exact parent-command provenance, and leaves the background child runnable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cascade()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let parent = 0xf100;
+    let bound_child = 0xf101;
+    let background_child = 0xf102;
+    let bound_request = 0xf110;
+    let background_request = 0xf120;
+    let bound_turn = 0xf111;
+    let background_turn = 0xf121;
+    let stop_command = 0xf130;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf001, parent, 0xf201))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf002, bound_child, 0xf202))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf003, background_child, 0xf203))
+        .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: bound_request,
+            parent_session: parent,
+            parent_turn: 0xf112,
+            child_session: bound_child,
+            child_turn: bound_turn,
+            task_entry: 0xf113,
+            selection: 0xf202,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("cancel"),
+        },
+    )
+    .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: background_request,
+            parent_session: parent,
+            parent_turn: 0xf122,
+            child_session: background_child,
+            child_turn: background_turn,
+            task_entry: 0xf123,
+            selection: 0xf203,
+            policy_kind: "background",
+            on_parent_stopped: None,
+            on_parent_cancelled: None,
+        },
+    )
+    .await?;
+
+    let activation = StartEligibleTurnRepository::new(pool.clone())
+        .handle(session(bound_child), activation_identities(0xf135))
+        .await?;
+    let StartEligibleTurnOutcome::Activated(_) = activation else {
+        panic!("the bound child must activate before its parent stops");
+    };
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xf139));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0xf202)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0xf138))),
+    )])
+    .expect("one bound-child target forms a catalog");
+    let mut model_calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("cascade-test-provider"),
+    );
+    let prepared = model_calls
+        .prepare_initial_call(
+            session(bound_child),
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf13a)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xf13b)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xf13c)),
+            |_| panic!("the bound child has no pending steering"),
+        )
+        .await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = prepared else {
+        panic!("the bound child's first model call must checkpoint");
+    };
+    assert_eq!(checkpointed, call);
+    let AuthorizeModelCallOutcome::Authorized(authorized) = model_calls
+        .authorize_send(session(bound_child), call)
+        .await?
+    else {
+        panic!("the prepared child call must authorize before its parent stops");
+    };
+
+    let repository = GoalRepository::new(pool.clone());
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xf129),
+                    session(parent),
+                    GoalUserAction::Attach(statement("stop the delegated descendants")),
+                ),
+                Some(turn_candidates(0xf131)),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(stop_command),
+                    session(parent),
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+
+    let cascade: (String, String, i64) = sqlx::query_as(
+        "SELECT root_source_kind, termination_kind, disposition_count::bigint
+           FROM session_delegation_termination_cascade
+          WHERE root_command_id = $1",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cascade, ("goal_command".into(), "stopped".into(), 2));
+    let bound_terminal: (Uuid, Uuid, String, Uuid) = sqlx::query_as(
+        "SELECT child_session_id, child_turn_id, disposition_kind, root_command_id
+           FROM session_delegation_logical_terminal
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(Uuid::from_u128(bound_request))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        bound_terminal,
+        (
+            Uuid::from_u128(bound_child),
+            Uuid::from_u128(bound_turn),
+            "stopped".into(),
+            Uuid::from_u128(stop_command),
+        )
+    );
+    let outcomes: Vec<(Uuid, String, String, String, Uuid)> = sqlx::query_as(
+        "SELECT spawning_tool_request_id, outcome_kind, reason_kind,
+                provenance_kind, provenance_command_id
+           FROM session_delegation_event
+          WHERE provenance_command_id = $1
+          ORDER BY spawning_tool_request_id",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        outcomes,
+        [
+            (
+                Uuid::from_u128(bound_request),
+                "child_stopped".into(),
+                "parent_stopped_parent_and_descendants".into(),
+                "parent_goal_command".into(),
+                Uuid::from_u128(stop_command),
+            ),
+            (
+                Uuid::from_u128(background_request),
+                "continue_running".into(),
+                "parent_stopped_parent_and_descendants".into(),
+                "parent_goal_command".into(),
+                Uuid::from_u128(stop_command),
+            ),
+        ]
+    );
+    let delivered: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)::bigint FROM session_child_result
+              WHERE spawning_tool_request_id = $1),
+            (SELECT count(*)::bigint FROM delegation_update_outbox_event
+              WHERE provenance_command_id = $2
+                AND update_kind = 'child_lifecycle_disposition'),
+            (SELECT count(*)::bigint FROM delegation_update_outbox_event
+              WHERE provenance_command_id = $2
+                AND update_kind = 'child_result'),
+            (SELECT count(*)::bigint FROM delegation_wake_outbox_event
+              WHERE result_spawning_request_id = $1)",
+    )
+    .bind(Uuid::from_u128(bound_request))
+    .bind(Uuid::from_u128(stop_command))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(delivered, (1, 2, 1, 1));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        model_calls.cancellation_signal(session(bound_child), call),
+    )
+    .await
+    .expect("the logical terminal proof must resolve the provider poll");
+    let discarded = CommitModelCallObservationTransaction::commit_observation(
+        &mut model_calls,
+        session(bound_child),
+        authorized
+            .observation_correlation()
+            .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("late provider result".into())
+                        .expect("fixture assistant text is valid"),
+                ],
+            }),
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Completed(
+            CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    0xf13d,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf13e)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xf13f)),
+            ),
+        )),
+        |_| panic!("discarded provider content cannot reclassify steering"),
+    )
+    .await?;
+    assert_eq!(discarded, None);
+    assert!(
+        StartEligibleTurnRepository::new(pool.clone())
+            .preview(session(bound_child), activation_identities(0xf140),)
+            .await?
+            .is_none()
+    );
+    assert!(
+        StartEligibleTurnRepository::new(pool.clone())
+            .preview(session(background_child), activation_identities(0xf150),)
+            .await?
+            .is_some()
+    );
 
     pool.close().await;
     drop(container);

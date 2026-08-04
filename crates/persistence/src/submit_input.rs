@@ -1088,6 +1088,10 @@ where
         }
         None => {}
     }
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        .bind(durable_command_id_to_uuid(command_id))
+        .execute(&mut *connection)
+        .await?;
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))

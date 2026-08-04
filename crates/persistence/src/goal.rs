@@ -335,6 +335,10 @@ impl GoalRepository {
             }
             GoalCommandResult::Rejected(_) => {}
         }
+        sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+            .bind(durable_command_id_to_uuid(command_id))
+            .execute(&mut *transaction)
+            .await?;
         commit(transaction).await?;
         Ok(GoalCommandHandlingOutcome::Recorded(result))
     }

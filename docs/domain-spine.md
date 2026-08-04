@@ -5463,7 +5463,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
     fn reread_observation(
@@ -5476,6 +5476,7 @@ pub trait CommitModelCallObservationTransaction {
 pub enum RetainedModelCallObservationStatus {
     Pending,
     AlreadyCommitted,
+    DiscardedByLogicalTerminal,
 }
 
 pub struct RetainedModelCallExecutionState { /* private */ }

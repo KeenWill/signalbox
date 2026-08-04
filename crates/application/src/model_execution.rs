@@ -805,7 +805,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 
@@ -824,6 +824,8 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+    /// A newer logical terminal proof made the retained provider result inert.
+    DiscardedByLogicalTerminal,
 }
 
 /// Opaque same-incarnation evidence retained across a failed orchestration stage.
@@ -1472,6 +1474,9 @@ where
                             .commit_terminal_observation(retained_session, retained, tool_approvals)
                             .await;
                     }
+                    Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state: RetainedModelCallExecutionStateKind::TerminalObservation {
@@ -1750,12 +1755,13 @@ where
                 .commit_observation(session, observation.clone(), identities, next_turn)
                 .await
             {
-                Ok(outcome) => {
+                Ok(Some(outcome)) => {
                     report_model_call_terminalization(&outcome);
                     return Ok(ModelCallExecutionOutcome::ObservationCommitted(Box::new(
                         outcome,
                     )));
                 }
+                Ok(None) => return Ok(ModelCallExecutionOutcome::NoWork),
                 Err(error)
                     if error.operator_failure_class()
                         == OperatorFailureClass::IdentityCollision =>
@@ -3003,7 +3009,7 @@ mod tests {
             _observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<ModelCallTerminalOutcome, Self::Error>
+        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
@@ -3037,7 +3043,7 @@ mod tests {
             observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<ModelCallTerminalOutcome, Self::Error>
+        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {

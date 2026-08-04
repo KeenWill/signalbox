@@ -730,7 +730,10 @@ impl PostgresModelCallRepository {
             ModelCallTerminalIdentityCandidates::Exact(identities),
             next_reclassified_turn,
         )
-        .await
+        .await?
+        .ok_or(ModelCallRepositoryError::InvalidTransition(
+            "provider observation was discarded by logical delegation terminalization",
+        ))
     }
 
     async fn apply_terminal_observation_candidates<NextTurn>(
@@ -739,13 +742,22 @@ impl PostgresModelCallRepository {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         mut next_reclassified_turn: NextTurn,
-    ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError>
+    ) -> Result<Option<ModelCallTerminalOutcome>, ModelCallRepositoryError>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
+            if model_call_is_delegation_logically_terminal(
+                &mut transaction,
+                session,
+                observation.call(),
+            )
+            .await?
+            {
+                return Ok(None);
+            }
             let execution = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 observation.call(),
@@ -772,7 +784,7 @@ impl PostgresModelCallRepository {
                 provider_failure_cause,
             )
             .await?;
-            Ok(outcome)
+            Ok(Some(outcome))
         }
         .await;
         finish_commit(transaction, result).await
@@ -1108,6 +1120,15 @@ impl PostgresModelCallRepository {
                 return Err(ModelCallRepositoryError::InvalidTransition(
                     "retained observation correlation changed",
                 ));
+            }
+            if model_call_is_delegation_logically_terminal(
+                &mut transaction,
+                session,
+                observation.call(),
+            )
+            .await?
+            {
+                return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
             }
             match (stored.state.as_str(), stored.disposition.as_deref()) {
                 ("in_flight", None) => {
@@ -1516,6 +1537,32 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
     }
 }
 
+async fn model_call_is_delegation_logically_terminal(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<bool, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM model_call AS call
+              JOIN session_delegation_initial_task AS task
+                ON task.child_session_id = call.session_id
+               AND task.turn_id = call.turn_id
+              JOIN session_delegation_logical_terminal AS terminal
+                ON terminal.spawning_tool_request_id = task.spawning_tool_request_id
+               AND terminal.child_session_id = task.child_session_id
+               AND terminal.child_turn_id = task.turn_id
+             WHERE call.session_id = $1
+               AND call.model_call_id = $2
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
 impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
     type Error = ModelCallRepositoryError;
 
@@ -1545,21 +1592,28 @@ impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
             let mut interval = cancellation_poll_interval();
             loop {
                 interval.tick().await;
-                let state = sqlx::query_scalar::<_, String>(
-                    "SELECT state_kind
-                       FROM model_call
-                      WHERE session_id = $1
-                        AND model_call_id = $2",
+                let cancelled = sqlx::query_scalar::<_, bool>(
+                    "SELECT call.state_kind IN ('cancellation_requested', 'terminal')
+                            OR EXISTS (
+                                SELECT 1
+                                  FROM session_delegation_initial_task AS task
+                                  JOIN session_delegation_logical_terminal AS terminal
+                                    ON terminal.spawning_tool_request_id =
+                                       task.spawning_tool_request_id
+                                   AND terminal.child_session_id = task.child_session_id
+                                   AND terminal.child_turn_id = task.turn_id
+                                 WHERE task.child_session_id = call.session_id
+                                   AND task.turn_id = call.turn_id
+                            )
+                       FROM model_call AS call
+                      WHERE call.session_id = $1
+                        AND call.model_call_id = $2",
                 )
                 .bind(session_id_to_uuid(session))
                 .bind(call.into_uuid())
                 .fetch_optional(&pool)
                 .await;
-                if matches!(
-                    state,
-                    Ok(Some(ref state))
-                        if state == "cancellation_requested" || state == "terminal"
-                ) {
+                if matches!(cancelled, Ok(Some(true))) {
                     return;
                 }
             }
@@ -1582,7 +1636,7 @@ impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> Result<ModelCallTerminalOutcome, Self::Error>
+    ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
@@ -2893,7 +2947,10 @@ async fn load_delegated_live_turn(
         WHERE lifecycle.session_id = $1
           AND lifecycle.origin_kind = 'delegation'
           AND lifecycle.state_kind = 'active'
-          AND lifecycle.active_phase_kind = 'running'",
+          AND lifecycle.active_phase_kind = 'running'
+          AND goal_turn_is_runtime_relevant(
+                lifecycle.session_id, lifecycle.turn_id
+          )",
     )
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut *connection)
@@ -4197,6 +4254,18 @@ async fn persist_delegated_child_cancellation(
     let Some((spawning_request, parent)) = relation else {
         return Ok(());
     };
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1 FROM session_child_result
+             WHERE spawning_tool_request_id = $1
+        )",
+    )
+    .bind(spawning_request)
+    .fetch_one(&mut *connection)
+    .await?
+    {
+        return Ok(());
+    }
     sqlx::query("SELECT 1 FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
         .bind(parent)
         .execute(&mut *connection)
