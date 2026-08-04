@@ -1801,7 +1801,7 @@ impl ModelCapabilities {
         precedence: ModelSettingsPrecedence,
         caller_overlay: ModelSettingsOverlay,
     ) -> Result<AdjustedModelSettings, UnsupportedModelSetting>;
-    pub const fn serving_target(
+    pub fn serving_target(
         &self,
         selected: ResolvedProviderTarget,
         fast_mode: FastMode,

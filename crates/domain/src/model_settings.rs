@@ -729,7 +729,7 @@ impl ModelCapabilities {
     }
 
     /// Selects the capability-authorized serving target for fast mode.
-    pub const fn serving_target(
+    pub fn serving_target(
         &self,
         selected: ResolvedProviderTarget,
         fast_mode: FastMode,
@@ -738,7 +738,9 @@ impl ModelCapabilities {
             (FastMode::Disabled, _) | (FastMode::Enabled, FastModeSupport::RequestControl) => {
                 Some(selected)
             }
-            (FastMode::Enabled, FastModeSupport::AlternateTarget(target)) => Some(target),
+            (FastMode::Enabled, FastModeSupport::AlternateTarget(target)) => {
+                (target != selected).then_some(target)
+            }
             (FastMode::Enabled, FastModeSupport::Unsupported) => None,
         }
     }
@@ -1662,6 +1664,16 @@ mod tests {
             supported.serving_target(selected, FastMode::Disabled),
             Some(selected)
         );
+    }
+
+    /// S37 / INV-054: the alternate-target variant cannot silently authorize
+    /// ordinary serving through a self-map.
+    #[test]
+    fn s37_inv054_fast_mode_rejects_a_self_mapped_alternate_target() {
+        let selected = ResolvedProviderTarget::naming(provider_model_identity(1));
+        let supported = capabilities([], FastModeSupport::AlternateTarget(selected), []);
+
+        assert_eq!(supported.serving_target(selected, FastMode::Enabled), None);
     }
 
     /// S37 / INV-053: an automatic adjustment is a durable event field and
