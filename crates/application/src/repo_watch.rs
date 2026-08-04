@@ -1514,36 +1514,61 @@ fn stack_root_pull_request(
     context: &PullRequestEventContext,
     observation: &RepoWatchObservation,
 ) -> PullRequestNumber {
-    let mut frontier = BTreeSet::from([(context.base_branch().clone(), context.number())]);
+    let open_pull_requests = observation
+        .state()
+        .pull_requests()
+        .iter()
+        .filter(|pull_request| pull_request.lifecycle() == RepoWatchPullRequestLifecycle::Open)
+        .collect::<Vec<_>>();
+    let mut frontier = BTreeSet::from([context.number()]);
     let mut visited = BTreeSet::new();
-    let mut roots = BTreeSet::new();
-    while let Some((branch, root)) = frontier.pop_first() {
-        if !visited.insert(branch.clone()) {
+    let mut component = BTreeSet::new();
+    while let Some(number) = frontier.pop_first() {
+        if !visited.insert(number) {
             continue;
         }
-        let parents = observation
-            .state()
-            .pull_requests()
+        let (candidate, candidate_is_open) = open_pull_requests
             .iter()
-            .filter(|candidate| {
-                candidate.lifecycle() == RepoWatchPullRequestLifecycle::Open
-                    && candidate.context().head_repository() == repository
-                    && candidate.context().head_branch() == &branch
-            })
-            .map(|parent| {
-                (
-                    parent.context().base_branch().clone(),
-                    parent.context().number(),
-                )
-            })
-            .collect::<Vec<_>>();
-        if parents.is_empty() {
-            roots.insert(root);
-        } else {
-            frontier.extend(parents);
+            .find(|pull_request| pull_request.context().number() == number)
+            .map_or((context, false), |pull_request| {
+                (pull_request.context(), true)
+            });
+        if candidate_is_open {
+            component.insert(number);
+        }
+        frontier.extend(
+            open_pull_requests
+                .iter()
+                .filter(|parent| {
+                    parent.context().head_repository() == repository
+                        && parent.context().head_branch() == candidate.base_branch()
+                })
+                .map(|parent| parent.context().number()),
+        );
+        if candidate_is_open && candidate.head_repository() == repository {
+            frontier.extend(open_pull_requests.iter().filter_map(|child| {
+                (child.context().base_branch() == candidate.head_branch())
+                    .then_some(child.context().number())
+            }));
         }
     }
-    roots.into_iter().next().unwrap_or_else(|| context.number())
+    component
+        .iter()
+        .filter_map(|number| {
+            open_pull_requests
+                .iter()
+                .find(|pull_request| pull_request.context().number() == *number)
+                .map(|pull_request| (*number, pull_request.context()))
+        })
+        .find(|(_, candidate)| {
+            !open_pull_requests.iter().any(|parent| {
+                parent.context().head_repository() == repository
+                    && parent.context().head_branch() == candidate.base_branch()
+            })
+        })
+        .map(|(number, _)| number)
+        .or_else(|| component.into_iter().next())
+        .unwrap_or_else(|| context.number())
 }
 
 /// Display and error forwarding for repository-watch dispatch service failures.
@@ -1603,8 +1628,10 @@ mod tests {
     const OTHER_REACTION_CONTENT: &str = "eyes";
     const PULL_REQUEST_NUMBER: u64 = 17;
     const OTHER_PULL_REQUEST_NUMBER: u64 = 3;
+    const THIRD_PULL_REQUEST_NUMBER: u64 = 29;
     const FIRST_FORK_REPOSITORY: &str = "first/project";
     const SECOND_FORK_REPOSITORY: &str = "second/project";
+    const OTHER_BASE_BRANCH: &str = "release";
     const FIRST_STACK_BRANCH: &str = "feature/first";
     const SECOND_STACK_BRANCH: &str = "feature/second";
     const SHARED_STACK_BRANCH: &str = "feature/shared";
@@ -1929,6 +1956,74 @@ mod tests {
         assert_eq!(
             stack_root_pull_request(&repository()?, &top, &state),
             bottom.number()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn branching_pull_requests_share_one_canonical_stack_root() -> Result<(), Box<dyn Error>> {
+        let first_parent = stack_context(PULL_REQUEST_NUMBER, BASE_BRANCH, SHARED_STACK_BRANCH)?;
+        let second_parent = stack_context(
+            OTHER_PULL_REQUEST_NUMBER,
+            OTHER_BASE_BRANCH,
+            SHARED_STACK_BRANCH,
+        )?;
+        let child = stack_context(
+            THIRD_PULL_REQUEST_NUMBER,
+            SHARED_STACK_BRANCH,
+            TOP_STACK_BRANCH,
+        )?;
+        let state = observation(
+            vec![
+                stack_pull_request(first_parent.clone())?,
+                stack_pull_request(second_parent.clone())?,
+                stack_pull_request(child.clone())?,
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &first_parent, &state),
+            second_parent.number()
+        );
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &second_parent, &state),
+            second_parent.number()
+        );
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &child, &state),
+            second_parent.number()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cyclic_pull_requests_share_one_canonical_stack_root() -> Result<(), Box<dyn Error>> {
+        let first = stack_context(PULL_REQUEST_NUMBER, SECOND_STACK_BRANCH, FIRST_STACK_BRANCH)?;
+        let second = stack_context(
+            OTHER_PULL_REQUEST_NUMBER,
+            FIRST_STACK_BRANCH,
+            SECOND_STACK_BRANCH,
+        )?;
+        let state = observation(
+            vec![
+                stack_pull_request(first.clone())?,
+                stack_pull_request(second.clone())?,
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &first, &state),
+            second.number()
+        );
+        assert_eq!(
+            stack_root_pull_request(&repository()?, &second, &state),
+            second.number()
         );
         Ok(())
     }

@@ -53,6 +53,7 @@ const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
 const DISPATCH_CONTEXT: &str = r#"{"fixture":"repository-watch"}"#;
+const FIRST_TERMINAL_IDENTITY_SEED: u128 = 0x10_000;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -788,6 +789,14 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_all(&fixture.pool)
     .await?;
+    mark_queued_turn_failed(
+        &fixture.pool,
+        fixture.sessions[0],
+        TurnId::from_uuid(turns[0]),
+        None,
+        FIRST_TERMINAL_IDENTITY_SEED,
+    )
+    .await?;
     let mut first = fixture.pool.begin().await?;
     sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
         .bind(turns[0])
@@ -809,6 +818,16 @@ async fn concurrent_terminal_batch_checks_serialize_on_the_dispatch() -> Result<
     wait_for_backend_lock(&fixture.pool, second_backend).await?;
     first.commit().await?;
     second_check.await??;
+    let release_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_dispatch_release
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(release_count, 1);
     Ok(())
 }
 
