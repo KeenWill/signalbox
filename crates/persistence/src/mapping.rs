@@ -773,7 +773,12 @@ enum StoredFastMode {
 }
 
 #[derive(Clone, Copy, Deserialize)]
-#[serde(tag = "provider", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "provider",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 enum StoredServiceTier {
     Anthropic(StoredAnthropicServiceTier),
     OpenAi(StoredOpenAiServiceTier),
@@ -1234,6 +1239,19 @@ mod tests {
             .expect_err("an unknown settings member must fail closed");
 
         assert!(matches!(error, StoredModelSettingsError::Json(_)));
+
+        let nested_tier = serde_json::json!({
+            "reasoning_level": {"kind": "inherit"},
+            "fast_mode": {"kind": "inherit"},
+            "service_tier": {
+                "kind": "value",
+                "value": {"provider": "open_ai", "value": "flex", "extra": true}
+            }
+        });
+        let nested_error = model_settings_overlay_from_json(nested_tier)
+            .expect_err("an unknown nested service-tier member must fail closed");
+
+        assert!(matches!(nested_error, StoredModelSettingsError::Json(_)));
     }
 
     /// INV-003: fast mode has no provider-default state in the domain, so a

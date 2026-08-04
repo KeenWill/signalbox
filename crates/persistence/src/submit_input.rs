@@ -65,10 +65,10 @@ use crate::{
         dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
-        model_change_adjustments_from_json, model_change_adjustments_to_json,
-        model_settings_from_json, model_settings_overlay_from_json, model_settings_overlay_to_json,
-        model_settings_to_json, positive_u64_from_numeric, session_id_from_uuid,
-        session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, model_settings_overlay_to_json,
+        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
+        turn_id_to_uuid,
     },
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
@@ -77,6 +77,7 @@ use crate::{
         persist_terminal_outcome, persist_tool_reconciliation_required,
         require_live_execution_for_restart,
     },
+    model_settings_resolution,
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
@@ -4089,42 +4090,7 @@ async fn insert_prepared(
                 .ok_or(SubmitInputCorruption::Inconsistent(
                     "resolved model settings event",
                 ))?;
-        sqlx::query(
-            "INSERT INTO turn_model_settings_resolved
-                (accepted_input_id, turn_id, session_id, defaults_version,
-                 selected_direct_model_id, per_call_model_settings,
-                 resolved_model_settings, adjusted_from_selection_id, adjustments)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-        )
-        .bind(accepted_input_id_to_uuid(settings_event.accepted_input()))
-        .bind(turn_id_to_uuid(settings_event.turn()))
-        .bind(session_id_to_uuid(applied.session()))
-        .bind(defaults_version_to_numeric(
-            settings_event.defaults_version(),
-        ))
-        .bind(settings_event.selection().selected_direct().into_uuid())
-        .bind(model_settings_overlay_to_json(
-            settings_event.per_call_override(),
-        ))
-        .bind(model_settings_to_json(settings_event.settings()))
-        .bind(
-            settings_event
-                .adjusted_from_selection()
-                .map(DirectModelSelection::into_uuid),
-        )
-        .bind(model_change_adjustments_to_json(
-            settings_event.adjustments(),
-        ))
-        .execute(&mut *connection)
-        .await?;
-        outbox::append(
-            connection,
-            OutboxEvent::TurnModelSettingsResolved {
-                session: applied.session(),
-                accepted_input: applied.accepted_input(),
-            },
-        )
-        .await?;
+        model_settings_resolution::persist(connection, applied.session(), &settings_event).await?;
 
         sqlx::query(
             "INSERT INTO queued_input_origin

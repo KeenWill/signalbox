@@ -4377,64 +4377,28 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
 async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = postgres_before_approval_event_migration().await?;
-    let (fixture, _repository, _observation, requests) = checkpoint_tool_batch_with_approval(
-        &pool,
-        APPROVAL_FIXTURE_SEED,
-        &[
-            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
-            (APPROVAL_TOOL_NAME, APPROVAL_ARGUMENTS),
-        ],
-        InitialToolApproval::Human,
-    )
-    .await?;
-    let [decided_request, next_request] = requests.as_slice() else {
-        panic!("the migration fixture returns two requests")
-    };
+    insert_outbox_session_fixture(&pool, APPROVAL_FIXTURE_SEED + 1).await?;
+    let request = insert_pre_approval_tool_request(&pool, APPROVAL_FIXTURE_SEED).await?;
+    let session = Uuid::from_u128(APPROVAL_FIXTURE_SEED + 1);
+    let turn = Uuid::from_u128(APPROVAL_FIXTURE_SEED + 2);
     let command = Uuid::from_u128(APPROVAL_COMMAND_SEED);
-    let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
-    )
-    .bind(command)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO decide_tool_request_command
-            (command_id, command_kind, storage_version, request_id,
-             decision_kind, denial_reason, result_kind, rejection_kind,
-             result_earliest_undecided_request_id)
-         VALUES ($1, 'decide_tool_request', 1, $2,
-                 'approve', NULL, 'applied', NULL, NULL)",
-    )
-    .bind(command)
-    .bind(decided_request.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(&mut *connection)
+        .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
             (request_id, decision_kind, decision_source, owner_command_id)
          VALUES ($1, 'approve', 'owner_command', $2)",
     )
-    .bind(decided_request.into_uuid())
+    .bind(request)
     .bind(command)
-    .execute(&mut *transaction)
+    .execute(&mut *connection)
     .await?;
-    sqlx::query(
-        "UPDATE turn_lifecycle
-            SET approval_tool_request_id = $1
-          WHERE turn_id = $2
-            AND session_id = $3
-            AND approval_tool_request_id = $4",
-    )
-    .bind(next_request.into_uuid())
-    .bind(fixture.turn.into_uuid())
-    .bind(fixture.session.into_uuid())
-    .bind(decided_request.into_uuid())
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
 
     migrate(&pool).await?;
     let state: ApprovalDecisionEventBackfillState = sqlx::query_as(
@@ -4445,12 +4409,12 @@ async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Resul
              ON header.event_sequence = event.event_sequence
           WHERE event.request_id = $1",
     )
-    .bind(decided_request.into_uuid())
+    .bind(request)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(state.request_id, decided_request.into_uuid());
-    assert_eq!(state.turn_id, fixture.turn.into_uuid());
-    assert_eq!(state.session_id, fixture.session.into_uuid());
+    assert_eq!(state.request_id, request);
+    assert_eq!(state.turn_id, turn);
+    assert_eq!(state.session_id, session);
     assert_eq!(state.event_kind, "tool_approval_decided");
 
     pool.close().await;
@@ -11263,13 +11227,14 @@ async fn s04_inv014_inv034_restart_recovery_preserves_durable_target_after_catal
     Ok(())
 }
 
-/// S04 / S08 / S09 / INV-016: steering accepted after send authorization is
-/// atomically reclassified when the source completes. Its immutable command
-/// still replays PendingSteering, while the inherited successor enters the
-/// ordinary scheduler and activates after the terminal source.
+/// S04 / S08 / S09 / INV-016 / INV-053: steering accepted after send
+/// authorization is atomically reclassified when the source completes. Its
+/// immutable command still replays PendingSteering, while the inherited
+/// successor enters the ordinary scheduler with the source's exact settings
+/// evidence and activates after the terminal source.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_steering()
+async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pending_steering()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e4));
@@ -11321,26 +11286,27 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
     let mut calls =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xce5));
-    assert!(matches!(
-        calls
-            .prepare_initial_call(
-                session,
-                call,
-                FailedModelCallTurnIdentities::new(
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf4)),
-                    ContextFrontierId::from_uuid(Uuid::from_u128(0xef4)),
-                ),
-                ContextFrontierId::from_uuid(Uuid::from_u128(0xff4)),
-                |_| {
-                    (
-                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
-                        TurnId::from_uuid(Uuid::from_u128(0xcf5)),
-                    )
-                },
-            )
-            .await?,
-        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
-    ));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = calls
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf4)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xef4)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff4)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                    TurnId::from_uuid(Uuid::from_u128(0xcf5)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the exact Prepared fixture checkpoints")
+    };
+    assert_eq!(checkpointed, call);
     let AuthorizeModelCallOutcome::Authorized(authorized) =
         calls.authorize_send(session, call).await?
     else {
@@ -11407,7 +11373,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
         successor
     );
 
-    let durable: (String, Uuid, Uuid, String, i64, i64) = sqlx::query_as(
+    let durable: (String, Uuid, Uuid, String, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT accepted.disposition_kind,
                 accepted.expected_active_turn_id,
                 accepted.origin_turn_id,
@@ -11428,7 +11394,31 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
                   WHERE event.accepted_input_id = $1
                     AND event.session_id = $2
                     AND event.turn_id = $3
-                    AND event.acceptance_position = accepted.acceptance_position)
+                    AND event.acceptance_position = accepted.acceptance_position),
+                (SELECT count(*)
+                   FROM turn_model_settings_resolved AS successor_settings
+                   JOIN turn_model_settings_resolved AS source_settings
+                     ON source_settings.turn_id = $4
+                    AND source_settings.session_id = $2
+                    AND successor_settings.defaults_version =
+                        source_settings.defaults_version
+                    AND successor_settings.selected_direct_model_id =
+                        source_settings.selected_direct_model_id
+                    AND successor_settings.per_call_model_settings =
+                        source_settings.per_call_model_settings
+                    AND successor_settings.resolved_model_settings =
+                        source_settings.resolved_model_settings
+                    AND successor_settings.adjusted_from_selection_id
+                        IS NOT DISTINCT FROM
+                        source_settings.adjusted_from_selection_id
+                    AND successor_settings.adjustments = source_settings.adjustments
+                  WHERE successor_settings.accepted_input_id = $1
+                    AND successor_settings.turn_id = $3
+                    AND successor_settings.session_id = $2),
+                (SELECT count(*)
+                   FROM turn_model_settings_resolved_outbox_event AS event
+                  WHERE event.accepted_input_id = $1
+                    AND event.session_id = $2)
            FROM accepted_input AS accepted
            JOIN turn_lifecycle AS successor
              ON successor.turn_id = accepted.origin_turn_id
@@ -11450,6 +11440,8 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
             "queued".into(),
             1,
             1,
+            1,
+            1,
         )
     );
 
@@ -11457,12 +11449,13 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
         .load(steering_command)
         .await?
         .expect("the immutable command receipt must remain readable");
-    assert!(matches!(
-        replay.result(),
-        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(pending))
-            if pending.accepted_input() == steering_input
-                && pending.binding().source_turn() == source_turn
-    ));
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(pending)) =
+        replay.result()
+    else {
+        panic!("the immutable command receipt retains PendingSteering")
+    };
+    assert_eq!(pending.accepted_input(), steering_input);
+    assert_eq!(pending.binding().source_turn(), source_turn);
     let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?

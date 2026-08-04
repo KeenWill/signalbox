@@ -4665,6 +4665,36 @@ async fn persist_reclassified_pending_steering(
         .rows_affected();
         require_single(lifecycle_rows, "reclassified successor lifecycle")?;
 
+        let settings_rows = sqlx::query(
+            "INSERT INTO turn_model_settings_resolved
+                (accepted_input_id, turn_id, session_id, defaults_version,
+                 selected_direct_model_id, per_call_model_settings,
+                 resolved_model_settings, adjusted_from_selection_id, adjustments)
+             SELECT $2, $1, source.session_id, source.defaults_version,
+                    source.selected_direct_model_id, source.per_call_model_settings,
+                    source.resolved_model_settings, source.adjusted_from_selection_id,
+                    source.adjustments
+               FROM turn_model_settings_resolved AS source
+              WHERE source.turn_id = $4
+                AND source.session_id = $3",
+        )
+        .bind(turn_id_to_uuid(successor.turn()))
+        .bind(successor.accepted_input().id().into_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(source_turn))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(settings_rows, "reclassified successor model settings")?;
+        outbox::append(
+            connection,
+            OutboxEvent::TurnModelSettingsResolved {
+                session,
+                accepted_input: successor.accepted_input().id(),
+            },
+        )
+        .await?;
+
         outbox::append(
             connection,
             OutboxEvent::InputAccepted {

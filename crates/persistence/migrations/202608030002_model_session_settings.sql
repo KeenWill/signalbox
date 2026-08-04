@@ -26,7 +26,9 @@ ALTER TABLE replace_session_defaults_command
     ADD CONSTRAINT replace_session_defaults_replacement_model_settings_object
         CHECK (jsonb_typeof(replacement_model_settings) = 'object'),
     ADD CONSTRAINT replace_session_defaults_caller_model_settings_object
-        CHECK (jsonb_typeof(caller_model_settings) = 'object');
+        CHECK (jsonb_typeof(caller_model_settings) = 'object'),
+    ADD CONSTRAINT replace_session_defaults_command_settings_event_key
+        UNIQUE (command_id, result_session_id, result_installed_version);
 
 ALTER TABLE create_session_from_imported_frontier_command
     ADD COLUMN model_settings jsonb NOT NULL DEFAULT
@@ -56,8 +58,12 @@ CREATE TABLE session_model_settings_changed (
             AND jsonb_typeof(adjustments) = 'array'
         ),
     CONSTRAINT session_model_settings_changed_command_fk
-        FOREIGN KEY (command_id)
-        REFERENCES replace_session_defaults_command (command_id)
+        FOREIGN KEY (command_id, session_id, installed_defaults_version)
+        REFERENCES replace_session_defaults_command (
+            command_id,
+            result_session_id,
+            result_installed_version
+        )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
@@ -143,6 +149,7 @@ ALTER TABLE outbox_event
                 'turn_failed',
                 'model_call_transition',
                 'tool_batch_transition',
+                'tool_approval_decided',
                 'context_compacted',
                 'turn_completed',
                 'turn_refused',
@@ -280,6 +287,10 @@ BEGIN
         WHEN 'tool_batch_transition' THEN
             SELECT count(*) INTO matching_records
               FROM tool_batch_transition_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'tool_approval_decided' THEN
+            SELECT count(*) INTO matching_records
+              FROM tool_approval_decided_outbox_event
              WHERE event_sequence = NEW.event_sequence;
         WHEN 'context_compacted' THEN
             SELECT count(*) INTO matching_records
