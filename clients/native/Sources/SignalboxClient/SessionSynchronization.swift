@@ -1316,7 +1316,7 @@ public struct SignalboxSessionSynchronizationMachine: Sendable {
       case .recoveryRequired, .unknown:
         return false
       }
-    case .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
+    case .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused, .turnCancelled,
       .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
       return true
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
@@ -1831,8 +1831,20 @@ extension SignalboxTranscriptEntry {
 
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
-    case .assistantToolUse(_, _, _, let toolName, let arguments):
-      return UInt(toolName.utf8.count).saturatedAdding(UInt(arguments.utf8.count))
+    case .assistantToolUse(_, _, _, let toolName, let arguments, let approval):
+      let approvalBytes: UInt
+      switch approval?.decision {
+      case .deny(let reason):
+        approvalBytes = UInt(reason?.utf8.count ?? 0)
+          .saturatedAdding(UInt(approval?.rationale?.utf8.count ?? 0))
+      case .approve:
+        approvalBytes = UInt(approval?.rationale?.utf8.count ?? 0)
+      case nil:
+        approvalBytes = 0
+      }
+      return UInt(toolName.utf8.count)
+        .saturatedAdding(UInt(arguments.utf8.count))
+        .saturatedAdding(approvalBytes)
     case .toolExecutionResult(_, _, let content),
       .toolDenied(_, let content),
       .toolClosed(_, let content):
@@ -1971,7 +1983,7 @@ extension SignalboxProcessSessionEvent {
       return (kind, diagnostic)
     case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
       .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .contextCompacted, .turnCompleted, .turnFailed,
+      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
       .turnRefused, .turnCancelled, .turnReconciliationRequired,
       .turnToolReconciliationRequired:
       return nil
@@ -1993,6 +2005,9 @@ extension SignalboxProcessSessionEvent {
       return state.retainedUTF8Bytes
     case .toolBatchTransition(_, _, let state):
       return state.retainedUTF8Bytes
+    case .toolApprovalDecided(_, _, let decision, _, let rationale):
+      return decision.retainedUTF8Bytes
+        .saturatedAdding(UInt(rationale?.utf8.count ?? 0))
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
@@ -2003,6 +2018,15 @@ extension SignalboxProcessSessionEvent {
       .turnToolReconciliationRequired:
       return 0
     }
+  }
+}
+
+extension SignalboxToolApprovalEventDecision {
+  fileprivate var retainedUTF8Bytes: UInt {
+    if case .deny(let reason) = self {
+      return UInt(reason?.utf8.count ?? 0)
+    }
+    return 0
   }
 }
 
