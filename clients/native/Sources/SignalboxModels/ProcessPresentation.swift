@@ -149,7 +149,7 @@ public struct SignalboxProcessConversation: Identifiable, Equatable, Sendable {
       case .native:
         return "Session \(conversationID.rawValue.prefix(8))"
       case .imported:
-        return "Imported \(conversationID.rawValue.prefix(8))"
+        return "Untitled imported conversation \(conversationID.rawValue.prefix(8))"
       }
     }
     return title
@@ -336,36 +336,72 @@ public struct SignalboxProcessActivity: Equatable, Sendable {
   )
 }
 
+public enum SignalboxProcessMessageSourceAttribution: String, Codable, Equatable, Sendable {
+  case importedUserRole = "imported_user_role"
+  case importedAssistantRole = "imported_assistant_role"
+  case importedSpeakerNotAttested = "imported_speaker_not_attested"
+  case importedSpeakerAbsent = "imported_speaker_absent"
+
+  public var presentationLabel: String {
+    switch self {
+    case .importedUserRole:
+      return "User role"
+    case .importedAssistantRole:
+      return "Assistant role"
+    case .importedSpeakerNotAttested:
+      return "Speaker not attested"
+    case .importedSpeakerAbsent:
+      return "Speaker absent"
+    }
+  }
+
+  public var role: SignalboxMessageRole {
+    switch self {
+    case .importedUserRole:
+      return .user
+    case .importedAssistantRole:
+      return .assistant
+    case .importedSpeakerNotAttested, .importedSpeakerAbsent:
+      return .unknown
+    }
+  }
+}
+
 public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
   private enum CodingKeys: String, CodingKey {
     case kind
     case role
     case text
     case unrecognizedKind = "unrecognized_kind"
+    case sourceAttribution = "source_attribution"
   }
 
   public let kind: String
   public let role: SignalboxMessageRole
   public let text: String
   public let unrecognizedKind: String?
+  public let sourceAttribution: SignalboxProcessMessageSourceAttribution?
 
   public init(
     role: SignalboxMessageRole,
     text: String,
-    unrecognizedKind: String? = nil
+    unrecognizedKind: String? = nil,
+    sourceAttribution: SignalboxProcessMessageSourceAttribution? = nil
   ) {
+    let retainedUnrecognizedKind = sourceAttribution == nil
+      ? unrecognizedKind.map { SignalboxProcessPresentation.retainedLabel($0) }
+      : nil
     self.kind = "process_message"
-    self.role = role
+    self.role = retainedUnrecognizedKind == nil ? sourceAttribution?.role ?? role : .unknown
     self.text = text
-    self.unrecognizedKind = unrecognizedKind.map {
-      SignalboxProcessPresentation.retainedLabel($0)
-    }
+    self.unrecognizedKind = retainedUnrecognizedKind
+    self.sourceAttribution = sourceAttribution
   }
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     self.kind = try container.decode(String.self, forKey: .kind)
-    self.role = try container.decode(SignalboxMessageRole.self, forKey: .role)
+    let role = try container.decode(SignalboxMessageRole.self, forKey: .role)
     self.text = try container.decode(String.self, forKey: .text)
     self.unrecognizedKind = try container.decodeIfPresent(
       String.self,
@@ -373,6 +409,33 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     ).map {
       SignalboxProcessPresentation.retainedLabel($0)
     }
+    let sourceAttribution = try container.decodeIfPresent(
+      SignalboxProcessMessageSourceAttribution.self,
+      forKey: .sourceAttribution
+    )
+    guard sourceAttribution?.role == role || sourceAttribution == nil else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .sourceAttribution,
+        in: container,
+        debugDescription: "Imported source attribution contradicts the message role."
+      )
+    }
+    guard unrecognizedKind == nil || sourceAttribution == nil else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .sourceAttribution,
+        in: container,
+        debugDescription: "Imported source attribution contradicts unrecognized speaker evidence."
+      )
+    }
+    guard unrecognizedKind == nil || role == .unknown else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .role,
+        in: container,
+        debugDescription: "Unrecognized speaker evidence requires the unknown message role."
+      )
+    }
+    self.role = role
+    self.sourceAttribution = sourceAttribution
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -381,6 +444,289 @@ public struct SignalboxProcessMessageEvent: Codable, Equatable, Sendable {
     try container.encode(role, forKey: .role)
     try container.encode(text, forKey: .text)
     try container.encodeIfPresent(unrecognizedKind, forKey: .unrecognizedKind)
+    try container.encodeIfPresent(sourceAttribution, forKey: .sourceAttribution)
+  }
+}
+
+public struct SignalboxProcessContextSummaryEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let text: String
+
+  public init(text: String) {
+    self.kind = "process_context_summary"
+    self.text = text
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case text
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_context_summary" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not context-summary evidence."
+      )
+    }
+    self.kind = kind
+    self.text = try container.decode(String.self, forKey: .text)
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(["kind", "text"], decoder: decoder)
+    self = try Self(from: decoder)
+  }
+}
+
+public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let turnID: SignalboxCanonicalUUID
+  public let defaultsVersion: SignalboxCanonicalUInt64
+  public let selectedModelID: SignalboxCanonicalUUID
+
+  public init(
+    turnID: SignalboxCanonicalUUID,
+    defaultsVersion: SignalboxCanonicalUInt64,
+    selectedModelID: SignalboxCanonicalUUID
+  ) throws {
+    guard defaultsVersion.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: [],
+          debugDescription: "Model-identity defaults version must be positive."
+        )
+      )
+    }
+    self.kind = "process_model_identity"
+    self.turnID = turnID
+    self.defaultsVersion = defaultsVersion
+    self.selectedModelID = selectedModelID
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case turnID = "turn_id"
+    case defaultsVersion = "defaults_version"
+    case selectedModelID = "selected_model_id"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_model_identity" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not model-identity evidence."
+      )
+    }
+    try self.init(
+      turnID: container.decode(SignalboxCanonicalUUID.self, forKey: .turnID),
+      defaultsVersion: container.decode(
+        SignalboxCanonicalUInt64.self,
+        forKey: .defaultsVersion
+      ),
+      selectedModelID: container.decode(SignalboxCanonicalUUID.self, forKey: .selectedModelID)
+    )
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["kind", "turn_id", "defaults_version", "selected_model_id"],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
+  }
+}
+
+public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let turnID: SignalboxCanonicalUUID
+  public let modelCallID: SignalboxCanonicalUUID
+  public let usageProvenance: String
+  public let inputTokens: SignalboxCanonicalUInt64?
+  public let outputTokens: SignalboxCanonicalUInt64?
+  public let cacheCreationInputTokens: SignalboxCanonicalUInt64?
+  public let cacheReadInputTokens: SignalboxCanonicalUInt64?
+  public let costAmountUSD: String?
+  public let costRateVersion: String?
+  public let costLabel: String?
+
+  public init(evidence: SignalboxTranscriptModelCallUsage) {
+    self.kind = "process_model_call_usage"
+    self.turnID = evidence.turnID
+    self.modelCallID = evidence.modelCallID
+    self.usageProvenance = evidence.usageProvenance.rawValue
+    self.inputTokens = evidence.usage.inputTokens
+    self.outputTokens = evidence.usage.outputTokens
+    self.cacheCreationInputTokens = evidence.usage.cacheCreationInputTokens
+    self.cacheReadInputTokens = evidence.usage.cacheReadInputTokens
+    self.costAmountUSD = evidence.cost?.amountUSD.rawValue
+    self.costRateVersion = evidence.cost?.rateVersion.rawValue
+    self.costLabel = evidence.cost?.label.rawValue
+  }
+
+  var hasAtomicCostFields: Bool {
+    let count = [costAmountUSD, costRateVersion, costLabel].compactMap { $0 }.count
+    return count == 0 || count == 3
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case turnID = "turn_id"
+    case modelCallID = "model_call_id"
+    case usageProvenance = "usage_provenance"
+    case inputTokens = "input_tokens"
+    case outputTokens = "output_tokens"
+    case cacheCreationInputTokens = "cache_creation_input_tokens"
+    case cacheReadInputTokens = "cache_read_input_tokens"
+    case costAmountUSD = "cost_amount_usd"
+    case costRateVersion = "cost_rate_version"
+    case costLabel = "cost_label"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_model_call_usage" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not model-usage evidence."
+      )
+    }
+    let provenance = try container.decode(
+      SignalboxUsageProvenance.self,
+      forKey: .usageProvenance
+    )
+    let amount = try container.decodeIfPresent(
+      SignalboxCanonicalDollarAmount.self,
+      forKey: .costAmountUSD
+    )
+    let rateVersion = try container.decodeIfPresent(
+      SignalboxBillingRateVersion.self,
+      forKey: .costRateVersion
+    )
+    let label = try container.decodeIfPresent(
+      SignalboxModelCallCostLabel.self,
+      forKey: .costLabel
+    )
+    self.kind = kind
+    self.turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+    self.modelCallID = try container.decode(
+      SignalboxCanonicalUUID.self,
+      forKey: .modelCallID
+    )
+    self.usageProvenance = provenance.rawValue
+    self.inputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .inputTokens
+    )
+    self.outputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .outputTokens
+    )
+    self.cacheCreationInputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .cacheCreationInputTokens
+    )
+    self.cacheReadInputTokens = try container.decodeIfPresent(
+      SignalboxCanonicalUInt64.self,
+      forKey: .cacheReadInputTokens
+    )
+    self.costAmountUSD = amount?.rawValue
+    self.costRateVersion = rateVersion?.rawValue
+    self.costLabel = label?.rawValue
+    let hasUsage = inputTokens != nil || outputTokens != nil
+      || cacheCreationInputTokens != nil || cacheReadInputTokens != nil
+    guard hasAtomicCostFields, amount == nil || hasUsage else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "Model-usage evidence contains invalid scalar relationships."
+        )
+      )
+    }
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      [
+        "kind", "turn_id", "model_call_id", "usage_provenance", "input_tokens",
+        "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+        "cost_amount_usd", "cost_rate_version", "cost_label",
+      ],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
+  }
+}
+
+public enum SignalboxProcessImportedContentKind: String, Codable, Equatable, Sendable {
+  case sourceEvent = "source_event"
+  case sourceMessageBlock = "source_message_block"
+  case text
+  case toolCall = "tool_call"
+  case toolResult = "tool_result"
+  case thinking
+  case redactedThinking = "redacted_thinking"
+  case document
+  case messageContentAbsent = "message_content_absent"
+}
+
+public struct SignalboxProcessImportedContentEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let contentKind: SignalboxProcessImportedContentKind
+  public let sourceSpeaker: String
+
+  public init(
+    contentKind: SignalboxProcessImportedContentKind,
+    sourceSpeaker: String
+  ) {
+    kind = "process_imported_content"
+    self.contentKind = contentKind
+    self.sourceSpeaker = SignalboxProcessPresentation.retainedLabel(sourceSpeaker)
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case contentKind = "content_kind"
+    case sourceSpeaker = "source_speaker"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_imported_content" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not imported-content evidence."
+      )
+    }
+    self.init(
+      contentKind: try container.decode(
+        SignalboxProcessImportedContentKind.self,
+        forKey: .contentKind
+      ),
+      sourceSpeaker: try container.decode(String.self, forKey: .sourceSpeaker)
+    )
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      ["kind", "content_kind", "source_speaker"],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
   }
 }
 
@@ -393,9 +739,37 @@ public enum SignalboxProcessToolStatus: String, Codable, Equatable, Sendable {
   case recoveryRequired = "recovery_required"
 }
 
+public struct SignalboxProcessToolRequestPosition: Codable, Equatable, Sendable {
+  public let turnID: SignalboxCanonicalUUID
+  public let entryIndex: SignalboxCanonicalUInt64
+  public let toolName: String
+  public let toolAttemptID: SignalboxCanonicalUUID?
+  public let toolOutput: String?
+
+  public init(
+    turnID: SignalboxCanonicalUUID,
+    entryIndex: SignalboxCanonicalUInt64,
+    toolName: String,
+    toolAttemptID: SignalboxCanonicalUUID?,
+    toolOutput: String?
+  ) {
+    self.turnID = turnID
+    self.entryIndex = entryIndex
+    self.toolName = toolName
+    self.toolAttemptID = toolAttemptID
+    self.toolOutput = toolOutput
+  }
+}
+
 public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
   public let kind: String
   public let toolRequestID: SignalboxToolInvocationID
+  public let turnID: SignalboxCanonicalUUID?
+  public let sessionTurnAcceptancePositions:
+    [SignalboxCanonicalUUID: SignalboxCanonicalUInt64]?
+  public let sessionToolRequestPositions:
+    [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition]?
+  public let toolAttemptID: SignalboxCanonicalUUID?
   public let toolName: String
   public let arguments: String?
   public let output: String?
@@ -403,6 +777,12 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
 
   public init(
     toolRequestID: SignalboxToolInvocationID,
+    turnID: SignalboxCanonicalUUID? = nil,
+    sessionTurnAcceptancePositions:
+      [SignalboxCanonicalUUID: SignalboxCanonicalUInt64]? = nil,
+    sessionToolRequestPositions:
+      [SignalboxCanonicalUUID: SignalboxProcessToolRequestPosition]? = nil,
+    toolAttemptID: SignalboxCanonicalUUID? = nil,
     toolName: String,
     arguments: String?,
     output: String?,
@@ -410,10 +790,26 @@ public struct SignalboxProcessToolEvent: Codable, Equatable, Sendable {
   ) {
     self.kind = "process_tool"
     self.toolRequestID = toolRequestID
+    self.turnID = turnID
+    self.sessionTurnAcceptancePositions = sessionTurnAcceptancePositions
+    self.sessionToolRequestPositions = sessionToolRequestPositions
+    self.toolAttemptID = toolAttemptID
     self.toolName = toolName
     self.arguments = arguments
     self.output = output
     self.status = status
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      [
+        "kind", "toolRequestID", "turnID", "sessionTurnAcceptancePositions", "toolAttemptID",
+        "sessionToolRequestPositions", "toolName", "arguments", "output", "status",
+      ],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
   }
 }
 

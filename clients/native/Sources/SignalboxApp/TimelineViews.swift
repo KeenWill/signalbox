@@ -62,6 +62,9 @@ struct MessageBubble: View {
     }
 
     private var roleLabel: String {
+        if let label = message.label {
+            return label
+        }
         if let unrecognizedKind = message.unrecognizedKind {
             return "Unrecognized: \(unrecognizedKind)"
         }
@@ -80,6 +83,9 @@ struct MessageBubble: View {
     }
 
     private var roleIcon: String {
+        if let systemImage = message.systemImage {
+            return systemImage
+        }
         switch message.role {
         case .user:
             return "person.crop.circle"
@@ -554,7 +560,7 @@ struct ToolInvocationCard: View {
                     .foregroundStyle(statusColor)
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(tool.toolName)
+                    Text(tool.displayName)
                         .font(.headline)
                     Text(tool.status.label)
                         .font(.caption.weight(.semibold))
@@ -599,7 +605,7 @@ struct ToolInvocationCard: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
-                    CodeBlock(title: "Arguments", content: tool.compactArgumentSummary)
+                    CodeBlock(title: tool.argumentsLabel, content: tool.compactArgumentSummary)
                     if !tool.statusUpdates.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Status")
@@ -632,7 +638,7 @@ struct ToolInvocationCard: View {
                             }
                         }
                     }
-                    CodeBlock(title: "Output", content: tool.outputPreview)
+                    CodeBlock(title: tool.outputLabel, content: tool.outputPreview)
                     #if os(iOS)
                     if let output = tool.output, !output.isEmpty {
                         ShareLink(item: output) {
@@ -723,6 +729,31 @@ struct FailureCard: View {
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct ProcessNoticeCard: View {
+    let notice: SignalboxProcessNoticeCard
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(notice.title, systemImage: notice.systemImage)
+                .font(.callout.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                ForEach(Array(notice.details.enumerated()), id: \.offset) { _, detail in
+                    GridRow {
+                        Text(detail.label)
+                            .foregroundStyle(.secondary)
+                        Text(detail.value)
+                            .textSelection(.enabled)
+                    }
+                    .font(.caption)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
