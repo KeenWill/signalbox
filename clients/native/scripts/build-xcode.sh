@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
 
+python3 "$ROOT/scripts/generate-plan-contract.py" --check
+
 CMD=(
 	xcodebuild
 	-quiet
