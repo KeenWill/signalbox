@@ -640,14 +640,25 @@ unchanged.
 provider's CLI owns, reads, and writes. The daemon supplies it as that process's
 credential home and never opens it. It exists so a deployment can point the
 daemon at a login an operator already established interactively, provisioning
-nothing. It carries three constraints. A `codex_home` profile is admitted only
-as the sole member of its pool, and the daemon serialises every invocation
-against it, because that store has no cross-process locking and two concurrent
-token refreshes can permanently invalidate the login. One directory may not
-appear on two profiles. And the operations policy does not apply, because
-rotation happens inside the store rather than at an external source of truth. A
-process the daemon did not start — an operator running the CLI by hand against
-the same directory — is outside what serialisation can protect.
+nothing. It carries three constraints. The daemon runs at most one invocation at
+a time against any one such profile, because that store has no cross-process
+locking and two concurrent refreshes against the same directory can permanently
+invalidate the login. The bound is per profile, not per pool: two profiles
+naming different directories are two independent token families with nothing
+shared between them, so a pool may hold as many as a deployment has, and it runs
+that many invocations concurrently. One directory may not appear on two
+profiles, which is what makes that independence real rather than assumed. And
+the operations policy does not apply, because rotation happens inside the store
+rather than at an external source of truth. A process the daemon did not start —
+an operator running the CLI by hand against the same directory — is outside what
+serialisation can protect.
+
+A `codex_home` member already running an invocation is skipped during selection,
+exactly as an excluded member is. Contention is not exhaustion: when every
+member is merely busy, the turn waits for one to free rather than consulting
+`on_pool_exhausted`, because a busy member has reported no failure and carries
+no reset time. Exhaustion means every member is excluded by a trigger or a
+quarantine, which is a durable condition; busyness resolves on its own.
 
 **`oauth`** is a rotating authorization the daemon owns. The profile carries the
 `client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
@@ -675,11 +686,23 @@ sole remaining effect is to invalidate the live authorization if it were ever
 replayed. Access tokens are held in memory; a restart costs one refresh per
 profile and keeps them out of the database entirely.
 
-Dispatch supplies each invocation a scratch credential home containing the
-access token and **no refresh token**, discarded when the process ends. Nothing
-the CLI can do refreshes, rotates, or writes back, so concurrent invocations
-share no mutable authorization state and the reuse hazard that constrains
-`codex_home` does not arise.
+Dispatch supplies each invocation a scratch credential home carrying a
+daemon-minted access token, discarded when the process ends. The refresh token
+is not absent from the design — it is the whole of it — but it stays with the
+daemon and is never copied into a scratch home. Withholding it is what buys the
+concurrency: a CLI process holding a refresh token could decide to refresh, so N
+concurrent processes could race exactly as they do under `codex_home`. Holding
+none, they share no mutable authorization state, and the daemon refreshes once
+under its row lock on behalf of all of them.
+
+A daemon-minted access token can expire while a long invocation is still
+running, and that is not an authorization failure. The daemon minted the token
+and therefore knows its expiry, so an invocation whose credential lapsed while
+running is a transient failure that a fresh token retries, distinct from a
+refresh the provider rejected. Only the latter quarantines. Why the distinction
+is stated rather than left to classification: treating a mid-run lapse as a
+rejected credential would quarantine a healthy account for the offence of being
+given a long task, and would do it more often the longer the work ran.
 
 A refresh rejected as expired, reused, or revoked is permanent. The profile is
 quarantined and re-provisioning is the only recovery, which is the same operator
