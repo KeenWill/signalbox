@@ -163,7 +163,6 @@ pub struct CodexCliPreparedRequest<C> {
 
 struct CodexControls {
     reasoning_effort: Option<&'static str>,
-    enable_tier_control: bool,
     service_tier: Option<&'static str>,
 }
 
@@ -468,7 +467,6 @@ fn codex_controls(settings: &ModelSettings) -> Result<CodexControls, Preparation
     };
     Ok(CodexControls {
         reasoning_effort,
-        enable_tier_control: settings.fast_mode == FastMode::Enabled || service_tier.is_some(),
         service_tier,
     })
 }
@@ -523,7 +521,7 @@ async fn execute_process<C: Clone + Send + Sync>(
     for feature in DISABLED_CODEX_CLI_CAPABILITY_FEATURES {
         command.arg("--disable").arg(feature);
     }
-    if prepared.controls.enable_tier_control {
+    if prepared.controls.service_tier.is_some() {
         command.arg("--enable").arg("fast_mode");
     }
     if let Some(effort) = prepared.controls.reasoning_effort {
@@ -625,7 +623,6 @@ mod tests {
 
         let controls = codex_controls(&settings).expect("supported controls map");
 
-        assert!(controls.enable_tier_control);
         assert_eq!(controls.service_tier, Some("priority"));
     }
 

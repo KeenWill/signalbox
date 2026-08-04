@@ -312,6 +312,8 @@ impl std::error::Error for ModelCapabilityCatalogError {}
 mod tests {
     use std::collections::BTreeSet;
 
+    use expect_test::expect;
+
     use super::{
         FastModeTarget, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
         ModelCapabilityError,
@@ -385,18 +387,12 @@ mod tests {
             service_tier: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
         };
 
-        assert_eq!(
-            unknown.to_string(),
-            "exact runtime target \"fixture-unknown\" has no model-capability record"
-        );
-        assert_eq!(
-            reasoning.to_string(),
-            "explicit reasoning level ultra is unsupported by the exact runtime target"
-        );
-        assert_eq!(
-            tier.to_string(),
-            "explicit service tier openai:priority is unsupported by the exact runtime target"
-        );
+        expect!["exact runtime target \"fixture-unknown\" has no model-capability record"]
+            .assert_eq(&unknown.to_string());
+        expect!["explicit reasoning level ultra is unsupported by the exact runtime target"]
+            .assert_eq(&reasoning.to_string());
+        expect!["explicit service tier openai:priority is unsupported by the exact runtime target"]
+            .assert_eq(&tier.to_string());
     }
 
     /// S37 / INV-054: a same-target request control cannot masquerade as a
