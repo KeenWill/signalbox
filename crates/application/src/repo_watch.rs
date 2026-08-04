@@ -41,7 +41,10 @@ pub struct RepoWatchCheckCompletionGeneration(String);
 
 impl RepoWatchCheckCompletionGeneration {
     pub fn try_new(value: String) -> Result<Self, RepoWatchCheckCompletionGenerationError> {
-        if value.is_empty() || value.len() > MAX_CHECK_COMPLETION_GENERATION_BYTES {
+        if value.is_empty()
+            || value.len() > MAX_CHECK_COMPLETION_GENERATION_BYTES
+            || value.contains('\0')
+        {
             return Err(RepoWatchCheckCompletionGenerationError);
         }
         Ok(Self(value))
@@ -60,7 +63,7 @@ impl fmt::Display for RepoWatchCheckCompletionGenerationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "repository-watch check completion generation must contain 1 to {MAX_CHECK_COMPLETION_GENERATION_BYTES} bytes"
+            "repository-watch check completion generation must contain 1 to {MAX_CHECK_COMPLETION_GENERATION_BYTES} NUL-free bytes"
         )
     }
 }
@@ -1164,6 +1167,7 @@ mod tests {
     const CHECK_NAME: &str = "required";
     const CHECK_COMPLETION_GENERATION: &str = "2026-08-02T12:00:00Z";
     const NEXT_CHECK_COMPLETION_GENERATION: &str = "2026-08-02T12:05:00Z";
+    const NUL_CHECK_COMPLETION_GENERATION: &str = "generation\0";
     const OVERLONG_CHECK_COMPLETION_GENERATION: &str =
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
     const WORKFLOW_NAME: &str = "continuous-integration";
@@ -1384,6 +1388,15 @@ mod tests {
     fn overlong_check_completion_generation_is_rejected() {
         let result = RepoWatchCheckCompletionGeneration::try_new(String::from(
             OVERLONG_CHECK_COMPLETION_GENERATION,
+        ));
+
+        assert_eq!(result, Err(RepoWatchCheckCompletionGenerationError));
+    }
+
+    #[test]
+    fn nul_check_completion_generation_is_rejected() {
+        let result = RepoWatchCheckCompletionGeneration::try_new(String::from(
+            NUL_CHECK_COMPLETION_GENERATION,
         ));
 
         assert_eq!(result, Err(RepoWatchCheckCompletionGenerationError));

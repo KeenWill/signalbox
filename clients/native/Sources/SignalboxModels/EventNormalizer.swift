@@ -3,6 +3,7 @@ import Foundation
 public enum SignalboxTimelineItem: Identifiable, Equatable, Sendable {
     case message(SignalboxTimelineMessage)
     case tool(SignalboxToolCard)
+    case processEvidence(SignalboxProcessNoticeCard)
     case turnFailure(SignalboxTurnFailureCard)
     case unknown(SignalboxUnknownEventCard)
 
@@ -11,7 +12,9 @@ public enum SignalboxTimelineItem: Identifiable, Equatable, Sendable {
         case .message(let message):
             return "message-\(message.eventID.rawValue)"
         case .tool(let tool):
-            return "tool-\(tool.invocationID.rawValue)"
+            return "tool-\(tool.eventID.rawValue)"
+        case .processEvidence(let notice):
+            return "notice-\(notice.eventID.rawValue)"
         case .turnFailure(let failure):
             return "failure-\(failure.eventID.rawValue)"
         case .unknown(let unknown):
@@ -28,6 +31,25 @@ public struct SignalboxTimelineMessage: Equatable, Sendable {
     public let thinkingText: String?
     public let isStreaming: Bool
     public let createdAt: Date?
+    public let label: String?
+    public let systemImage: String?
+}
+
+public struct SignalboxProcessNoticeDetail: Equatable, Sendable {
+    public let label: String
+    public let value: String
+}
+
+public struct SignalboxProcessNoticeCard: Equatable, Sendable {
+    public let eventID: SignalboxEventID
+    public let title: String
+    public let systemImage: String
+    public let details: [SignalboxProcessNoticeDetail]
+}
+
+fileprivate enum SignalboxToolCardPresentation: Equatable, Sendable {
+    case planRead(arguments: String?, output: String?)
+    case planUpdate(arguments: String?)
 }
 
 public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
@@ -43,6 +65,7 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     public let approvalRationale: String?
     public let childSessionID: SignalboxSessionID?
     public let decisionAvailable: Bool
+    fileprivate let presentation: SignalboxToolCardPresentation?
 
     public init(
         eventID: SignalboxEventID,
@@ -58,6 +81,38 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         childSessionID: SignalboxSessionID?,
         decisionAvailable: Bool = true
     ) {
+        self.init(
+            eventID: eventID,
+            invocationID: invocationID,
+            toolName: toolName,
+            status: status,
+            arguments: arguments,
+            output: output,
+            statusUpdates: statusUpdates,
+            decisionReason: decisionReason,
+            approvalDecider: approvalDecider,
+            approvalRationale: approvalRationale,
+            childSessionID: childSessionID,
+            decisionAvailable: decisionAvailable,
+            presentation: nil
+        )
+    }
+
+    fileprivate init(
+        eventID: SignalboxEventID,
+        invocationID: SignalboxToolInvocationID,
+        toolName: String,
+        status: SignalboxToolCardStatus,
+        arguments: String?,
+        output: String?,
+        statusUpdates: [String],
+        decisionReason: String?,
+        approvalDecider: String? = nil,
+        approvalRationale: String? = nil,
+        childSessionID: SignalboxSessionID?,
+        decisionAvailable: Bool,
+        presentation: SignalboxToolCardPresentation?
+    ) {
         self.eventID = eventID
         self.invocationID = invocationID
         self.toolName = toolName
@@ -70,12 +125,61 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
         self.approvalRationale = approvalRationale
         self.childSessionID = childSessionID
         self.decisionAvailable = decisionAvailable
+        self.presentation = presentation
     }
 
-    public var id: SignalboxToolInvocationID { invocationID }
+    public var id: SignalboxEventID { eventID }
+
+    public var displayName: String {
+        switch presentation {
+        case .planRead:
+            return "Plan read"
+        case .planUpdate:
+            return "Plan update"
+        case nil:
+            return toolName
+        }
+    }
+
+    public var argumentsLabel: String {
+        switch presentation {
+        case .planRead:
+            return "Read request"
+        case .planUpdate:
+            return "Plan operation"
+        case nil:
+            return "Arguments"
+        }
+    }
+
+    public var outputLabel: String {
+        guard case .planRead(_, let output) = presentation,
+            output != nil
+        else {
+            return "Output"
+        }
+        return "Current plan"
+    }
+
+    public var presentationArguments: String? {
+        switch presentation {
+        case .planRead(let arguments, _), .planUpdate(let arguments):
+            return arguments
+        case nil:
+            return nil
+        }
+    }
+
+    public var presentationOutput: String? {
+        guard case .planRead(_, let output) = presentation else {
+            return nil
+        }
+        return output
+    }
 
     public var compactArgumentSummary: String {
-        let trimmed = (arguments ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (presentationArguments ?? arguments ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return "No arguments"
         }
@@ -86,7 +190,8 @@ public struct SignalboxToolCard: Identifiable, Equatable, Sendable {
     }
 
     public var outputPreview: String {
-        let trimmed = (output ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (presentationOutput ?? output ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return "No output yet"
         }
@@ -225,10 +330,51 @@ public enum SignalboxEventNormalizer {
                     unrecognizedKind: event.unrecognizedKind,
                     thinkingText: nil,
                     isStreaming: false,
-                    createdAt: nil
+                    createdAt: nil,
+                    label: event.sourceAttribution?.presentationLabel,
+                    systemImage: nil
                 )
             )
+        case .processContextSummary(let event):
+            return .message(
+                SignalboxTimelineMessage(
+                    eventID: record.eventID,
+                    role: .assistant,
+                    text: event.text,
+                    unrecognizedKind: nil,
+                    thinkingText: nil,
+                    isStreaming: false,
+                    createdAt: nil,
+                    label: "Context summary",
+                    systemImage: "doc.text"
+                )
+            )
+        case .processModelIdentity(let event):
+            return .processEvidence(
+                SignalboxProcessNoticeCard(
+                    eventID: record.eventID,
+                    title: "Model changed",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    details: [
+                        .init(label: "Turn", value: event.turnID.rawValue),
+                        .init(label: "Selected model", value: event.selectedModelID.rawValue),
+                        .init(label: "Defaults version", value: event.defaultsVersion.rawValue.description),
+                    ]
+                )
+            )
+        case .processModelCallUsage(let event):
+            return .processEvidence(
+                SignalboxProcessNoticeCard(
+                    eventID: record.eventID,
+                    title: "Model usage",
+                    systemImage: "number.circle",
+                    details: modelCallUsageDetails(event)
+                )
+            )
+        case .processImportedContent(let event):
+            return .processEvidence(importedContentCard(record: record, event: event))
         case .processTool(let event):
+            let presentation = planPresentation(event)
             return .tool(
                 SignalboxToolCard(
                     eventID: record.eventID,
@@ -240,7 +386,8 @@ public enum SignalboxEventNormalizer {
                     statusUpdates: [],
                     decisionReason: nil,
                     childSessionID: nil,
-                    decisionAvailable: true
+                    decisionAvailable: true,
+                    presentation: presentation
                 )
             )
         case .processTurnFailure(let event):
@@ -294,6 +441,905 @@ public enum SignalboxEventNormalizer {
         }
     }
 
+    private struct PlanReadArguments: Decodable {
+        let afterEntryID: UInt64?
+        let includeHistory: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case afterEntryID = "after_entry_id"
+            case includeHistory = "include_history"
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            try payload.rejectUnadmittedFields(
+                ["after_entry_id", "include_history"],
+                decoder: decoder
+            )
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            afterEntryID = try container.decodeIfPresent(UInt64.self, forKey: .afterEntryID)
+            if container.contains(.includeHistory) {
+                includeHistory = try container.decode(Bool.self, forKey: .includeHistory)
+            } else {
+                includeHistory = nil
+            }
+            guard afterEntryID.map({ $0 > 0 }) ?? true else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .afterEntryID,
+                    in: container,
+                    debugDescription: "The plan-read cursor must be positive."
+                )
+            }
+        }
+    }
+
+    private struct PlanReadOutput: Decodable {
+        let entries: [PlanEntry]
+        let nextAfterEntryID: UInt64?
+        let planTruncated: Bool
+        let history: [PlanEvent]?
+        let historyTruncated: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case entries
+            case nextAfterEntryID = "next_after_entry_id"
+            case planTruncated = "plan_truncated"
+            case history
+            case historyTruncated = "history_truncated"
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let fields: Set<String> = [
+                "entries", "next_after_entry_id", "plan_truncated", "history",
+                "history_truncated",
+            ]
+            try payload.rejectUnadmittedFields(fields, decoder: decoder)
+            try payload.requireFields(fields, decoder: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            entries = try container.decode([PlanEntry].self, forKey: .entries)
+            nextAfterEntryID = try container.decodeIfPresent(UInt64.self, forKey: .nextAfterEntryID)
+            planTruncated = try container.decode(Bool.self, forKey: .planTruncated)
+            history = try container.decodeIfPresent([PlanEvent].self, forKey: .history)
+            historyTruncated = try container.decode(Bool.self, forKey: .historyTruncated)
+            let cursorMatchesTruncation = planTruncated
+                ? entries.last.map { nextAfterEntryID == $0.entryID } ?? false
+                : nextAfterEntryID == nil
+            guard nextAfterEntryID.map({ $0 > 0 }) ?? true,
+                cursorMatchesTruncation,
+                SignalboxEventNormalizer.validPlanEntries(entries),
+                SignalboxEventNormalizer.validPlanHistory(
+                    history,
+                    truncated: historyTruncated
+                )
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .nextAfterEntryID,
+                    in: container,
+                    debugDescription:
+                        "Plan read output contains contradictory pagination or relationships."
+                )
+            }
+        }
+    }
+
+    private struct PlanEntry: Decodable, Equatable {
+        let entryID: UInt64
+        let text: String
+        let status: String
+        let dependencies: [UInt64]
+        let readiness: String
+
+        private enum CodingKeys: String, CodingKey {
+            case entryID = "entry_id"
+            case text
+            case status
+            case dependencies
+            case readiness
+        }
+
+        init(
+            entryID: UInt64,
+            text: String,
+            status: String,
+            dependencies: [UInt64],
+            readiness: String
+        ) {
+            self.entryID = entryID
+            self.text = text
+            self.status = status
+            self.dependencies = dependencies
+            self.readiness = readiness
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let fields: Set<String> = [
+                "entry_id", "text", "status", "dependencies", "readiness",
+            ]
+            try payload.rejectUnadmittedFields(fields, decoder: decoder)
+            try payload.requireFields(fields, decoder: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            entryID = try container.decode(UInt64.self, forKey: .entryID)
+            text = try container.decode(String.self, forKey: .text)
+            status = try container.decode(String.self, forKey: .status)
+            dependencies = try container.decode([UInt64].self, forKey: .dependencies)
+            readiness = try container.decode(String.self, forKey: .readiness)
+            guard entryID > 0,
+                SignalboxEventNormalizer.validPlanText(text),
+                SignalboxEventNormalizer.validPlanStatus(status),
+                dependencies.allSatisfy({ $0 > 0 }),
+                Set(dependencies).count == dependencies.count,
+                dependencies.count
+                    <= SignalboxProcessProtocol.maximumPlanDependenciesPerEntry,
+                SignalboxEventNormalizer.validPlanReadiness(readiness)
+            else {
+                throw DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Plan entry contains invalid current values."
+                    )
+                )
+            }
+        }
+    }
+
+    private struct PlanEvent: Decodable, Equatable {
+        let ordinal: UInt64
+        let kind: String
+        let entryID: UInt64
+        let text: String?
+        let status: String?
+        let dependencyID: UInt64?
+        let provenance: PlanEventProvenance
+
+        private enum CodingKeys: String, CodingKey {
+            case ordinal
+            case kind
+            case entryID = "entry_id"
+            case text
+            case status
+            case dependencyID = "dependency_id"
+            case provenance
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            ordinal = try container.decode(UInt64.self, forKey: .ordinal)
+            kind = try container.decode(String.self, forKey: .kind)
+            entryID = try container.decode(UInt64.self, forKey: .entryID)
+            provenance = try container.decode(PlanEventProvenance.self, forKey: .provenance)
+            guard ordinal > 0, entryID > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .ordinal,
+                    in: container,
+                    debugDescription: "Plan event identities must be positive."
+                )
+            }
+            switch kind {
+            case "created":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "text", "provenance"],
+                    decoder: decoder
+                )
+                text = try container.decode(String.self, forKey: .text)
+                status = nil
+                dependencyID = nil
+                guard entryID == ordinal, text.map(SignalboxEventNormalizer.validPlanText) == true
+                else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .text,
+                        in: container,
+                        debugDescription: "Created plan event is invalid."
+                    )
+                }
+            case "text_revised":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "text", "provenance"],
+                    decoder: decoder
+                )
+                text = try container.decode(String.self, forKey: .text)
+                status = nil
+                dependencyID = nil
+                guard entryID < ordinal,
+                    text.map(SignalboxEventNormalizer.validPlanText) == true
+                else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .text,
+                        in: container,
+                        debugDescription: "Revised plan text is invalid."
+                    )
+                }
+            case "status_changed":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "status", "provenance"],
+                    decoder: decoder
+                )
+                text = nil
+                status = try container.decode(String.self, forKey: .status)
+                dependencyID = nil
+                guard entryID < ordinal,
+                    status.map(SignalboxEventNormalizer.validPlanStatus) == true
+                else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .status,
+                        in: container,
+                        debugDescription: "Plan event status is invalid."
+                    )
+                }
+            case "depends_on":
+                try payload.rejectUnadmittedFields(
+                    ["ordinal", "kind", "entry_id", "dependency_id", "provenance"],
+                    decoder: decoder
+                )
+                text = nil
+                status = nil
+                dependencyID = try container.decode(UInt64.self, forKey: .dependencyID)
+                guard entryID < ordinal,
+                    dependencyID.map({ $0 > 0 && $0 < ordinal && $0 != entryID }) == true
+                else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .dependencyID,
+                        in: container,
+                        debugDescription: "Plan dependency identity must be positive."
+                    )
+                }
+            default:
+                throw DecodingError.dataCorruptedError(
+                    forKey: .kind,
+                    in: container,
+                    debugDescription: "Plan event kind is unrecognized."
+                )
+            }
+        }
+    }
+
+    private struct PlanWriteOutput: Decodable {
+        let event: PlanEvent
+
+        private enum CodingKeys: String, CodingKey {
+            case event
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            try payload.rejectUnadmittedFields(["event"], decoder: decoder)
+            try payload.requireFields(["event"], decoder: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            event = try container.decode(PlanEvent.self, forKey: .event)
+        }
+    }
+
+    private struct PlanEventProvenance: Decodable, Equatable {
+        let turnID: SignalboxCanonicalUUID
+        let issuingAttemptID: SignalboxCanonicalUUID
+        let requestID: SignalboxCanonicalUUID
+        let attemptID: SignalboxCanonicalUUID
+        let generation: UInt64
+
+        private enum CodingKeys: String, CodingKey {
+            case turnID = "turn_id"
+            case issuingAttemptID = "issuing_attempt_id"
+            case requestID = "request_id"
+            case attemptID = "attempt_id"
+            case generation
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            try payload.rejectUnadmittedFields(
+                ["turn_id", "issuing_attempt_id", "request_id", "attempt_id", "generation"],
+                decoder: decoder
+            )
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            turnID = try container.decode(SignalboxCanonicalUUID.self, forKey: .turnID)
+            issuingAttemptID = try container.decode(
+                SignalboxCanonicalUUID.self,
+                forKey: .issuingAttemptID
+            )
+            requestID = try container.decode(SignalboxCanonicalUUID.self, forKey: .requestID)
+            attemptID = try container.decode(SignalboxCanonicalUUID.self, forKey: .attemptID)
+            generation = try container.decode(UInt64.self, forKey: .generation)
+            guard generation > 0 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .generation,
+                    in: container,
+                    debugDescription: "Plan event generation must be positive."
+                )
+            }
+        }
+    }
+
+    private struct PlanWriteArguments: Decodable {
+        let kind: String
+        let entryID: UInt64?
+        let text: String?
+        let status: String?
+        let dependencyID: UInt64?
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case entryID = "entry_id"
+            case text
+            case status
+            case dependencyID = "dependency_id"
+        }
+
+        init(from decoder: Decoder) throws {
+            let payload = try SignalboxUntaggedPayload(from: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            kind = try container.decode(String.self, forKey: .kind)
+            let admittedFields: Set<String>
+            switch kind {
+            case "create":
+                admittedFields = ["kind", "text"]
+            case "revise":
+                admittedFields = ["kind", "entry_id", "text"]
+            case "set_status":
+                admittedFields = ["kind", "entry_id", "status"]
+            case "depends_on":
+                admittedFields = ["kind", "entry_id", "dependency_id"]
+            default:
+                throw DecodingError.dataCorruptedError(
+                    forKey: .kind,
+                    in: container,
+                    debugDescription: "The plan operation is unrecognized."
+                )
+            }
+            try payload.rejectUnadmittedFields(admittedFields, decoder: decoder)
+            try payload.requireFields(admittedFields, decoder: decoder)
+            entryID = try container.decodeIfPresent(UInt64.self, forKey: .entryID)
+            text = try container.decodeIfPresent(String.self, forKey: .text)
+            status = try container.decodeIfPresent(String.self, forKey: .status)
+            dependencyID = try container.decodeIfPresent(UInt64.self, forKey: .dependencyID)
+            guard SignalboxEventNormalizer.validPlanWriteArguments(self) else {
+                throw DecodingError.dataCorrupted(
+                    .init(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "The plan operation contains invalid values."
+                    )
+                )
+            }
+        }
+    }
+
+    private static func planPresentation(
+        _ tool: SignalboxProcessToolEvent
+    ) -> SignalboxToolCardPresentation? {
+        switch tool.toolName {
+        case "plan_read":
+            let decodedArguments = tool.arguments.flatMap(decodePlanReadArguments)
+            let decodedOutput = tool.status == .completed
+                ? tool.output.flatMap { decode(PlanReadOutput.self, from: $0) }
+                : nil
+            let presentationOutput = decodedArguments.flatMap { arguments in
+                decodedOutput.flatMap { output in
+                    validPlanReadResponse(arguments: arguments, output: output)
+                        && planHistoryIsPresentable(output.history)
+                        ? formattedPlanReadOutput(output)
+                        : nil
+                }
+            }
+            return .planRead(
+                arguments: decodedArguments.map(formattedPlanReadArguments),
+                output: presentationOutput
+            )
+        case "plan_write":
+            let decodedArguments = tool.arguments.flatMap(decodePlanWriteArguments)
+            return .planUpdate(
+                arguments: decodedArguments.map(formattedPlanWriteArguments)
+            )
+        default:
+            return nil
+        }
+    }
+
+    private static func formattedPlanReadArguments(_ value: PlanReadArguments) -> String {
+        return [
+            "After entry: \(value.afterEntryID?.description ?? "Beginning")",
+            "Include history: \(yesNo(value.includeHistory ?? false))",
+        ].joined(separator: "\n")
+    }
+
+    private static func formattedPlanReadOutput(_ value: PlanReadOutput) -> String {
+        let entries = value.entries.map { entry in
+            let dependencies = entry.dependencies.isEmpty
+                ? "None"
+                : entry.dependencies.map { "#\($0)" }.joined(separator: ", ")
+            return "#\(entry.entryID) [\(planStatusLabel(entry.status)), "
+                + "\(planReadinessLabel(entry.readiness))] \(escapedPlanText(entry.text))\n"
+                + "Dependencies: \(dependencies)"
+        }
+        let history: [String]
+        switch value.history {
+        case nil:
+            history = ["Not included"]
+        case .some(let events) where events.isEmpty:
+            history = ["None"]
+        case .some(let events):
+            history = events.map(formattedPlanEvent)
+        }
+        return (["Entries"] + (entries.isEmpty ? ["None"] : entries) + [
+            "Continue after: \(value.nextAfterEntryID?.description ?? "None")",
+            "Plan truncated: \(yesNo(value.planTruncated))",
+            "History",
+        ] + history + [
+            "History truncated: \(yesNo(value.historyTruncated))"
+        ]).joined(separator: "\n")
+    }
+
+    private static func decodePlanReadArguments(_ json: String) -> PlanReadArguments? {
+        decode(PlanReadArguments.self, from: json)
+    }
+
+    private static func formattedPlanWriteArguments(_ value: PlanWriteArguments) -> String {
+        return formattedPlanOperation(
+            kind: value.kind,
+            entryID: value.entryID,
+            text: value.text,
+            status: value.status,
+            dependencyID: value.dependencyID
+        )
+    }
+
+    private static func decodePlanWriteArguments(_ json: String) -> PlanWriteArguments? {
+        decode(PlanWriteArguments.self, from: json)
+    }
+
+    private static func validPlanWriteArguments(_ value: PlanWriteArguments) -> Bool {
+        switch value.kind {
+        case "create":
+            return value.text.map(validPlanText) == true
+        case "revise":
+            return value.entryID.map({ $0 > 0 }) == true
+                && value.text.map(validPlanText) == true
+        case "set_status":
+            return value.entryID.map({ $0 > 0 }) == true
+                && value.status.map(validPlanStatus) == true
+        case "depends_on":
+            return value.entryID.map({ $0 > 0 }) == true
+                && value.dependencyID.map({ $0 > 0 }) == true
+        default:
+            return false
+        }
+    }
+
+    private static func validPlanReadResponse(
+        arguments: PlanReadArguments,
+        output: PlanReadOutput
+    ) -> Bool {
+        guard (arguments.includeHistory ?? false) == (output.history != nil),
+            output.entries.allSatisfy({ entry in
+                arguments.afterEntryID.map { entry.entryID > $0 } ?? true
+            })
+        else {
+            return false
+        }
+        let completeUncursoredPlan = arguments.afterEntryID == nil && !output.planTruncated
+        if completeUncursoredPlan {
+            let visibleEntryIDs = Set(output.entries.map(\.entryID))
+            guard output.entries.allSatisfy({ entry in
+                entry.dependencies.allSatisfy(visibleEntryIDs.contains)
+            }) else {
+                return false
+            }
+        }
+        guard let history = output.history else {
+            return true
+        }
+        guard let folded = foldedPlanHistory(history) else {
+            return false
+        }
+        guard !output.historyTruncated else {
+            return true
+        }
+        var expected = folded
+        if let afterEntryID = arguments.afterEntryID {
+            expected.removeAll { $0.entryID <= afterEntryID }
+        }
+        let expectedTruncated =
+            expected.count > SignalboxProcessProtocol.maximumPlanReadEntries
+        expected = Array(expected.prefix(SignalboxProcessProtocol.maximumPlanReadEntries))
+        return output.entries == expected && output.planTruncated == expectedTruncated
+    }
+
+    private static func validPlanText(_ text: String) -> Bool {
+        !text.isEmpty
+            && text.unicodeScalars.count
+                <= SignalboxProcessProtocol.maximumPlanTextUnicodeScalars
+            && text.unicodeScalars.allSatisfy { $0.value != 0 }
+    }
+
+    private static func validPlanStatus(_ status: String) -> Bool {
+        switch status {
+        case "pending", "in_progress", "completed", "abandoned": return true
+        default: return false
+        }
+    }
+
+    private static func validPlanReadiness(_ readiness: String) -> Bool {
+        switch readiness {
+        case "ready", "waiting": return true
+        default: return false
+        }
+    }
+
+    private static func validPlanEntries(_ entries: [PlanEntry]) -> Bool {
+        guard entries.count <= SignalboxProcessProtocol.maximumPlanReadEntries else {
+            return false
+        }
+        var statuses: [UInt64: String] = [:]
+        var priorEntryID: UInt64?
+        for entry in entries {
+            guard priorEntryID.map({ entry.entryID > $0 }) ?? true,
+                statuses.updateValue(entry.status, forKey: entry.entryID) == nil
+            else {
+                return false
+            }
+            priorEntryID = entry.entryID
+        }
+        for entry in entries {
+            let visibleIncomplete = entry.dependencies.contains { dependencyID in
+                statuses[dependencyID].map { $0 != "completed" } ?? false
+            }
+            let allVisibleCompleted = entry.dependencies.allSatisfy { dependencyID in
+                statuses[dependencyID] == "completed"
+            }
+            guard !((entry.readiness == "ready" && visibleIncomplete)
+                || (entry.readiness == "waiting" && allVisibleCompleted))
+            else {
+                return false
+            }
+        }
+        let dependencies = Dictionary(uniqueKeysWithValues: entries.map { entry in
+            (entry.entryID, entry.dependencies.filter { statuses[$0] != nil })
+        })
+        return !planDependenciesContainCycle(dependencies)
+    }
+
+    private enum PlanDependencyVisit {
+        case visiting
+        case visited
+    }
+
+    private static func planDependenciesContainCycle(
+        _ dependencies: [UInt64: [UInt64]]
+    ) -> Bool {
+        var visits: [UInt64: PlanDependencyVisit] = [:]
+        for entryID in dependencies.keys {
+            if planDependencyVisit(entryID, dependencies: dependencies, visits: &visits) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func planDependencyVisit(
+        _ entryID: UInt64,
+        dependencies: [UInt64: [UInt64]],
+        visits: inout [UInt64: PlanDependencyVisit]
+    ) -> Bool {
+        switch visits[entryID] {
+        case .visiting:
+            return true
+        case .visited:
+            return false
+        case nil:
+            visits[entryID] = .visiting
+        }
+        for dependencyID in dependencies[entryID, default: []] {
+            if planDependencyVisit(dependencyID, dependencies: dependencies, visits: &visits) {
+                return true
+            }
+        }
+        visits[entryID] = .visited
+        return false
+    }
+
+    private static func validPlanHistory(
+        _ history: [PlanEvent]?,
+        truncated: Bool
+    ) -> Bool {
+        guard let history else {
+            return !truncated
+        }
+        guard history.count <= SignalboxProcessProtocol.maximumPlanHistoryEvents,
+            !truncated || !history.isEmpty
+        else {
+            return false
+        }
+        var attemptIDs: Set<SignalboxCanonicalUUID> = []
+        for (index, event) in history.enumerated() {
+            guard event.ordinal == UInt64(index) + 1,
+                attemptIDs.insert(event.provenance.attemptID).inserted
+            else {
+                return false
+            }
+        }
+        return foldedPlanHistory(history) != nil
+    }
+
+    private static func planHistoryIsPresentable(_ history: [PlanEvent]?) -> Bool {
+        history?.isEmpty ?? true
+    }
+
+    private static func foldedPlanHistory(_ history: [PlanEvent]) -> [PlanEntry]? {
+        var entries: [UInt64: PlanEntry] = [:]
+        var creationOrder: [UInt64] = []
+        for event in history {
+            switch event.kind {
+            case "created":
+                guard let text = event.text, entries[event.entryID] == nil else {
+                    return nil
+                }
+                entries[event.entryID] = PlanEntry(
+                    entryID: event.entryID,
+                    text: text,
+                    status: "pending",
+                    dependencies: [],
+                    readiness: "ready"
+                )
+                creationOrder.append(event.entryID)
+            case "text_revised":
+                guard let text = event.text, let entry = entries[event.entryID] else {
+                    return nil
+                }
+                entries[event.entryID] = PlanEntry(
+                    entryID: entry.entryID,
+                    text: text,
+                    status: entry.status,
+                    dependencies: entry.dependencies,
+                    readiness: entry.readiness
+                )
+            case "status_changed":
+                guard let status = event.status, let entry = entries[event.entryID] else {
+                    return nil
+                }
+                entries[event.entryID] = PlanEntry(
+                    entryID: entry.entryID,
+                    text: entry.text,
+                    status: status,
+                    dependencies: entry.dependencies,
+                    readiness: entry.readiness
+                )
+            case "depends_on":
+                guard let dependencyID = event.dependencyID,
+                    var entry = entries[event.entryID],
+                    entries[dependencyID] != nil
+                else {
+                    return nil
+                }
+                if !entry.dependencies.contains(dependencyID) {
+                    guard entry.dependencies.count
+                        < SignalboxProcessProtocol.maximumPlanDependenciesPerEntry
+                    else {
+                        return nil
+                    }
+                    let dependencies = Dictionary(uniqueKeysWithValues: entries.values.map {
+                        ($0.entryID, $0.dependencies)
+                    })
+                    var candidate = dependencies
+                    candidate[event.entryID, default: []].append(dependencyID)
+                    guard !planDependenciesContainCycle(candidate) else {
+                        return nil
+                    }
+                    entry = PlanEntry(
+                        entryID: entry.entryID,
+                        text: entry.text,
+                        status: entry.status,
+                        dependencies: entry.dependencies + [dependencyID],
+                        readiness: entry.readiness
+                    )
+                    entries[event.entryID] = entry
+                }
+            default:
+                return nil
+            }
+        }
+        let completed = Set(entries.values.lazy.filter { $0.status == "completed" }.map(\.entryID))
+        return creationOrder.compactMap { entryID in
+            guard let entry = entries[entryID] else {
+                return nil
+            }
+            let readiness = entry.dependencies.allSatisfy(completed.contains) ? "ready" : "waiting"
+            return PlanEntry(
+                entryID: entry.entryID,
+                text: entry.text,
+                status: entry.status,
+                dependencies: entry.dependencies,
+                readiness: readiness
+            )
+        }
+    }
+
+    private static func formattedPlanEvent(_ event: PlanEvent) -> String {
+        let operation = "Event #\(event.ordinal): " + formattedPlanOperation(
+            kind: event.kind,
+            entryID: event.entryID,
+            text: event.text,
+            status: event.status,
+            dependencyID: event.dependencyID
+        )
+        return [
+            operation,
+            "Turn: \(event.provenance.turnID.rawValue)",
+            "Issuing attempt: \(event.provenance.issuingAttemptID.rawValue)",
+            "Request: \(event.provenance.requestID.rawValue)",
+            "Attempt: \(event.provenance.attemptID.rawValue)",
+            "Generation: \(event.provenance.generation)",
+        ].joined(separator: "\n")
+    }
+
+    private static func formattedPlanOperation(
+        kind: String,
+        entryID: UInt64?,
+        text: String?,
+        status: String?,
+        dependencyID: UInt64?
+    ) -> String {
+        switch kind {
+        case "create", "created":
+            return "Create entry\(entryID.map { " #\($0)" } ?? ""): "
+                + escapedPlanText(text ?? "Text not reported")
+        case "revise", "text_revised":
+            return "Revise entry #\(entryID?.description ?? "not reported"): "
+                + escapedPlanText(text ?? "Text not reported")
+        case "set_status", "status_changed":
+            let statusLabel = status.map(planStatusLabel) ?? "Status not reported"
+            return "Set entry #\(entryID?.description ?? "not reported") to \(statusLabel)"
+        case "depends_on":
+            return "Make entry #\(entryID?.description ?? "not reported") depend on entry "
+                + "#\(dependencyID?.description ?? "not reported")"
+        default:
+            return "Unrecognized plan operation (\(kind))"
+        }
+    }
+
+    private static func escapedPlanText(_ text: String) -> String {
+        var escaped = ""
+        escaped.reserveCapacity(text.utf8.count)
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\\":
+                escaped += "\\\\"
+            case "\r":
+                escaped += "\\r"
+            case "\n":
+                escaped += "\\n"
+            case _ where CharacterSet.newlines.contains(scalar):
+                let value = String(scalar.value, radix: 16, uppercase: true)
+                escaped += "\\u{\(value)}"
+            default:
+                escaped.unicodeScalars.append(scalar)
+            }
+        }
+        return escaped
+    }
+
+    private static func planStatusLabel(_ status: String) -> String {
+        switch status {
+        case "pending": return "Pending"
+        case "in_progress": return "In progress"
+        case "completed": return "Completed"
+        case "abandoned": return "Abandoned"
+        default: return "Unrecognized status (\(status))"
+        }
+    }
+
+    private static func planReadinessLabel(_ readiness: String) -> String {
+        switch readiness {
+        case "ready": return "Ready"
+        case "waiting": return "Waiting"
+        default: return "Unrecognized readiness (\(readiness))"
+        }
+    }
+
+    private static func decode<Value: Decodable>(
+        _ type: Value.Type,
+        from json: String
+    ) -> Value? {
+        guard planJSONUsesCanonicalUnsignedIntegerTokens(json) else {
+            return nil
+        }
+        let data = Data(json.utf8)
+        var scanner = SignalboxJSONDuplicateMemberScanner(data: data)
+        guard let duplicateObjectPaths = try? scanner.scan() else {
+            return nil
+        }
+        let decoder = SignalboxJSONCoding.decoder()
+        decoder.userInfo[.signalboxDuplicateObjectPaths] = duplicateObjectPaths
+        return try? decoder.decode(type, from: data)
+    }
+
+    private static func planJSONUsesCanonicalUnsignedIntegerTokens(_ json: String) -> Bool {
+        let bytes = Array(json.utf8)
+        var index = 0
+        var isInsideString = false
+        var isEscaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if isInsideString {
+                if isEscaped {
+                    isEscaped = false
+                } else if byte == 0x5C {
+                    isEscaped = true
+                } else if byte == 0x22 {
+                    isInsideString = false
+                }
+                index += 1
+                continue
+            }
+            if byte == 0x22 {
+                isInsideString = true
+                index += 1
+                continue
+            }
+            guard byte == 0x2D || (0x30...0x39).contains(byte) else {
+                index += 1
+                continue
+            }
+            let start = index
+            index += 1
+            while index < bytes.count {
+                let candidate = bytes[index]
+                guard (0x30...0x39).contains(candidate)
+                    || candidate == 0x2B || candidate == 0x2D
+                    || candidate == 0x2E || candidate == 0x45 || candidate == 0x65
+                else {
+                    break
+                }
+                index += 1
+            }
+            let token = bytes[start..<index]
+            guard token.allSatisfy({ (0x30...0x39).contains($0) }),
+                token.count == 1 || token.first != 0x30
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func yesNo(_ value: Bool) -> String {
+        value ? "Yes" : "No"
+    }
+
+    private static func importedContentCard(
+        record: SignalboxStoredEvent,
+        event: SignalboxProcessImportedContentEvent
+    ) -> SignalboxProcessNoticeCard {
+        let presentation: (title: String, systemImage: String)
+        switch event.contentKind {
+        case .sourceEvent:
+            presentation = ("Imported source event", "doc.badge.gearshape")
+        case .sourceMessageBlock:
+            presentation = ("Imported message block", "text.bubble")
+        case .text:
+            presentation = ("Imported text unavailable", "text.quote")
+        case .toolCall:
+            presentation = ("Imported tool call", "wrench.and.screwdriver")
+        case .toolResult:
+            presentation = ("Imported tool result", "checkmark.rectangle")
+        case .thinking:
+            presentation = ("Imported thinking", "brain")
+        case .redactedThinking:
+            presentation = ("Imported redacted thinking", "eye.slash")
+        case .document:
+            presentation = ("Imported document", "doc")
+        case .messageContentAbsent:
+            presentation = ("Imported message content absent", "rectangle.slash")
+        }
+        return SignalboxProcessNoticeCard(
+            eventID: record.eventID,
+            title: presentation.title,
+            systemImage: presentation.systemImage,
+            details: [
+                .init(label: "Source speaker", value: event.sourceSpeaker)
+            ]
+        )
+    }
+
     private static func normalizedMessage(
         record: SignalboxStoredEvent,
         event: SignalboxMessageEvent,
@@ -334,9 +1380,43 @@ public enum SignalboxEventNormalizer {
                 unrecognizedKind: nil,
                 thinkingText: thinkingText.isEmpty ? nil : thinkingText,
                 isStreaming: event.isStreaming,
-                createdAt: event.createdAt
+                createdAt: event.createdAt,
+                label: nil,
+                systemImage: nil
             )
         )
+    }
+
+    private static func tokenLabel(_ value: SignalboxCanonicalUInt64?) -> String {
+        value?.rawValue.description ?? "Not reported"
+    }
+
+    private static func modelCallUsageDetails(
+        _ event: SignalboxProcessModelCallUsageEvent
+    ) -> [SignalboxProcessNoticeDetail] {
+        var details = [
+            SignalboxProcessNoticeDetail(label: "Turn", value: event.turnID.rawValue),
+            .init(label: "Model call", value: event.modelCallID.rawValue),
+            .init(label: "Usage provenance", value: event.usageProvenance),
+            .init(label: "Input tokens", value: tokenLabel(event.inputTokens)),
+            .init(label: "Output tokens", value: tokenLabel(event.outputTokens)),
+            .init(
+                label: "Cache creation input tokens",
+                value: tokenLabel(event.cacheCreationInputTokens)
+            ),
+            .init(
+                label: "Cache read input tokens",
+                value: tokenLabel(event.cacheReadInputTokens)
+            ),
+        ]
+        if let amount = event.costAmountUSD,
+           let rateVersion = event.costRateVersion,
+           let label = event.costLabel {
+            details.append(.init(label: "Cost (USD)", value: amount))
+            details.append(.init(label: "Cost rate version", value: rateVersion))
+            details.append(.init(label: "Cost label", value: label))
+        }
+        return details
     }
 
     private static func toolCard(
@@ -493,6 +1573,8 @@ public final class SignalboxIncrementalEventNormalizer {
     private(set) var metrics = SignalboxEventNormalizationMetrics()
 
     private var recordsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
+    private var presentationOrdersByID: [SignalboxEventID: SignalboxEventID] = [:]
+    private var timelineEventIDs: Set<SignalboxEventID> = []
     private var invocationEventIDsByFunctionCallEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
     private var invocationEventIDsByFunctionResponseEventID: [SignalboxEventID: Set<SignalboxEventID>] = [:]
 
@@ -513,14 +1595,20 @@ public final class SignalboxIncrementalEventNormalizer {
     ///   that case, so the previously loaded history stays renderable while the
     ///   caller fails the refresh.
     public func replaceAll(with records: [SignalboxStoredEvent]) throws {
-        let sortedRecords = records.sorted { $0.eventID < $1.eventID }
         // Index before storing anything: a snapshot cannot be applied halfway,
         // and only the index can tell a duplicate ID from a fresh one.
-        let recordsByID = try Self.eventsByID(in: sortedRecords)
+        let recordsByID = try Self.eventsByID(in: records)
+        let sortedRecords = records.sorted(by: Self.recordSortsBefore)
 
         self.records = sortedRecords
         self.recordsByID = recordsByID
+        presentationOrdersByID = Dictionary(
+            uniqueKeysWithValues: sortedRecords.map {
+                ($0.eventID, $0.presentationOrder ?? $0.eventID)
+            }
+        )
         timeline.items = []
+        timelineEventIDs = []
         metrics = SignalboxEventNormalizationMetrics()
         invocationEventIDsByFunctionCallEventID = [:]
         invocationEventIDsByFunctionResponseEventID = [:]
@@ -533,24 +1621,21 @@ public final class SignalboxIncrementalEventNormalizer {
         }
     }
 
-    /// Indexes a snapshot sorted by event ID, rejecting any repeated ID.
+    /// Indexes a snapshot, rejecting any repeated ID.
     private static func eventsByID(
-        in sortedRecords: [SignalboxStoredEvent]
+        in records: [SignalboxStoredEvent]
     ) throws -> [SignalboxEventID: SignalboxConversationEvent] {
         var eventsByID: [SignalboxEventID: SignalboxConversationEvent] = [:]
-        eventsByID.reserveCapacity(sortedRecords.count)
-        var duplicateEventIDs: [SignalboxEventID] = []
-        for record in sortedRecords {
+        eventsByID.reserveCapacity(records.count)
+        var duplicateEventIDs: Set<SignalboxEventID> = []
+        for record in records {
             guard eventsByID.updateValue(record.event, forKey: record.eventID) != nil else {
                 continue
             }
-            // The sort groups repeats, so reporting each ID once needs no set.
-            if duplicateEventIDs.last != record.eventID {
-                duplicateEventIDs.append(record.eventID)
-            }
+            duplicateEventIDs.insert(record.eventID)
         }
         guard duplicateEventIDs.isEmpty else {
-            throw SignalboxEventNormalizerError.duplicateEventIDs(duplicateEventIDs)
+            throw SignalboxEventNormalizerError.duplicateEventIDs(duplicateEventIDs.sorted())
         }
         return eventsByID
     }
@@ -569,12 +1654,12 @@ public final class SignalboxIncrementalEventNormalizer {
         addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
         removeInvocationLinks(for: oldEvent, invocationEventID: eventID)
 
-        let index = recordInsertionIndex(for: eventID)
-        if index < records.count, records[index].eventID == eventID {
-            records[index] = record
-        } else {
-            records.insert(record, at: index)
+        if let oldIndex = records.firstIndex(where: { $0.eventID == eventID }) {
+            records.remove(at: oldIndex)
         }
+        presentationOrdersByID[eventID] = record.presentationOrder ?? eventID
+        let index = recordInsertionIndex(for: record)
+        records.insert(record, at: index)
         recordsByID[eventID] = record.event
         addInvocationLinks(for: record.event, invocationEventID: eventID)
         addLinkedEventIDs(from: record.event, to: &affectedEventIDs)
@@ -600,11 +1685,11 @@ public final class SignalboxIncrementalEventNormalizer {
         addLinkedInvocationEventIDs(for: eventID, to: &affectedEventIDs)
         removeInvocationLinks(for: removedEvent, invocationEventID: eventID)
 
-        let index = recordInsertionIndex(for: eventID)
-        if index < records.count, records[index].eventID == eventID {
+        if let index = records.firstIndex(where: { $0.eventID == eventID }) {
             records.remove(at: index)
         }
         setTimelineItem(nil, for: eventID)
+        presentationOrdersByID.removeValue(forKey: eventID)
         for affectedEventID in affectedEventIDs.sorted() {
             reevaluate(affectedEventID)
         }
@@ -616,7 +1701,11 @@ public final class SignalboxIncrementalEventNormalizer {
             return
         }
         metrics.recordEvaluationCount += 1
-        let record = SignalboxStoredEvent(eventID: eventID, event: event)
+        let record = SignalboxStoredEvent(
+            eventID: eventID,
+            presentationOrder: presentationOrdersByID[eventID],
+            event: event
+        )
         let item = SignalboxEventNormalizer.normalize(
             record,
             recordsByID: recordsByID,
@@ -698,22 +1787,42 @@ public final class SignalboxIncrementalEventNormalizer {
         }
     }
 
-    private func recordInsertionIndex(for eventID: SignalboxEventID) -> Int {
-        if let lastRecord = records.last, lastRecord.eventID < eventID {
+    private static func recordSortsBefore(
+        _ lhs: SignalboxStoredEvent,
+        _ rhs: SignalboxStoredEvent
+    ) -> Bool {
+        let lhsOrder = lhs.presentationOrder ?? lhs.eventID
+        let rhsOrder = rhs.presentationOrder ?? rhs.eventID
+        return lhsOrder == rhsOrder ? lhs.eventID < rhs.eventID : lhsOrder < rhsOrder
+    }
+
+    private func recordInsertionIndex(for record: SignalboxStoredEvent) -> Int {
+        if let lastRecord = records.last, Self.recordSortsBefore(lastRecord, record) {
             return records.count
         }
         return insertionIndex(count: records.count) { index in
-            records[index].eventID < eventID
+            Self.recordSortsBefore(records[index], record)
         }
     }
 
     private func timelineInsertionIndex(for eventID: SignalboxEventID) -> Int {
-        if let lastItem = timeline.last, timelineEventID(lastItem) < eventID {
+        if let lastItem = timeline.last,
+            timelineSortsBefore(timelineEventID(lastItem), eventID)
+        {
             return timeline.count
         }
         return insertionIndex(count: timeline.count) { index in
-            timelineEventID(timeline[index]) < eventID
+            timelineSortsBefore(timelineEventID(timeline[index]), eventID)
         }
+    }
+
+    private func timelineSortsBefore(
+        _ lhs: SignalboxEventID,
+        _ rhs: SignalboxEventID
+    ) -> Bool {
+        let lhsOrder = presentationOrdersByID[lhs] ?? lhs
+        let rhsOrder = presentationOrdersByID[rhs] ?? rhs
+        return lhsOrder == rhsOrder ? lhs < rhs : lhsOrder < rhsOrder
     }
 
     private func insertionIndex(
@@ -737,17 +1846,17 @@ public final class SignalboxIncrementalEventNormalizer {
         _ item: SignalboxTimelineItem?,
         for eventID: SignalboxEventID
     ) {
-        let index = timelineInsertionIndex(for: eventID)
-        let itemExists = index < timeline.count && timelineEventID(timeline[index]) == eventID
-        if let item {
-            if itemExists {
-                timeline.items[index] = item
-            } else {
-                timeline.items.insert(item, at: index)
+        if timelineEventIDs.remove(eventID) != nil {
+            if let oldIndex = timeline.items.firstIndex(where: { timelineEventID($0) == eventID }) {
+                timeline.items.remove(at: oldIndex)
             }
-        } else if itemExists {
-            timeline.items.remove(at: index)
         }
+        guard let item else {
+            return
+        }
+        let index = timelineInsertionIndex(for: eventID)
+        timeline.items.insert(item, at: index)
+        timelineEventIDs.insert(eventID)
     }
 
     private func timelineEventID(_ item: SignalboxTimelineItem) -> SignalboxEventID {
@@ -756,6 +1865,8 @@ public final class SignalboxIncrementalEventNormalizer {
             return message.eventID
         case .tool(let tool):
             return tool.eventID
+        case .processEvidence(let notice):
+            return notice.eventID
         case .turnFailure(let failure):
             return failure.eventID
         case .unknown(let unknown):
