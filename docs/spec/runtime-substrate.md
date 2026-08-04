@@ -552,8 +552,9 @@ Reasoning level, fast mode, and service tier are enforced through the explicit
 preparation mappings owned by
 [model/session settings](model-session-settings.md#adapter-translation); they
 are not part of the advisory exception above. The adapter validates the exact
-target capability record before checking its ambient-login reference and never
-delegates validation to the CLI.
+target capability record before checking its ambient-login reference whenever an
+operation carries an explicit catalog-governed control, and never delegates
+validation to the CLI. Provider-default-only operations need no catalog lookup.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Streamed credential lookbehind retains at most

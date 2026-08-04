@@ -29,8 +29,16 @@ use crate::wire::{
 ///
 /// Streamed delivery always requests `stream_options.include_usage`, so the
 /// stream carries a usage record before its terminal marker.
+#[cfg(test)]
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
+) -> Result<ChatRequest, PreparationFailure> {
+    build_request_with_fast_mode(operation, operation.settings.fast_mode)
+}
+
+pub(crate) fn build_request_with_fast_mode<C>(
+    operation: &ModelOperation<C>,
+    request_fast_mode: FastMode,
 ) -> Result<ChatRequest, PreparationFailure> {
     if let Err(error) = operation.validate() {
         return Err(PreparationFailure::UnsupportedOperation {
@@ -87,7 +95,7 @@ pub(crate) fn build_request<C>(
         .reasoning_level
         .map(openai_reasoning_effort)
         .transpose()?;
-    let service_tier = openai_service_tier(operation)?;
+    let service_tier = openai_service_tier(operation, request_fast_mode)?;
     Ok(ChatRequest {
         model: operation.resolved_target.as_str().to_string(),
         messages,
@@ -124,6 +132,7 @@ fn openai_reasoning_effort(level: ReasoningLevel) -> Result<&'static str, Prepar
 
 fn openai_service_tier<C>(
     operation: &ModelOperation<C>,
+    request_fast_mode: FastMode,
 ) -> Result<Option<&'static str>, PreparationFailure> {
     let tier = match operation.settings.service_tier {
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Auto)) => Some("auto"),
@@ -140,7 +149,10 @@ fn openai_service_tier<C>(
         None => None,
     };
     match (operation.settings.fast_mode, tier) {
-        (FastMode::Enabled, None | Some("fast")) => Ok(Some("fast")),
+        (FastMode::Enabled, None | Some("fast")) => Ok(match (request_fast_mode, tier) {
+            (FastMode::Enabled, _) => Some("fast"),
+            (FastMode::Disabled, tier) => tier,
+        }),
         (FastMode::Enabled, Some(_)) => Err(PreparationFailure::UnsupportedOperation {
             detail: "OpenAI fast mode is incompatible with a non-fast service tier".to_string(),
         }),
@@ -507,7 +519,7 @@ mod tests {
         ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::build_request;
+    use super::{build_request, build_request_with_fast_mode};
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -553,6 +565,18 @@ mod tests {
 
         assert!(matches!(
             build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn mapped_fast_mode_still_rejects_openai_flex_tier() {
+        let mut operation = operation("call-mapped-incompatible-settings");
+        operation.settings.fast_mode = FastMode::Enabled;
+        operation.settings.service_tier = Some(ServiceTier::OpenAi(OpenAiServiceTier::Flex));
+
+        assert!(matches!(
+            build_request_with_fast_mode(&operation, FastMode::Disabled),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
