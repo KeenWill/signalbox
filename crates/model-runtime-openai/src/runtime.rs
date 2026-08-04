@@ -276,10 +276,10 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             }
         };
         if let Some(capabilities) = capabilities {
-            operation.resolved_target = match capabilities
+            let (target, request_fast_mode) = match capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)
             {
-                Ok(target) => target.clone(),
+                Ok(application) => application,
                 Err(error) => {
                     return PreparationOutcome::Failed {
                         correlation,
@@ -289,6 +289,8 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                     };
                 }
             };
+            operation.resolved_target = target.clone();
+            operation.settings.fast_mode = request_fast_mode;
         }
         let wire_request = match build_request(&operation) {
             Ok(request) => request,
