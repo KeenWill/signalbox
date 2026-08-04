@@ -331,10 +331,12 @@ repository equals the prospective child's event repository (its base repository)
 and its head branch equals the child's base branch. Rule scope keys only by rule
 identity and version; repository scope adds repository. Branch events cannot
 satisfy pull-request or stack scope and make such a rule invalid rather than
-silently changing its key. The component identity is the bottom open PR's number
-in the watched repository, so independent PRs do not share a singleton even when
-forks reuse the same head-branch name or both target the same destination
-branch.
+silently changing its key. The component identity is the lowest-numbered root,
+where a root is a component member without an open parent. A rootless component
+formed by a cycle uses its lowest-numbered member. The ordinary single-root case
+therefore remains the bottom open PR's number in the watched repository, while
+independent PRs do not share a singleton even when forks reuse the same
+head-branch name or both target the same destination branch.
 
 **Implemented behavior.** One event/rule match admits its complete ordered
 action list as one singleton batch. Admission, creation of every dispatched
