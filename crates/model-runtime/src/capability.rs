@@ -50,17 +50,24 @@ impl ModelCapabilities {
         &self.service_tiers
     }
 
-    /// Returns the declared effective provider target for these settings.
+    /// Returns the declared effective provider target and the fast-mode value
+    /// that remains to be emitted as a request control.
+    ///
+    /// A mapped target implements fast mode by serving identity, so its
+    /// request-control value is disabled after the target is selected.
     pub fn effective_target<'a>(
         &'a self,
         selected: &'a ResolvedTarget,
         fast_mode: FastMode,
-    ) -> Result<&'a ResolvedTarget, ModelCapabilityError> {
+    ) -> Result<(&'a ResolvedTarget, FastMode), ModelCapabilityError> {
         match (fast_mode, &self.fast_mode) {
-            (FastMode::Disabled, _) | (FastMode::Enabled, Some(FastModeTarget::SameTarget)) => {
-                Ok(selected)
+            (FastMode::Disabled, _) => Ok((selected, FastMode::Disabled)),
+            (FastMode::Enabled, Some(FastModeTarget::SameTarget)) => {
+                Ok((selected, FastMode::Enabled))
             }
-            (FastMode::Enabled, Some(FastModeTarget::Mapped(target))) => Ok(target),
+            (FastMode::Enabled, Some(FastModeTarget::Mapped(target))) => {
+                Ok((target, FastMode::Disabled))
+            }
             (FastMode::Enabled, None) => Err(ModelCapabilityError::UnsupportedFastMode),
         }
     }
@@ -364,14 +371,23 @@ mod tests {
             Some(FastModeTarget::Mapped(mapped.clone())),
             BTreeSet::new(),
         );
+        let same_target_capabilities = ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::SameTarget),
+            BTreeSet::new(),
+        );
 
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Enabled),
-            Ok(&mapped)
+            Ok((&mapped, FastMode::Disabled))
         );
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Disabled),
-            Ok(&selected)
+            Ok((&selected, FastMode::Disabled))
+        );
+        assert_eq!(
+            same_target_capabilities.effective_target(&selected, FastMode::Enabled),
+            Ok((&selected, FastMode::Enabled))
         );
     }
 

@@ -1,7 +1,8 @@
 # Model and session settings
 
 Verified against PR #436 (`agent/model-settings-domain`) for its foundation
-proposal and domain/runtime value shapes.
+proposal and domain/runtime value shapes, and PR #437
+(`agent/model-settings-adapters`) for provider-adapter translation.
 
 This page is the foundation proposal at the bottom of the model-settings
 implementation stack. It specifies the cross-crate contract for model reasoning,
@@ -96,9 +97,11 @@ the direct selection frozen for the operation.
 
 Where fast mode uses another serving identity, the adapter's capability record
 must name that exact target. Preparation uses it as the effective provider
-target, while durable selection provenance retains the requested direct target.
-Lineage verification compares provider evidence with the declared effective
-target; an undeclared suffix or substitute remains a mismatch (INV-014).
+target and consumes the toggle without also emitting that provider's same-target
+fast request control, while durable selection provenance retains the requested
+direct target. Lineage verification compares provider evidence with the declared
+effective target; an undeclared suffix or substitute remains a mismatch
+(INV-014).
 
 ## Compatibility and adjustments
 
