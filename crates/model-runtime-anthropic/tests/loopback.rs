@@ -696,6 +696,51 @@ async fn input_count_uses_the_declared_fast_target() {
     );
     assert_eq!(requests.len(), 1);
     assert!(requests[0].contains(&format!(r#""model":"{}""#, mapped.as_str())));
+    assert!(!requests[0].contains(r#""speed":"fast""#));
+    assert!(!requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
+}
+
+#[tokio::test]
+async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
+    let correlation = "count-request-controls";
+    let input_tokens = 7;
+    let response_body = format!(r#"{{"input_tokens":{input_tokens}}}"#);
+    let server =
+        CannedServer::serving(vec![http_response("200 OK", &[], response_body.as_bytes())]).await;
+    let mut counted = operation(correlation);
+    counted.settings.reasoning_level = Some(ReasoningLevel::Low);
+    counted.settings.fast_mode = FastMode::Enabled;
+    let selected = counted.resolved_target.clone();
+    let definitions = [ModelCapabilityDefinition::new(
+        selected.clone(),
+        ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low]),
+            Some(FastModeTarget::SameTarget),
+            BTreeSet::new(),
+        ),
+    )];
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
+        .expect("fixture capabilities are unique");
+    let runtime = AnthropicRuntime::new(config, FixedKey).expect("configuration constructs");
+
+    let outcome = runtime
+        .count_input_tokens(counted, CancellationSignal::never())
+        .await;
+    let requests = server.recorded_requests();
+
+    assert_eq!(
+        outcome,
+        InputTokenCountOutcome::Counted {
+            correlation: correlation.to_string(),
+            input_tokens,
+        }
+    );
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains(&format!(r#""model":"{}""#, selected.as_str())));
+    assert!(requests[0].contains(r#""output_config":{"effort":"low"}"#));
+    assert!(requests[0].contains(r#""speed":"fast""#));
     assert!(requests[0].contains("anthropic-beta: fast-mode-2026-02-01"));
 }
 

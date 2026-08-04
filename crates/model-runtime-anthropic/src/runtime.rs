@@ -144,9 +144,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .model_capabilities
             .validate_explicit(&operation.resolved_target, &operation.settings)?;
         if let Some(capabilities) = capabilities {
-            operation.resolved_target = capabilities
-                .effective_target(&operation.resolved_target, operation.settings.fast_mode)?
-                .clone();
+            let (target, request_fast_mode) = capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)?;
+            operation.resolved_target = target.clone();
+            operation.settings.fast_mode = request_fast_mode;
         }
         Ok(())
     }

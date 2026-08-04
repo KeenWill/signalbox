@@ -428,6 +428,12 @@ Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
 
+Anthropic preflight input counting preserves the generation request's
+prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped
+fast serving identity consumes the fast toggle during preparation, so neither
+the `speed` field nor its beta header is emitted for the counting or generation
+request in addition to that alternate target.
+
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
