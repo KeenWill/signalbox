@@ -90,11 +90,11 @@ credential_pool = "anthropic-main"
 # scopes = ["<scope>"]
 #
 # delivery = "codex_home" — the daemon uses a login an operator established by
-# hand. At most one invocation runs at a time against any one such profile,
-# because that store has no cross-process locking and two concurrent refreshes
-# against the same directory can permanently invalidate the login. The bound is
-# per profile: a pool may hold several, each with its own directory, and runs
-# that many concurrently. Two profiles may not name the same directory.
+# hand. Concurrent invocations are allowed by default; that store has no file
+# locking, but the CLI adopts a token another process wrote rather than
+# refreshing again, so the residual race is narrow and its consequence is a
+# quarantine the pool fails over from. Set max_concurrent_invocations to trade
+# throughput for avoiding it. Two profiles may not name the same directory.
 # [[credential_profiles]]
 # name = "codex-local-a"
 # adapter = "codex_cli"

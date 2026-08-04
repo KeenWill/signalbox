@@ -640,25 +640,35 @@ unchanged.
 provider's CLI owns, reads, and writes. The daemon supplies it as that process's
 credential home and never opens it. It exists so a deployment can point the
 daemon at a login an operator already established interactively, provisioning
-nothing. It carries three constraints. The daemon runs at most one invocation at
-a time against any one such profile, because that store has no cross-process
-locking and two concurrent refreshes against the same directory can permanently
-invalidate the login. The bound is per profile, not per pool: two profiles
-naming different directories are two independent token families with nothing
-shared between them, so a pool may hold as many as a deployment has, and it runs
-that many invocations concurrently. One directory may not appear on two
-profiles, which is what makes that independence real rather than assumed. And
-the operations policy does not apply, because rotation happens inside the store
-rather than at an external source of truth. A process the daemon did not start —
-an operator running the CLI by hand against the same directory — is outside what
-serialisation can protect.
+nothing. Concurrent invocations against one such profile are admitted by
+default, matching how the CLI is ordinarily used. The store has no cross-process
+file locking, but the CLI re-reads it immediately before refreshing and adopts a
+token another process wrote rather than refreshing again, so the residual race
+is two processes crossing the refresh threshold within one token-exchange round
+trip — narrow, because a process refreshes about once per access-token lifetime.
+When it does fire the authorization is invalidated and the profile quarantines;
+recovery is the ordinary re-provisioning an operator already performs, and the
+pool fails over meanwhile. A deployment preferring not to carry that risk sets
+the optional per-profile `max_concurrent_invocations`, unbounded when absent.
+The knob exists because the tradeoff is a deployment's to make and code cannot
+observe which side of it a given operator is on.
 
-A `codex_home` member already running an invocation is skipped during selection,
-exactly as an excluded member is. Contention is not exhaustion: when every
-member is merely busy, the turn waits for one to free rather than consulting
-`on_pool_exhausted`, because a busy member has reported no failure and carries
-no reset time. Exhaustion means every member is excluded by a trigger or a
-quarantine, which is a durable condition; busyness resolves on its own.
+Two profiles naming different directories are independent token families with
+nothing shared, so a pool holds as many as a deployment has and runs them
+concurrently. One directory may not appear on two profiles, which is what makes
+that independence real rather than assumed. The operations policy does not
+apply, because rotation happens inside the store rather than at an external
+source of truth. And a process the daemon did not start — an operator running
+the CLI by hand against the same directory — is outside anything the daemon can
+coordinate.
+
+Where `max_concurrent_invocations` is set and reached, that member is skipped
+during selection exactly as an excluded member is. Contention is not exhaustion:
+when every member is merely at its bound, the turn waits for one to free rather
+than consulting `on_pool_exhausted`, because a member at its bound has reported
+no failure and carries no reset time. Exhaustion means every member is excluded
+by a trigger or a quarantine, which is a durable condition; contention resolves
+on its own.
 
 **`oauth`** is a rotating authorization the daemon owns. The profile carries the
 `client_id`, `token_url`, `device_authorization_url`, and `scopes` its provider
