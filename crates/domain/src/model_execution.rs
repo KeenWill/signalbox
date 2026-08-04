@@ -160,6 +160,17 @@ impl ModelCallOriginContent {
         }
     }
 
+    /// Binds content for one checked consumed-steering frontier member.
+    pub fn from_consumed_steering(
+        consumed: &crate::ConsumedSteeringInput,
+        content: UserContent,
+    ) -> Self {
+        Self {
+            accepted_input: consumed.accepted_input(),
+            content,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn from_validated_parts(
         accepted_input: AcceptedInputId,

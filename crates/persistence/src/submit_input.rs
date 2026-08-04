@@ -2684,12 +2684,17 @@ pub(crate) async fn load_scheduling_projection(
         load_active_acceptance_tail(connection, session_id, &turns).await?;
 
     let consumed_steering_rows = sqlx::query(
-        "SELECT session_id, accepted_input_id, acceptance_position, expected_active_turn_id,
-                consuming_model_call_id
-           FROM accepted_input
-          WHERE session_id = $1
-            AND disposition_kind = 'consumed_as_steering'
-          ORDER BY acceptance_position",
+        "SELECT accepted.session_id, accepted.accepted_input_id,
+                accepted.acceptance_position, accepted.expected_active_turn_id,
+                accepted.consuming_model_call_id
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS source
+             ON source.turn_id = accepted.expected_active_turn_id
+            AND source.session_id = accepted.session_id
+            AND source.origin_kind = 'accepted_input'
+          WHERE accepted.session_id = $1
+            AND accepted.disposition_kind = 'consumed_as_steering'
+          ORDER BY accepted.acceptance_position",
     )
     .bind(session_id_to_uuid(session_id))
     .fetch_all(&mut *connection)
@@ -2701,6 +2706,36 @@ pub(crate) async fn load_scheduling_projection(
         required_model_calls.insert(call.into_uuid());
         *consumed_counts_by_call.entry(call.into_uuid()).or_default() += 1;
         consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
+            session_id_from_uuid(required(&row, "session_id")?),
+            AcceptedInputLifecycle::new(
+                accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
+                AcceptedInputDisposition::ConsumedAsSteering { call },
+            ),
+            decode_position(&row, "acceptance_position")?,
+            turn_id_from_uuid(required(&row, "expected_active_turn_id")?),
+        ));
+    }
+    let delegated_consumed_steering_rows = sqlx::query(
+        "SELECT accepted.session_id, accepted.accepted_input_id,
+                accepted.acceptance_position, accepted.expected_active_turn_id,
+                accepted.consuming_model_call_id
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS source
+             ON source.turn_id = accepted.expected_active_turn_id
+            AND source.session_id = accepted.session_id
+            AND source.origin_kind = 'delegation'
+          WHERE accepted.session_id = $1
+            AND accepted.disposition_kind = 'consumed_as_steering'
+          ORDER BY accepted.acceptance_position",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut delegated_consumed_steering =
+        Vec::with_capacity(delegated_consumed_steering_rows.len());
+    for row in delegated_consumed_steering_rows {
+        let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
+        delegated_consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
             session_id_from_uuid(required(&row, "session_id")?),
             AcceptedInputLifecycle::new(
                 accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
@@ -3943,6 +3978,7 @@ pub(crate) async fn load_scheduling_projection(
         .with_model_call_facts(pinned_targets, model_calls)
         .with_context_compaction_facts(compaction_calls, compactions)
         .with_consumed_steering_facts(consumed_steering)
+        .with_delegated_consumed_steering_facts(delegated_consumed_steering)
         .with_steering_continuation_rounds(steering_continuation_rounds)
         .with_continuation_rounds(continuation_rounds)
         .reconstitute()

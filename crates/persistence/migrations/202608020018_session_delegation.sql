@@ -425,6 +425,115 @@ AS $$
      LIMIT 1
 $$;
 
+-- The model-call validator predates delegation-origin turns. Preserve its
+-- complete attempt, frontier, state, and target checks while replacing only
+-- the accepted-input-only configuration lookup with the closed typed-origin
+-- projection above.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    accepted_origin_lookup CONSTANT text := $old$
+    WITH RECURSIVE configuration_origin AS (
+        SELECT stored.*
+          FROM queued_input_origin AS stored
+         WHERE stored.turn_id = checked_turn_id
+           AND stored.session_id = checked_session_id
+        UNION
+        SELECT source.*
+          FROM configuration_origin AS current
+          JOIN queued_input_origin AS source
+            ON source.turn_id = current.source_configuration_turn_id
+           AND source.session_id = current.session_id
+    )
+    SELECT
+        origin.frozen_model_kind,
+        origin.frozen_direct_model_selection_id,
+        origin.frozen_model_alias_id,
+        origin.frozen_alias_selected_direct_id,
+        lifecycle.pinned_provider_model_identity_id,
+        lifecycle.state_kind,
+        lifecycle.active_phase_kind,
+        lifecycle.current_attempt_id,
+        lifecycle.recovery_model_call_id,
+        lifecycle.terminal_attempt_id,
+        lifecycle.terminal_model_call_id,
+        lifecycle.terminal_disposition_kind,
+        lifecycle.starting_frontier_id
+      INTO
+        origin_frozen_kind,
+        origin_direct_id,
+        origin_alias_id,
+        origin_alias_selected_id,
+        pinned_target_id,
+        turn_state,
+        active_phase,
+        current_attempt,
+        recovery_call,
+        terminal_attempt,
+        terminal_call,
+        terminal_disposition,
+        starting_frontier
+      FROM turn_lifecycle AS lifecycle
+      JOIN configuration_origin AS origin
+        ON origin.session_id = lifecycle.session_id
+       AND origin.source_configuration_turn_id IS NULL
+     WHERE lifecycle.turn_id = checked_turn_id
+       AND lifecycle.session_id = checked_session_id;
+$old$;
+    typed_origin_lookup CONSTANT text := $new$
+    SELECT
+        origin.frozen_model_kind,
+        origin.frozen_direct_model_selection_id,
+        origin.frozen_model_alias_id,
+        origin.frozen_alias_selected_direct_id,
+        lifecycle.pinned_provider_model_identity_id,
+        lifecycle.state_kind,
+        lifecycle.active_phase_kind,
+        lifecycle.current_attempt_id,
+        lifecycle.recovery_model_call_id,
+        lifecycle.terminal_attempt_id,
+        lifecycle.terminal_model_call_id,
+        lifecycle.terminal_disposition_kind,
+        lifecycle.starting_frontier_id
+      INTO
+        origin_frozen_kind,
+        origin_direct_id,
+        origin_alias_id,
+        origin_alias_selected_id,
+        pinned_target_id,
+        turn_state,
+        active_phase,
+        current_attempt,
+        recovery_call,
+        terminal_attempt,
+        terminal_call,
+        terminal_disposition,
+        starting_frontier
+      FROM turn_lifecycle AS lifecycle
+      JOIN LATERAL turn_origin_exact_model_configuration(
+            lifecycle.turn_id,
+            lifecycle.session_id
+      ) AS origin ON TRUE
+     WHERE lifecycle.turn_id = checked_turn_id
+       AND lifecycle.session_id = checked_session_id;
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_model_call_final_state_without_stop(uuid)'::regprocedure
+    ) INTO definition;
+    updated_definition := replace(
+        definition,
+        accepted_origin_lookup,
+        typed_origin_lookup
+    );
+    IF updated_definition = definition THEN
+        RAISE EXCEPTION 'delegation could not update model-call origin lookup';
+    END IF;
+    EXECUTE updated_definition;
+END;
+$migration$;
+
 -- Model-identity boundary validation must recognize the same closed origin
 -- families as configuration resolution. A delegated initial turn has no
 -- accepted-input origin row, so resolving it through queued_input_origin alone

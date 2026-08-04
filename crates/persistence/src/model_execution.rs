@@ -25,7 +25,8 @@ use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
     AssistantText, AuthorizedModelCall, CancelledModelCallTurn, CancelledToolRoundModelCallTurn,
-    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
+    CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
+    CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
     DelegatedWakeTurnActivationInput, DelegationContent, DirectModelSelection, DurableCommandId,
     FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
     FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
@@ -386,7 +387,7 @@ impl PostgresModelCallRepository {
             })
             .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
         let origin_contents =
-            load_origin_contents(&mut transaction, &frontier_entries, &[]).await?;
+            load_origin_contents(&mut transaction, &frontier_entries, &[], &[]).await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
@@ -2778,6 +2779,7 @@ async fn require_live_execution_with_targets(
         connection,
         &frontier_entries,
         active_turn.pending_steering(),
+        active_turn.consumed_steering(),
     )
     .await?;
     let tool_result_correlations =
@@ -2955,6 +2957,11 @@ async fn load_delegated_live_turn(
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated pending steering",
         ))?;
+    let active = active
+        .with_consumed_steering(load_delegated_consumed_steering(connection, session, turn).await?)
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated consumed steering",
+        ))?;
     let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
         .await?
         .reconstitute()
@@ -3127,6 +3134,11 @@ async fn load_delegated_live_wake_turn(
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated wake pending steering",
         ))?;
+    let active = active
+        .with_consumed_steering(load_delegated_consumed_steering(connection, session, turn).await?)
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake consumed steering",
+        ))?;
     let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
         .await?
         .reconstitute()
@@ -3172,6 +3184,42 @@ async fn load_delegated_pending_steering(
                 turn,
             )
             .ok_or_else(|| ModelCallCorruption::Inconsistent("delegated pending steering").into())
+        })
+        .collect()
+}
+
+async fn load_delegated_consumed_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Vec<ConsumedSteeringReconstitutionInput>, ModelCallRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT accepted_input_id, acceptance_position, consuming_model_call_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'consumed_as_steering'
+            AND expected_active_turn_id = $2
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let accepted_input = accepted_input_id_from_uuid(required(&row, "accepted_input_id")?);
+            let position = input_position_from_numeric(required(&row, "acceptance_position")?)
+                .map_err(|_| ModelCallCorruption::Inconsistent("delegated steering position"))?;
+            let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
+            Ok(ConsumedSteeringReconstitutionInput::new(
+                session,
+                AcceptedInputLifecycle::new(
+                    accepted_input,
+                    AcceptedInputDisposition::ConsumedAsSteering { call },
+                ),
+                position,
+                turn,
+            ))
         })
         .collect()
 }
@@ -3320,10 +3368,15 @@ async fn load_origin_contents(
     connection: &mut PgConnection,
     entries: &[SemanticTranscriptEntry],
     pending_steering: &[PendingSteeringInput],
+    consumed_steering: &[signalbox_domain::ConsumedSteeringInput],
 ) -> Result<Vec<ModelCallOriginContent>, ModelCallRepositoryError> {
     let pending_by_accepted = pending_steering
         .iter()
         .map(|pending| (pending.accepted_input(), pending))
+        .collect::<BTreeMap<_, _>>();
+    let consumed_by_accepted = consumed_steering
+        .iter()
+        .map(|consumed| (consumed.accepted_input(), consumed))
         .collect::<BTreeMap<_, _>>();
     let accepted_inputs = entries
         .iter()
@@ -3348,6 +3401,7 @@ async fn load_origin_contents(
             | SemanticTranscriptEntryPayload::Imported { .. } => None,
         })
         .chain(pending_by_accepted.keys().copied())
+        .chain(consumed_by_accepted.keys().copied())
         .collect::<BTreeSet<_>>();
     if accepted_inputs.is_empty() {
         return Ok(Vec::new());
@@ -3374,17 +3428,19 @@ async fn load_origin_contents(
     let mut loaded = BTreeSet::new();
     let mut command_by_accepted = BTreeMap::new();
     let mut goal_content_by_accepted = BTreeMap::new();
-    let mut pending_content_by_accepted = BTreeMap::new();
+    let mut steering_content_by_accepted = BTreeMap::new();
     for row in rows {
         let accepted: Uuid = required(&row, "accepted_input_id")?;
         if !accepted_input_uuids.contains(&accepted) || !loaded.insert(accepted) {
             return Err(ModelCallCorruption::Inconsistent("accepted receipt inventory").into());
         }
         let accepted = AcceptedInputId::from_uuid(accepted);
-        if pending_by_accepted.contains_key(&accepted) {
+        if pending_by_accepted.contains_key(&accepted)
+            || consumed_by_accepted.contains_key(&accepted)
+        {
             let content = UserContent::try_text(required(&row, "content_text")?)
-                .map_err(|_| ModelCallCorruption::Inconsistent("pending steering content"))?;
-            if pending_content_by_accepted
+                .map_err(|_| ModelCallCorruption::Inconsistent("steering content"))?;
+            if steering_content_by_accepted
                 .insert(accepted, content)
                 .is_some()
             {
@@ -3433,11 +3489,21 @@ async fn load_origin_contents(
     accepted_inputs
         .into_iter()
         .map(|accepted| {
-            let content = match pending_content_by_accepted.remove(&accepted) {
-                Some(content) => ModelCallOriginContent::from_pending_steering(
-                    pending_by_accepted
+            let content = match steering_content_by_accepted.remove(&accepted) {
+                Some(content) if pending_by_accepted.contains_key(&accepted) => {
+                    ModelCallOriginContent::from_pending_steering(
+                        pending_by_accepted
+                            .get(&accepted)
+                            .ok_or(ModelCallCorruption::Missing("pending steering correlation"))?,
+                        content,
+                    )
+                }
+                Some(content) => ModelCallOriginContent::from_consumed_steering(
+                    consumed_by_accepted
                         .get(&accepted)
-                        .ok_or(ModelCallCorruption::Missing("pending steering correlation"))?,
+                        .ok_or(ModelCallCorruption::Missing(
+                            "consumed steering correlation",
+                        ))?,
                     content,
                 ),
                 None => match goal_content_by_accepted.remove(&accepted) {
