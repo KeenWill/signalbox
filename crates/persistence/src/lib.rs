@@ -6,6 +6,7 @@
 mod command_registry;
 mod conversation_import_codec;
 mod lock_inventory;
+mod model_settings_resolution;
 
 pub mod approval_judge;
 pub mod context_compaction;

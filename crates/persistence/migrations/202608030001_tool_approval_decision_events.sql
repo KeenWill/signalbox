@@ -3,9 +3,7 @@ ALTER TABLE outbox_event
     ADD CONSTRAINT outbox_event_kind_closed
         CHECK (
             event_kind IN (
-                'session_created', 'session_model_settings_changed',
-                'turn_model_settings_resolved', 'input_accepted',
-                'goal_turn_retired',
+                'session_created', 'input_accepted', 'goal_turn_retired',
                 'turn_activated', 'turn_failed', 'model_call_transition',
                 'tool_batch_transition', 'tool_approval_decided',
                 'context_compacted', 'turn_completed', 'turn_refused',
@@ -206,8 +204,6 @@ DECLARE
 BEGIN
     CASE NEW.event_kind
         WHEN 'session_created' THEN SELECT count(*) INTO matching_records FROM session_created_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'session_model_settings_changed' THEN SELECT count(*) INTO matching_records FROM session_model_settings_changed_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'turn_model_settings_resolved' THEN SELECT count(*) INTO matching_records FROM turn_model_settings_resolved_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'input_accepted' THEN SELECT count(*) INTO matching_records FROM input_accepted_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'goal_turn_retired' THEN SELECT count(*) INTO matching_records FROM goal_turn_retired_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'turn_activated' THEN SELECT count(*) INTO matching_records FROM turn_activated_outbox_event WHERE event_sequence = NEW.event_sequence;

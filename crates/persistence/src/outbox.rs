@@ -628,7 +628,26 @@ async fn load_event(
         }
         TURN_MODEL_SETTINGS_RESOLVED => {
             let row = sqlx::query(
-                "SELECT settings.accepted_input_id, settings.turn_id,
+                "WITH RECURSIVE configuration_origin AS (
+                     SELECT queued.*
+                       FROM turn_model_settings_resolved_outbox_event AS event
+                       JOIN turn_model_settings_resolved AS settings
+                         ON settings.accepted_input_id = event.accepted_input_id
+                        AND settings.session_id = event.session_id
+                       JOIN queued_input_origin AS queued
+                         ON queued.accepted_input_id = settings.accepted_input_id
+                        AND queued.turn_id = settings.turn_id
+                        AND queued.session_id = settings.session_id
+                      WHERE event.event_sequence = $1
+                        AND event.session_id = $2
+                     UNION
+                     SELECT source.*
+                       FROM configuration_origin AS current
+                       JOIN queued_input_origin AS source
+                         ON source.turn_id = current.source_configuration_turn_id
+                        AND source.session_id = current.session_id
+                 )
+                 SELECT settings.accepted_input_id, settings.turn_id,
                         settings.defaults_version,
                         settings.selected_direct_model_id,
                         settings.per_call_model_settings,
@@ -646,10 +665,9 @@ async fn load_event(
                    JOIN turn_model_settings_resolved AS settings
                      ON settings.accepted_input_id = event.accepted_input_id
                     AND settings.session_id = event.session_id
-                   JOIN queued_input_origin AS queued
-                     ON queued.accepted_input_id = settings.accepted_input_id
-                    AND queued.turn_id = settings.turn_id
-                    AND queued.session_id = settings.session_id
+                   JOIN configuration_origin AS queued
+                     ON queued.session_id = settings.session_id
+                    AND queued.source_configuration_turn_id IS NULL
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )

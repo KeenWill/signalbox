@@ -202,12 +202,13 @@ async fn terminalize_goal_turn_as_failed(pool: &PgPool, value: u128) -> Result<(
     Ok(())
 }
 
-/// INV-048: a fresh durable sweep rediscovers a pursuing goal whose current
-/// turn terminalized before its scheduler disposition could commit.
+/// INV-048 / INV-053: a fresh durable sweep rediscovers a pursuing goal whose
+/// current turn terminalized before its scheduler disposition could commit,
+/// and the goal-owned origin records its frozen model settings.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv048_terminal_goal_disposition_survives_scheduler_restart() -> Result<(), Box<dyn Error>>
-{
+async fn inv048_inv053_terminal_goal_disposition_survives_scheduler_restart()
+-> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation())
@@ -224,6 +225,21 @@ async fn inv048_terminal_goal_disposition_survives_scheduler_restart() -> Result
             |_| None,
         )
         .await?;
+    let settings_evidence: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_model_settings_resolved
+              WHERE accepted_input_id = $1 AND turn_id = $2),
+            (SELECT count(*)
+               FROM turn_model_settings_resolved_outbox_event
+              WHERE accepted_input_id = $1 AND session_id = $3)",
+    )
+    .bind(attached_turn.accepted_input().into_uuid())
+    .bind(attached_turn.turn().into_uuid())
+    .bind(session(SESSION).into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(settings_evidence, (1, 1));
     assert_eq!(
         activate_goal_turn(&pool, 0xd61).await?,
         attached_turn.turn()
@@ -543,11 +559,12 @@ fn assert_applied_command(outcome: GoalCommandHandlingOutcome) {
     };
 }
 
-/// INV-048: a goal-owned accepted input dispatches and activates without a
-/// synthetic user command, then remains a canonical active origin for steer.
+/// INV-048 / INV-053: a goal-owned accepted input dispatches its frozen model
+/// settings and activates without a synthetic user command, then remains a
+/// canonical active origin for steer.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
+async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
@@ -599,6 +616,24 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
         DispatchedOutboxEventKind::SessionCreated
     ));
 
+    let mut settings = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                settings = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    let settings = settings.expect("the goal settings event was offered");
+    assert_eq!(settings.session(), session(SESSION));
+    let DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) = settings.kind() else {
+        panic!("the goal settings event has its typed payload")
+    };
+    assert_eq!(settings.accepted_input(), candidates.accepted_input());
+    assert_eq!(settings.turn(), candidates.turn());
+
     let mut accepted = None;
     assert_eq!(
         dispatcher
@@ -607,7 +642,7 @@ async fn s_goal_inv048_goal_owned_input_activates_without_a_user_command()
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 2 }
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
     );
     let accepted = accepted.expect("the goal input acceptance event was offered");
     assert_eq!(accepted.session(), session(SESSION));
@@ -1005,6 +1040,12 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
             .await?,
         OutboxDispatchOutcome::Delivered { sequence: 2 }
     );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
     let mut retired = None;
     assert_eq!(
         dispatcher
@@ -1013,7 +1054,7 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
                 OutboxDeliveryDecision::Delivered
             })
             .await?,
-        OutboxDispatchOutcome::Delivered { sequence: 3 }
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
     );
     let retired = retired.expect("the queued goal retirement event was offered");
     assert_eq!(retired.session(), session(SESSION));
