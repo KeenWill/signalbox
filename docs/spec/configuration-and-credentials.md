@@ -1113,8 +1113,8 @@ deployment-side rules that code cannot enforce are stated in
   while an uncertain mutation acknowledgement follows the tool loop's
   external-effect ambiguity contract.
 - **Durable references, and one narrow class of value.** Postgres stores a
-  credential value only where that credential rotates and the daemon is its sole
-  owner — exactly the `oauth` delivery in
+  credential value only where that credential rotates and the daemon alone
+  refreshes it — exactly the `oauth` delivery in
   [credential deliveries](#credential-deliveries), and nothing else. Every other
   credential is reference-only. Each model call durably pins its non-secret
   credential reference at the `Prepared` insert
