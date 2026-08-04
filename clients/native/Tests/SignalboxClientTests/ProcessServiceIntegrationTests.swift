@@ -573,6 +573,10 @@ final class ProcessServiceIntegrationTests: XCTestCase {
       ProcessProjectionFixture.conservativeKinds(in: projection),
       ProcessProjectionFixture.foregroundDelegationResultKinds
     )
+    XCTAssertEqual(
+      ProcessProjectionFixture.toolSummaries(in: projection),
+      ProcessProjectionFixture.foregroundDelegationToolSummaries
+    )
   }
 
   func testToolReconciliationSideProjectionRejectsAttemptlessDeniedSuffix() throws {
@@ -6208,6 +6212,10 @@ private enum ProcessProjectionFixture {
   static let delegationChildTurn = "aaaaaaaa-3333-4333-8333-333333333333"
   static let delegationResultContent = "Delegated fixture inspected."
   static let foregroundDelegationResultKinds = ["delegation_result"]
+  static let foregroundDelegationToolSummaries = [
+    "\(proposedToolName): \(delegationResultContent)",
+    "\(reconciliationSuffixToolName): \(reconciliationSuffixOutput)",
+  ]
   static let reconciliationSuffixToolNames = [
     proposedToolName, reconciliationSuffixToolName,
   ]

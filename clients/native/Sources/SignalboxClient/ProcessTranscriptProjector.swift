@@ -365,6 +365,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         )
         if let projected {
           store(projected, in: &projectedByID, order: &projectedOrder)
+          if case .delegationResult(
+            let requestID,
+            _,
+            _,
+            .foreground,
+            _,
+            let outcome,
+            let content,
+            _,
+            _
+          ) = message.entry {
+            let toolResult = try updateTool(
+              sourceSessionID: message.sourceSessionID.rawValue,
+              requestID: requestID.rawValue,
+              toolAttemptID: nil,
+              output: content,
+              status: outcome == .returned ? .completed : .closed
+            )
+            store(toolResult, in: &projectedByID, order: &projectedOrder)
+          }
         }
       }
       for usageRecord in anchoredUsageByRecordIndex.removeValue(forKey: recordIndex) ?? [] {
@@ -893,7 +913,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     sourceSessionID: String,
     requestID: String,
     toolAttemptID: SignalboxCanonicalUUID?,
-    output: String,
+    output: String?,
     status: SignalboxProcessToolStatus
   ) throws -> SignalboxStoredEvent {
     let correlation = ToolCorrelation(
