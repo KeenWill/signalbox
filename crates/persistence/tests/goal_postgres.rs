@@ -41,9 +41,10 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     outbox::{
+        DispatchedDelegationOutcome, DispatchedDelegationProvenance, DispatchedDelegationReason,
         DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
     },
-    process_read::ProcessReadRepository,
+    process_read::{ProcessReadRepository, ProcessTurnState},
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
@@ -2757,8 +2758,9 @@ async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dy
 }
 
 /// S18 / INV-010 / INV-012 / INV-032: an applied descendant-scoped goal stop
-/// atomically records every edge, logically terminalizes the bound child with
-/// exact parent-command provenance, and leaves the background child runnable.
+/// atomically records every edge, logically terminalizes active and queued
+/// bound children with exact provenance, and leaves the background child
+/// runnable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cascade()
@@ -2767,10 +2769,13 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     let parent = 0xf100;
     let bound_child = 0xf101;
     let background_child = 0xf102;
+    let queued_bound_child = 0xf103;
     let bound_request = 0xf110;
     let background_request = 0xf120;
     let bound_turn = 0xf111;
     let background_turn = 0xf121;
+    let queued_bound_request = 0xf310;
+    let queued_bound_turn = 0xf311;
     let stop_command = 0xf130;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation_fixture(0xf001, parent, 0xf201))
@@ -2780,6 +2785,9 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
         .await?;
     CreateSessionRepository::new(pool.clone(), credential_pin())
         .handle(creation_fixture(0xf003, background_child, 0xf203))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xf004, queued_bound_child, 0xf204))
         .await?;
     insert_queued_delegation_fixture(
         &pool,
@@ -2791,6 +2799,22 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             child_turn: bound_turn,
             task_entry: 0xf113,
             selection: 0xf202,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("cancel"),
+        },
+    )
+    .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: queued_bound_request,
+            parent_session: parent,
+            parent_turn: 0xf312,
+            child_session: queued_bound_child,
+            child_turn: queued_bound_turn,
+            task_entry: 0xf313,
+            selection: 0xf204,
             policy_kind: "bound",
             on_parent_stopped: Some("stop"),
             on_parent_cancelled: Some("cancel"),
@@ -2892,7 +2916,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     .bind(Uuid::from_u128(stop_command))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(cascade, ("goal_command".into(), "stopped".into(), 2));
+    assert_eq!(cascade, ("goal_command".into(), "stopped".into(), 3));
     let bound_terminal: (Uuid, Uuid, String, Uuid) = sqlx::query_as(
         "SELECT child_session_id, child_turn_id, disposition_kind, root_command_id
            FROM session_delegation_logical_terminal
@@ -2909,6 +2933,58 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             "stopped".into(),
             Uuid::from_u128(stop_command),
         )
+    );
+    let terminal_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session(bound_child))
+        .await?
+        .expect("the bound child transcript remains readable");
+    let terminal_turn = terminal_snapshot
+        .turns()
+        .first()
+        .expect("the child transcript retains its delegated root turn");
+    let ProcessTurnState::DelegationTerminated {
+        spawning_request,
+        outcome,
+        reason,
+        provenance,
+    } = terminal_turn.state()
+    else {
+        panic!("the retained delegated turn must project its logical terminal state");
+    };
+    assert_eq!(*spawning_request, tool_request(bound_request));
+    assert_eq!(*outcome, DispatchedDelegationOutcome::ChildStopped);
+    assert_eq!(
+        *reason,
+        DispatchedDelegationReason::ParentStoppedWithDescendants
+    );
+    assert_eq!(
+        *provenance,
+        DispatchedDelegationProvenance::ParentGoalCommand {
+            session: session(parent),
+            goal_generation: 1,
+            command: command(stop_command),
+        }
+    );
+    let queued_terminal_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session(queued_bound_child))
+        .await?
+        .expect("the queued bound child transcript remains readable");
+    let queued_terminal_turn = queued_terminal_snapshot
+        .turns()
+        .first()
+        .expect("the queued child transcript retains its delegated root turn");
+    assert_eq!(
+        queued_terminal_turn.state(),
+        &ProcessTurnState::DelegationTerminated {
+            spawning_request: tool_request(queued_bound_request),
+            outcome: DispatchedDelegationOutcome::ChildStopped,
+            reason: DispatchedDelegationReason::ParentStoppedWithDescendants,
+            provenance: DispatchedDelegationProvenance::ParentGoalCommand {
+                session: session(parent),
+                goal_generation: 1,
+                command: command(stop_command),
+            },
+        }
     );
     let outcomes: Vec<(Uuid, String, String, String, Uuid)> = sqlx::query_as(
         "SELECT spawning_tool_request_id, outcome_kind, reason_kind,
@@ -2937,6 +3013,13 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
                 "parent_goal_command".into(),
                 Uuid::from_u128(stop_command),
             ),
+            (
+                Uuid::from_u128(queued_bound_request),
+                "child_stopped".into(),
+                "parent_stopped_parent_and_descendants".into(),
+                "parent_goal_command".into(),
+                Uuid::from_u128(stop_command),
+            ),
         ]
     );
     let delivered: (i64, i64, i64, i64) = sqlx::query_as(
@@ -2956,7 +3039,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     .bind(Uuid::from_u128(stop_command))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(delivered, (1, 2, 1, 1));
+    assert_eq!(delivered, (1, 3, 2, 1));
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         model_calls.cancellation_signal(session(bound_child), call),
@@ -2998,6 +3081,54 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             .preview(session(background_child), activation_identities(0xf150),)
             .await?
             .is_some()
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xf160),
+                    session(bound_child),
+                    GoalUserAction::Attach(statement("run independent work after the cascade")),
+                ),
+                Some(turn_candidates(0xf161)),
+                |_| None,
+            )
+            .await?,
+    );
+    let restarted = StartEligibleTurnRepository::new(pool.clone())
+        .handle(session(bound_child), activation_identities(0xf170))
+        .await?;
+    let StartEligibleTurnOutcome::Activated(restarted) = restarted else {
+        panic!("the logical terminal proof must release the child session slot");
+    };
+    assert_ne!(
+        restarted.turn(),
+        TurnId::from_uuid(Uuid::from_u128(bound_turn))
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xf320),
+                    session(queued_bound_child),
+                    GoalUserAction::Attach(statement(
+                        "run independent work after a queued cascade",
+                    )),
+                ),
+                Some(turn_candidates(0xf321)),
+                |_| None,
+            )
+            .await?,
+    );
+    let restarted_queued = StartEligibleTurnRepository::new(pool.clone())
+        .handle(session(queued_bound_child), activation_identities(0xf330))
+        .await?;
+    let StartEligibleTurnOutcome::Activated(restarted_queued) = restarted_queued else {
+        panic!("the queued logical terminal must release the child session slot");
+    };
+    assert_ne!(
+        restarted_queued.turn(),
+        TurnId::from_uuid(Uuid::from_u128(queued_bound_turn))
     );
 
     pool.close().await;

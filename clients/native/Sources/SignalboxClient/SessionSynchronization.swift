@@ -1683,6 +1683,7 @@ extension SignalboxTranscriptTurnState {
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
     case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
+    case .delegationTerminated: return .permitted
     case .unknown: return .permitted
     case .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
@@ -1719,8 +1720,9 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .queuedDelegated, .queuedDelegationWake, .activeRunning, .activeAwaitingChild,
-      .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeRunning, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
       .toolReconciliationRequired:
@@ -1735,6 +1737,8 @@ extension SignalboxTranscriptTurnState {
     case .queuedDelegated(_, _, _, let content):
       return UInt(content.utf8.count)
     case .queuedDelegationWake:
+      return 0
+    case .delegationTerminated:
       return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
@@ -2089,7 +2093,8 @@ extension SignalboxTranscriptTurnState {
         kind: "transcript_turn.state.\(kind)",
         decodingDiagnostic: nil
       )
-    case .queued, .queuedDelegated, .queuedDelegationWake, .activeAwaitingChild,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeAwaitingChild,
       .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,

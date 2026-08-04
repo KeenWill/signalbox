@@ -931,6 +931,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
       )
     }
   }
+
 }
 
 public struct SignalboxToolRequestDecided: Decodable, Equatable, Sendable {
@@ -1665,6 +1666,11 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
   case queuedDelegationWake(
     firstDeliverySequence: SignalboxCanonicalUInt64,
     throughDeliverySequence: SignalboxCanonicalUInt64)
+  case delegationTerminated(
+    spawningRequestID: SignalboxCanonicalUUID,
+    outcome: SignalboxDelegationOutcome,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance)
   case activeRunning(
     currentAttemptID: SignalboxCanonicalUUID, currentModelCall: SignalboxCurrentModelCall?)
   case activeAwaitingModelCallRecovery(
@@ -1750,6 +1756,29 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
         self = .queuedDelegationWake(
           firstDeliverySequence: first,
           throughDeliverySequence: through)
+      case "delegation_terminated":
+        try tagged.rejectUnadmittedFields(
+          ["type", "spawning_request_id", "outcome", "reason", "provenance"],
+          decoder: decoder
+        )
+        let outcome: SignalboxDelegationOutcome = try decoder.decode("outcome")
+        let reason: SignalboxDelegationReason = try decoder.decode("reason")
+        let provenance: SignalboxDelegationProvenance = try decoder.decode("provenance")
+        guard Self.delegationTerminalShapeIsValid(
+          outcome: outcome, reason: reason, provenance: provenance
+        ) else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath,
+              debugDescription: "A delegation terminal requires parent cascade authority."
+            )
+          )
+        }
+        self = .delegationTerminated(
+          spawningRequestID: try decoder.decode("spawning_request_id"),
+          outcome: outcome,
+          reason: reason,
+          provenance: provenance)
       case "active_running":
         try tagged.rejectUnadmittedFields(
           ["type", "current_attempt_id", "current_model_call"],
@@ -1868,6 +1897,28 @@ public enum SignalboxTranscriptTurnState: Decodable, Equatable, Sendable {
         payload: tagged.payload,
         decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
       )
+    }
+  }
+}
+
+extension SignalboxTranscriptTurnState {
+  fileprivate static func delegationTerminalShapeIsValid(
+    outcome: SignalboxDelegationOutcome,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance
+  ) -> Bool {
+    guard
+      (outcome == .stopped && reason == .parentStopped)
+        || (outcome == .cancelled && reason == .parentCancelled)
+    else {
+      return false
+    }
+    switch provenance {
+    case .parentTurnCommand(_, _, _, .parentAndDescendants),
+      .parentGoalCommand(_, _, _, .parentAndDescendants):
+      return true
+    case .childTurn, .parentTurnCommand, .parentGoalCommand:
+      return false
     }
   }
 }

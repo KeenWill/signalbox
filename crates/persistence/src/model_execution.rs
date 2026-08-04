@@ -3048,7 +3048,9 @@ async fn load_delegated_live_wake_turn(
             wake.first_delivery_sequence,
             wake.through_delivery_sequence,
             predecessor.turn_id AS predecessor_turn_id,
-            predecessor.terminal_frontier_id AS predecessor_frontier_id,
+            turn_lifecycle_effective_terminal_frontier(
+                predecessor.session_id, predecessor.turn_id
+            ) AS predecessor_frontier_id,
             lifecycle.starting_frontier_id,
             lifecycle.current_attempt_id,
             attempt.state_kind AS attempt_state_kind,
@@ -3077,10 +3079,15 @@ async fn load_delegated_live_wake_turn(
          JOIN turn_lifecycle AS predecessor
            ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
           AND predecessor.session_id = lifecycle.session_id
-          AND predecessor.state_kind = 'terminal'
-          AND predecessor.terminal_disposition_kind IN (
-                'failed', 'completed', 'refused', 'cancelled',
-                'reconciliation_required'
+          AND (
+                predecessor.delegation_runtime_terminal
+                OR (
+                    predecessor.state_kind = 'terminal'
+                    AND predecessor.terminal_disposition_kind IN (
+                        'failed', 'completed', 'refused', 'cancelled',
+                        'reconciliation_required'
+                    )
+                )
           )
          JOIN turn_attempt AS attempt
            ON attempt.turn_attempt_id = lifecycle.current_attempt_id

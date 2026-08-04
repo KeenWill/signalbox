@@ -614,7 +614,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return terminalModelCallID
     case .cancelled(_, _, let terminalModelCallID):
       return terminalModelCallID
-    case .queued, .queuedDelegated, .queuedDelegationWake, .activeRunning,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
       .activeAwaitingChild, .activeAwaitingModelCallRecovery,
       .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .refused,
       .reconciliationRequired, .toolReconciliationRequired, .unknown:
@@ -632,7 +632,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
-      case .queued, .queuedDelegated, .queuedDelegationWake, .activeRunning,
+      case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .activeRunning,
         .activeAwaitingChild, .activeAwaitingToolApproval,
         .activeAwaitingToolRecovery, .failed, .completed, .cancelled,
         .toolReconciliationRequired, .unknown:
@@ -1131,7 +1131,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .cancelled:
         content = nil
       }
-    case .queued, .queuedDelegated, .queuedDelegationWake, .activeAwaitingChild,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeAwaitingChild,
       .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
@@ -1234,8 +1235,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       .activeAwaitingModelCallRecovery, .activeAwaitingToolRecovery, .reconciliationRequired,
       .toolReconciliationRequired:
       return true
-    case .queued, .queuedDelegated, .queuedDelegationWake, .failed, .completed, .refused,
-      .cancelled, .unknown:
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated, .failed,
+      .completed, .refused, .cancelled, .unknown:
       return false
     }
   }
@@ -1867,6 +1868,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch state {
     case .queued, .queuedDelegated, .queuedDelegationWake:
       return .init(state: .queued, label: "Queued")
+    case .delegationTerminated(_, let outcome, _, _):
+      let label = outcome == .stopped ? "Stopped by parent" : "Cancelled by parent"
+      return .init(state: .cancelled, label: label)
     case .activeRunning(_, let currentModelCall):
       if let currentModelCall, case .unknown = currentModelCall.state {
         return .init(state: .recoveryRequired, label: "Recovery required")

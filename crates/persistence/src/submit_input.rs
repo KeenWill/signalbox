@@ -3056,6 +3056,35 @@ pub(crate) async fn load_scheduling_projection(
         ));
     }
 
+    let preceding_non_accepted_terminal = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "SELECT terminal.child_turn_id,
+                terminal.terminal_frontier_id,
+                effective.direct_selection_id
+           FROM session_delegation_logical_terminal AS terminal
+           JOIN LATERAL turn_origin_effective_model_configuration(
+                terminal.child_turn_id, terminal.child_session_id
+           ) AS effective ON true
+          WHERE terminal.child_session_id = $1
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle AS successor
+                 WHERE successor.session_id = terminal.child_session_id
+                   AND successor.turn_id <> terminal.child_turn_id
+                   AND goal_turn_is_runtime_relevant(
+                        successor.session_id, successor.turn_id
+                   )
+                   AND accepted_input_turn_queue_predecessor(
+                        successor.session_id, successor.turn_id
+                   ) = terminal.child_turn_id
+            )",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_optional(&mut *connection)
+    .await?;
+    if let Some((_, terminal_frontier, _)) = preceding_non_accepted_terminal {
+        required_frontiers.insert(terminal_frontier);
+    }
+
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
         "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
@@ -3977,6 +4006,14 @@ pub(crate) async fn load_scheduling_projection(
     );
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
+    }
+    if let Some((turn, terminal_frontier, selected)) = preceding_non_accepted_terminal {
+        input = input.with_preceding_non_accepted_terminal(
+            session_id,
+            TurnId::from_uuid(turn),
+            ContextFrontierId::from_uuid(terminal_frontier),
+            DirectModelSelection::from_uuid(selected),
+        );
     }
     input
         .with_model_call_facts(pinned_targets, model_calls)

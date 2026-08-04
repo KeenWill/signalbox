@@ -2585,6 +2585,13 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         imported_session: ReconstitutedImportedSession,
     ) -> Self;
+    pub fn with_preceding_non_accepted_terminal(
+        self,
+        session: SessionId,
+        turn: TurnId,
+        terminal_frontier: ContextFrontierId,
+        selected: DirectModelSelection,
+    ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
     // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
     // compactions(), consumed_steering(), delegated_consumed_steering(),

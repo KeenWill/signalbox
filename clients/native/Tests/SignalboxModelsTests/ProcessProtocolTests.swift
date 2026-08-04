@@ -817,6 +817,36 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(range.through.rawValue, ProcessProtocolFixture.wakeThroughDeliverySequence)
   }
 
+  func testDelegationTerminalTurnDecodesParentGoalAuthority() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(turnID: turnID)
+    )
+    let terminal = try ProcessProtocolFixture.delegationTerminal(in: frame.message)
+
+    XCTAssertEqual(terminal.spawningRequestID.rawValue, ProcessProtocolFixture.spawningRequestID)
+    XCTAssertEqual(terminal.outcome, .stopped)
+    XCTAssertEqual(terminal.reason, .parentStopped)
+    XCTAssertEqual(
+      terminal.provenance,
+      .parentGoalCommand(
+        parentSessionID: try SignalboxCanonicalUUID(
+          validating: ProcessProtocolFixture.parentSessionID),
+        goalGeneration: try SignalboxCanonicalUInt64(validating: "1"),
+        commandID: try SignalboxCanonicalUUID(validating: ProcessProtocolFixture.parentTurnID),
+        descendantScope: .parentAndDescendants
+      )
+    )
+  }
+
+  func testDelegationTerminalTurnRejectsContradictoryReason() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationTerminalTurnFrame(
+        turnID: turnID, reason: "parent_cancelled")
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.turnStateDecodingDiagnostic(in: frame.message))
+  }
+
   func testTranscriptModelCallCostWithoutAUsageAxisDegradesWithDiagnostic() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.modelCallCostWithoutUsageAxisFrame(turnID: turnID)
@@ -1798,6 +1828,37 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func delegationTerminalTurnFrame(
+    turnID: String, reason: String = "parent_stopped"
+  ) -> Data {
+    Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_turn",
+          "turn_id":"\(turnID)",
+          "acceptance_position":"1",
+          "state":{
+            "type":"delegation_terminated",
+            "spawning_request_id":"\(spawningRequestID)",
+            "outcome":"stopped",
+            "reason":"\(reason)",
+            "provenance":{
+              "type":"parent_goal_command",
+              "parent_session_id":"\(parentSessionID)",
+              "goal_generation":"1",
+              "command_id":"\(parentTurnID)",
+              "descendant_scope":"parent_and_descendants"
+            }
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func failedTurnWithNullCauseFrame(turnID: String) -> Data {
     Data(
       """
@@ -1924,6 +1985,24 @@ private enum ProcessProtocolFixture {
       throw ProcessProtocolFixtureError.missingDelegatedOrigin
     }
     return (first, through)
+  }
+
+  static func delegationTerminal(
+    in message: SignalboxProcessServerMessage
+  ) throws -> (
+    spawningRequestID: SignalboxCanonicalUUID,
+    outcome: SignalboxDelegationOutcome,
+    reason: SignalboxDelegationReason,
+    provenance: SignalboxDelegationProvenance
+  ) {
+    guard
+      case .transcriptTurn(let turn) = message,
+      case .delegationTerminated(
+        let spawningRequestID, let outcome, let reason, let provenance) = turn.state
+    else {
+      throw ProcessProtocolFixtureError.missingDelegatedOrigin
+    }
+    return (spawningRequestID, outcome, reason, provenance)
   }
 
   static func oversizedFrame() -> Data {

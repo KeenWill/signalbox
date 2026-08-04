@@ -167,17 +167,28 @@ FOR EACH ROW EXECUTE FUNCTION lock_delegation_parent_for_spawn();
 -- key continues to prove the pre-existing origin family.
 ALTER TABLE turn_lifecycle
     ADD COLUMN origin_kind text NOT NULL DEFAULT 'accepted_input',
+    ADD COLUMN delegation_runtime_terminal boolean NOT NULL DEFAULT false,
     ALTER COLUMN origin_accepted_input_id DROP NOT NULL,
     ADD CONSTRAINT turn_lifecycle_origin_kind_closed CHECK (
         (origin_kind = 'accepted_input' AND origin_accepted_input_id IS NOT NULL)
         OR (origin_kind = 'delegation' AND origin_accepted_input_id IS NULL)
     ),
     ADD CONSTRAINT turn_lifecycle_delegation_origin_key
-        UNIQUE (turn_id, session_id, acceptance_position);
+        UNIQUE (turn_id, session_id, acceptance_position),
+    ADD CONSTRAINT turn_lifecycle_delegation_runtime_terminal_shape CHECK (
+        NOT delegation_runtime_terminal OR origin_kind = 'delegation'
+    );
+
+DROP INDEX turn_lifecycle_one_active_per_session;
+CREATE UNIQUE INDEX turn_lifecycle_one_active_per_session
+    ON turn_lifecycle(session_id)
+    WHERE state_kind = 'active' AND NOT delegation_runtime_terminal;
 
 CREATE UNIQUE INDEX turn_lifecycle_one_queued_delegation_origin_per_session
     ON turn_lifecycle(session_id)
-    WHERE state_kind = 'queued' AND origin_kind = 'delegation';
+    WHERE state_kind = 'queued'
+      AND origin_kind = 'delegation'
+      AND NOT delegation_runtime_terminal;
 
 CREATE TABLE session_delegation_initial_task (
     spawning_tool_request_id uuid PRIMARY KEY,
@@ -1623,6 +1634,7 @@ CREATE TABLE session_delegation_logical_terminal (
     child_session_id uuid NOT NULL UNIQUE,
     child_turn_id uuid NOT NULL UNIQUE,
     root_command_id uuid NOT NULL,
+    terminal_frontier_id uuid NOT NULL UNIQUE,
     disposition_kind text NOT NULL CHECK (
         disposition_kind IN ('stopped', 'cancelled')
     ),
@@ -1638,12 +1650,17 @@ CREATE TABLE session_delegation_logical_terminal (
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (child_turn_id, child_session_id)
         REFERENCES turn_lifecycle(turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (child_session_id, terminal_frontier_id)
+        REFERENCES context_frontier(owning_session_id, context_frontier_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 
 -- A logically terminal delegated root is no longer scheduler work even while
 -- physical cancellation of an already-issued operation remains in flight.
-CREATE OR REPLACE FUNCTION goal_turn_is_runtime_relevant(
+-- The lifecycle flag is the indexable scheduling projection; deferred checks
+-- below require its exact immutable logical-terminal proof in both directions.
+CREATE FUNCTION goal_turn_is_queue_order_relevant(
     checked_session uuid,
     checked_turn uuid
 )
@@ -1651,13 +1668,9 @@ RETURNS boolean
 LANGUAGE sql
 STABLE
 AS $$
-    SELECT NOT EXISTS (
-        SELECT 1
-          FROM session_delegation_logical_terminal AS terminal
-         WHERE terminal.child_session_id = checked_session
-           AND terminal.child_turn_id = checked_turn
-    ) AND COALESCE((
-        SELECT lifecycle.state_kind <> 'queued'
+    SELECT COALESCE((
+        SELECT (
+            lifecycle.state_kind <> 'queued'
             OR goal.turn_id IS NULL
             OR (
                 SELECT (
@@ -1673,10 +1686,30 @@ AS $$
                  ORDER BY event.event_ordinal DESC
                  LIMIT 1
             )
+        )
           FROM turn_lifecycle AS lifecycle
           LEFT JOIN goal_turn AS goal
             ON goal.session_id = lifecycle.session_id
            AND goal.turn_id = lifecycle.turn_id
+         WHERE lifecycle.session_id = checked_session
+           AND lifecycle.turn_id = checked_turn
+    ), true);
+$$;
+
+CREATE OR REPLACE FUNCTION goal_turn_is_runtime_relevant(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE((
+        SELECT NOT lifecycle.delegation_runtime_terminal
+               AND goal_turn_is_queue_order_relevant(
+                    lifecycle.session_id, lifecycle.turn_id
+               )
+          FROM turn_lifecycle AS lifecycle
          WHERE lifecycle.session_id = checked_session
            AND lifecycle.turn_id = checked_turn
     ), true);
@@ -3940,7 +3973,7 @@ AS $$
                     )
                 )
            )
-           AND goal_turn_is_runtime_relevant(
+           AND goal_turn_is_queue_order_relevant(
                 lifecycle.session_id,
                 lifecycle.turn_id
            )
@@ -3957,7 +3990,7 @@ AS $$
           JOIN turn_lifecycle AS successor_lifecycle
             ON successor_lifecycle.turn_id = successor.turn_id
            AND successor_lifecycle.session_id = successor.session_id
-         WHERE goal_turn_is_runtime_relevant(
+         WHERE goal_turn_is_queue_order_relevant(
             successor_lifecycle.session_id,
             successor_lifecycle.turn_id
          )
@@ -4085,6 +4118,30 @@ AS $$
     )
 $$;
 
+CREATE FUNCTION turn_lifecycle_effective_terminal_frontier(
+    checked_session_id uuid,
+    checked_turn_id uuid
+)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT CASE lifecycle.state_kind
+        WHEN 'terminal' THEN lifecycle.terminal_frontier_id
+        ELSE logical_terminal.terminal_frontier_id
+    END
+      FROM turn_lifecycle AS lifecycle
+      LEFT JOIN session_delegation_logical_terminal AS logical_terminal
+        ON logical_terminal.child_session_id = lifecycle.session_id
+       AND logical_terminal.child_turn_id = lifecycle.turn_id
+     WHERE lifecycle.session_id = checked_session_id
+       AND lifecycle.turn_id = checked_turn_id
+       AND (
+            lifecycle.state_kind = 'terminal'
+            OR lifecycle.delegation_runtime_terminal
+       )
+$$;
+
 DO $migration$
 DECLARE
     checked_function regprocedure;
@@ -4099,12 +4156,24 @@ BEGIN
         SELECT pg_get_functiondef(checked_function) INTO definition;
         updated_definition := replace(
             replace(
-                definition,
-                'predecessor_terminal_member_count + 1',
-                'predecessor_terminal_member_count + turn_lifecycle_origin_member_span(checked_turn_id, checked_session_id)'
+                replace(
+                    replace(
+                        replace(
+                            definition,
+                            'predecessor_terminal_member_count + 1',
+                            'predecessor_terminal_member_count + turn_lifecycle_origin_member_span(checked_turn_id, checked_session_id)'
+                        ),
+                        'predecessor_member_count + 1',
+                        'predecessor_member_count + turn_lifecycle_origin_member_span(checked_turn_id, checked_session)'
+                    ),
+                    'SELECT state_kind, acceptance_position, terminal_frontier_id',
+                    'SELECT state_kind, acceptance_position, turn_lifecycle_effective_terminal_frontier(session_id, turn_id)'
+                ),
+                E'IF predecessor_state IS DISTINCT FROM ''terminal''\n           OR predecessor_position',
+                E'IF (predecessor_state IS DISTINCT FROM ''terminal''\n           AND predecessor_terminal_frontier IS NULL)\n           OR predecessor_position'
             ),
-            'predecessor_member_count + 1',
-            'predecessor_member_count + turn_lifecycle_origin_member_span(checked_turn_id, checked_session)'
+            E'SELECT terminal_frontier_id\n          INTO predecessor_frontier\n          FROM turn_lifecycle\n         WHERE turn_id = checked_predecessor\n           AND session_id = checked_session\n           AND state_kind = ''terminal'';\n        IF NOT FOUND THEN',
+            E'SELECT turn_lifecycle_effective_terminal_frontier(\n                    checked_session, checked_predecessor\n               )\n          INTO predecessor_frontier;\n        IF predecessor_frontier IS NULL THEN'
         );
         IF updated_definition = definition THEN
             RAISE EXCEPTION 'delegation wake could not extend lifecycle origin span in %',
@@ -4170,11 +4239,10 @@ BEGIN
         stored.recipient_session_id,
         stored.turn_id
     );
-    SELECT terminal_frontier_id INTO predecessor_frontier
-      FROM turn_lifecycle
-     WHERE turn_id = predecessor_turn
-       AND session_id = stored.recipient_session_id
-       AND state_kind = 'terminal';
+    SELECT turn_lifecycle_effective_terminal_frontier(
+                stored.recipient_session_id, predecessor_turn
+           )
+      INTO predecessor_frontier;
     SELECT member_count INTO predecessor_member_count
       FROM context_frontier
      WHERE owning_session_id = stored.recipient_session_id
@@ -5064,6 +5132,10 @@ DECLARE
     reason_kind text;
     logical_disposition text;
     child_turn uuid;
+    child_starting_frontier uuid;
+    child_terminal_frontier uuid;
+    child_frontier_member_count numeric(20, 0);
+    child_task_entry uuid;
     wait_record record;
     delivery_sequence numeric(20, 0);
 BEGIN
@@ -5188,17 +5260,58 @@ BEGIN
         END;
 
         IF logical_disposition IS NOT NULL THEN
-            SELECT task.turn_id INTO child_turn
+            SELECT task.turn_id, task.semantic_entry_id,
+                   lifecycle.starting_frontier_id
+              INTO child_turn, child_task_entry, child_starting_frontier
               FROM session_delegation_initial_task AS task
+              JOIN turn_lifecycle AS lifecycle
+                ON lifecycle.turn_id = task.turn_id
+               AND lifecycle.session_id = task.child_session_id
              WHERE task.spawning_tool_request_id =
                     frontier.spawning_tool_request_id
                AND task.child_session_id = frontier.child_session_id;
+            child_terminal_frontier := (
+                md5(
+                    'signalbox:delegation-terminal-frontier:'
+                    || frontier.spawning_tool_request_id::text
+                )
+            )::uuid;
+            IF child_starting_frontier IS NULL THEN
+                INSERT INTO context_frontier
+                    (owning_session_id, context_frontier_id, member_count,
+                     prefix_context_frontier_id)
+                VALUES
+                    (frontier.child_session_id, child_terminal_frontier,
+                     1, NULL);
+                INSERT INTO context_frontier_delta
+                    (owning_session_id, context_frontier_id, member_position,
+                     source_session_id, semantic_entry_id)
+                VALUES
+                    (frontier.child_session_id, child_terminal_frontier, 1,
+                     frontier.child_session_id, child_task_entry);
+            ELSE
+                SELECT stored.member_count INTO child_frontier_member_count
+                  FROM context_frontier AS stored
+                 WHERE stored.owning_session_id = frontier.child_session_id
+                   AND stored.context_frontier_id = child_starting_frontier;
+                INSERT INTO context_frontier
+                    (owning_session_id, context_frontier_id, member_count,
+                     prefix_context_frontier_id)
+                VALUES
+                    (frontier.child_session_id, child_terminal_frontier,
+                     child_frontier_member_count, child_starting_frontier);
+            END IF;
             INSERT INTO session_delegation_logical_terminal
                 (spawning_tool_request_id, child_session_id, child_turn_id,
-                 root_command_id, disposition_kind)
+                 root_command_id, terminal_frontier_id, disposition_kind)
             VALUES
                 (frontier.spawning_tool_request_id, frontier.child_session_id,
-                 child_turn, checked_root_command, logical_disposition);
+                 child_turn, checked_root_command, child_terminal_frontier,
+                 logical_disposition);
+            UPDATE turn_lifecycle
+               SET delegation_runtime_terminal = true
+             WHERE session_id = frontier.child_session_id
+               AND turn_id = child_turn;
         END IF;
 
         SELECT COALESCE(max(stored.event_ordinal), 0) + 1
@@ -5365,6 +5478,16 @@ BEGIN
             USING ERRCODE = '23503',
                 CONSTRAINT = 'session_delegation_logical_terminal_outcome';
     END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM turn_lifecycle AS lifecycle
+         WHERE lifecycle.session_id = NEW.child_session_id
+           AND lifecycle.turn_id = NEW.child_turn_id
+           AND lifecycle.delegation_runtime_terminal
+    ) THEN
+        RAISE EXCEPTION 'logical delegation terminal did not release its runtime slot'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'session_delegation_logical_terminal_runtime_slot';
+    END IF;
     RETURN NULL;
 END;
 $$;
@@ -5372,6 +5495,40 @@ CREATE CONSTRAINT TRIGGER session_delegation_logical_terminal_requires_outcome
 AFTER INSERT ON session_delegation_logical_terminal
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_delegation_logical_terminal_outcome();
+
+CREATE FUNCTION require_turn_delegation_runtime_terminal_proof()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.delegation_runtime_terminal AND NOT EXISTS (
+        SELECT 1 FROM session_delegation_logical_terminal AS terminal
+         WHERE terminal.child_session_id = NEW.session_id
+           AND terminal.child_turn_id = NEW.turn_id
+    ) THEN
+        RAISE EXCEPTION 'released delegation runtime slot lacks terminal proof'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'turn_lifecycle_delegation_runtime_terminal_proof';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE CONSTRAINT TRIGGER turn_lifecycle_delegation_runtime_terminal_requires_proof
+AFTER INSERT OR UPDATE OF delegation_runtime_terminal ON turn_lifecycle
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION require_turn_delegation_runtime_terminal_proof();
+
+CREATE FUNCTION reject_turn_delegation_runtime_terminal_reversal()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.delegation_runtime_terminal AND NOT NEW.delegation_runtime_terminal THEN
+        RAISE EXCEPTION 'delegation runtime terminalization is monotonic'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER turn_lifecycle_delegation_runtime_terminal_is_monotonic
+BEFORE UPDATE OF delegation_runtime_terminal ON turn_lifecycle
+FOR EACH ROW EXECUTE FUNCTION reject_turn_delegation_runtime_terminal_reversal();
 
 CREATE TRIGGER session_delegation_is_append_only
 BEFORE UPDATE OR DELETE ON session_delegation

@@ -25,9 +25,10 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ContextFrontierId,
-    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest, EndedTurnAttempt,
-    InitialSemanticTranscriptEntryPayload, ModelCallDisposition, NonEmptyIssuedOperationRefs,
-    OriginConfiguration, ReconstitutedImportedSession, ReconstitutedModelCall,
+    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
+    DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
+    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
@@ -1285,6 +1286,8 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
     continuation_rounds: Vec<ContinuationRoundReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
+    preceding_non_accepted_terminal:
+        Option<(SessionId, TurnId, ContextFrontierId, DirectModelSelection)>,
 }
 
 impl AcceptedInputSchedulingReconstitutionInput {
@@ -1311,7 +1314,22 @@ impl AcceptedInputSchedulingReconstitutionInput {
             steering_continuation_rounds: Vec::new(),
             continuation_rounds: Vec::new(),
             active_acceptance_tail,
+            preceding_non_accepted_terminal: None,
         }
+    }
+
+    /// Supplies the immediate terminal predecessor when it is not an
+    /// accepted-input-origin turn, together with the retained terminal
+    /// frontier and its selected model identity.
+    pub fn with_preceding_non_accepted_terminal(
+        mut self,
+        session: SessionId,
+        turn: TurnId,
+        terminal_frontier: ContextFrontierId,
+        selected: DirectModelSelection,
+    ) -> Self {
+        self.preceding_non_accepted_terminal = Some((session, turn, terminal_frontier, selected));
+        self
     }
 
     /// Supplies the complete independently checked imported seed projection
@@ -2109,6 +2127,11 @@ pub struct AcceptedInputSchedulingProjection {
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
+    preceding_non_accepted_terminal: Option<(
+        TurnId,
+        ResolvedContextFrontierSnapshot,
+        DirectModelSelection,
+    )>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3879,6 +3902,21 @@ fn reconstitute_inner(
         }
     }
 
+    let preceding_non_accepted_terminal = match input.preceding_non_accepted_terminal {
+        Some((stored_session, turn, terminal_frontier, selected)) => {
+            if stored_session != session || records_by_turn.contains_key(&turn) {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch { turn },
+                );
+            }
+            let snapshot = snapshots.get(&terminal_frontier).cloned().ok_or(
+                AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+            )?;
+            Some((turn, snapshot, selected))
+        }
+        None => None,
+    };
+
     let mut compaction_calls = BTreeMap::new();
     let mut compaction_snapshots = BTreeSet::new();
     for candidate in &input.compaction_calls {
@@ -4651,8 +4689,12 @@ fn reconstitute_inner(
     }
 
     let mut turns = Vec::with_capacity(total_order.len());
-    let mut previous_terminal: Option<(TurnId, ResolvedContextFrontierSnapshot)> = None;
-    let mut previous_selected = None;
+    let mut previous_terminal = preceding_non_accepted_terminal
+        .as_ref()
+        .map(|(turn, snapshot, _)| (*turn, snapshot.clone()));
+    let mut previous_selected = preceding_non_accepted_terminal
+        .as_ref()
+        .map(|(_, _, selected)| *selected);
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
@@ -4660,6 +4702,11 @@ fn reconstitute_inner(
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
     referenced_snapshots.extend(initial_seed_frontier);
+    referenced_snapshots.extend(
+        preceding_non_accepted_terminal
+            .as_ref()
+            .map(|(_, snapshot, _)| snapshot.frontier().snapshot()),
+    );
     let mut attempt_owners = BTreeMap::new();
     let mut claimed_continuation_rounds = BTreeSet::new();
 
@@ -6250,6 +6297,7 @@ fn reconstitute_inner(
         active_model_call_recovery,
         active_tool_recovery_attempt,
         active_executing_tool_batch,
+        preceding_non_accepted_terminal,
     })
 }
 
@@ -7276,13 +7324,23 @@ fn prepare_earliest_queued_activation(
         .effective()
         .model()
         .selected_direct();
-    let previous_selected = index.checked_sub(1).map(|predecessor| {
-        projection.turns[predecessor]
-            .origin_configuration
-            .effective()
-            .model()
-            .selected_direct()
-    });
+    let previous_selected = index.checked_sub(1).map_or_else(
+        || {
+            projection
+                .preceding_non_accepted_terminal
+                .as_ref()
+                .map(|(_, _, selected)| *selected)
+        },
+        |predecessor| {
+            Some(
+                projection.turns[predecessor]
+                    .origin_configuration
+                    .effective()
+                    .model()
+                    .selected_direct(),
+            )
+        },
+    );
     let model_identity_entry = previous_selected
         .filter(|previous| *previous != selected)
         .map(|_| {
@@ -7321,7 +7379,9 @@ fn prepare_earliest_queued_activation(
         .iter()
         .map(SemanticTranscriptEntry::reference)
         .collect::<Vec<_>>();
-    let (lineage, starting_snapshot) = if index == 0 {
+    let (lineage, starting_snapshot) = if index == 0
+        && projection.preceding_non_accepted_terminal.is_none()
+    {
         let seed = projection
             .initial_seed_frontier
             .and_then(|frontier| projection.snapshots.get(&frontier));
@@ -7360,15 +7420,31 @@ fn prepare_earliest_queued_activation(
         };
         (AcceptedInputStartingLineage::FirstInSession, snapshot)
     } else {
-        let predecessor = &projection.turns[index - 1];
-        let predecessor_turn = predecessor.turn;
-        let Some(terminal_frontier) = predecessor.terminal_frontier() else {
-            return Err(fail(
-                projection,
-                AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
-                    predecessor: predecessor_turn,
-                },
-            ));
+        let (predecessor_turn, terminal_frontier) = match index.checked_sub(1) {
+            Some(predecessor_index) => {
+                let predecessor = &projection.turns[predecessor_index];
+                let predecessor_turn = predecessor.turn;
+                let Some(terminal_frontier) = predecessor.terminal_frontier() else {
+                    return Err(fail(
+                        projection,
+                        AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                            predecessor: predecessor_turn,
+                        },
+                    ));
+                };
+                (predecessor_turn, terminal_frontier)
+            }
+            None => {
+                let Some((predecessor_turn, terminal_frontier, _)) =
+                    projection.preceding_non_accepted_terminal.as_ref()
+                else {
+                    return Err(fail(
+                        projection,
+                        AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                    ));
+                };
+                (*predecessor_turn, terminal_frontier)
+            }
         };
         let compacted = projection
             .latest_compaction_result
@@ -7388,7 +7464,7 @@ fn prepare_earliest_queued_activation(
         };
         (
             AcceptedInputStartingLineage::After {
-                immediate_predecessor: predecessor.turn,
+                immediate_predecessor: predecessor_turn,
             },
             snapshot,
         )
