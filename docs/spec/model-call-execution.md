@@ -46,8 +46,9 @@ implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
 automatic machinery. The runner-placement rendering and executable session-tool
 snapshot paragraphs are the foundation proposal at the bottom of their
-implementing stack and become verified only with those child pull requests.
-Invariant tags cite [docs/invariants.md](../invariants.md).
+implementing stack and become verified only with those child pull requests, as
+is [availability successor calls](#availability-successor-calls). Invariant tags
+cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -547,23 +548,52 @@ cannot prove the provider did not act, so repetition risks undisclosed duplicate
 provider effects and spend; honest ambiguity is preferred to an invented
 exactly-once claim.
 
-**Committed unimplemented functionality — availability successor calls.** No
-present configuration, command, or scheduler path selects another credential
-profile after a failed call; every known failure fails its attempt and turn as
-described above. A future availability-failover surface constrains present
-change in four ways, and states nothing further about how selection behaves. Its
-successor is a distinct model call with its own pinned target and its own
-durable credential reference, never a second authorization or a substituted
-identity on an existing call, so the accepted no-silent-substitution rule
-(INV-018) is untouched. That successor belongs to a successor turn attempt, so
-`model_call_attempt_once UNIQUE (turn_attempt_id)` continues to admit exactly
-one call row per attempt and needs no relaxation. Its admitted causes are drawn
-only from classified availability failures that prove non-acceptance; an
-ambiguous outcome stays outside them under INV-025, and a refusal stays outside
-them because refusal is provider judgment rather than provider capacity. And the
-reason a successor exists is recorded as durable evidence rather than inferred
-from the pair of calls. The qualifying-cause decision this constrains is
-[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+### Availability successor calls
+
+The rule above governs repetition: one durable authorization never reaches the
+provider twice. It does not govern substitution of the credential that failed. A
+`KnownFailed` call whose cause is one of the three availability causes —
+`provider_quota_exhausted`, `provider_rate_limited`, or `provider_overloaded` —
+and whose pool configures `switch_now` for that cause may be followed by a
+*successor call*: a distinct model call, on a successor turn attempt, against
+the next admitted member of the same credential pool
+([configuration-and-credentials](configuration-and-credentials.md#credential-pools-and-selection)).
+
+That framing is what makes this compatible with the accepted rules rather than
+an exception to them. The predecessor stays terminal and stays `KnownFailed`;
+nothing reclassifies it, and its pinned target, pinned credential reference, and
+reported usage remain exactly what it recorded. The successor pins the same
+resolved target and a different credential reference, so no call changes
+identity mid-flight and INV-018 is untouched. Because the successor belongs to
+its own attempt, `model_call_attempt_once UNIQUE (turn_attempt_id)` still admits
+exactly one call row per attempt and needs no relaxation; the attempt chain is
+the one intra-turn tool rounds already create.
+
+Three causes qualify and no others. Refusal never qualifies: it is provider
+judgment about the request, so another account would refuse the same content and
+substituting one would be shopping for a different answer. Ambiguity never
+qualifies (INV-025): a lost acknowledgement cannot prove the provider did not
+act, so a successor could duplicate both an effect and its spend. Credential
+resolution failure and `provider_credential_rejected` never qualify: both are
+deployment misconfiguration, and moving to another account hides the account
+that is broken. Every other known failure keeps the behavior above, failing its
+attempt and turn.
+
+The chain is bounded by the pool. A member that produced a qualifying failure is
+excluded from the rest of that turn, so at most one call per member exists per
+turn and the longest possible chain is the pool's member count. When no member
+remains admissible, the pool's `on_pool_exhausted` decides: `fail` fails the
+turn as a known failure carrying the last observed cause, and `park` parks the
+turn in a durable wait carrying the earliest reset its members reported, which
+the scheduler releases when that time passes. A parked turn holds its session
+slot, appends no failure entry, and is not a terminal outcome.
+
+Each successor durably records the predecessor call it follows and the cause
+that authorized it, so a chain reads as evidence rather than as two calls that
+happen to share a turn. A goal-mode turn that exhausts its pool under `fail`
+blocks with the ordinary `execution_failure` reason ([goal-mode](goal-mode.md));
+under `park` it remains the current goal turn and appends nothing, because no
+terminal disposition exists yet.
 
 ## Provider observation classification
 
@@ -836,13 +866,11 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
-- No availability successor call exists: a classified availability failure fails
-  its attempt and turn like any other known failure. The qualifying causes, the
-  configuration that would select another profile, and the client visibility
-  surface are routed through
-  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance);
-  the compatibility constraint on present change is stated under
-  [one call, one physical interaction](#one-call-one-physical-interaction).
+- An [availability successor call](#availability-successor-calls) is durable
+  evidence but not yet a transient one: no client surface renders that a
+  successor is being selected, so a chain is visible only after the fact. The
+  visibility surface is routed through
+  [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
 - The aggregate admits at most one call per turn attempt; the tool loop creates

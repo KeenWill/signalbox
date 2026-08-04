@@ -47,13 +47,23 @@ lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
-unimplemented functionality as labeled below.
+unimplemented functionality as labeled below. The credential-pool grammar,
+per-profile credential delivery, and pool selection are the foundation proposal
+at the bottom of their implementing stack and become verified only with those
+child pull requests; every other paragraph on this page describes behavior
+verified against the references above.
 
 ## Process configuration
 
-`signalboxd` reads six unconditionally required deployment values, the optional
-runner-socket override, and the conditionally required Anthropic key path from
-the process environment at startup, and also consults `HOME`:
+`signalboxd` reads six unconditionally required deployment values and the
+optional runner-socket override from the process environment at startup, and
+also consults `HOME`. Model-provider credential paths are deliberately not among
+them: an Anthropic profile carries its own `file` and a Codex profile its own
+`codex_home` in the static catalog below, on the same pattern
+`[credentials.<name>]` already uses for the runner. Why: one environment
+variable cannot name the paths of several accounts, and a deployment holding two
+keys for one provider must be able to say so. The two integration credentials,
+of which there is exactly one each, keep their process settings:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
@@ -67,9 +77,6 @@ the process environment at startup, and also consults `HOME`:
   prompt-file reference, the environment value is additionally required to be a
   nonempty absolute path; absence, an empty value, or a relative value is a
   typed template-configuration failure.
-- `ANTHROPIC_API_KEY_FILE` — path to the file holding the current Anthropic API
-  key value. It is required only when at least one static model mapping selects
-  the Anthropic adapter; a Codex-only configuration does not consult it.
 - `BRAVE_API_KEY_FILE` — path to the file holding the current Brave Search API
   key value used by the daemon-composed `web_search` tool.
 - `GITHUB_TOKEN_FILE` — path to the file holding the current token shared by the
@@ -148,10 +155,11 @@ migration behavior is [persistence-protocol](persistence-protocol.md) scope, and
 the socket boundary and single-daemon guard are
 [process-protocol](process-protocol.md) material.
 
-The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL`,
-`SIGNALBOX_CONFIG_FILE`, and `ANTHROPIC_API_KEY_FILE` in its `--anthropic` mode.
-It does not compose the daemon tool catalog and does not read
-`GITHUB_TOKEN_FILE`; it is a development driver, not the client protocol.
+The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` and
+`SIGNALBOX_CONFIG_FILE` in its `--anthropic` mode, taking the Anthropic key path
+from the configured profile exactly as the daemon does. It does not compose the
+daemon tool catalog and does not read `GITHUB_TOKEN_FILE`; it is a development
+driver, not the client protocol.
 
 ## Telemetry export
 
@@ -414,15 +422,27 @@ fail-closed:
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
 - At least one `[[adapter_mappings]]` entry is required. Each entry gives one
-  exact `model_family`, the build-provided `adapter`, and its non-secret
-  `credential_profile`. The profile must name one declared
-  `[[credential_profiles]]` entry. Duplicate families, an adapter this daemon
-  build does not provide, or an undeclared profile are typed startup failures.
-  Nothing is inferred from model spelling.
+  exact `model_family`, the build-provided `adapter`, and the non-secret
+  `credential_pool` whose members may authenticate that family. The pool must
+  name one declared `[[credential_pools]]` entry, and every member of that pool
+  must carry the mapping's adapter. Duplicate families, an adapter this daemon
+  build does not provide, an undeclared pool, and an adapter disagreement
+  between a mapping and its pool are typed startup failures. Nothing is inferred
+  from model spelling.
 - At least one `[[credential_profiles]]` entry is required. Each exact `name`
-  carries one closed `billing_kind`: `api_metered` or `subscription`. Duplicate
-  names, unknown kinds, and unknown fields are rejected. Billing kind belongs to
-  authentication, not to the adapter selected by a mapping.
+  carries the build-provided `adapter` it authenticates, one closed
+  `billing_kind` (`api_metered` or `subscription`), and the delivery its adapter
+  requires: an `anthropic` profile names an absolute `file`, and a `codex_cli`
+  profile an absolute `codex_home`. Duplicate names, unknown adapters, unknown
+  kinds, a delivery field belonging to the other adapter, a relative path, and
+  unknown fields are rejected. Neither path is opened at startup, matching the
+  no-preflight rule below. Billing kind belongs to authentication, not to the
+  adapter a mapping selects. A profile name is opaque to code: no build-provided
+  constant is compared against it, so a deployment names its accounts as it
+  chooses.
+- At least one `[[credential_pools]]` entry is required.
+  [Credential pools and selection](#credential-pools-and-selection) owns its
+  complete grammar and admission rules.
 - Unknown fields are rejected at the root and inside every table. Why: a
   silently ignored key would let a typo change model meaning invisibly, so
   unrecognized content fails explicitly instead.
@@ -554,16 +574,20 @@ Each `[[models]]` entry defines one direct selection:
   configuration error; omitting all five is valid and yields no dollar figure
   for that model.
 
-This build provides exactly `anthropic` and `codex_cli`. Anthropic mappings use
-the declared `anthropic-primary` profile. Codex mappings may select any declared
-profile, but every Codex family in one daemon configuration must select the same
-one because the composed CLI runtime has one ambient authentication context. A
-Codex mapping also requires `[codex_cli]` with an absolute executable path
-naming an existing regular file and an absolute, existing `working_directory`;
-construction validates that shape and platform support without invoking Codex or
-inspecting login state. The Codex CLI owns its external login exactly as the
-adapter contract specifies. OpenAI HTTP and Claude CLI mappings are not provided
-by this build.
+This build provides exactly `anthropic` and `codex_cli`. Neither adapter pins a
+profile name, and a pool may hold several profiles for either. An Anthropic
+profile carries the deployment path its secret value arrives through (see
+[credential lifecycle](#credential-lifecycle)). A Codex profile instead carries
+an absolute `codex_home`, the directory holding the login store its fresh
+processes read, so two Codex profiles are two distinct logins rather than one
+shared ambient context; two profiles naming the same `codex_home` are a startup
+failure, because they are one login under two names and their separate billing
+and availability accounting would be fiction. A Codex mapping also requires
+`[codex_cli]` with an absolute executable path naming an existing regular file
+and an absolute, existing `working_directory`; construction validates that shape
+and platform support without invoking Codex or inspecting login state. The Codex
+CLI owns its external login exactly as the adapter contract specifies. OpenAI
+HTTP and Claude CLI mappings are not provided by this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -602,6 +626,85 @@ the catalog now resolves that selection to a different target. The startup-scan
 restart path instead rebuilds its target catalog from the stored calls
 themselves, deliberately not from configuration — part of why recovery of
 acknowledged work is configuration-independent (INV-034).
+
+## Credential pools and selection
+
+A credential pool is the set of profiles that may substitute for one another for
+one model family. Each `[[credential_pools]]` entry carries:
+
+- `name` — the exact pool key, unique in the document.
+- `members` — a nonempty array of tables. Each names one declared `profile`, its
+  `priority` within this pool as a positive integer where a lower value is
+  preferred, and an optional `headroom_reserve_percent` overriding the pool
+  value for that member alone.
+- `tie_break` — one closed value resolving equal priorities: `first_listed`,
+  `round_robin`, or `least_used`.
+- `on_pool_exhausted` — one closed value, `park` or `fail`.
+- `headroom_reserve_percent` — an optional pool-wide integer from 0 through 99.
+- the five closed trigger keys `on_quota_exhausted`, `on_rate_limited`,
+  `on_overloaded`, `on_credential_rejected`, and `on_headroom_low`, each
+  carrying one closed action. An omitted trigger key selects `stay`.
+
+Priority is a property of the membership rather than of the profile. Why: one
+account holds different ranks in different pools — first choice for interactive
+work, last resort for batch — and a single rank on the profile cannot state
+both. Priorities need not be unique or contiguous: equal values are exactly what
+`tie_break` resolves, and gaps let a later profile take an intermediate rank
+without renumbering the rest.
+
+The five admitted actions are:
+
+| Action               | Effect when its trigger fires for a member                                                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stay`               | The member keeps the session. The failure terminalizes as it would with no pool.                                                                      |
+| `switch_next_turn`   | The turn fails as it would with no pool. The next turn's preparation excludes this member.                                                            |
+| `switch_now`         | The turn creates a successor attempt against the next admitted member ([model-call-execution](model-call-execution.md#availability-successor-calls)). |
+| `avoid_new_sessions` | Sessions already pinned to the member keep it; preparation for a session with no prior completed call on this pool excludes it.                       |
+| `quarantine`         | The member is excluded from every selection until a restart or an explicit re-check clears it.                                                        |
+
+`switch_now` is admitted only for `on_quota_exhausted`, `on_rate_limited`, and
+`on_overloaded`, because only those causes carry proof that the request was not
+accepted. Selecting it for `on_credential_rejected` or `on_headroom_low` is a
+typed startup failure: a rejected credential is deployment misconfiguration that
+substitution would hide, and low headroom is not a failure at all.
+
+Selection happens at model-call preparation, never at session creation. For the
+resolved target's family, preparation reads the session's current pool from its
+credential history, then admits pool members in priority order, skipping any
+excluded by an action above, and breaks a priority tie by the pool's rule.
+Stickiness needs no separate durable state: preparation prefers the member the
+session's most recent completed call on that pool pinned, so a session stays on
+one account until a trigger displaces it. When the pool admits no member,
+`on_pool_exhausted` decides — `park` parks the turn in the durable wait carrying
+the earliest reset the pool's members reported, and `fail` fails the turn as a
+known failure. Quarantine is process-local and rebuilt from observation, so a
+restart re-admits a quarantined member and learns again. Why: recovery of
+acknowledged work must not depend on retained credential judgments (INV-034).
+
+The durable record is unchanged in kind. A session's credential history event
+carries a complete family-to-pool snapshot where it previously carried a
+family-to-reference snapshot, and each model call still pins the exact profile
+that authenticated it in `model_call.credential_reference` at the `Prepared`
+insert. A historical read therefore still resolves that call's billing kind and
+rates from the reference the call itself pinned, whatever selection chose it,
+and a pool edited across a restart cannot relabel a stored call.
+
+Admission is fail-closed. Startup rejects a pool with no members, a duplicate
+member profile, a member naming an undeclared profile, a mapping naming an
+undeclared pool, members disagreeing on adapter, a priority that is not a
+positive integer, an unknown tie-break or exhaustion value, an unknown action,
+an action on a trigger that does not admit it, and any unknown field. It also
+rejects `headroom_reserve_percent`, `tie_break = "least_used"`, and any
+`on_headroom_low` action other than `stay` whenever the pool's adapter reports
+no remaining capacity — which in this build is every adapter, because neither
+composed runtime observes it. Why: a configured reserve that silently never
+fires would read as protection the deployment does not have. The keys are
+admitted by the grammar so that a later adapter supplying the observation needs
+no configuration contract change; the observation itself is routed through
+[model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+
+A one-member pool is the ordinary single-account deployment and requires no
+trigger keys, since no member can succeed another.
 
 ## The static session-template catalog
 
@@ -797,26 +900,27 @@ deployment-side rules that code cannot enforce are stated in
   one credential; a `CredentialValue` carries the secret bytes. References are
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
-  record or log ever needs the secret (INV-035). The composition constants are
-  `anthropic-primary`, `codex-subscription-primary`, `brave-search-primary`, and
-  `github-primary`; model configuration may declare additional non-secret
-  profiles.
-- **File-based supply, reread per preparation.** `FileCredentialAccess` binds
-  the Anthropic, Brave Search, and GitHub references to their corresponding
-  deployment paths and reads the file for every Anthropic model call, web
-  search, code-host operation, or pull-request tool operation preparation;
-  nothing is cached. Why: atomic file replacement rotates any credential without
-  restarting signalboxd, and an in-flight operation keeps the value it
-  authenticated with. Resolution is reference-scoped: a foreign reference fails
-  typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
-  `Unreadable` — all reference-only errors.
-- **External Codex login.** A Codex mapping's profile names the
-  operator-selected ambient Codex CLI login. The default example uses
-  `codex-subscription-primary`. The daemon and adapter neither locate nor read
-  its credential store and invent no credential-value shape; the fresh CLI
-  process resolves login state under the adapter's existing environment
-  contract. The profile's configured billing kind labels derived cost; adapter
-  kind does not.
+  record or log ever needs the secret (INV-035). The two integration constants
+  are `brave-search-primary` and `github-primary`; every model-provider
+  reference is a configured profile name this build never spells.
+- **File-based supply, reread per preparation.** `FileCredentialAccess` binds a
+  map of references to deployment paths — one entry per `anthropic` profile plus
+  the two integration constants — and reads the file for every Anthropic model
+  call, web search, code-host operation, or pull-request tool operation
+  preparation; nothing is cached. Why: atomic file replacement rotates any
+  credential without restarting signalboxd, and an in-flight operation keeps the
+  value it authenticated with. Resolution stays reference-scoped: a reference
+  absent from the map fails typed `Unmapped`; a missing file is `Unavailable`;
+  an unreadable file is `Unreadable` — all reference-only errors, so a failure
+  names an account without disclosing which path served it.
+- **External Codex login.** A Codex profile names an operator-selected Codex CLI
+  login by the `codex_home` directory holding it. The daemon and adapter neither
+  locate, read, nor validate that store and invent no credential-value shape;
+  each fresh CLI process resolves login state for itself under the adapter's
+  existing environment contract, with the profile's `codex_home` supplied as
+  that process's credential home. Two Codex profiles are therefore two logins
+  the CLI resolves independently, which is what lets one pool hold several. The
+  profile's configured billing kind labels derived cost; adapter kind does not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -835,18 +939,18 @@ deployment-side rules that code cannot enforce are stated in
 - **Session credential history.** First handling of every native or imported
   session-creation command appends event ordinal 1 to that session's credential
   history in the same transaction as the session. The event has creation-command
-  provenance and a complete, nonempty family-to-reference snapshot copied from
-  the validated mapping table. Record and entry rows are append-only; a guarded
-  head names the current event, and model-call preparation reads the latest
-  entry for the resolved target's family. Equal command replay returns the
-  recorded session without consulting the current table, so a configuration edit
-  never silently re-resolves an existing session's credentials. The migration
-  seeds each preexisting session with a `migration_backfill` creation event
-  containing the sole previously composed `anthropic` / `anthropic-primary`
-  pair. While that event remains current, an Anthropic route may use the durable
-  legacy entry for a differently named configured family; Codex routes never
-  may. A later explicit credential event ends this migration-only aliasing
-  because resolution then uses only that complete latest snapshot.
+  provenance and a complete, nonempty family-to-pool snapshot copied from the
+  validated mapping table. Record and entry rows are append-only; a guarded head
+  names the current event, and model-call preparation reads the latest entry for
+  the resolved target's family and then selects a member of the named pool
+  ([credential pools and selection](#credential-pools-and-selection)). Equal
+  command replay returns the recorded session without consulting the current
+  table, so a configuration edit never silently re-resolves an existing
+  session's credentials. The migration rewrites each existing
+  family-to-reference entry as a family-to-pool entry naming the one-member pool
+  that the same document's mapping now declares, which preserves every existing
+  session's resolution exactly: a one-member pool admits only the profile the
+  entry already named.
 - **Resolution timing.** The Anthropic adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
@@ -890,24 +994,13 @@ advancing the head by exactly one; it must never rewrite history or
 automatically apply a configuration edit. The current append-only record shape
 is compatible with that operation.
 
-**Committed unimplemented functionality — several credential profiles for one
-family.** Present configuration admits exactly one profile per model family: the
-adapter-mapping rules above fix the Anthropic profile name and force one shared
-Codex profile, and the file-based supply below binds one reference to one
-deployment path. No present surface lets one family draw on several
-interchangeable profiles. A later surface that does is constrained by what this
-page already states and by nothing further. Each model call keeps its own
-durable `credential_reference` pinned at the `Prepared` insert, so the profile
-that authenticated a call remains that call's record whatever chose it. Billing
-kind stays a property of the profile, so a historical read still resolves its
-dollar meaning from the reference that call pinned. A selection scope, if a
-session records one, is appended alongside the family-to-reference snapshot
-rather than replacing it, leaving the present complete snapshot valid as the
-single-member case. Members of one interchangeable group share an adapter,
-because the two composed runtimes differ in authentication shape as described
-above. The [credential operations policy](#credential-operations-policy) applies
-per profile: several profiles are several sources of truth, never one secret
-under several names.
+Each profile is its own credential, so
+[credential operations policy](#credential-operations-policy) applies once per
+profile: several profiles are several sources of truth, never one secret
+delivered under several names. A deployment that points two profiles at one
+vault item has not gained an account; it has given one account two names, two
+priorities, and two independent availability judgments about the same remaining
+quota.
 
 ## Runner credential lifecycle
 
@@ -1113,10 +1206,11 @@ are outside this cluster-delivery policy:
   phase.
 - [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
   owns the unresolved in-memory credential-hygiene question.
-- One profile per model family is the present arity, so a deployment holding
-  several accounts for one provider cannot configure them. What a later plural
-  surface must stay compatible with is stated under
-  [credential lifecycle](#credential-lifecycle); which failure classes would let
-  one profile succeed another, and whether any adapter can report remaining
-  capacity, are routed through
+- No adapter in this build reports remaining provider capacity, so
+  `headroom_reserve_percent`, `least_used`, and a non-`stay` `on_headroom_low`
+  action are rejected at startup rather than silently inert. The observation
+  itself is routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
+- Quarantine is process-local, so a restart re-admits a member whose credential
+  a provider rejected and learns that again from the next preparation. No
+  durable quarantine record and no explicit re-check command exist.

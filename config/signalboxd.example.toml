@@ -15,28 +15,77 @@
 # above the model's cap.
 version = 1
 
-# Every model credential profile declares how calls authenticated through that
-# profile are billed. api_metered produces real dollar cost; subscription
-# produces metered-equivalent cost. Keep a profile name's billing meaning
-# stable, and use a new name when an authentication update changes that meaning.
+# One profile is one provider account. Names are opaque to code — call them
+# whatever the deployment calls them. billing_kind states how calls through this
+# account are billed: api_metered produces real dollar cost, subscription
+# produces metered-equivalent cost. Keep a name's billing meaning stable, and use
+# a new name when an authentication update changes it. An anthropic profile
+# names the file holding its key; a codex_cli profile names the directory holding
+# its login store. Neither path is opened at startup.
 [[credential_profiles]]
 name = "anthropic-primary"
+adapter = "anthropic"
 billing_kind = "api_metered"
+file = "/run/secrets/anthropic-primary"
 
+# A second account for the same provider. Pointing two profiles at one secret
+# does not create a second account; it gives one account two names and two
+# independent judgments about the same remaining quota.
 [[credential_profiles]]
-name = "codex-subscription-primary"
-billing_kind = "subscription"
+name = "anthropic-overflow"
+adapter = "anthropic"
+billing_kind = "api_metered"
+file = "/run/secrets/anthropic-overflow"
+
+# A pool is the set of profiles that may substitute for one another. Priority
+# lives on the membership, not the profile, so one account can rank differently
+# in different pools; equal priorities are resolved by tie_break, and gaps let a
+# later profile take an intermediate rank without renumbering.
+#
+# Omitted trigger keys select "stay", which is the pre-pool behavior: record the
+# failure honestly and do not move. switch_now is admitted only for the three
+# availability causes, because only those prove the request was not accepted.
+[[credential_pools]]
+name = "anthropic-main"
+tie_break = "first_listed"        # first_listed | round_robin | least_used
+on_pool_exhausted = "park"        # park | fail
+members = [
+  { profile = "anthropic-primary", priority = 1 },
+  { profile = "anthropic-overflow", priority = 2 },
+]
+on_quota_exhausted = "switch_now"
+on_rate_limited = "switch_now"
+on_overloaded = "switch_next_turn"
+on_credential_rejected = "quarantine"
+
+# least_used and headroom_reserve_percent need an adapter that reports remaining
+# capacity. No adapter in this build does, so configuring either fails startup
+# rather than sitting inert.
 
 [[adapter_mappings]]
 model_family = "anthropic"
 adapter = "anthropic"
-credential_profile = "anthropic-primary"
+credential_pool = "anthropic-main"
 
-# To serve a Codex model family, add this mapping and process configuration:
+# To serve a Codex model family, add profiles, a pool, this mapping, and the
+# codex_cli table. Two Codex profiles are two logins because each names its own
+# codex_home; two profiles sharing one codex_home fail startup.
+# [[credential_profiles]]
+# name = "codex-subscription-primary"
+# adapter = "codex_cli"
+# billing_kind = "subscription"
+# codex_home = "/var/lib/signalbox/codex/primary"
+#
+# [[credential_pools]]
+# name = "codex-main"
+# tie_break = "first_listed"
+# on_pool_exhausted = "fail"
+# members = [{ profile = "codex-subscription-primary", priority = 1 }]
+#
 # [[adapter_mappings]]
 # model_family = "codex"
 # adapter = "codex_cli"
-# credential_profile = "codex-subscription-primary"
+# credential_pool = "codex-main"
 #
 # [codex_cli]
 # executable = "/absolute/path/to/codex"
