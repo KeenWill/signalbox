@@ -111,6 +111,38 @@ pub(crate) fn approval_judge_recommendation_from_str(
     }
 }
 
+/// Closed tool-approval decision sources stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolApprovalDecisionSourceStorageKind {
+    UserCommand,
+    PolicyAuto,
+    SessionBlanket,
+    Delegate,
+}
+
+pub(crate) const fn tool_approval_decision_source_to_str(
+    value: ToolApprovalDecisionSourceStorageKind,
+) -> &'static str {
+    match value {
+        ToolApprovalDecisionSourceStorageKind::UserCommand => "owner_command",
+        ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
+        ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
+        ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+    }
+}
+
+pub(crate) fn tool_approval_decision_source_from_str(
+    value: &str,
+) -> Option<ToolApprovalDecisionSourceStorageKind> {
+    match value {
+        "owner_command" => Some(ToolApprovalDecisionSourceStorageKind::UserCommand),
+        "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
+        "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
+        "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        _ => None,
+    }
+}
+
 /// Closed durable-command kinds stored by the user-global registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DurableCommandKind {
