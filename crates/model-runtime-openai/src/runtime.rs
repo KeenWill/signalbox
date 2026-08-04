@@ -31,7 +31,7 @@ use crate::config::OpenAiConfig;
 use crate::response::{StopSequences, decode_buffered_response};
 use crate::status::{classify_error, classify_error_envelope};
 use crate::stream::{StreamDecoder, StreamStep};
-use crate::translate::build_request;
+use crate::translate::build_request_with_fast_mode;
 use crate::wire::ErrorEnvelope;
 
 /// The OpenAI Chat Completions adapter.
@@ -275,8 +275,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 };
             }
         };
+        let mut request_fast_mode = operation.settings.fast_mode;
         if let Some(capabilities) = capabilities {
-            let (target, request_fast_mode) = match capabilities
+            let (target, effective_request_fast_mode) = match capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)
             {
                 Ok(application) => application,
@@ -290,9 +291,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 }
             };
             operation.resolved_target = target.clone();
-            operation.settings.fast_mode = request_fast_mode;
+            request_fast_mode = effective_request_fast_mode;
         }
-        let wire_request = match build_request(&operation) {
+        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => request,
             Err(failure) => {
                 return PreparationOutcome::Failed {

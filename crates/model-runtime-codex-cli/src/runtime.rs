@@ -313,8 +313,9 @@ impl CodexCliRuntime {
                 };
             }
         };
+        let mut request_fast_mode = operation.settings.fast_mode;
         if let Some(capabilities) = capabilities {
-            let (target, request_fast_mode) = match capabilities
+            let (target, effective_request_fast_mode) = match capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)
             {
                 Ok(application) => application,
@@ -328,9 +329,9 @@ impl CodexCliRuntime {
                 }
             };
             operation.resolved_target = target.clone();
-            operation.settings.fast_mode = request_fast_mode;
+            request_fast_mode = effective_request_fast_mode;
         }
-        let controls = match codex_controls(&operation.settings) {
+        let controls = match codex_controls(&operation.settings, request_fast_mode) {
             Ok(controls) => controls,
             Err(failure) => {
                 return PreparationOutcome::Failed {
@@ -427,7 +428,10 @@ impl CodexCliRuntime {
     }
 }
 
-fn codex_controls(settings: &ModelSettings) -> Result<CodexControls, PreparationFailure> {
+fn codex_controls(
+    settings: &ModelSettings,
+    request_fast_mode: FastMode,
+) -> Result<CodexControls, PreparationFailure> {
     let reasoning_effort = settings.reasoning_level.map(|level| match level {
         ReasoningLevel::None => "none",
         ReasoningLevel::Minimal => "minimal",
@@ -466,6 +470,10 @@ fn codex_controls(settings: &ModelSettings) -> Result<CodexControls, Preparation
                 detail: "Codex cannot enforce another provider's service tier".to_string(),
             });
         }
+    };
+    let service_tier = match (request_fast_mode, settings.service_tier) {
+        (FastMode::Disabled, None) => None,
+        _ => service_tier,
     };
     Ok(CodexControls {
         reasoning_effort,
@@ -612,7 +620,8 @@ mod tests {
         let mut settings = ModelSettings::new(64);
         settings.reasoning_level = Some(ReasoningLevel::Ultra);
 
-        let controls = codex_controls(&settings).expect("supported reasoning maps");
+        let controls =
+            codex_controls(&settings, settings.fast_mode).expect("supported reasoning maps");
 
         assert_eq!(controls.reasoning_effort, Some("ultra"));
     }
@@ -623,7 +632,8 @@ mod tests {
         settings.fast_mode = FastMode::Enabled;
         settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
 
-        let controls = codex_controls(&settings).expect("supported controls map");
+        let controls =
+            codex_controls(&settings, settings.fast_mode).expect("supported controls map");
 
         assert_eq!(controls.service_tier, Some("priority"));
     }
@@ -633,6 +643,15 @@ mod tests {
         let mut settings = ModelSettings::new(64);
         settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
 
-        assert!(codex_controls(&settings).is_err());
+        assert!(codex_controls(&settings, settings.fast_mode).is_err());
+    }
+
+    #[test]
+    fn mapped_fast_mode_still_rejects_codex_flex_tier() {
+        let mut settings = ModelSettings::new(64);
+        settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Flex));
+
+        assert!(codex_controls(&settings, FastMode::Disabled).is_err());
     }
 }

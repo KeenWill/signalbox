@@ -29,7 +29,7 @@ use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error, classify_error_status};
 use crate::stream::{StreamDecoder, StreamStep};
-use crate::translate::build_request;
+use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
 
 /// The Anthropic Messages adapter.
@@ -139,17 +139,18 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     fn apply_model_capabilities<C>(
         &self,
         operation: &mut ModelOperation<C>,
-    ) -> Result<(), ModelCapabilityError> {
+    ) -> Result<FastMode, ModelCapabilityError> {
+        let mut request_fast_mode = operation.settings.fast_mode;
         let capabilities = self
             .model_capabilities
             .validate_explicit(&operation.resolved_target, &operation.settings)?;
         if let Some(capabilities) = capabilities {
-            let (target, request_fast_mode) = capabilities
+            let (target, effective_request_fast_mode) = capabilities
                 .effective_target(&operation.resolved_target, operation.settings.fast_mode)?;
             operation.resolved_target = target.clone();
-            operation.settings.fast_mode = request_fast_mode;
+            request_fast_mode = effective_request_fast_mode;
         }
-        Ok(())
+        Ok(request_fast_mode)
     }
 
     /// Builds the adapter and its HTTP client.
@@ -302,8 +303,8 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, AnthropicPreparedRequest<C>> {
         let correlation = operation.correlation.clone();
-        match self.apply_model_capabilities(&mut operation) {
-            Ok(()) => {}
+        let request_fast_mode = match self.apply_model_capabilities(&mut operation) {
+            Ok(request_fast_mode) => request_fast_mode,
             Err(error) => {
                 return PreparationOutcome::Failed {
                     correlation,
@@ -312,8 +313,8 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     },
                 };
             }
-        }
-        let wire_request = match build_request(&operation) {
+        };
+        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => request,
             Err(failure) => {
                 return PreparationOutcome::Failed {
@@ -366,7 +367,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if operation.settings.fast_mode == FastMode::Enabled {
+        if request_fast_mode == FastMode::Enabled {
             builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
         }
         let request = match build_http_request(builder) {
@@ -602,10 +603,11 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
         mut cancellation: CancellationSignal,
     ) -> InputTokenCountOutcome<C> {
         let correlation = operation.correlation.clone();
-        if self.apply_model_capabilities(&mut operation).is_err() {
-            return InputTokenCountOutcome::Failed { correlation };
-        }
-        let wire_request = match build_request(&operation) {
+        let request_fast_mode = match self.apply_model_capabilities(&mut operation) {
+            Ok(request_fast_mode) => request_fast_mode,
+            Err(_) => return InputTokenCountOutcome::Failed { correlation },
+        };
+        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => CountTokensRequest::from(request),
             Err(_) => return InputTokenCountOutcome::Failed { correlation },
         };
@@ -631,7 +633,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelInputTokenCounter<C>
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body);
-        if operation.settings.fast_mode == FastMode::Enabled {
+        if request_fast_mode == FastMode::Enabled {
             builder = builder.header("anthropic-beta", "fast-mode-2026-02-01");
         }
         let request = match build_http_request(builder) {
