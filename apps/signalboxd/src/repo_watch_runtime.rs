@@ -943,8 +943,6 @@ impl GitHubRepositoryPoller {
                     self.repository_url(
                         &["actions", "workflows", &workflow_id, "runs"],
                         &[
-                            ("branch", branch.branch().as_str().to_owned()),
-                            ("status", "completed".to_owned()),
                             ("per_page", PAGE_SIZE.to_string()),
                             ("page", page.to_string()),
                         ],
@@ -954,6 +952,11 @@ impl GitHubRepositoryPoller {
                 .await?;
             let has_next = response.workflow_runs.len() == PAGE_SIZE;
             for run in response.workflow_runs {
+                if run.head_branch.as_deref() != Some(branch.branch().as_str())
+                    || run.status != "completed"
+                {
+                    continue;
+                }
                 let run_id = object_id(run.id)?;
                 let run_attempt = RepoWatchWorkflowRunAttempt::new(
                     NonZeroU64::new(run.run_attempt)
@@ -1575,6 +1578,8 @@ struct WorkflowRunsResponse {
 struct WorkflowRunResponse {
     id: u64,
     run_attempt: u64,
+    head_branch: Option<String>,
+    status: String,
     conclusion: Option<String>,
     head_repository: Option<RepositoryResponse>,
 }
@@ -1691,9 +1696,12 @@ mod tests {
         "/repos/namespace/project/pulls/7/comments?per_page=100&page=1";
     const REVIEW_COMMENT_REACTIONS_TARGET: &str =
         "/repos/namespace/project/pulls/comments/51/reactions?per_page=100&page=1";
-    const MAIN_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=100&page=1";
-    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=100&page=2";
-    const FEATURE_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=feature%2Fwatch&status=completed&per_page=100&page=1";
+    const MAIN_WORKFLOW_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
+    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2";
+    const FEATURE_WORKFLOW_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
     const EMPTY_LIST: &str = "[]";
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
@@ -1954,24 +1962,56 @@ mod tests {
 
     fn main_workflow_run() -> String {
         serde_json::json!({
-            "workflow_runs": [{
-                "id": WORKFLOW_RUN_IDS[0],
-                "run_attempt": WORKFLOW_RUN_ATTEMPT,
-                "conclusion": "success",
-                "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
-            }]
+            "workflow_runs": [
+                {
+                    "id": WORKFLOW_RUN_IDS[0],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                },
+                {
+                    "id": WORKFLOW_RUN_IDS[1],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": HEAD_BRANCH,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                }
+            ]
         })
         .to_string()
     }
 
-    fn feature_workflow_run() -> String {
+    fn irrelevant_then_watched_workflow_runs() -> String {
         serde_json::json!({
-            "workflow_runs": [{
-                "id": WORKFLOW_RUN_IDS[1],
-                "run_attempt": WORKFLOW_RUN_ATTEMPT,
-                "conclusion": "failure",
-                "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
-            }]
+            "workflow_runs": [
+                {
+                    "id": FOREIGN_WORKFLOW_RUN_ID,
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": HEAD_BRANCH,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                },
+                {
+                    "id": FOREIGN_WORKFLOW_RUN_ID + 1,
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "in_progress",
+                    "conclusion": null,
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                },
+                {
+                    "id": WORKFLOW_RUN_IDS[0],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                }
+            ]
         })
         .to_string()
     }
@@ -1982,12 +2022,16 @@ mod tests {
                 {
                     "id": FOREIGN_WORKFLOW_RUN_ID,
                     "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
                     "conclusion": "failure",
                     "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
                 },
                 {
                     "id": WORKFLOW_RUN_IDS[0],
                     "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
                     "conclusion": "success",
                     "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
                 }
@@ -2003,6 +2047,8 @@ mod tests {
                     "id": FOREIGN_WORKFLOW_RUN_ID + u64::try_from(offset)
                         .expect("fixture page offset fits u64"),
                     "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
                     "conclusion": "failure",
                     "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
                 })
@@ -2265,7 +2311,7 @@ mod tests {
             ScriptedResponse::ok(BRANCHES_TARGET, branches()),
             ScriptedResponse::ok(WORKFLOWS_TARGET, workflows()),
             ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
-            ScriptedResponse::ok(FEATURE_WORKFLOW_TARGET, feature_workflow_run()),
+            ScriptedResponse::not_modified(FEATURE_WORKFLOW_TARGET),
         ]
     }
 
@@ -2385,6 +2431,28 @@ mod tests {
             .await
             .expect("workflow-run response is valid")
             .expect("watched-repository run remains in the response");
+        server.finish().await;
+
+        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
+    }
+
+    #[tokio::test]
+    async fn workflow_listing_avoids_capped_filters_and_skips_irrelevant_runs() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            MAIN_WORKFLOW_TARGET,
+            irrelevant_then_watched_workflow_runs(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let branch = base_branch_head();
+        let workflow = workflow_response();
+
+        let run = fixture
+            .poller
+            .fetch_workflow_run(&branch, &workflow)
+            .await
+            .expect("unfiltered workflow-run response is valid")
+            .expect("latest completed run for the watched branch remains visible");
         server.finish().await;
 
         assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
