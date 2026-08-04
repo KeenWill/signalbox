@@ -294,6 +294,10 @@ fn decode_complete(
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
     if ancestry == "imported_conversation" {
+        validate_imported_creation_provenance(
+            required(&row, "stored_cause")?,
+            row.try_get("stored_spawning_request_id")?,
+        )?;
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
             .is_some()
@@ -580,6 +584,27 @@ fn decode_provenance(
     }
 }
 
+fn validate_imported_creation_provenance(
+    cause: String,
+    spawning_request: Option<Uuid>,
+) -> Result<(), SessionRepositoryError> {
+    let Some(cause_kind) = session_creation_cause_from_str(&cause) else {
+        return Err(SessionCorruption::Unsupported {
+            field: "creation cause",
+            value: cause,
+        }
+        .into());
+    };
+    match (cause_kind, spawning_request) {
+        (SessionCreationCauseStorageKind::UserInitiated, None) => Ok(()),
+        (
+            SessionCreationCauseStorageKind::UserInitiated
+            | SessionCreationCauseStorageKind::Delegated,
+            _,
+        ) => Err(SessionCorruption::Inconsistent("creation cause provenance").into()),
+    }
+}
+
 fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
@@ -628,7 +653,10 @@ mod tests {
     use signalbox_domain::{SessionCreationCause, TranscriptAncestry};
     use sqlx::types::Uuid;
 
-    use super::{NO_ANCESTRY, SessionCorruption, SessionRepositoryError, decode_provenance};
+    use super::{
+        NO_ANCESTRY, SessionCorruption, SessionRepositoryError, decode_provenance,
+        validate_imported_creation_provenance,
+    };
     use crate::mapping::session_creation_cause_to_str;
 
     const NON_NONE_ANCESTRY: &str = "single_source";
@@ -698,6 +726,24 @@ mod tests {
             Some(spawning_request()),
         )
         .expect_err("user-initiated provenance cannot carry delegated authority");
+
+        assert_eq!(
+            corruption(error),
+            SessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
+
+    /// S28 / INV-003: an imported user-initiated row cannot silently discard
+    /// a contradictory delegated spawning identity.
+    #[test]
+    fn s28_inv003_imported_provenance_rejects_spawning_request() {
+        let error = validate_imported_creation_provenance(
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            Some(spawning_request()),
+        )
+        .expect_err("imported user-initiated provenance cannot carry a spawning request");
 
         assert_eq!(
             corruption(error),

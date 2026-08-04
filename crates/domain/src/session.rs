@@ -914,8 +914,16 @@ impl SessionReconstitutionInput {
             Some(SessionReconstitutionFailure::PlacementSessionMismatch)
         } else if self.current_placement_version != self.current_placement.version() {
             Some(SessionReconstitutionFailure::CurrentPlacementVersionMismatch)
+        } else if let Some(failure) = session_provenance_failure(self.provenance) {
+            Some(failure)
+        } else if matches!(
+            self.provenance.cause(),
+            SessionCreationCause::Delegated { .. }
+        ) && self.template_provenance.is_some()
+        {
+            Some(SessionReconstitutionFailure::DelegatedTemplateProvenance)
         } else {
-            session_provenance_failure(self.provenance)
+            None
         };
         if let Some(failure) = failure {
             return Err(SessionReconstitutionError {
@@ -979,6 +987,8 @@ pub enum SessionReconstitutionFailure {
     ImportedSessionSeedUnavailable,
     /// Delegated creation is independently constrained to no ancestry.
     DelegatedAncestryMismatch,
+    /// Delegated creation cannot carry user-selected template provenance.
+    DelegatedTemplateProvenance,
 }
 
 /// A failed current-session reconstitution retaining every typed input
@@ -1808,6 +1818,7 @@ mod tests {
         requested_session: crate::SessionId,
         stored_session: crate::SessionId,
         provenance: SessionCreationProvenance,
+        template_provenance: Option<SessionTemplateProvenance>,
         current_defaults_session: crate::SessionId,
         current_defaults_version: SessionConfigurationDefaultsVersion,
         defaults_session: crate::SessionId,
@@ -1827,6 +1838,7 @@ mod tests {
                 requested_session: session,
                 stored_session: session,
                 provenance: user_initiated_empty(),
+                template_provenance: None,
                 current_defaults_session: session,
                 current_defaults_version: SessionConfigurationDefaultsVersion::first(),
                 defaults_session: session,
@@ -1844,7 +1856,7 @@ mod tests {
                 self.requested_session,
                 self.stored_session,
                 self.provenance,
-                None,
+                self.template_provenance,
                 self.current_defaults_session,
                 self.current_defaults_version,
                 self.defaults_session,
@@ -1890,6 +1902,47 @@ mod tests {
             SessionCreationCause::Delegated { spawning_request }
         );
         assert_eq!(provenance.ancestry(), TranscriptAncestry::None);
+    }
+
+    /// S18 / INV-003: matching delegated current-session facts retain the
+    /// exact spawning request and no transcript ancestry.
+    #[test]
+    fn s18_inv003_current_session_reconstitutes_delegated_no_ancestry() {
+        let spawning_request = delegated_spawning_request();
+        let provenance = SessionCreationProvenance::delegated(spawning_request);
+        let session = CurrentSessionFacts {
+            provenance,
+            ..CurrentSessionFacts::matching(session_id(1))
+        }
+        .input()
+        .reconstitute()
+        .expect("matching delegated current-session facts reconstitute");
+
+        assert_eq!(session.creation_provenance(), provenance);
+        assert_eq!(
+            session.creation_provenance().cause(),
+            SessionCreationCause::Delegated { spawning_request }
+        );
+        assert_eq!(
+            session.creation_provenance().ancestry(),
+            TranscriptAncestry::None
+        );
+    }
+
+    /// S18 / INV-003: delegated creation cannot retain user-selected template
+    /// provenance through the public current-session seam.
+    #[test]
+    fn s18_inv003_current_session_rejects_delegated_template_provenance() {
+        let failure = current_session_reconstitution_failure(CurrentSessionFacts {
+            provenance: SessionCreationProvenance::delegated(delegated_spawning_request()),
+            template_provenance: Some(template_provenance("reviewer", 2)),
+            ..CurrentSessionFacts::matching(session_id(1))
+        });
+
+        assert_eq!(
+            failure,
+            SessionReconstitutionFailure::DelegatedTemplateProvenance
+        );
     }
 
     /// S18 / INV-003: delegated current sessions reject native ancestry.

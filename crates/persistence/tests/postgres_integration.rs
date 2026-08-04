@@ -12994,6 +12994,77 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
     Ok(())
 }
 
+fn create_session_corruption(error: CreateSessionRepositoryError) -> CreateSessionCorruption {
+    let CreateSessionRepositoryError::Corruption(corruption) = error else {
+        panic!("the ordinary creation reader failure is durable corruption")
+    };
+    corruption
+}
+
+fn session_corruption(error: SessionRepositoryError) -> SessionCorruption {
+    let SessionRepositoryError::Corruption(corruption) = error else {
+        panic!("the current-session reader failure is durable corruption")
+    };
+    corruption
+}
+
+/// S01 / INV-003: both ordinary creation replay and current-session loading
+/// reject a user-initiated row carrying a contradictory spawning request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv003_creation_readers_reject_spawning_request_on_user_session()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(0x0016_0001));
+    let session = SessionId::from_uuid(Uuid::from_u128(0x0017_0001));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x0016_0001, 0x0017_0001, direct(0x0018_0001)))
+        .await?;
+
+    sqlx::query("DROP TRIGGER session_is_append_only ON session")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE session
+         DROP CONSTRAINT session_delegated_cause_shape,
+         DROP CONSTRAINT session_spawning_request_fk,
+         DROP CONSTRAINT session_delegation_relation_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session
+         SET spawning_tool_request_id = $1
+         WHERE session_id = $2",
+    )
+    .bind(Uuid::from_u128(0x0019_0001))
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let creation_error = CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .load(command)
+        .await
+        .expect_err("ordinary creation replay must validate the spawning request column");
+    assert_eq!(
+        create_session_corruption(creation_error),
+        CreateSessionCorruption::Inconsistent("creation cause provenance")
+    );
+
+    let session_error = SessionRepository::new(pool.clone())
+        .load_session(session)
+        .await
+        .expect_err("current-session loading must validate the same provenance shape");
+    assert_eq!(
+        session_corruption(session_error),
+        SessionCorruption::Inconsistent("creation cause provenance")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-047: template creation durably copies the original bundle and its
 /// provenance; a same-command replay after a catalog edit returns that winner.
 #[tokio::test(flavor = "multi_thread")]

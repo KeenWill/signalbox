@@ -886,6 +886,7 @@ pub enum SessionReconstitutionFailure {
     CurrentPlacementVersionMismatch,
     ImportedSessionSeedUnavailable,
     DelegatedAncestryMismatch,
+    DelegatedTemplateProvenance,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
