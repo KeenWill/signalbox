@@ -284,7 +284,7 @@ context_window_tokens = 200000
 
         assert_eq!(
             capabilities.effective_target(&selected, settings.fast_mode),
-            Ok(&expected)
+            Ok((&expected, FastMode::Disabled))
         );
     }
 
