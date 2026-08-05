@@ -20,7 +20,9 @@ verified through PR #311 (`agent/session-templates-spec`); exact start-frontier
 reconstitution across a validated compaction boundary was verified through PR
 `#312` (`agent/context-compaction-core`); and the corresponding persistent
 final-state gate was verified through PR #314
-(`agent/context-compaction-protocol`). Code homes:
+(`agent/context-compaction-protocol`); the delegated foreground-wait termination
+path and descendant-cascade ordering were verified through this PR
+(`agent/delegation`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -799,13 +801,19 @@ delegation-wake origin appropriate to the work that queued it.
 `AwaitingChild { wait }` is an active phase with no current attempt. Its wait
 names the exact foreground `await_session` request, spawning request, and child;
 it retains the parent's sole progressing-turn slot, and survives restart
-unchanged until that relationship has one deliverable terminal result. Result
-consumption atomically appends the parent's delivered-result entry, returns the
-result as that tool request's content, and moves the same turn back to running
-with a fresh continuation attempt. The scheduler routes that durable hint back
-through the tool loop: the exact parked batch is reconstituted first, then the
-fresh attempt and lifecycle transition commit before ordinary tool continuation
-runs. A raw child identity or an unrelated result cannot release the wait.
+unchanged until that relationship has one deliverable terminal result or an
+applied interrupt terminates the parent turn. Result consumption atomically
+appends the parent's delivered-result entry, returns the result as that tool
+request's content, and moves the same turn back to running with a fresh
+continuation attempt. A parent-only interrupt instead appends ordinary
+`ToolClosed` evidence for the await request and terminalizes the parent without
+fabricating a child result or a live turn attempt. A descendant-scoped interrupt
+materializes its complete cascade first, so a resulting child outcome is
+delivered before the parent closes. The scheduler routes a durable result hint
+back through the tool loop: the exact parked batch is reconstituted first, then
+the fresh attempt and lifecycle transition commit before ordinary tool
+continuation runs. A raw child identity or an unrelated result cannot release
+the wait.
 
 A delegated-task or delegation-wake turn owns the same session-local active slot
 as an accepted-input turn. Input submission therefore uses that exact turn for

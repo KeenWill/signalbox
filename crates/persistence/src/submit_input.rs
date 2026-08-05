@@ -79,7 +79,7 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     tool_loop::{
         load_active_batch_from_connection, load_continuation_round_evidence,
-        load_foreground_delegation_outcome, load_recovery_batch_by_attempt,
+        load_optional_foreground_delegation_outcome, load_recovery_batch_by_attempt,
         load_steering_continuation_round_evidence, load_terminal_result_attempts,
         load_terminal_result_denials, persist_ended_attempt,
     },
@@ -784,6 +784,11 @@ where
         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
         | SubmitInputResult::Rejected(_) => None,
     };
+    insert_prepared_command(connection, &prepared).await?;
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        .bind(durable_command_id_to_uuid(command_id))
+        .execute(&mut *connection)
+        .await?;
     let interrupt_outcome = if let Some(interrupt) = interrupt {
         let executing_tool_batch = load_active_batch_from_connection(
             connection,
@@ -796,6 +801,7 @@ where
             matches!(
                 batch.phase(),
                 signalbox_domain::ToolBatchPhase::Executing { .. }
+                    | signalbox_domain::ToolBatchPhase::AwaitingChild { .. }
             )
         });
         if let Some(mut batch) = executing_tool_batch {
@@ -859,7 +865,29 @@ where
                         }
                         _ => None,
                     });
-            if child_wait.is_none() && scheduling.is_some() {
+            let projection = match child_wait {
+                Some((awaiting_request, spawning_request, child)) => batch
+                    .prepare_delegation_cancellation_projection(
+                        result_entries,
+                        result_frontier,
+                        load_optional_foreground_delegation_outcome(
+                            connection,
+                            interrupt.session(),
+                            awaiting_request,
+                            spawning_request,
+                            child,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?,
+                    ),
+                None => batch.prepare_cancellation_projection(result_entries, result_frontier),
+            }
+            .map_err(|_| {
+                SubmitInputCorruption::Inconsistent(
+                    "executing tool batch cannot project cancellation",
+                )
+            })?;
+            if scheduling.is_some() {
                 let Some(scheduling) = scheduling else {
                     return Err(SubmitInputCorruption::Inconsistent(
                         "tool interrupt scheduling projection",
@@ -883,13 +911,7 @@ where
                 })?;
                 Some(ModelCallInterruptOutcome::Cancelled(
                     scheduling
-                        .apply_interrupt_to_tool_batch(
-                            batch,
-                            result_entries,
-                            result_frontier,
-                            interrupt,
-                            identities,
-                        )
+                        .apply_interrupt_to_tool_batch(batch, projection, interrupt, identities)
                         .map_err(|_| {
                             SubmitInputCorruption::Inconsistent(
                                 "applied interrupt cannot close executing tool batch",
@@ -897,28 +919,6 @@ where
                         })?,
                 ))
             } else {
-                let projection = match child_wait {
-                    Some((awaiting_request, spawning_request, child)) => batch
-                        .prepare_delegation_cancellation_projection(
-                            result_entries,
-                            result_frontier,
-                            load_foreground_delegation_outcome(
-                                connection,
-                                interrupt.session(),
-                                awaiting_request,
-                                spawning_request,
-                                child,
-                            )
-                            .await
-                            .map_err(map_tool_loop_error)?,
-                        ),
-                    None => batch.prepare_cancellation_projection(result_entries, result_frontier),
-                }
-                .map_err(|_| {
-                    SubmitInputCorruption::Inconsistent(
-                        "executing tool batch cannot project cancellation",
-                    )
-                })?;
                 let execution =
                     require_live_execution_for_restart(connection, interrupt.session()).await?;
                 let identities = attach_interrupt_reclassification_candidates(
@@ -1068,7 +1068,7 @@ where
     } else {
         None
     };
-    insert_prepared(connection, prepared).await?;
+    insert_prepared_effects(connection, prepared).await?;
     match interrupt_outcome {
         Some(ModelCallInterruptOutcome::Cancelled(cancelled)) => {
             persist_terminal_outcome(connection, &ModelCallTerminalOutcome::Cancelled(cancelled))
@@ -1089,10 +1089,6 @@ where
         }
         None => {}
     }
-    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
-        .bind(durable_command_id_to_uuid(command_id))
-        .execute(&mut *connection)
-        .await?;
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
@@ -1262,7 +1258,8 @@ async fn prepare_against_locked_state(
                 AND attempt.session_id = lifecycle.session_id
               WHERE lifecycle.session_id = $1
                 AND lifecycle.origin_kind = 'delegation'
-                AND lifecycle.state_kind = 'active'",
+                AND lifecycle.state_kind = 'active'
+                AND NOT lifecycle.delegation_runtime_terminal",
         )
         .bind(session_id_to_uuid(command.session()))
         .fetch_optional(&mut *connection)
@@ -4592,9 +4589,9 @@ fn decode_starting_lineage(
     }
 }
 
-async fn insert_prepared(
+async fn insert_prepared_command(
     connection: &mut PgConnection,
-    prepared: PreparedSubmitInput,
+    prepared: &PreparedSubmitInput,
 ) -> Result<(), SubmitInputRepositoryError> {
     let command = prepared.command();
     let actor = encode_actor(command.actor());
@@ -4654,6 +4651,16 @@ async fn insert_prepared(
     .bind(result.existing_interrupt_command)
     .execute(&mut *connection)
     .await?;
+
+    Ok(())
+}
+
+async fn insert_prepared_effects(
+    connection: &mut PgConnection,
+    prepared: PreparedSubmitInput,
+) -> Result<(), SubmitInputRepositoryError> {
+    let command = prepared.command();
+    let delivery = encode_delivery(command.delivery());
 
     if let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
         prepared.result()

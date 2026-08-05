@@ -3061,8 +3061,7 @@ impl AcceptedInputSchedulingProjection {
     pub fn apply_interrupt_to_tool_batch(
         self,
         batch: ToolBatch,
-        result_entries: Vec<SemanticTranscriptEntryId>,
-        result_frontier: ContextFrontierId,
+        result_projection: PreparedToolResultProjection,
         interrupt: AppliedInterruptCommandResult,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
@@ -3813,7 +3812,7 @@ pub struct CancelledToolRoundModelCallTurn { /* private */ }
 // reclassified_pending_steering()
 pub struct FailedModelCallTurn { /* private */ }
 pub struct CancelledModelCallTurn { /* private */ }
-// accessors: session(), turn(), call(), attempt(), disposition(),
+// accessors: session(), turn(), call(), optional attempt(), disposition(),
 // tool_result_entries(), cancellation_entry(), terminal_snapshot(),
 // reclassified_pending_steering()
 pub struct StopRequestedModelCallTurn { /* private */ }
@@ -4670,7 +4669,7 @@ impl ToolBatch {
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,
-        outcome: DelegationOutcome,
+        outcome: Option<DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_reconciliation_projection(
         &self,

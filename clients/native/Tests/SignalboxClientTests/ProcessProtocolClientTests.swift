@@ -37,7 +37,7 @@ final class ProcessProtocolClientTests: XCTestCase {
           "session_id": .number(17),
         ],
         decodingDiagnostic: SignalboxDecodingDiagnostic(
-          message: "Unexpected field type at message.session_id."
+          message: "Missing required field at message.model_settings."
         )
       )
     )
