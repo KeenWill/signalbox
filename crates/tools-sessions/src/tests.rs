@@ -10,10 +10,11 @@ use serde_json::{Value, json};
 use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
 use signalbox_domain::{
     ContextFrontierId, DescendantTerminationScope, DurableCommandId, GoalGeneration, ModelCallId,
-    ResolvedContextFrontierReconstitutionInput, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-    ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
+    ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptId, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolName, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
 };
 use signalbox_tool_contract::rendered_contract_schema;
 
@@ -84,9 +85,13 @@ fn dispatch(request: &ToolRequest, effect: ToolEffectClass) -> ToolDispatchAutho
 /// Canonical logical request fixture: the seed identifies the request and
 /// derives its distinct session, turn, and producing-call identities.
 fn request(seed: u128, name: &str, arguments: Value) -> ToolRequest {
+    request_for_session(seed, session(seed + 100), name, arguments)
+}
+
+fn request_for_session(seed: u128, source: SessionId, name: &str, arguments: Value) -> ToolRequest {
     ToolRequestReconstitutionInput::new(
         request_id(seed),
-        session(seed + 100),
+        source,
         turn(seed + 200),
         ModelCallId::from_uuid(uuid::Uuid::from_u128(seed + 300)),
         ToolRequestOrdinal::from_u32(0),
@@ -95,6 +100,34 @@ fn request(seed: u128, name: &str, arguments: Value) -> ToolRequest {
             .expect("fixture arguments are normalized"),
     )
     .into_request()
+}
+
+fn background_spawn_for_parent(seed: u128, parent: SessionId) -> ToolRequest {
+    request_for_session(
+        seed,
+        parent,
+        SPAWN_SESSION_NAME,
+        json!({
+            "relationship": { "kind": "background" },
+            "task": TASK,
+        }),
+    )
+}
+
+fn bound_spawn_for_parent(seed: u128, parent: SessionId) -> ToolRequest {
+    request_for_session(
+        seed,
+        parent,
+        SPAWN_SESSION_NAME,
+        json!({
+            "relationship": {
+                "kind": "bound",
+                "on_parent_cancelled": "cancel",
+                "on_parent_stopped": "stop",
+            },
+            "task": TASK,
+        }),
+    )
 }
 
 fn background_spawn(seed: u128) -> ToolRequest {
@@ -194,6 +227,23 @@ fn completed_text(disposition: UnboundExecutionDisposition) -> String {
         panic!("fixture operation completes with text")
     };
     result
+}
+
+fn foreground_result(disposition: UnboundExecutionDisposition) -> DeliveredChildResult {
+    let UnboundExecutionDisposition::ForegroundDelivered(result) = disposition else {
+        panic!("fixture operation delivers one typed foreground result")
+    };
+    result
+}
+
+#[track_caller]
+fn assert_port_contract(
+    result: Result<UnboundExecutionDisposition, SessionDelegationExecutorError<FakeError>>,
+) {
+    assert!(matches!(
+        result,
+        Err(SessionDelegationExecutorError::PortContract)
+    ));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -330,7 +380,63 @@ fn assert_definition(catalog: &CompiledToolCatalog, name: &str, effect: ToolEffe
     assert_eq!(definition.effect_class(), effect);
 }
 
-fn returned_result(child: SessionId) -> DeliveredChildResult {
+#[track_caller]
+fn single_spawn_request(port: &FakePort) -> &DelegatedSpawnRequest {
+    assert_eq!(port.spawn_requests.len(), 1);
+    &port.spawn_requests[0]
+}
+
+#[track_caller]
+fn single_message_request(port: &FakePort) -> &DelegationMessageRequest {
+    assert_eq!(port.message_requests.len(), 1);
+    &port.message_requests[0]
+}
+
+fn terminal_relation(
+    spawning_request: ToolRequest,
+    child: SessionId,
+    child_turn: TurnId,
+    outcome: DelegationOutcome,
+) -> (SessionDelegation, DelegationEvent) {
+    let spawning_request = decoded_spawn(&spawning_request);
+    let spawned = DelegationEvent::Spawned {
+        ordinal: DelegationEventOrdinal::new(NonZeroU64::MIN),
+        provenance: DelegationProvenance::from_spawn(&spawning_request),
+    };
+    let outcome_event = DelegationEvent::OutcomeRecorded {
+        ordinal: DelegationEventOrdinal::new(
+            NonZeroU64::new(2).expect("fixture outcome ordinal is positive"),
+        ),
+        outcome,
+    };
+    let relation = SessionDelegationReconstitutionInput::new(
+        spawning_request,
+        child,
+        child_turn,
+        vec![spawned, outcome_event.clone()],
+    )
+    .reconstitute()
+    .expect("fixture terminal relationship reconstitutes");
+    (relation, outcome_event)
+}
+
+fn delivered_result(
+    spawning_request: ToolRequest,
+    child: SessionId,
+    child_turn: TurnId,
+    outcome: DelegationOutcome,
+    awaiting: &DelegationAwaitRequest,
+) -> DeliveredChildResult {
+    let (relation, event) = terminal_relation(spawning_request, child, child_turn, outcome);
+    let wait = DelegationWait::reconstitute(&relation, awaiting)
+        .expect("fixture foreground wait reconstitutes");
+    DeliveredChildResult::try_new(wait, &relation, &event)
+        .expect("fixture relationship result is deliverable")
+}
+
+fn returned_result(awaiting: &DelegationAwaitRequest) -> DeliveredChildResult {
+    let child = awaiting.child();
+    let child_turn = turn(900);
     let content = DelegationContent::try_new(RETURNED_CONTENT.to_owned())
         .expect("fixture returned content is bounded");
     let outcome = DelegationOutcome::reconstitute(
@@ -339,11 +445,30 @@ fn returned_result(child: SessionId) -> DeliveredChildResult {
         DelegationOutcomeReason::ChildCompleted,
         signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
             session: child,
-            turn: turn(900),
+            turn: child_turn,
         },
     )
     .expect("fixture child result is sealed");
-    DeliveredChildResult::try_new(child, outcome).expect("fixture child result is deliverable")
+    delivered_result(
+        background_spawn_for_parent(901, awaiting.request().session()),
+        child,
+        child_turn,
+        outcome,
+        awaiting,
+    )
+}
+
+fn failed_outcome(child: SessionId, child_turn: TurnId) -> DelegationOutcome {
+    DelegationOutcome::reconstitute(
+        DelegationOutcomeKind::ChildFailed,
+        None,
+        DelegationOutcomeReason::ChildResultUnavailable,
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: child,
+            turn: child_turn,
+        },
+    )
+    .expect("fixture child failure is sealed")
 }
 
 #[test]
@@ -500,9 +625,7 @@ fn spawn_executor_returns_child_receipt_and_forwards_sealed_request() {
     let output: Value =
         serde_json::from_str(&completed_text(disposition)).expect("spawn receipt is compact JSON");
     let port = executor.into_port();
-    let [observed] = port.spawn_requests.as_slice() else {
-        panic!("one spawn request is observed")
-    };
+    let observed = single_spawn_request(&port);
 
     assert_eq!(observed.request(), &raw);
     assert_eq!(output["result"], json!("session_spawned"));
@@ -544,10 +667,11 @@ fn background_await_returns_registration_without_child_content() {
 }
 
 #[test]
-fn already_delivered_foreground_result_returns_exact_child_content() {
+fn already_delivered_foreground_result_retains_exact_child_content() {
     let child = session(15);
     let raw = await_request(16, child, "foreground");
-    let result = returned_result(child);
+    let awaiting = decoded_await(&raw);
+    let result = returned_result(&awaiting);
     let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::awaiting(
         AwaitSessionPortOutcome::Delivered(result),
     ))
@@ -558,40 +682,86 @@ fn already_delivered_foreground_result_returns_exact_child_content() {
     let authority = dispatch(&raw, ToolEffectClass::EffectFree);
     let disposition = run_ready(executor.execute_operation(operation, authority))
         .expect("already-delivered result succeeds");
+    let delivered = foreground_result(disposition);
 
-    assert_eq!(completed_text(disposition), RETURNED_CONTENT);
+    assert_eq!(delivered.kind(), DelegationOutcomeKind::ResultReturned);
+    assert_eq!(
+        delivered
+            .content()
+            .expect("returned result has content")
+            .as_str(),
+        RETURNED_CONTENT
+    );
+}
+
+#[test]
+fn delivered_foreground_result_rejects_another_wait_for_the_same_child() {
+    let child = session(160);
+    let raw = await_request(161, child, "foreground");
+    let other_raw = request_for_session(
+        162,
+        raw.session(),
+        AWAIT_SESSION_NAME,
+        json!({
+            "child_session_id": child.as_uuid().to_string(),
+            "mode": "foreground",
+        }),
+    );
+    let other_awaiting = decoded_await(&other_raw);
+    let result = returned_result(&other_awaiting);
+    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::awaiting(
+        AwaitSessionPortOutcome::Delivered(result),
+    ))
+    .expect("fixture tools compile")
+    .into_parts();
+    let operation = decode_operation(&raw).expect("fixture foreground await is canonical");
+
+    let authority = dispatch(&raw, ToolEffectClass::EffectFree);
+    let result = run_ready(executor.execute_operation(operation, authority));
+
+    assert_port_contract(result);
 }
 
 #[test]
 fn failed_child_result_retains_reason_and_turn_provenance() {
     let child = session(17);
-    let outcome = DelegationOutcome::reconstitute(
-        DelegationOutcomeKind::ChildFailed,
-        None,
-        DelegationOutcomeReason::ChildResultUnavailable,
-        signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
-            session: child,
-            turn: turn(900),
-        },
-    )
-    .expect("fixture child failure is sealed");
-    let result = DeliveredChildResult::try_new(child, outcome)
-        .expect("fixture child failure is deliverable");
-    let terminal_turn = result
+    let awaiting_raw = await_request(906, child, "foreground");
+    let awaiting = decoded_await(&awaiting_raw);
+    let outcome = failed_outcome(child, turn(900));
+    let result = delivered_result(
+        background_spawn_for_parent(902, awaiting.request().session()),
+        child,
+        turn(900),
+        outcome,
+        &awaiting,
+    );
+    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::awaiting(
+        AwaitSessionPortOutcome::Delivered(result),
+    ))
+    .expect("fixture tools compile")
+    .into_parts();
+    let operation = decode_operation(&awaiting_raw).expect("fixture foreground await is canonical");
+    let authority = dispatch(&awaiting_raw, ToolEffectClass::EffectFree);
+    let disposition = run_ready(executor.execute_operation(operation, authority))
+        .expect("typed child failure succeeds");
+    let delivered = foreground_result(disposition);
+    let terminal_turn = delivered
         .provenance()
         .child_turn()
         .expect("fixture provenance is a child turn");
 
     let output: Value = serde_json::from_str(
-        &render_delivered_child_result(result).expect("typed child failure renders"),
+        &render_delivered_child_result(delivered).expect("typed child failure renders"),
     )
     .expect("child outcome is compact JSON");
 
-    assert_eq!(output["result"], json!("child_outcome"));
-    assert_eq!(output["child_session_id"], child.as_uuid().to_string());
-    assert_eq!(output["outcome"], json!("child_failed"));
-    assert_eq!(output["reason"]["kind"], json!("child_result_unavailable"));
-    assert_eq!(output["provenance"]["kind"], json!("child_turn"));
+    assert_eq!(output["outcome"], json!("failed"));
+    assert_eq!(output["reason"], json!("child_result_unavailable"));
+    assert_eq!(output["provenance"]["type"], json!("child_turn"));
+    assert_eq!(
+        output["provenance"]["child_session_id"],
+        child.as_uuid().to_string()
+    );
     assert_eq!(
         output["provenance"]["child_turn_id"],
         terminal_turn.1.as_uuid().to_string()
@@ -599,9 +769,48 @@ fn failed_child_result_retains_reason_and_turn_provenance() {
 }
 
 #[test]
+fn delivered_result_rejects_another_relationships_terminal_turn() {
+    let child = session(170);
+    let local_turn = turn(900);
+    let foreign_turn = turn(901);
+    let (relation, _) = terminal_relation(
+        background_spawn(904),
+        child,
+        local_turn,
+        failed_outcome(child, local_turn),
+    );
+    let (_, foreign_event) = terminal_relation(
+        background_spawn(905),
+        child,
+        foreign_turn,
+        failed_outcome(child, foreign_turn),
+    );
+    let awaiting_raw = request_for_session(
+        907,
+        relation.parent(),
+        AWAIT_SESSION_NAME,
+        json!({
+            "child_session_id": child.as_uuid().to_string(),
+            "mode": "foreground",
+        }),
+    );
+    let awaiting = decoded_await(&awaiting_raw);
+    let wait = DelegationWait::reconstitute(&relation, &awaiting)
+        .expect("fixture foreground wait reconstitutes");
+
+    let error = DeliveredChildResult::try_new(wait, &relation, &foreign_event)
+        .expect_err("another relationship event is rejected");
+
+    assert_eq!(error.into_parts(), (wait, foreign_event));
+}
+
+#[test]
 fn stopped_child_result_retains_goal_command_provenance() {
     let child = session(18);
-    let parent = session(19);
+    let awaiting_raw = await_request(908, child, "foreground");
+    let awaiting = decoded_await(&awaiting_raw);
+    let parent = awaiting.request().session();
+    let spawning_request = bound_spawn_for_parent(903, parent);
     let command = DurableCommandId::from_uuid(uuid::Uuid::from_u128(20));
     let generation =
         GoalGeneration::new(NonZeroU64::new(2).expect("fixture generation is positive"));
@@ -618,16 +827,16 @@ fn stopped_child_result_retains_goal_command_provenance() {
         },
     )
     .expect("fixture parent goal command is sealed");
-    let result = DeliveredChildResult::try_new(child, outcome)
-        .expect("parent-command outcome is deliverable");
+    let result = delivered_result(spawning_request, child, turn(901), outcome, &awaiting);
 
     let output: Value = serde_json::from_str(
         &render_delivered_child_result(result).expect("typed child stop renders"),
     )
     .expect("child outcome is compact JSON");
 
-    assert_eq!(output["outcome"], json!("child_stopped"));
-    assert_eq!(output["provenance"]["kind"], json!("parent_goal_command"));
+    assert_eq!(output["outcome"], json!("stopped"));
+    assert_eq!(output["reason"], json!("parent_stopped"));
+    assert_eq!(output["provenance"]["type"], json!("parent_goal_command"));
     assert_eq!(
         output["provenance"]["parent_session_id"],
         parent.as_uuid().to_string()
@@ -670,9 +879,7 @@ fn message_executor_returns_identity_direction_ordinal_and_delivery_sequence() {
     let output: Value = serde_json::from_str(&completed_text(disposition))
         .expect("message receipt is compact JSON");
     let port = executor.into_port();
-    let [observed] = port.message_requests.as_slice() else {
-        panic!("one message request is observed")
-    };
+    let observed = single_message_request(&port);
 
     assert_eq!(observed.request(), &raw);
     assert_eq!(output["result"], json!("session_message_sent"));

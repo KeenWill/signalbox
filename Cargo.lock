@@ -3535,6 +3535,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-model-provider-runtime",
  "signalbox-tool-contract",
  "uuid",
 ]
