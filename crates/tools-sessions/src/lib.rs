@@ -11,10 +11,11 @@ use signalbox_domain::{
     DelegationContent, DelegationEvent, DelegationEventOrdinal, DelegationMessageDirection,
     DelegationMessageId, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
     DelegationOutcomeReason, DelegationProvenance, DelegationRequestError, DelegationWait,
-    DelegationWaitMode, NormalizedToolArguments, ParentTerminationCommandSource, SessionDelegation,
-    SessionId, ToolAttemptDispatchCorrelation, ToolDispatchAuthority, ToolEffectClass,
+    DelegationWaitMode, NormalizedToolArguments, SessionDelegation, SessionId,
+    ToolAttemptDispatchCorrelation, ToolDispatchAuthority, ToolEffectClass,
     ToolExecutionErrorDetail, ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultText,
 };
+use signalbox_model_provider_runtime::render_delegation_outcome;
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
@@ -344,92 +345,99 @@ impl SessionMessageReceipt {
 /// A terminal child result selected for delivery to one exact parent wait.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResult {
-    child: SessionId,
-    kind: DelegationOutcomeKind,
-    content: Option<DelegationContent>,
-    reason: DelegationOutcomeReason,
-    provenance: DelegationProvenance,
+    wait: DelegationWait,
+    outcome: DelegationOutcome,
 }
 
 impl DeliveredChildResult {
-    /// Admits only terminal outcomes with provenance valid for this child.
+    /// Admits only a deliverable outcome event from the exact validated relation.
     pub fn try_new(
-        child: SessionId,
-        outcome: DelegationOutcome,
+        wait: DelegationWait,
+        relation: &SessionDelegation,
+        event: &DelegationEvent,
     ) -> Result<Self, DeliveredChildResultError> {
-        let provenance = outcome.provenance();
-        let valid = match outcome.kind() {
-            DelegationOutcomeKind::ResultReturned | DelegationOutcomeKind::ChildFailed => {
-                provenance
-                    .child_turn()
-                    .is_some_and(|(source, _)| source == child)
-            }
-            DelegationOutcomeKind::ChildStopped => provenance.parent_command().is_some(),
-            DelegationOutcomeKind::ChildCancelled => {
-                provenance
-                    .child_turn()
-                    .is_some_and(|(source, _)| source == child)
-                    || provenance.parent_command().is_some()
-            }
+        let Some(outcome) = event.outcome() else {
+            return Err(DeliveredChildResultError {
+                wait,
+                event: Box::new(event.clone()),
+            });
+        };
+        let valid_kind = match outcome.kind() {
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled => true,
             DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
                 false
             }
         };
-        if !valid {
-            return Err(DeliveredChildResultError { child, outcome });
+        if wait.mode() != DelegationWaitMode::Foreground
+            || wait.spawning_request() != relation.spawning_request()
+            || wait.parent() != relation.parent()
+            || wait.child() != relation.child()
+            || relation.lifecycle() != signalbox_domain::DelegationLifecycle::Terminal
+            || !valid_kind
+            || !relation.events().iter().any(|candidate| candidate == event)
+        {
+            return Err(DeliveredChildResultError {
+                wait,
+                event: Box::new(event.clone()),
+            });
         }
         Ok(Self {
-            child,
-            kind: outcome.kind(),
-            content: outcome.content().cloned(),
-            reason: outcome.reason(),
-            provenance,
+            wait,
+            outcome: outcome.clone(),
         })
+    }
+
+    /// Returns the exact foreground wait that selected this delivery.
+    pub const fn wait(&self) -> DelegationWait {
+        self.wait
     }
 
     /// Returns the child whose terminal result is delivered.
     pub const fn child(&self) -> SessionId {
-        self.child
+        self.wait.child()
     }
 
     /// Returns the closed terminal outcome kind.
     pub const fn kind(&self) -> DelegationOutcomeKind {
-        self.kind
+        self.outcome.kind()
     }
 
     /// Borrows returned content when this is a successful child result.
     pub const fn content(&self) -> Option<&DelegationContent> {
-        self.content.as_ref()
+        self.outcome.content()
     }
 
     /// Returns the typed lifecycle reason.
     pub const fn reason(&self) -> DelegationOutcomeReason {
-        self.reason
+        self.outcome.reason()
     }
 
     /// Returns the typed terminal authority projection.
     pub const fn provenance(&self) -> DelegationProvenance {
-        self.provenance
+        self.outcome.provenance()
     }
 }
 
-/// A nonterminal or cross-wired outcome was offered for result delivery.
+/// A nonterminal or cross-wired relationship event was offered for delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResultError {
-    child: SessionId,
-    outcome: DelegationOutcome,
+    wait: DelegationWait,
+    event: Box<DelegationEvent>,
 }
 
 impl DeliveredChildResultError {
     /// Returns the unchanged rejected input.
-    pub fn into_parts(self) -> (SessionId, DelegationOutcome) {
-        (self.child, self.outcome)
+    pub fn into_parts(self) -> (DelegationWait, DelegationEvent) {
+        (self.wait, *self.event)
     }
 }
 
 impl fmt::Display for DeliveredChildResultError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("delegation outcome is not deliverable for the selected child")
+        formatter.write_str("delegation event is not deliverable for the selected relationship")
     }
 }
 
@@ -451,7 +459,7 @@ pub enum AwaitSessionPortOutcome {
     BackgroundRegistered(AwaitSessionReceipt),
     /// A foreground result already existed and is deliverable immediately.
     Delivered(DeliveredChildResult),
-    /// The foreground wait was durably registered and requires scheduler parking.
+    /// The foreground wait and physical-attempt closure were atomically parked.
     ForegroundPending(DelegationWait),
     /// Domain or durable admission definitively refused the request.
     Rejected,
@@ -472,8 +480,10 @@ pub trait SessionDelegationPort: Send {
 
     /// Registers or observes one wait without waiting for child completion.
     ///
-    /// A pending foreground result returns [`AwaitSessionPortOutcome::ForegroundPending`]
-    /// immediately after its durable registration; it never retains this future.
+    /// Before returning [`AwaitSessionPortOutcome::ForegroundPending`], the port
+    /// commits the wait registration, physical-attempt closure, and turn
+    /// `AwaitingChild` state in one durable transaction. The returned handoff
+    /// stops local execution; it does not authorize a later parking write.
     fn await_session(
         &mut self,
         request: DelegationAwaitRequest,
@@ -794,7 +804,7 @@ pub struct ForegroundAwaitPending {
 }
 
 impl ForegroundAwaitPending {
-    /// Returns the issued physical dispatch correlation to end before parking.
+    /// Returns the dispatch correlation whose physical attempt is already closed.
     pub const fn correlation(self) -> ToolAttemptDispatchCorrelation {
         self.correlation
     }
@@ -805,11 +815,37 @@ impl ForegroundAwaitPending {
     }
 }
 
-/// Nonblocking executor result: terminal evidence or a scheduler parking handoff.
+/// Exact scheduling handoff for an already-delivered foreground child result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForegroundAwaitDelivered {
+    correlation: ToolAttemptDispatchCorrelation,
+    result: DeliveredChildResult,
+}
+
+impl ForegroundAwaitDelivered {
+    /// Returns the issued physical dispatch correlation.
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
+        self.correlation
+    }
+
+    /// Borrows the typed child outcome selected by the exact foreground wait.
+    pub const fn result(&self) -> &DeliveredChildResult {
+        &self.result
+    }
+
+    /// Returns the typed child outcome selected by the exact foreground wait.
+    pub fn into_result(self) -> DeliveredChildResult {
+        self.result
+    }
+}
+
+/// Nonblocking executor result: ordinary evidence or a typed scheduler handoff.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionDelegationExecutionDisposition {
     /// Ordinary completed or known-failed tool evidence bound to its dispatch.
     Completed(CorrelatedToolExecutorEvidence),
+    /// An already-delivered foreground result retaining its typed outcome.
+    ForegroundDelivered(ForegroundAwaitDelivered),
     /// A foreground wait registered without retaining a physical future.
     ForegroundPending(ForegroundAwaitPending),
 }
@@ -886,6 +922,7 @@ where
 
 enum UnboundExecutionDisposition {
     Completed(ToolExecutorEvidence),
+    ForegroundDelivered(DeliveredChildResult),
     ForegroundPending(DelegationWait),
 }
 
@@ -907,6 +944,14 @@ where
             UnboundExecutionDisposition::Completed(evidence) => Ok(
                 SessionDelegationExecutionDisposition::Completed(invocation.bind(evidence)),
             ),
+            UnboundExecutionDisposition::ForegroundDelivered(result) => {
+                Ok(SessionDelegationExecutionDisposition::ForegroundDelivered(
+                    ForegroundAwaitDelivered {
+                        correlation,
+                        result,
+                    },
+                ))
+            }
             UnboundExecutionDisposition::ForegroundPending(wait) => {
                 Ok(SessionDelegationExecutionDisposition::ForegroundPending(
                     ForegroundAwaitPending { correlation, wait },
@@ -963,11 +1008,12 @@ where
                     }
                     AwaitSessionPortOutcome::Delivered(result)
                         if expected_mode == DelegationWaitMode::Foreground
-                            && result.child() == expected_child =>
+                            && result.wait().awaiting_request() == expected_request
+                            && result.wait().parent() == expected_parent
+                            && result.wait().child() == expected_child
+                            && result.wait().mode() == expected_mode =>
                     {
-                        let rendered = render_delivered_child_result(result)
-                            .map_err(|_| SessionDelegationExecutorError::ResultEncoding)?;
-                        completed(rendered)
+                        Ok(UnboundExecutionDisposition::ForegroundDelivered(result))
                     }
                     AwaitSessionPortOutcome::ForegroundPending(wait)
                         if expected_mode == DelegationWaitMode::Foreground
@@ -1130,46 +1176,6 @@ fn encode_message_receipt<PortError>(
     })
 }
 
-#[derive(serde::Serialize)]
-struct ChildOutcomeOutput {
-    result: &'static str,
-    child_session_id: String,
-    outcome: &'static str,
-    reason: OutcomeReasonOutput,
-    provenance: OutcomeProvenanceOutput,
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum OutcomeReasonOutput {
-    ChildExecutionFailed,
-    ChildResultUnavailable,
-    ChildCancelled,
-    ParentStopped { scope: &'static str },
-    ParentCancelled { scope: &'static str },
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum OutcomeProvenanceOutput {
-    ChildTurn {
-        child_session_id: String,
-        child_turn_id: String,
-    },
-    ParentTurnCommand {
-        parent_session_id: String,
-        parent_turn_id: String,
-        command_id: String,
-        descendant_scope: &'static str,
-    },
-    ParentGoalCommand {
-        parent_session_id: String,
-        goal_generation: String,
-        command_id: String,
-        descendant_scope: &'static str,
-    },
-}
-
 /// Renders delivered child content or a typed terminal outcome for scheduling.
 ///
 /// A successful return is the child's exact delivered content with no JSON
@@ -1184,27 +1190,14 @@ pub fn render_delivered_child_result(
         ToolResultText::try_new(rendered.clone()).map_err(|_| DeliveredChildResultRenderError)?;
         return Ok(rendered);
     }
-    let kind = match result.kind() {
-        DelegationOutcomeKind::ChildFailed => "child_failed",
-        DelegationOutcomeKind::ChildStopped => "child_stopped",
-        DelegationOutcomeKind::ChildCancelled => "child_cancelled",
+    match result.kind() {
+        DelegationOutcomeKind::ChildFailed
+        | DelegationOutcomeKind::ChildStopped
+        | DelegationOutcomeKind::ChildCancelled => Ok(render_delegation_outcome(&result.outcome)),
         DelegationOutcomeKind::ResultReturned
         | DelegationOutcomeKind::AlreadyTerminal
-        | DelegationOutcomeKind::ContinueRunning => {
-            return Err(DeliveredChildResultRenderError);
-        }
-    };
-    let reason = reason_output(result.reason()).ok_or(DeliveredChildResultRenderError)?;
-    let provenance =
-        provenance_output(result.provenance()).ok_or(DeliveredChildResultRenderError)?;
-    serde_json::to_string(&ChildOutcomeOutput {
-        result: "child_outcome",
-        child_session_id: result.child().as_uuid().to_string(),
-        outcome: kind,
-        reason,
-        provenance,
-    })
-    .map_err(|_| DeliveredChildResultRenderError)
+        | DelegationOutcomeKind::ContinueRunning => Err(DeliveredChildResultRenderError),
+    }
 }
 
 /// A typed delivered result could not fit the model-facing result contract.
@@ -1218,68 +1211,6 @@ impl fmt::Display for DeliveredChildResultRenderError {
 }
 
 impl Error for DeliveredChildResultRenderError {}
-
-fn reason_output(reason: DelegationOutcomeReason) -> Option<OutcomeReasonOutput> {
-    match reason {
-        DelegationOutcomeReason::ChildCompleted => None,
-        DelegationOutcomeReason::ChildExecutionFailed => {
-            Some(OutcomeReasonOutput::ChildExecutionFailed)
-        }
-        DelegationOutcomeReason::ChildResultUnavailable => {
-            Some(OutcomeReasonOutput::ChildResultUnavailable)
-        }
-        DelegationOutcomeReason::ChildCancelled => Some(OutcomeReasonOutput::ChildCancelled),
-        DelegationOutcomeReason::ParentStopped { scope } => {
-            Some(OutcomeReasonOutput::ParentStopped {
-                scope: descendant_scope_output(scope),
-            })
-        }
-        DelegationOutcomeReason::ParentCancelled { scope } => {
-            Some(OutcomeReasonOutput::ParentCancelled {
-                scope: descendant_scope_output(scope),
-            })
-        }
-    }
-}
-
-const fn descendant_scope_output(
-    scope: signalbox_domain::DescendantTerminationScope,
-) -> &'static str {
-    match scope {
-        signalbox_domain::DescendantTerminationScope::ParentAlone => "parent_alone",
-        signalbox_domain::DescendantTerminationScope::ParentAndDescendants => {
-            "parent_and_descendants"
-        }
-    }
-}
-
-fn provenance_output(provenance: DelegationProvenance) -> Option<OutcomeProvenanceOutput> {
-    if let Some((session, turn)) = provenance.child_turn() {
-        return Some(OutcomeProvenanceOutput::ChildTurn {
-            child_session_id: session.as_uuid().to_string(),
-            child_turn_id: turn.as_uuid().to_string(),
-        });
-    }
-    let authority = provenance.parent_command()?;
-    Some(match authority.source() {
-        ParentTerminationCommandSource::Turn { turn } => {
-            OutcomeProvenanceOutput::ParentTurnCommand {
-                parent_session_id: authority.parent().as_uuid().to_string(),
-                parent_turn_id: turn.as_uuid().to_string(),
-                command_id: authority.command().as_uuid().to_string(),
-                descendant_scope: descendant_scope_output(authority.scope()),
-            }
-        }
-        ParentTerminationCommandSource::Goal { generation } => {
-            OutcomeProvenanceOutput::ParentGoalCommand {
-                parent_session_id: authority.parent().as_uuid().to_string(),
-                goal_generation: generation.get().to_string(),
-                command_id: authority.command().as_uuid().to_string(),
-                descendant_scope: descendant_scope_output(authority.scope()),
-            }
-        }
-    })
-}
 
 fn encode_json<PortError>(
     value: &impl serde::Serialize,

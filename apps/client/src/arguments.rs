@@ -474,10 +474,10 @@ struct SpawnSessionArguments {
     /// Exact logical spawn tool request.
     #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
     tool_request_id: CanonicalUuid,
-    /// Exact child task.
+    /// Nonempty, NUL-free UTF-8 child task; at most 1 MiB.
     #[arg(long, value_name = "TEXT")]
     task: Option<String>,
-    /// Read the exact child task from one file.
+    /// Read a nonempty, NUL-free UTF-8 child task of at most 1 MiB from one file.
     #[arg(long, value_name = "PATH")]
     task_file: Option<PathBuf>,
     /// Keep the child independent of parent terminalization.
@@ -566,10 +566,10 @@ struct MessageSessionArguments {
     /// Related session receiving the message.
     #[arg(value_name = "PEER_SESSION", value_parser = canonical_uuid)]
     peer_session_id: CanonicalUuid,
-    /// Exact message content.
+    /// Nonempty, NUL-free UTF-8 message content; at most 1 MiB.
     #[arg(long, value_name = "TEXT")]
     content: Option<String>,
-    /// Read the exact message content from one file.
+    /// Read nonempty, NUL-free UTF-8 message content of at most 1 MiB from one file.
     #[arg(long, value_name = "PATH")]
     content_file: Option<PathBuf>,
 }
@@ -3516,24 +3516,16 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn delegation_spawn_parses_background_task_and_canonical_provenance() {
-        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
-        const TURN: &str = "00000000-0000-0000-0000-000000000002";
-        const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
-        let Ok(ParseOutcome::Run(arguments)) = parse(
-            [
-                "session",
-                "spawn",
-                SESSION,
-                TURN,
-                REQUEST,
-                "--task",
-                "inspect logs",
-                "--background",
-            ]
-            .map(Into::into),
-        ) else {
+    fn parsed_delegation_spawn(
+        parsed: Result<ParseOutcome, UsageError>,
+    ) -> (
+        CanonicalUuid,
+        CanonicalUuid,
+        CanonicalUuid,
+        String,
+        DelegationPolicy,
+    ) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
             panic!("the background spawn fixture must parse");
         };
         let Command::Session(SessionCommand::Spawn {
@@ -3546,11 +3538,68 @@ mod tests {
         else {
             panic!("the fixture must select session spawn");
         };
+        (session_id, turn_id, tool_request_id, task, relationship)
+    }
+
+    fn parsed_delegation_await(
+        parsed: Result<ParseOutcome, UsageError>,
+    ) -> (CanonicalUuid, DelegationWaitMode) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the background await fixture must parse");
+        };
+        let Command::Session(SessionCommand::Await {
+            child_session_id,
+            mode,
+            ..
+        }) = arguments.command
+        else {
+            panic!("the fixture must select session await");
+        };
+        (child_session_id, mode)
+    }
+
+    fn parsed_delegation_message(
+        parsed: Result<ParseOutcome, UsageError>,
+    ) -> (CanonicalUuid, PathBuf) {
+        let Ok(ParseOutcome::Run(arguments)) = parsed else {
+            panic!("the file-backed message fixture must parse");
+        };
+        let Command::Session(SessionCommand::Message {
+            peer_session_id,
+            content: DelegationTextArgument::File(path),
+            ..
+        }) = arguments.command
+        else {
+            panic!("the fixture must select session message");
+        };
+        (peer_session_id, path)
+    }
+
+    #[test]
+    fn delegation_spawn_parses_background_task_and_canonical_provenance() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+        const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        const TASK: &str = "inspect logs";
+        let (session_id, turn_id, tool_request_id, task, relationship) =
+            parsed_delegation_spawn(parse(
+                [
+                    "session",
+                    "spawn",
+                    SESSION,
+                    TURN,
+                    REQUEST,
+                    "--task",
+                    TASK,
+                    "--background",
+                ]
+                .map(Into::into),
+            ));
 
         assert_eq!(session_id.to_string(), SESSION);
         assert_eq!(turn_id.to_string(), TURN);
         assert_eq!(tool_request_id.to_string(), REQUEST);
-        assert_eq!(task, "inspect logs");
+        assert_eq!(task, TASK);
         assert_eq!(relationship, DelegationPolicy::Background {});
     }
 
@@ -3584,7 +3633,7 @@ mod tests {
         const TURN: &str = "00000000-0000-0000-0000-000000000002";
         const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
         const CHILD: &str = "00000000-0000-0000-0000-000000000004";
-        let Ok(ParseOutcome::Run(arguments)) = parse(
+        let (child_session_id, mode) = parsed_delegation_await(parse(
             [
                 "session",
                 "await",
@@ -3596,17 +3645,7 @@ mod tests {
                 "background",
             ]
             .map(Into::into),
-        ) else {
-            panic!("the background await fixture must parse");
-        };
-        let Command::Session(SessionCommand::Await {
-            child_session_id,
-            mode,
-            ..
-        }) = arguments.command
-        else {
-            panic!("the fixture must select session await");
-        };
+        ));
 
         assert_eq!(child_session_id.to_string(), CHILD);
         assert_eq!(mode, DelegationWaitMode::Background);
@@ -3618,7 +3657,8 @@ mod tests {
         const TURN: &str = "00000000-0000-0000-0000-000000000002";
         const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
         const PEER: &str = "00000000-0000-0000-0000-000000000004";
-        let Ok(ParseOutcome::Run(arguments)) = parse(
+        const CONTENT_FILE: &str = "message.txt";
+        let (peer_session_id, path) = parsed_delegation_message(parse(
             [
                 "session",
                 "message",
@@ -3627,23 +3667,13 @@ mod tests {
                 REQUEST,
                 PEER,
                 "--content-file",
-                "message.txt",
+                CONTENT_FILE,
             ]
             .map(Into::into),
-        ) else {
-            panic!("the file-backed message fixture must parse");
-        };
-        let Command::Session(SessionCommand::Message {
-            peer_session_id,
-            content: DelegationTextArgument::File(path),
-            ..
-        }) = arguments.command
-        else {
-            panic!("the fixture must select session message");
-        };
+        ));
 
         assert_eq!(peer_session_id.to_string(), PEER);
-        assert_eq!(path, PathBuf::from("message.txt"));
+        assert_eq!(path, PathBuf::from(CONTENT_FILE));
     }
 
     #[test]

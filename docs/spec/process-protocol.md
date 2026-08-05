@@ -6,6 +6,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The typed usage provenance, derived-cost row shape, and labeled client
 aggregation are verified against PR #389 (`agent/cost-accounting`).
 
+The delegation mutation request and receipt frame vocabulary is verified through
+this PR (`agent/delegation-process-wire-v2`).
+
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
@@ -18,8 +21,8 @@ The model/session-settings wire vocabulary was verified through PR #439
 The tool-approval decision event surface is verified against this implementing
 change.
 
-The session-delegation process and terminal surface was re-verified through
-`agent/delegation-client-verbs-v2`.
+The session-delegation process and terminal surface was re-verified through PR
+#459 (`agent/delegation-client-verbs-v2`).
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
@@ -1594,17 +1597,18 @@ the process protocol explicitly maps them.
 
 ## Session-delegation process surface
 
-The session-follow event shapes and internal-wake exclusion in this section are
-implemented. The mutation request and receipt shapes are committed unimplemented
-functionality: no current `ClientRequest`, daemon handler, or client verb
-provides them. Their fixed compatibility constraint is that the future process
-surface admits only exact already-issued model work for terminal operation and
-recovery; it must not let a client fabricate model provenance. The model-facing
-tool names and arguments are owned by
-[tool-loop](tool-loop.md#session-delegation-tool-family). Future
-`spawn_session`, `await_session`, and `send_session_message` requests therefore
-each carry the invoking session, turn, and `tool_request_id`, which must
-reconstitute one matching logical request before any mutation occurs.
+The session-follow event shapes, internal-wake exclusion, closed mutation
+request and receipt frame vocabulary, and terminal-client verbs in this section
+are implemented. Daemon execution remains committed unimplemented functionality
+in this slice: each admitted delegation request currently receives
+`invalid_request` without mutation. Its fixed compatibility constraint is that
+the composed process surface admits only exact already-issued model work for
+terminal operation and recovery; it must not let a client fabricate model
+provenance. The model-facing tool names and arguments are owned by
+[tool-loop](tool-loop.md#session-delegation-tool-family). `spawn_session`,
+`await_session`, and `send_session_message` requests each carry the invoking
+session, turn, and `tool_request_id`, which must reconstitute one matching
+logical request before any mutation occurs.
 
 Logical-request reconstitution alone is not execution authority. Before a first
 mutation, the daemon must also reconstitute the exact authorized, executable
