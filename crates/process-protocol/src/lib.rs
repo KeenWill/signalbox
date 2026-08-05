@@ -5801,8 +5801,18 @@ impl ServerMessage {
             Self::SessionEvent { event, .. } => validate_settings_event(event)?,
             Self::TranscriptTurn {
                 model_settings: Some(settings),
+                state,
                 ..
-            } => settings.validate()?,
+            } => {
+                settings.validate()?;
+                if let TurnState::Queued {
+                    accepted_input_id, ..
+                } = state
+                    && settings.accepted_input_id != *accepted_input_id
+                {
+                    return Err(FrameValidationError::ModelSettingsShape);
+                }
+            }
             Self::TranscriptEntry {
                 entry:
                     TranscriptEntry::AssistantToolUse {
@@ -11951,6 +11961,39 @@ mod tests {
 
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    /// INV-033: queued turn settings evidence belongs to the accepted input
+    /// named by the authoritative queued state.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_queued_input() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    accepted_input_id: uuid(5),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: InputContent::new("settings-aware turn".to_owned()),
+                },
+            },
+        )
+        .expect_err("queued settings must name the queued accepted input");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
     /// INV-033: required-nullable turn settings cannot be omitted.

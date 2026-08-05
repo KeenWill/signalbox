@@ -280,17 +280,38 @@ async fn s28_inv012_inv053_legacy_imported_creation_rejects_explicit_model_setti
     sqlx::raw_sql(
         "ALTER TABLE durable_command DISABLE TRIGGER USER;
          ALTER TABLE create_session_from_imported_frontier_command DISABLE TRIGGER USER;
-         ALTER TABLE create_session_from_imported_frontier_command DROP CONSTRAINT create_session_from_imported_frontier_command_registry_fk;
-         UPDATE durable_command SET storage_version = 3 WHERE command_id = '00000000-0000-0000-0000-00000000033a';
-         UPDATE create_session_from_imported_frontier_command SET storage_version = 3 WHERE command_id = '00000000-0000-0000-0000-00000000033a';",
+         ALTER TABLE create_session_from_imported_frontier_command DROP CONSTRAINT create_session_from_imported_frontier_command_registry_fk;",
     )
     .execute(&pool)
     .await?;
+    let registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 3 WHERE command_id = $1")
+            .bind(command.command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let typed_downgrade = sqlx::query(
+        "UPDATE create_session_from_imported_frontier_command
+            SET storage_version = 3
+          WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(registry_downgrade.rows_affected(), 1);
+    assert_eq!(typed_downgrade.rows_affected(), 1);
 
     assert!(matches!(
         repository.load(command.command_id()).await,
         Err(ImportedSessionRepositoryError::Corruption(
             ImportedSessionCorruption::Inconsistent("storage version without model settings")
+        ))
+    ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(SessionId::from_uuid(Uuid::from_u128(0x43a)))
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults storage version without model settings")
         ))
     ));
     Ok(())

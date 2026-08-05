@@ -138,9 +138,10 @@ impl SessionRepository {
     /// current-defaults pointer and exactly the immutable defaults row selected
     /// by that pointer. Imported ancestry additionally joins its one-to-one
     /// seed record and seed-frontier header as a constant-size proof. Native
-    /// template provenance additionally correlates the creation command's
-    /// storage version. The selected placement is then checked against its
-    /// complete authenticated event-and-receipt chain on the same connection.
+    /// template provenance and every selected defaults epoch additionally
+    /// correlate the command storage version that introduced their durable
+    /// fields. The selected placement is then checked against its complete
+    /// authenticated event-and-receipt chain on the same connection.
     /// It intentionally loads no imported aggregate, frontier membership,
     /// semantic entry, turn history, or unselected defaults version.
     pub async fn load_session(
@@ -175,6 +176,7 @@ pub(crate) async fn load_session_from_connection(
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
+            imported_creation.storage_version AS imported_create_storage_version,
             s.imported_conversation_id AS stored_conversation_id,
             s.imported_frontier_entry_id AS stored_frontier_entry_id,
             s.imported_frontier_position AS stored_frontier_position,
@@ -189,6 +191,7 @@ pub(crate) async fn load_session_from_connection(
             v.dangerous_tool_auto_approval,
             v.system_prompt,
             v.model_settings,
+            defaults_replacement.storage_version AS replace_storage_version,
             seed.session_id AS seed_session_id,
             seed.seed_context_frontier_id,
             seed_frontier.owning_session_id AS seed_frontier_session_id,
@@ -219,6 +222,12 @@ pub(crate) async fn load_session_from_connection(
           AND v.version = p.current_version
          LEFT JOIN create_session_command AS creation
            ON creation.created_session_id = s.session_id
+         LEFT JOIN create_session_from_imported_frontier_command AS imported_creation
+           ON imported_creation.created_session_id = s.session_id
+         LEFT JOIN replace_session_defaults_command AS defaults_replacement
+           ON defaults_replacement.result_session_id = v.session_id
+          AND defaults_replacement.result_installed_version = v.version
+          AND defaults_replacement.result_kind = 'applied'
          LEFT JOIN imported_session_seed AS seed
            ON seed.session_id = s.session_id
          LEFT JOIN context_frontier AS seed_frontier
@@ -295,6 +304,7 @@ fn decode_complete(
     requested_session: SessionId,
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
+    authenticate_defaults_settings_version(&row, &ancestry)?;
     if ancestry == "imported_conversation" {
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
@@ -373,6 +383,40 @@ fn decode_complete(
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
+}
+
+fn authenticate_defaults_settings_version(
+    row: &PgRow,
+    ancestry: &str,
+) -> Result<(), SessionRepositoryError> {
+    let defaults_version = decode_ordinal(row, "selected_defaults_version")?;
+    let model_settings = model_settings_from_json(required(row, "model_settings")?)
+        .map_err(|_| SessionCorruption::Inconsistent("model settings"))?;
+    let storage_version: i16 = if defaults_version == SessionConfigurationDefaultsVersion::first() {
+        match ancestry {
+            "none" => required(row, "create_storage_version")?,
+            "imported_conversation" => required(row, "imported_create_storage_version")?,
+            _ => return Ok(()),
+        }
+    } else {
+        required(row, "replace_storage_version")?
+    };
+    let settings_cutover = if defaults_version != SessionConfigurationDefaultsVersion::first() {
+        crate::replace_session_defaults::MODEL_SETTINGS_FROM_STORAGE_VERSION
+    } else if ancestry == "imported_conversation" {
+        create_session_from_imported_frontier::MODEL_SETTINGS_FROM_STORAGE_VERSION
+    } else {
+        crate::create_session::MODEL_SETTINGS_FROM_STORAGE_VERSION
+    };
+    if storage_version < settings_cutover
+        && model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults()
+    {
+        return Err(SessionCorruption::Inconsistent(
+            "defaults storage version without model settings",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

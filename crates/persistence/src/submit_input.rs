@@ -4691,6 +4691,8 @@ async fn load_complete_rows(
             queued.known_provider_failure_retry,
             queued.model_fallback,
             queued.dangerous_tool_auto_approval AS queued_tool_auto_approval,
+            configuration_origin.model_settings_evidence_required
+                AS origin_model_settings_evidence_required,
             defaults.session_id AS defaults_session_id,
             defaults.version AS defaults_version,
             defaults.model_selection_kind AS defaults_model_kind,
@@ -4724,6 +4726,23 @@ async fn load_complete_rows(
            ON accepted.accepted_input_id = typed.result_accepted_input_id
          LEFT JOIN queued_input_origin AS queued
            ON queued.accepted_input_id = accepted.accepted_input_id
+         LEFT JOIN LATERAL (
+              WITH RECURSIVE configuration_chain AS (
+                  SELECT origin.*
+                    FROM queued_input_origin AS origin
+                   WHERE origin.turn_id = queued.turn_id
+                     AND origin.session_id = queued.session_id
+                  UNION
+                  SELECT source.*
+                    FROM configuration_chain AS current
+                    JOIN queued_input_origin AS source
+                      ON source.turn_id = current.source_configuration_turn_id
+                     AND source.session_id = current.session_id
+              )
+              SELECT model_settings_evidence_required
+                FROM configuration_chain
+               WHERE source_configuration_turn_id IS NULL
+         ) AS configuration_origin ON TRUE
          LEFT JOIN session_defaults_version AS defaults
            ON defaults.session_id = typed.result_session_id
           AND defaults.version = COALESCE(
@@ -5769,6 +5788,8 @@ fn decode_applied_turn_origin(
     require_spelling(row, "known_provider_failure_retry", "disabled")?;
     require_spelling(row, "model_fallback", "disabled")?;
     let defaults_version = decode_defaults_version(row, "queued_defaults_version")?;
+    let model_settings_evidence_required: bool =
+        required(row, "origin_model_settings_evidence_required")?;
 
     let defaults_session = session_id_from_uuid(required(row, "defaults_session_id")?);
     let joined_defaults_version = decode_defaults_version(row, "defaults_version")?;
@@ -5857,9 +5878,7 @@ fn decode_applied_turn_origin(
             );
         }
     };
-    if command_storage_version >= MODEL_SETTINGS_FROM_STORAGE_VERSION
-        && stored_model_settings.is_none()
-    {
+    if model_settings_evidence_required && stored_model_settings.is_none() {
         return Err(SubmitInputCorruption::Missing("turn model settings evidence").into());
     }
     if command_storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION

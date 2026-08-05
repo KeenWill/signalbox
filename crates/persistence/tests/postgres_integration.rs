@@ -11685,9 +11685,9 @@ fn assert_refused_reclassified_successor(outcome: &ModelCallTerminalOutcome, suc
     assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
 }
 
-/// S04 / S08 / INV-016 / INV-053: a turn accepted before settings evidence
-/// existed can still reclassify pending steering after upgrade; the successor
-/// remains legacy-null instead of inventing settings evidence.
+/// S04 / S08 / INV-016 / INV-053: reclassification rejects missing settings
+/// for a post-cutover source, while a genuine pre-evidence source can still
+/// reclassify pending steering and leave the successor legacy-null.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_settings()
@@ -11711,6 +11711,60 @@ async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_setting
             None,
         )
         .await?;
+
+    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM turn_model_settings_resolved_outbox_event
+          WHERE accepted_input_id IN (
+                SELECT accepted_input_id
+                  FROM turn_model_settings_resolved
+                 WHERE turn_id = $1
+          )",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let deleted = sqlx::query("DELETE FROM turn_model_settings_resolved WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    assert_eq!(deleted.rows_affected(), 1);
+    sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let missing_settings = repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+            )),
+            |_| successor,
+        )
+        .await;
+    assert!(
+        matches!(
+            &missing_settings,
+            Err(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Scheduling(SubmitInputCorruption::Missing(
+                    "turn model settings evidence"
+                ))
+            ))
+        ),
+        "unexpected missing-settings outcome: {missing_settings:?}"
+    );
 
     sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER ALL")
         .execute(&pool)
@@ -11758,36 +11812,6 @@ async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_setting
         .execute(&pool)
         .await?;
 
-    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "DELETE FROM turn_model_settings_resolved_outbox_event
-          WHERE accepted_input_id IN (
-                SELECT accepted_input_id
-                  FROM turn_model_settings_resolved
-                 WHERE turn_id = $1
-          )",
-    )
-    .bind(fixture.turn.into_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    let deleted = sqlx::query("DELETE FROM turn_model_settings_resolved WHERE turn_id = $1")
-        .bind(fixture.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    assert_eq!(deleted.rows_affected(), 1);
-    sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-
-    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
     let outcome = repository
         .apply_terminal_observation(
             fixture.session,
@@ -21213,6 +21237,32 @@ async fn s24_inv012_inv053_process_read_rejects_missing_turn_settings_evidence()
         .handle(command.clone(), accepted_input, Some(turn))
         .await?;
 
+    sqlx::raw_sql(
+        "ALTER TABLE durable_command DISABLE TRIGGER USER;
+         ALTER TABLE submit_input_command DISABLE TRIGGER USER;
+         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;",
+    )
+    .execute(&pool)
+    .await?;
+    let registry_downgrade = sqlx::query(
+        "UPDATE durable_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .execute(&pool)
+    .await?;
+    let typed_downgrade = sqlx::query(
+        "UPDATE submit_input_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(registry_downgrade.rows_affected(), 1);
+    assert_eq!(typed_downgrade.rows_affected(), 1);
+
     sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -23056,16 +23106,47 @@ async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
          ALTER TABLE submit_input_command DISABLE TRIGGER USER;
          ALTER TABLE create_session_command DROP CONSTRAINT create_session_command_registry_fk;
          ALTER TABLE replace_session_defaults_command DROP CONSTRAINT replace_session_defaults_command_registry_fk;
-         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;
-         UPDATE durable_command SET storage_version = 6 WHERE command_id = '00000000-0000-0000-0000-000000003742';
-         UPDATE create_session_command SET storage_version = 6 WHERE command_id = '00000000-0000-0000-0000-000000003742';
-         UPDATE durable_command SET storage_version = 3 WHERE command_id = '00000000-0000-0000-0000-00000000374d';
-         UPDATE replace_session_defaults_command SET storage_version = 3 WHERE command_id = '00000000-0000-0000-0000-00000000374d';
-         UPDATE durable_command SET storage_version = 1 WHERE command_id = '00000000-0000-0000-0000-000000003754';
-         UPDATE submit_input_command SET storage_version = 1 WHERE command_id = '00000000-0000-0000-0000-000000003754';",
+         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;",
     )
     .execute(&pool)
     .await?;
+    let native_registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 6 WHERE command_id = $1")
+            .bind(native.command().command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let native_typed_downgrade =
+        sqlx::query("UPDATE create_session_command SET storage_version = 6 WHERE command_id = $1")
+            .bind(native.command().command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let replacement_registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 3 WHERE command_id = $1")
+            .bind(replacement.command.into_uuid())
+            .execute(&pool)
+            .await?;
+    let replacement_typed_downgrade = sqlx::query(
+        "UPDATE replace_session_defaults_command SET storage_version = 3 WHERE command_id = $1",
+    )
+    .bind(replacement.command.into_uuid())
+    .execute(&pool)
+    .await?;
+    let submit_registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 1 WHERE command_id = $1")
+            .bind(submit.command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let submit_typed_downgrade =
+        sqlx::query("UPDATE submit_input_command SET storage_version = 1 WHERE command_id = $1")
+            .bind(submit.command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    assert_eq!(native_registry_downgrade.rows_affected(), 1);
+    assert_eq!(native_typed_downgrade.rows_affected(), 1);
+    assert_eq!(replacement_registry_downgrade.rows_affected(), 1);
+    assert_eq!(replacement_typed_downgrade.rows_affected(), 1);
+    assert_eq!(submit_registry_downgrade.rows_affected(), 1);
+    assert_eq!(submit_typed_downgrade.rows_affected(), 1);
 
     assert!(matches!(
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -23091,6 +23172,22 @@ async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
             .await,
         Err(SubmitInputRepositoryError::Corruption(
             SubmitInputCorruption::Inconsistent("storage version without model settings override")
+        ))
+    ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(native.applied_result().session())
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults storage version without model settings")
+        ))
+    ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(replacement.session)
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults storage version without model settings")
         ))
     ));
 

@@ -35,7 +35,7 @@ use crate::{
 };
 
 const STORAGE_VERSION: i16 = 4;
-const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 4;
+pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 4;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";

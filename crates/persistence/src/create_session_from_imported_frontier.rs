@@ -50,7 +50,7 @@ use crate::{
 };
 
 const STORAGE_VERSION: i16 = 5;
-const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 5;
+pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 5;
 // Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";

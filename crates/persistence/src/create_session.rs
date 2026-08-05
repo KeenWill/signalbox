@@ -36,7 +36,7 @@ const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
 const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
-const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 7;
+pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 7;
 // Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
