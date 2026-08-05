@@ -366,6 +366,26 @@ fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionCreatedFacts {
+    session_id: CanonicalUuid,
+    model_settings: ModelSettingsSnapshot,
+}
+
+#[track_caller]
+fn session_created_facts(message: &ServerMessage) -> SessionCreatedFacts {
+    match message {
+        ServerMessage::SessionCreated {
+            session_id,
+            model_settings,
+        } => SessionCreatedFacts {
+            session_id: *session_id,
+            model_settings: *model_settings,
+        },
+        message => panic!("fixture expected session-created receipt, got {message:?}"),
+    }
+}
+
 fn provider_default_model_settings() -> ModelSettingsSnapshot {
     ModelSettingsSnapshot {
         precedence: ModelSettingsPrecedence {
@@ -582,6 +602,14 @@ impl RunningRuntime {
     }
 
     async fn restart(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.restart_with_model_configuration(MODEL_CONFIGURATION)
+            .await
+    }
+
+    async fn restart_with_model_configuration(
+        &mut self,
+        configuration: &str,
+    ) -> Result<usize, Box<dyn Error>> {
         self.shutdown.send(true)?;
         timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
 
@@ -594,7 +622,7 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let model_configuration = HubModelConfiguration::parse(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         let runtime = ProcessRuntime::new_with_templates(
             listener,
@@ -1581,6 +1609,27 @@ struct SessionModelSettingsChangedEventFacts {
     installed_settings: ModelSettingsSnapshot,
     caller_override: ModelSettingsOverlay,
     adjustments: Vec<ModelChangeAdjustment>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SessionDefaultsReplacedFacts {
+    defaults_version: CanonicalU64,
+    installed_settings: ModelSettingsSnapshot,
+}
+
+#[track_caller]
+fn session_defaults_replaced_facts(message: &ServerMessage) -> SessionDefaultsReplacedFacts {
+    match message {
+        ServerMessage::SessionDefaultsReplaced {
+            defaults_version,
+            model_settings,
+            ..
+        } => SessionDefaultsReplacedFacts {
+            defaults_version: *defaults_version,
+            installed_settings: *model_settings,
+        },
+        message => panic!("fixture expected defaults-replaced receipt, got {message:?}"),
+    }
 }
 
 #[track_caller]
@@ -5518,14 +5567,10 @@ async fn s37_inv052_inv053_model_change_clamps_inherited_session_settings()
             },
         )
         .await?;
-    let ServerMessage::SessionDefaultsReplaced {
-        defaults_version,
-        model_settings: installed_settings,
-        ..
-    } = *response_within(&mut connection).await?.message()
-    else {
-        panic!("model-changing defaults replacement must return its installed snapshot");
-    };
+    let replacement =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+    let defaults_version = replacement.defaults_version;
+    let installed_settings = replacement.installed_settings;
     let event =
         session_model_settings_changed_event_facts(response_within(&mut follow).await?.message());
 
@@ -5557,6 +5602,198 @@ async fn s37_inv052_inv053_model_change_clamps_inherited_session_settings()
 
     drop(follow);
     drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / INV-012: an equal explicit-creation replay is decided from its
+/// durable command before the current deployment revalidates model settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let command_id = command()?;
+    let requested_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSession {
+                command_id,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
+            },
+        )
+        .await?;
+    let applied = session_created_facts(response_within(&mut connection).await?.message());
+    drop(connection);
+
+    let configuration_without_reasoning =
+        MODEL_CONFIGURATION.replace("reasoning_levels = [\"low\"]\n", "");
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_reasoning)
+        .await?;
+    let mut replay_connection = Connection::connect(runtime.socket()).await?;
+    replay_connection
+        .request(
+            2,
+            ClientRequest::CreateSession {
+                command_id,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
+            },
+        )
+        .await?;
+    let replayed = session_created_facts(response_within(&mut replay_connection).await?.message());
+
+    assert_eq!(replayed, applied);
+
+    drop(replay_connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-012: an equal imported-continuation replay is decided from its
+/// durable command before the current deployment revalidates model settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv012_imported_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let command_id = command()?;
+    let requested_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id,
+                imported_conversation_id: fixture.conversation,
+                through_position: fixture.last_position,
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+            },
+        )
+        .await?;
+    let applied = session_created_facts(response_within(&mut connection).await?.message());
+    drop(connection);
+
+    let configuration_without_reasoning =
+        MODEL_CONFIGURATION.replace("reasoning_levels = [\"low\"]\n", "");
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_reasoning)
+        .await?;
+    let mut replay_connection = Connection::connect(runtime.socket()).await?;
+    replay_connection
+        .request(
+            2,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id,
+                imported_conversation_id: fixture.conversation,
+                through_position: fixture.last_position,
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+            },
+        )
+        .await?;
+    let replayed = session_created_facts(response_within(&mut replay_connection).await?.message());
+
+    assert_eq!(replayed, applied);
+
+    drop(replay_connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-012: an equal defaults-replacement replay returns its durable
+/// result before the current deployment revalidates model settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_defaults_replacement_replays_after_capability_removal()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    let command_id = command()?;
+    let requested_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let applied =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+    drop(connection);
+
+    let configuration_without_reasoning =
+        MODEL_CONFIGURATION.replace("reasoning_levels = [\"low\"]\n", "");
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_reasoning)
+        .await?;
+    let mut replay_connection = Connection::connect(runtime.socket()).await?;
+    replay_connection
+        .request(
+            3,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let replayed =
+        session_defaults_replaced_facts(response_within(&mut replay_connection).await?.message());
+
+    assert_eq!(replayed, applied);
+
+    drop(replay_connection);
     runtime.stop().await
 }
 

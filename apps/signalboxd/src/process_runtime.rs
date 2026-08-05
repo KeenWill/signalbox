@@ -4611,36 +4611,7 @@ where
     let conversation_id = ImportedConversationId::from_uuid(wire_request.conversation.into_uuid());
     let relationship = domain_imported_relationship(wire_request.relationship);
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
-    let model_settings = match validate_session_model_settings(
-        model_configuration,
-        model_selection,
-        wire_request.model_settings,
-    ) {
-        Ok(settings) => settings,
-        Err(error) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                model_settings_protocol_error(error),
-            )
-            .await;
-        }
-    };
-    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
-        model_selection,
-        DangerousToolAutoApproval::Disabled,
-        None,
-        model_settings,
-    ) else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    };
+    let caller_model_settings = domain_model_settings_overlay(wire_request.model_settings);
     let through_position = wire_request.through_position;
     let repository =
         ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
@@ -4652,7 +4623,21 @@ where
                 && command.imported_frontier().through_position().as_u64()
                     == through_position.value()
                 && command.relationship() == relationship
-                && command.initial_configuration_defaults() == &defaults
+                && command.initial_configuration_defaults().model() == model_selection
+                && command
+                    .initial_configuration_defaults()
+                    .dangerous_tool_auto_approval()
+                    == DangerousToolAutoApproval::Disabled
+                && command
+                    .initial_configuration_defaults()
+                    .system_prompt()
+                    .is_none()
+                && command
+                    .initial_configuration_defaults()
+                    .model_settings()
+                    .precedence()
+                    .session()
+                    == caller_model_settings
             {
                 return write_message(
                     writer,
@@ -4721,6 +4706,37 @@ where
             .await;
         }
     }
+
+    let model_settings = match validate_session_model_settings(
+        model_configuration,
+        model_selection,
+        caller_model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
+    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
+        model_selection,
+        DangerousToolAutoApproval::Disabled,
+        None,
+        model_settings,
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
 
     if model_configuration
         .resolve_session_model(model_selection)
@@ -6347,10 +6363,87 @@ where
         .await;
     };
     let model_selection = domain_model_selection(initial_model_selection);
+    let caller_model_settings = domain_model_settings_overlay(model_settings);
+    let command_id = DurableCommandId::from_uuid(command_uuid);
+    let repository = CreateSessionRepository::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
+    );
+    match repository.load(command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            let defaults = command.initial_configuration_defaults();
+            if defaults.model() == model_selection
+                && defaults.dangerous_tool_auto_approval() == DangerousToolAutoApproval::Disabled
+                && defaults.system_prompt() == system_prompt.as_ref()
+                && defaults.model_settings().precedence().session() == caller_model_settings
+                && command.template_provenance().is_none()
+                && command.placement() == &placement
+            {
+                return write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCreated {
+                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: wire_model_settings(defaults.model_settings()),
+                    },
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::CommitAmbiguous(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    None,
+                    InternalDiagnostic::TemplateSessionCreationCorruption,
+                ),
+            )
+            .await;
+        }
+    }
     let model_settings = match validate_session_model_settings(
         services.model_configuration.as_ref(),
         model_selection,
-        model_settings,
+        caller_model_settings,
     ) {
         Ok(settings) => settings,
         Err(error) => {
@@ -6377,8 +6470,7 @@ where
         )
         .await;
     };
-    let request =
-        CreateSessionRequest::try_new(DurableCommandId::from_uuid(command_uuid), defaults);
+    let request = CreateSessionRequest::try_new(command_id, defaults);
     let Ok(request) = request.map(|request| request.with_placement(placement)) else {
         return write_error(
             writer,
@@ -7824,6 +7916,75 @@ where
     };
     let replacement_model = domain_model_selection(model_selection);
     let session = SessionId::from_uuid(session_id.into_uuid());
+    let caller_model_settings = domain_model_settings_overlay(model_settings);
+    let dangerous_tool_auto_approval = if dangerous_tool_auto_approval {
+        DangerousToolAutoApproval::ApproveAll
+    } else {
+        DangerousToolAutoApproval::Disabled
+    };
+    let durable_command_id = DurableCommandId::from_uuid(command_id);
+    let repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    match repository.load(durable_command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            let replacement = command.replacement();
+            if command.session() == session
+                && command.expected_current_version() == expected_version
+                && !prompt_member_is_absent
+                && replacement.model() == replacement_model
+                && replacement.dangerous_tool_auto_approval() == dangerous_tool_auto_approval
+                && replacement.system_prompt() == system_prompt.as_ref()
+                && command.caller_model_settings() == caller_model_settings
+            {
+                return write_replace_session_defaults_result(
+                    writer,
+                    version,
+                    request_id,
+                    session_id,
+                    recorded.result(),
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(ReplaceSessionDefaultsRepositoryError::Database { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(ReplaceSessionDefaultsRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SessionDefaultsCorruption,
+                ),
+            )
+            .await;
+        }
+    }
     let prior_model_settings = match ProcessReadRepository::new(pool.clone())
         .read_session_defaults(session, Some(expected_version))
         .await
@@ -7855,7 +8016,6 @@ where
             .await;
         }
     };
-    let caller_model_settings = domain_model_settings_overlay(model_settings);
     let (model_settings, model_settings_adjustments) = match validate_replacement_model_settings(
         model_configuration,
         replacement_model,
@@ -7875,11 +8035,7 @@ where
     };
     let Some(replacement) = SessionConfigurationDefaults::complete_with_model_settings(
         replacement_model,
-        if dangerous_tool_auto_approval {
-            DangerousToolAutoApproval::ApproveAll
-        } else {
-            DangerousToolAutoApproval::Disabled
-        },
+        dangerous_tool_auto_approval,
         system_prompt,
         model_settings,
     ) else {
@@ -7891,7 +8047,6 @@ where
         )
         .await;
     };
-    let durable_command_id = DurableCommandId::from_uuid(command_id);
     // A member the frame could not state must not silently clear a prompt
     // the current epoch carries; the transaction refuses that atomically
     // under the compare-and-set lock, recording nothing.
@@ -7918,95 +8073,11 @@ where
         )
         .await;
     };
-    let repository = ReplaceSessionDefaultsRepository::new(pool.clone());
-    let command_is_claimed = match repository.load(durable_command_id).await {
-        Ok(Some(_)) | Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }) => {
-            true
-        }
-        Ok(None) => false,
-        Err(ReplaceSessionDefaultsRepositoryError::Database { .. }) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::mutation_unavailable(false),
-            )
-            .await;
-        }
-        Err(ReplaceSessionDefaultsRepositoryError::Corruption(_)) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(
-                    Some(session_id.into_uuid()),
-                    InternalDiagnostic::SessionDefaultsCorruption,
-                ),
-            )
-            .await;
-        }
-    };
-    if !replacement_model_is_admitted(command_is_claimed, replacement_model, model_configuration) {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    }
     let mut service = ReplaceSessionDefaultsService::new(repository);
     match service.execute(request).await {
-        Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
-            applied,
-        ))) => {
-            let installed = applied.installed();
-            let system_prompt = SystemPromptMember::present(
-                wire_system_prompt(installed.defaults().system_prompt())
-                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
-            );
-            write_mutation_receipt_via_spool(
-                writer,
-                version,
-                request_id,
-                ServerMessage::SessionDefaultsReplaced {
-                    session_id,
-                    defaults_version: CanonicalU64::new(installed.version().as_u64()),
-                    model_selection: wire_domain_model_selection(installed.defaults().model()),
-                    model_settings: wire_model_settings(installed.defaults().model_settings()),
-                    dangerous_tool_auto_approval: matches!(
-                        installed.defaults().dangerous_tool_auto_approval(),
-                        DangerousToolAutoApproval::ApproveAll
-                    ),
-                    system_prompt,
-                },
-            )
-            .await
-        }
-        Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
-            rejected,
-        ))) => {
-            let detail = match rejected {
-                ReplaceSessionDefaultsRejectedResult::SessionNotFound(rejected) => {
-                    RejectionDetail::SessionNotFound {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                    }
-                }
-                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(rejected) => {
-                    RejectionDetail::DefaultsVersionMismatch {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                        expected: CanonicalU64::new(rejected.expected().as_u64()),
-                        current: CanonicalU64::new(rejected.current().as_u64()),
-                    }
-                }
-                ReplaceSessionDefaultsRejectedResult::VersionExhausted(rejected) => {
-                    RejectionDetail::DefaultsVersionExhausted {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                        current: CanonicalU64::new(rejected.current().as_u64()),
-                    }
-                }
-            };
-            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        Ok(ReplaceSessionDefaultsOutcome::Recorded(result)) => {
+            write_replace_session_defaults_result(writer, version, request_id, session_id, &result)
+                .await
         }
         // Frame validation rejects an absent system-prompt member, so this
         // repository outcome cannot be client-triggered.
@@ -8058,20 +8129,65 @@ where
     }
 }
 
-fn replacement_model_is_admitted(
-    command_is_claimed: bool,
-    replacement_model: ModelSelectionRequest,
-    model_configuration: &HubModelConfiguration,
-) -> bool {
-    command_is_claimed
-        || match replacement_model {
-            ModelSelectionRequest::Direct(selection) => {
-                model_configuration.contains_selection(selection)
-            }
-            ModelSelectionRequest::Alias(alias) => {
-                model_configuration.resolve_alias(alias).is_some()
-            }
+async fn write_replace_session_defaults_result<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    result: &ReplaceSessionDefaultsResult,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match result {
+        ReplaceSessionDefaultsResult::Applied(applied) => {
+            let installed = applied.installed();
+            let system_prompt = SystemPromptMember::present(
+                wire_system_prompt(installed.defaults().system_prompt())
+                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
+            );
+            write_mutation_receipt_via_spool(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionDefaultsReplaced {
+                    session_id,
+                    defaults_version: CanonicalU64::new(installed.version().as_u64()),
+                    model_selection: wire_domain_model_selection(installed.defaults().model()),
+                    model_settings: wire_model_settings(installed.defaults().model_settings()),
+                    dangerous_tool_auto_approval: matches!(
+                        installed.defaults().dangerous_tool_auto_approval(),
+                        DangerousToolAutoApproval::ApproveAll
+                    ),
+                    system_prompt,
+                },
+            )
+            .await
         }
+        ReplaceSessionDefaultsResult::Rejected(rejected) => {
+            let detail = match rejected {
+                ReplaceSessionDefaultsRejectedResult::SessionNotFound(rejected) => {
+                    RejectionDetail::SessionNotFound {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                    }
+                }
+                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(rejected) => {
+                    RejectionDetail::DefaultsVersionMismatch {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        expected: CanonicalU64::new(rejected.expected().as_u64()),
+                        current: CanonicalU64::new(rejected.current().as_u64()),
+                    }
+                }
+                ReplaceSessionDefaultsRejectedResult::VersionExhausted(rejected) => {
+                    RejectionDetail::DefaultsVersionExhausted {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        current: CanonicalU64::new(rejected.current().as_u64()),
+                    }
+                }
+            };
+            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+    }
 }
 
 async fn write_session_metadata_read_error<Writer>(
@@ -10039,10 +10155,10 @@ fn domain_model_settings_overlay(value: WireModelSettingsOverlay) -> DomainModel
 fn validate_session_model_settings(
     configuration: &HubModelConfiguration,
     selection: ModelSelectionRequest,
-    value: WireModelSettingsOverlay,
+    value: DomainModelSettingsOverlay,
 ) -> Result<ValidatedModelSettings, ModelSettingsAdmissionError> {
     configuration
-        .validate_session_model_settings(selection, domain_model_settings_overlay(value))
+        .validate_session_model_settings(selection, value)
         .ok_or(ModelSettingsAdmissionError::UnknownModel)?
         .map_err(|error| {
             ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
@@ -12237,7 +12353,7 @@ mod tests {
         handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, observe_outbox_metrics_once,
-        operational_import_error, read_frame_line, replacement_model_is_admitted,
+        operational_import_error, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
@@ -12892,50 +13008,6 @@ mod tests {
                 active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
             }
         );
-        Ok(())
-    }
-
-    #[test]
-    fn recorded_defaults_replay_does_not_depend_on_the_current_catalog()
-    -> Result<(), Box<dyn Error>> {
-        let current_catalog = crate::HubModelConfiguration::parse(
-            r#"
-version = 1
-
-[[credential_profiles]]
-name = "anthropic-primary"
-billing_kind = "api_metered"
-
-[[adapter_mappings]]
-model_family = "anthropic"
-adapter = "anthropic"
-credential_profile = "anthropic-primary"
-
-[compaction]
-prompt = "Summarize the prior conversation faithfully for continuation."
-
-[[models]]
-selection_id = "00000000-0000-0000-0000-000000000001"
-target_id = "00000000-0000-0000-0000-000000000002"
-model_family = "anthropic"
-provider_model = "still-current"
-max_output_tokens = 256
-context_window_tokens = 200000
-"#,
-        )?;
-        let removed_selection =
-            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(4)));
-
-        assert!(replacement_model_is_admitted(
-            true,
-            removed_selection,
-            &current_catalog,
-        ));
-        assert!(!replacement_model_is_admitted(
-            false,
-            removed_selection,
-            &current_catalog,
-        ));
         Ok(())
     }
 

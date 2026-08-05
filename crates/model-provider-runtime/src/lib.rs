@@ -273,16 +273,15 @@ impl RuntimeModelCatalog {
         self.definitions.get(&target)
     }
 
-    fn effective_provider_target(
-        &self,
-        definition: &RuntimeModelDefinition,
+    fn effective_definition<'catalog>(
+        &'catalog self,
+        definition: &'catalog RuntimeModelDefinition,
         fast_mode: DomainFastMode,
-    ) -> Option<ResolvedTarget> {
-        let effective = match (fast_mode, definition.fast_target) {
+    ) -> Option<&'catalog RuntimeModelDefinition> {
+        Some(match (fast_mode, definition.fast_target) {
             (DomainFastMode::Enabled, Some(target)) => self.resolve(target)?,
             (DomainFastMode::Disabled, _) | (DomainFastMode::Enabled, None) => definition,
-        };
-        Some(ResolvedTarget::new(effective.provider_model.clone()))
+        })
     }
 }
 
@@ -1101,6 +1100,10 @@ where
             .models
             .resolve(call.target())
             .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
+        let effective_definition = self
+            .models
+            .effective_definition(definition, request.model_settings().effective().fast_mode())
+            .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(operation.messages());
         let tools = operation
             .tools()
@@ -1119,9 +1122,12 @@ where
             correlation,
             CredentialReference::new(operation.credential_reference().as_str().to_owned()),
             RequestedTarget::new(render_requested_target(call.selection())),
-            ResolvedTarget::new(definition.provider_model().to_owned()),
+            ResolvedTarget::new(effective_definition.provider_model().to_owned()),
             messages,
-            runtime_model_settings(definition.max_output_tokens(), request.model_settings()),
+            runtime_model_settings(
+                effective_definition.max_output_tokens(),
+                request.model_settings(),
+            ),
         );
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
         runtime_operation.tools = tools;
@@ -1212,11 +1218,10 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let configured_target = ResolvedTarget::new(definition.provider_model().to_owned());
         let effective_settings = request.model_settings().effective();
-        let resolved_target = self
+        let effective_definition = self
             .models
-            .effective_provider_target(definition, effective_settings.fast_mode())
+            .effective_definition(definition, effective_settings.fast_mode())
             .ok_or_else(|| {
                 fail_closed(
                     telemetry,
@@ -1224,13 +1229,17 @@ where
                     None,
                 )
             })?;
+        let resolved_target = ResolvedTarget::new(effective_definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
-            configured_target,
+            resolved_target.clone(),
             messages,
-            runtime_model_settings(definition.max_output_tokens(), request.model_settings()),
+            runtime_model_settings(
+                effective_definition.max_output_tokens(),
+                request.model_settings(),
+            ),
         );
         // The session system prompt frozen through the calling turn's
         // defaults epoch rides every operation; adapters translate a `None`
@@ -3210,7 +3219,7 @@ mod tests {
     }
 
     #[test]
-    fn mapped_fast_target_is_the_authorized_lineage_only_when_enabled() {
+    fn mapped_fast_target_supplies_the_authorized_delivery_identity_and_limit() {
         let ordinary = RuntimeModelDefinition::try_new(
             target(1),
             String::from("fixture-standard"),
@@ -3220,7 +3229,7 @@ mod tests {
         .expect("ordinary fixture definition is valid")
         .with_fast_target(target(2));
         let fast =
-            RuntimeModelDefinition::try_new(target(2), String::from("fixture-fast"), 64, 200_000)
+            RuntimeModelDefinition::try_new(target(2), String::from("fixture-fast"), 32, 200_000)
                 .expect("fast fixture definition is valid");
         let catalog = RuntimeModelCatalog::try_from_definitions([ordinary, fast])
             .expect("mapped target is present");
@@ -3230,17 +3239,31 @@ mod tests {
 
         assert_eq!(
             catalog
-                .effective_provider_target(source, FastMode::Disabled)
+                .effective_definition(source, FastMode::Disabled)
                 .expect("ordinary target resolves")
-                .as_str(),
+                .provider_model(),
             "fixture-standard"
         );
         assert_eq!(
             catalog
-                .effective_provider_target(source, FastMode::Enabled)
+                .effective_definition(source, FastMode::Disabled)
+                .expect("ordinary target resolves")
+                .max_output_tokens(),
+            64
+        );
+        assert_eq!(
+            catalog
+                .effective_definition(source, FastMode::Enabled)
                 .expect("mapped fast target resolves")
-                .as_str(),
+                .provider_model(),
             "fixture-fast"
+        );
+        assert_eq!(
+            catalog
+                .effective_definition(source, FastMode::Enabled)
+                .expect("mapped fast target resolves")
+                .max_output_tokens(),
+            32
         );
     }
 

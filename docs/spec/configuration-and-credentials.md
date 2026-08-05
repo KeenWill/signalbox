@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The daemon model-settings configuration surface is verified against the
+implementing stack through this PR (`agent/model-settings-execution`).
+
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
 (`agent/approval-judge-daemon`).
@@ -428,6 +431,31 @@ fail-closed:
   unrecognized content fails explicitly instead.
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
+
+The optional `[model_settings]` table supplies the deployment-global settings
+overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
+and an overlay that a selectable model may name with `settings_profile`. Both
+overlay forms admit `reasoning_level`, `fast_mode`, and `service_tier` only.
+Omission means inherit; reasoning and service tier also accept
+`provider_default`, while fast mode accepts `enabled` or `disabled`. A service
+tier is a provider-tagged inline table. Duplicate profile names, unknown profile
+references, malformed values, or a configured lower-layer value outside the
+selected model's capabilities fail startup. The precedence and durable
+provenance of these layers are owned by
+[Model and session settings](model-session-settings.md).
+
+Each `[[models]]` record declares its capability surface with
+`reasoning_levels`, `fast_mode`, and `service_tiers`. Omitted arrays are empty,
+and omitted fast mode means `unsupported`. `request_control` authorizes the
+adapter's request-level fast control. `alternate_target` additionally requires
+`fast_target_id`; that identity must name a non-selectable `[[serving_targets]]`
+record with its own exact provider model, `max_output_tokens`, and
+`context_window_tokens`. Startup rejects a missing, selectable, cross-adapter,
+or otherwise conflicting alternate target. An enabled call uses that serving
+record's provider identity and output-token request limit, while the client's
+durable selection remains unchanged. Capability values are validated against the
+selected adapter's explicit mapping table during startup, so an adapter cannot
+silently drop a configured setting.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
