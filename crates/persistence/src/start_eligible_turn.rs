@@ -858,6 +858,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnR
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             StartEligibleTurnCorruption::Inconsistent("origin accepted-input identity").into()
         }
+        SubmitInputRepositoryError::UnsupportedModelSetting(_) => {
+            StartEligibleTurnCorruption::Inconsistent("origin model settings").into()
+        }
         SubmitInputRepositoryError::ModelExecution(_) => {
             StartEligibleTurnCorruption::Inconsistent("origin command application").into()
         }

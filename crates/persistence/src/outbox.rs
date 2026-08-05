@@ -8,22 +8,30 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_domain::{
-    AcceptedInputId, ContextCompactionId, ContextFrontierId, ModelCallDisposition, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, SessionInputPosition, ToolApprovalResolution,
-    ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+    AcceptedInputId, ContextCompactionId, ContextFrontierId, DirectModelSelection,
+    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelSelectionRequest, SemanticTranscriptEntryId, SessionId, SessionInputPosition,
+    SessionModelSettingsChanged, ToolApprovalResolution, ToolAttemptId, ToolRequestId,
+    TurnAttemptId, TurnId, TurnModelSettingsResolved,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     lock_inventory,
     mapping::{
-        accepted_input_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
-        session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
+        accepted_input_id_to_uuid, defaults_version_from_numeric, defaults_version_to_numeric,
+        durable_command_id_from_uuid, input_position_from_numeric, input_position_to_numeric,
+        model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
+        turn_id_to_uuid,
     },
 };
 
 const SESSION_CREATED: &str = "session_created";
+const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
+const TURN_MODEL_SETTINGS_RESOLVED: &str = "turn_model_settings_resolved";
 const INPUT_ACCEPTED: &str = "input_accepted";
 const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
 const TURN_ACTIVATED: &str = "turn_activated";
@@ -88,6 +96,10 @@ impl DispatchedOutboxEvent {
 pub enum DispatchedOutboxEventKind {
     /// A session creation committed.
     SessionCreated,
+    /// A defaults replacement changed the model or model settings.
+    SessionModelSettingsChanged(SessionModelSettingsChanged),
+    /// An accepted origin froze complete model settings.
+    TurnModelSettingsResolved(TurnModelSettingsResolved),
     /// An accepted input and its queued turn committed.
     InputAccepted {
         /// Accepted input.
@@ -314,6 +326,8 @@ pub enum OutboxCorruption {
     InvalidTerminalEventCorrelation,
     /// A model-call transition had an inconsistent or unknown state shape.
     InvalidModelCallState,
+    /// A settings event disagreed with its immutable referenced records.
+    InvalidModelSettingsEvent,
 }
 
 impl fmt::Display for OutboxCorruption {
@@ -341,6 +355,7 @@ impl fmt::Display for OutboxCorruption {
                 "outbox terminal event correlations are invalid"
             }
             Self::InvalidModelCallState => "outbox model-call state is invalid",
+            Self::InvalidModelSettingsEvent => "outbox model-settings event is invalid",
         })
     }
 }
@@ -543,6 +558,209 @@ async fn load_event(
             )
             .await?;
             DispatchedOutboxEventKind::SessionCreated
+        }
+        SESSION_MODEL_SETTINGS_CHANGED => {
+            let row = sqlx::query(
+                "SELECT changed.command_id, changed.prior_defaults_version,
+                        changed.installed_defaults_version,
+                        prior.model_selection_kind AS prior_model_kind,
+                        prior.direct_model_selection_id AS prior_direct_id,
+                        prior.model_alias_id AS prior_alias_id,
+                        installed.model_selection_kind AS installed_model_kind,
+                        installed.direct_model_selection_id AS installed_direct_id,
+                        installed.model_alias_id AS installed_alias_id,
+                        changed.prior_model_settings,
+                        changed.installed_model_settings,
+                        prior.model_settings AS prior_defaults_model_settings,
+                        installed.model_settings AS installed_defaults_model_settings,
+                        changed.caller_model_settings,
+                        command.caller_model_settings AS command_caller_model_settings,
+                        changed.adjustments
+                   FROM session_model_settings_changed_outbox_event AS event
+                   JOIN session_model_settings_changed AS changed
+                     ON changed.session_id = event.session_id
+                    AND changed.installed_defaults_version =
+                        event.installed_defaults_version
+                   JOIN session_defaults_version AS prior
+                     ON prior.session_id = changed.session_id
+                    AND prior.version = changed.prior_defaults_version
+                   JOIN session_defaults_version AS installed
+                    ON installed.session_id = changed.session_id
+                    AND installed.version = changed.installed_defaults_version
+                   JOIN replace_session_defaults_command AS command
+                     ON command.command_id = changed.command_id
+                    AND command.result_session_id = changed.session_id
+                    AND command.result_installed_version =
+                        changed.installed_defaults_version
+                    AND command.result_kind = 'applied'
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let prior_version =
+                defaults_version_from_numeric(row.try_get("prior_defaults_version")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            let installed_version =
+                defaults_version_from_numeric(row.try_get("installed_defaults_version")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            let prior_model_settings: Value = row.try_get("prior_model_settings")?;
+            let installed_model_settings: Value = row.try_get("installed_model_settings")?;
+            if prior_model_settings != row.try_get::<Value, _>("prior_defaults_model_settings")?
+                || installed_model_settings
+                    != row.try_get::<Value, _>("installed_defaults_model_settings")?
+                || row.try_get::<Value, _>("caller_model_settings")?
+                    != row.try_get::<Value, _>("command_caller_model_settings")?
+            {
+                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+            }
+            let event = SessionModelSettingsChanged::try_new(
+                session,
+                durable_command_id_from_uuid(row.try_get("command_id")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                prior_version,
+                installed_version,
+                decode_settings_model_selection(
+                    row.try_get("prior_model_kind")?,
+                    row.try_get("prior_direct_id")?,
+                    row.try_get("prior_alias_id")?,
+                )?,
+                decode_settings_model_selection(
+                    row.try_get("installed_model_kind")?,
+                    row.try_get("installed_direct_id")?,
+                    row.try_get("installed_alias_id")?,
+                )?,
+                model_settings_from_json(prior_model_settings)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                model_settings_from_json(installed_model_settings)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                model_settings_overlay_from_json(row.try_get::<Value, _>("caller_model_settings")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                model_change_adjustments_from_json(row.try_get::<Value, _>("adjustments")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+            )
+            .ok_or(OutboxCorruption::InvalidModelSettingsEvent)?;
+            DispatchedOutboxEventKind::SessionModelSettingsChanged(event)
+        }
+        TURN_MODEL_SETTINGS_RESOLVED => {
+            let row = sqlx::query(
+                "WITH RECURSIVE configuration_origin AS (
+                     SELECT queued.*
+                       FROM turn_model_settings_resolved_outbox_event AS event
+                       JOIN turn_model_settings_resolved AS settings
+                         ON settings.accepted_input_id = event.accepted_input_id
+                        AND settings.session_id = event.session_id
+                       JOIN queued_input_origin AS queued
+                         ON queued.accepted_input_id = settings.accepted_input_id
+                        AND queued.turn_id = settings.turn_id
+                        AND queued.session_id = settings.session_id
+                      WHERE event.event_sequence = $1
+                        AND event.session_id = $2
+                     UNION
+                     SELECT source.*
+                       FROM configuration_origin AS current
+                       JOIN queued_input_origin AS source
+                         ON source.turn_id = current.source_configuration_turn_id
+                        AND source.session_id = current.session_id
+                 )
+                 SELECT settings.accepted_input_id, settings.turn_id,
+                        settings.defaults_version,
+                        settings.selected_direct_model_id,
+                        settings.per_call_model_settings,
+                        settings.resolved_model_settings,
+                        settings.adjusted_from_selection_id,
+                        settings.adjustments,
+                        queued.requested_model_kind,
+                        queued.requested_direct_model_selection_id,
+                        queued.requested_model_alias_id,
+                        queued.frozen_model_kind,
+                        queued.frozen_direct_model_selection_id,
+                        queued.frozen_model_alias_id,
+                        queued.frozen_alias_selected_direct_id,
+                        queued.defaults_version AS origin_defaults_version,
+                        origin_accepted.model_settings_override
+                            AS origin_per_call_model_settings,
+                        defaults.model_settings AS origin_defaults_model_settings
+                   FROM turn_model_settings_resolved_outbox_event AS event
+                   JOIN turn_model_settings_resolved AS settings
+                     ON settings.accepted_input_id = event.accepted_input_id
+                    AND settings.session_id = event.session_id
+                   JOIN configuration_origin AS queued
+                     ON queued.session_id = settings.session_id
+                    AND queued.source_configuration_turn_id IS NULL
+                   JOIN accepted_input AS origin_accepted
+                     ON origin_accepted.accepted_input_id = queued.accepted_input_id
+                    AND origin_accepted.session_id = queued.session_id
+                    AND origin_accepted.origin_turn_id = queued.turn_id
+                   JOIN session_defaults_version AS defaults
+                     ON defaults.session_id = queued.session_id
+                    AND defaults.version = queued.defaults_version
+                  WHERE event.event_sequence = $1
+                    AND event.session_id = $2",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .bind(stored_session)
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let frozen = decode_settings_frozen_model(
+                row.try_get("frozen_model_kind")?,
+                row.try_get("frozen_direct_model_selection_id")?,
+                row.try_get("frozen_model_alias_id")?,
+                row.try_get("frozen_alias_selected_direct_id")?,
+            )?;
+            if frozen.selected_direct().into_uuid()
+                != row.try_get::<Uuid, _>("selected_direct_model_id")?
+            {
+                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+            }
+            let event = TurnModelSettingsResolved::try_new(
+                AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
+                TurnId::from_uuid(row.try_get("turn_id")?),
+                defaults_version_from_numeric(row.try_get("defaults_version")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                frozen,
+                model_settings_overlay_from_json(
+                    row.try_get::<Value, _>("per_call_model_settings")?,
+                )
+                .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                model_settings_from_json(row.try_get::<Value, _>("resolved_model_settings")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+                row.try_get::<Option<Uuid>, _>("adjusted_from_selection_id")?
+                    .map(DirectModelSelection::from_uuid),
+                model_change_adjustments_from_json(row.try_get::<Value, _>("adjustments")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?,
+            )
+            .ok_or(OutboxCorruption::InvalidModelSettingsEvent)?;
+            let requested = decode_settings_model_selection(
+                row.try_get("requested_model_kind")?,
+                row.try_get("requested_direct_model_selection_id")?,
+                row.try_get("requested_model_alias_id")?,
+            )?;
+            if requested != requested_from_frozen(event.selection()) {
+                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+            }
+            let origin_defaults_version =
+                defaults_version_from_numeric(row.try_get("origin_defaults_version")?)
+                    .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            let origin_per_call = model_settings_overlay_from_json(
+                row.try_get::<Value, _>("origin_per_call_model_settings")?,
+            )
+            .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            let origin_defaults = model_settings_from_json(
+                row.try_get::<Value, _>("origin_defaults_model_settings")?,
+            )
+            .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            if event.defaults_version() != origin_defaults_version
+                || event.per_call_override() != origin_per_call
+                || !crate::model_settings_resolution::matches_defaults(&event, origin_defaults)
+            {
+                return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
+            }
+            DispatchedOutboxEventKind::TurnModelSettingsResolved(event)
         }
         INPUT_ACCEPTED => {
             let row = sqlx::query(
@@ -1559,9 +1777,62 @@ fn decode_model_call_state(
     }
 }
 
+fn decode_settings_model_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+) -> Result<ModelSelectionRequest, OutboxCorruption> {
+    match (kind.as_str(), direct, alias) {
+        ("direct", Some(selection), None) => Ok(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(selection),
+        )),
+        ("alias", None, Some(alias)) => {
+            Ok(ModelSelectionRequest::Alias(ModelAlias::from_uuid(alias)))
+        }
+        _ => Err(OutboxCorruption::InvalidModelSettingsEvent),
+    }
+}
+
+fn decode_settings_frozen_model(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    alias_selected: Option<Uuid>,
+) -> Result<FrozenModelSelection, OutboxCorruption> {
+    match (kind.as_str(), direct, alias, alias_selected) {
+        ("direct", Some(selection), None, None) => Ok(FrozenModelSelection::Direct(
+            DirectModelSelection::from_uuid(selection),
+        )),
+        ("frozen_alias", None, Some(alias), Some(selected)) => {
+            Ok(FrozenModelSelection::FrozenAlias {
+                alias: ModelAlias::from_uuid(alias),
+                definition: FrozenAliasDefinition::selecting(DirectModelSelection::from_uuid(
+                    selected,
+                )),
+            })
+        }
+        _ => Err(OutboxCorruption::InvalidModelSettingsEvent),
+    }
+}
+
+fn requested_from_frozen(selection: &FrozenModelSelection) -> ModelSelectionRequest {
+    match selection {
+        FrozenModelSelection::Direct(selection) => ModelSelectionRequest::Direct(*selection),
+        FrozenModelSelection::FrozenAlias { alias, .. } => ModelSelectionRequest::Alias(*alias),
+    }
+}
+
 pub(crate) enum OutboxEvent {
     SessionCreated {
         session: SessionId,
+    },
+    SessionModelSettingsChanged {
+        session: SessionId,
+        installed_defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+    },
+    TurnModelSettingsResolved {
+        session: SessionId,
+        accepted_input: AcceptedInputId,
     },
     InputAccepted {
         session: SessionId,
@@ -1663,6 +1934,17 @@ pub(crate) async fn append(
         OutboxEvent::SessionCreated { session } => {
             append_session_created(connection, session).await
         }
+        OutboxEvent::SessionModelSettingsChanged {
+            session,
+            installed_defaults_version,
+        } => {
+            append_session_model_settings_changed(connection, session, installed_defaults_version)
+                .await
+        }
+        OutboxEvent::TurnModelSettingsResolved {
+            session,
+            accepted_input,
+        } => append_turn_model_settings_resolved(connection, session, accepted_input).await,
         OutboxEvent::InputAccepted {
             session,
             accepted_input,
@@ -1926,6 +2208,60 @@ async fn append_session_created(
     .execute(connection)
     .await?;
 
+    Ok(())
+}
+
+async fn append_session_model_settings_changed(
+    connection: &mut PgConnection,
+    session: SessionId,
+    installed_defaults_version: signalbox_domain::SessionConfigurationDefaultsVersion,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO session_model_settings_changed_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             installed_defaults_version)
+         SELECT event_sequence, event_kind, storage_version, session_id, $4
+           FROM header",
+    )
+    .bind(SESSION_MODEL_SETTINGS_CHANGED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(defaults_version_to_numeric(installed_defaults_version))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_turn_model_settings_resolved(
+    connection: &mut PgConnection,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_model_settings_resolved_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             accepted_input_id)
+         SELECT event_sequence, event_kind, storage_version, session_id, $4
+           FROM header",
+    )
+    .bind(TURN_MODEL_SETTINGS_RESOLVED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(accepted_input_id_to_uuid(accepted_input))
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 

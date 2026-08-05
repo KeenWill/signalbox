@@ -1524,6 +1524,31 @@ pub struct ModelSettingsSnapshot {
     pub validated_for_selection_id: Option<CanonicalUuid>,
 }
 
+/// Complete frozen settings evidence for one transcript turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnModelSettingsSnapshot {
+    /// Turn that owns this frozen settings evidence.
+    pub turn_id: CanonicalUuid,
+    /// Accepted input that originated the turn.
+    pub accepted_input_id: CanonicalUuid,
+    /// Session-defaults epoch resolved for the origin.
+    pub defaults_version: CanonicalU64,
+    /// Model request before alias freezing.
+    pub requested_model: ModelSelection,
+    /// Direct model selected for execution.
+    pub selected_direct_id: CanonicalUuid,
+    /// Exact per-call settings contribution.
+    pub per_call_override: ModelSettingsOverlay,
+    /// Complete validated settings frozen for execution.
+    pub settings: ModelSettingsSnapshot,
+    /// Prior direct selection adjusted by a model change, or null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub adjusted_from_selection_id: Option<CanonicalUuid>,
+    /// Ordered automatic model-change adjustments.
+    pub adjustments: Vec<ModelChangeAdjustment>,
+}
+
 impl ModelSettingsSnapshot {
     fn validate(&self) -> Result<(), FrameValidationError> {
         let resolved = resolve_wire_settings(self.precedence);
@@ -1569,6 +1594,20 @@ impl ModelSettingsSnapshot {
             && self.reasoning_source.is_none()
             && self.fast_mode_source.is_none()
             && self.service_tier_source.is_none()
+    }
+}
+
+impl TurnModelSettingsSnapshot {
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        validate_turn_settings_payload(
+            self.defaults_version,
+            &self.requested_model,
+            self.selected_direct_id,
+            self.per_call_override,
+            &self.settings,
+            self.adjusted_from_selection_id,
+            &self.adjustments,
+        )
     }
 }
 
@@ -5049,6 +5088,43 @@ pub enum SessionEvent {
     },
 }
 
+fn validate_turn_settings_payload(
+    defaults_version: CanonicalU64,
+    requested_model: &ModelSelection,
+    selected_direct_id: CanonicalUuid,
+    per_call_override: ModelSettingsOverlay,
+    settings: &ModelSettingsSnapshot,
+    adjusted_from_selection_id: Option<CanonicalUuid>,
+    adjustments: &[ModelChangeAdjustment],
+) -> Result<(), FrameValidationError> {
+    settings.validate()?;
+    validate_adjustments(adjustments)?;
+    let direct_selection_mismatch = matches!(
+        requested_model,
+        ModelSelection::Direct { selection_id } if *selection_id != selected_direct_id
+    );
+    let validation_mismatch = match settings.validated_for_selection_id {
+        Some(selection_id) => selection_id != selected_direct_id,
+        None => !settings.is_model_independent_provider_defaults(),
+    };
+    let adjustment_provenance_mismatch = unapply_wire_adjustments(settings, adjustments)
+        .and_then(|unadjusted| apply_wire_adjustments(unadjusted, adjustments))
+        != Some(settings.precedence);
+    if defaults_version.value() == 0
+        || direct_selection_mismatch
+        || validation_mismatch
+        || settings.precedence.per_call != per_call_override
+        || match adjustments.is_empty() {
+            true => adjusted_from_selection_id.is_some(),
+            false => adjusted_from_selection_id.is_none_or(|prior| prior == selected_direct_id),
+        }
+        || adjustment_provenance_mismatch
+    {
+        return Err(FrameValidationError::ModelSettingsShape);
+    }
+    Ok(())
+}
+
 fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationError> {
     match event {
         SessionEvent::SessionModelSettingsChanged {
@@ -5109,35 +5185,15 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             adjusted_from_selection_id,
             adjustments,
             ..
-        } => {
-            settings.validate()?;
-            validate_adjustments(adjustments)?;
-            let direct_selection_mismatch = matches!(
-                requested_model,
-                ModelSelection::Direct { selection_id } if selection_id != selected_direct_id
-            );
-            let validation_mismatch = match settings.validated_for_selection_id {
-                Some(selection_id) => selection_id != *selected_direct_id,
-                None => !settings.is_model_independent_provider_defaults(),
-            };
-            let adjustment_provenance_mismatch = unapply_wire_adjustments(settings, adjustments)
-                .and_then(|unadjusted| apply_wire_adjustments(unadjusted, adjustments))
-                != Some(settings.precedence);
-            if defaults_version.value() == 0
-                || direct_selection_mismatch
-                || validation_mismatch
-                || settings.precedence.per_call != *per_call_override
-                || match adjustments.is_empty() {
-                    true => adjusted_from_selection_id.is_some(),
-                    false => {
-                        adjusted_from_selection_id.is_none_or(|prior| prior == *selected_direct_id)
-                    }
-                }
-                || adjustment_provenance_mismatch
-            {
-                return Err(FrameValidationError::ModelSettingsShape);
-            }
-        }
+        } => validate_turn_settings_payload(
+            *defaults_version,
+            requested_model,
+            *selected_direct_id,
+            *per_call_override,
+            settings,
+            *adjusted_from_selection_id,
+            adjustments,
+        )?,
         SessionEvent::ToolApprovalDecided {
             decision,
             decider,
@@ -5521,6 +5577,10 @@ pub enum ServerMessage {
         turn_id: CanonicalUuid,
         /// Immutable acceptance order.
         acceptance_position: CanonicalU64,
+        /// Complete frozen settings for a settings-aware turn, or null for a
+        /// turn committed before settings evidence existed.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        model_settings: Option<TurnModelSettingsSnapshot>,
         /// Exact lifecycle state.
         state: TurnState,
     },
@@ -5741,6 +5801,25 @@ impl ServerMessage {
                 }
             }
             Self::SessionEvent { event, .. } => validate_settings_event(event)?,
+            Self::TranscriptTurn {
+                turn_id,
+                model_settings: Some(settings),
+                state,
+                ..
+            } => {
+                settings.validate()?;
+                if settings.turn_id != *turn_id
+                    || (matches!(
+                        state,
+                        TurnState::Queued {
+                            accepted_input_id,
+                            ..
+                        } if settings.accepted_input_id != *accepted_input_id
+                    ))
+                {
+                    return Err(FrameValidationError::ModelSettingsShape);
+                }
+            }
             Self::TranscriptEntry {
                 entry:
                     TranscriptEntry::AssistantToolUse {
@@ -6713,8 +6792,8 @@ mod tests {
         ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
         SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
         ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
-        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line, validate_adjustments,
+        TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
+        decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -7419,7 +7498,7 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
@@ -7429,42 +7508,42 @@ mod tests {
     #[test]
     fn inv033_active_running_requires_current_model_call_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_shape_requires_nullable_attempt_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_call_requires_an_attempt() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_call_accepts_only_failure_dispositions() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
         );
     }
 
     #[test]
     fn inv033_failed_terminal_call_rejects_unknown_members() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
         );
     }
 
@@ -7476,6 +7555,7 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(2),
                     terminal_attempt_id: Some(uuid(3)),
@@ -7485,7 +7565,7 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
         )?;
         Ok(())
     }
@@ -7493,28 +7573,28 @@ mod tests {
     #[test]
     fn failed_terminal_call_rejects_an_unknown_failure_cause() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"future_provider_error"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"future_provider_error"}}}}"#,
         );
     }
 
     #[test]
     fn failed_terminal_call_rejects_explicit_null_cause() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":null}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":null}}}}"#,
         );
     }
 
     #[test]
     fn failed_terminal_call_rejects_a_cause_on_cancelled_disposition() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"cancelled","cause":"quota_exhausted"}}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"cancelled","cause":"quota_exhausted"}}}}"#,
         );
     }
 
     #[test]
     fn inv033_cancelled_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
         );
     }
 
@@ -7535,7 +7615,7 @@ mod tests {
     #[test]
     fn inv033_nested_terminal_duplicate_members_are_rejected() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
         );
     }
 
@@ -7547,6 +7627,7 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(2),
                     terminal_attempt_id: None,
@@ -7719,6 +7800,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: uuid(1),
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Failed {
                         terminal_frontier_id: uuid(2),
                         terminal_attempt_id: None,
@@ -10973,6 +11055,7 @@ mod tests {
         let model_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
+            model_settings: None,
             state: TurnState::ReconciliationRequired {
                 terminal_frontier_id: uuid(6),
                 terminal_attempt_id: uuid(7),
@@ -10991,6 +11074,7 @@ mod tests {
         let tool_reconciliation = ServerMessage::TranscriptTurn {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
+            model_settings: None,
             state: TurnState::ToolReconciliationRequired {
                 terminal_frontier_id: uuid(6),
                 terminal_attempt_id: uuid(7),
@@ -11443,43 +11527,47 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Refused {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: uuid(8),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"refused","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"refused","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(14)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: uuid(2),
                     content: InputContent::new("queued request".to_owned()),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
         )?;
         assert_server_message_round_trip(
             request(15)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(16)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: Some(CurrentModelCall::new(
@@ -11488,13 +11576,14 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"prepared"}}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"prepared"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(17)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: Some(CurrentModelCall::new(
@@ -11503,13 +11592,14 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"in_flight"}}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"in_flight"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(20)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveRunning {
                     current_attempt_id: uuid(7),
                     current_model_call: Some(CurrentModelCall::new(
@@ -11518,39 +11608,42 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(21)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: None,
                     terminal_model_call: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":null,"terminal_model_call":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":null,"terminal_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(22)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: Some(uuid(7)),
                     terminal_model_call: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(23)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: Some(uuid(7)),
@@ -11560,13 +11653,14 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"known_failed"}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"known_failed"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(24)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Failed {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: Some(uuid(7)),
@@ -11576,46 +11670,49 @@ mod tests {
                     )),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"cancelled"}}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"cancelled"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(25)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Cancelled {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: None,
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":null}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(26)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Cancelled {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: Some(uuid(8)),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(27)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ReconciliationRequired {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
                     terminal_model_call_id: uuid(8),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(8)?,
@@ -11838,6 +11935,117 @@ mod tests {
 
         assert_eq!(decoded, frame);
         Ok(())
+    }
+
+    /// INV-032 / INV-053: a late follower's authoritative turn projection
+    /// carries the same complete frozen settings evidence as the durable event.
+    #[test]
+    fn inv032_inv053_transcript_turn_round_trips_frozen_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let settings = settings_snapshot_fixture();
+        let message = ServerMessage::TranscriptTurn {
+            turn_id: uuid(3),
+            acceptance_position: CanonicalU64::new(1),
+            model_settings: Some(TurnModelSettingsSnapshot {
+                turn_id: uuid(3),
+                accepted_input_id: uuid(2),
+                defaults_version: CanonicalU64::new(7),
+                requested_model: ModelSelection::Direct {
+                    selection_id: uuid(4),
+                },
+                selected_direct_id: uuid(4),
+                per_call_override: settings.precedence.per_call,
+                settings,
+                adjusted_from_selection_id: None,
+                adjustments: Vec::new(),
+            }),
+            state: TurnState::Queued {
+                accepted_input_id: uuid(2),
+                content: InputContent::new("settings-aware turn".to_owned()),
+            },
+        };
+        let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(43)?, message)?;
+        let encoded = encode_server_line(&frame)?;
+
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    /// INV-033: queued turn settings evidence belongs to the accepted input
+    /// named by the authoritative queued state.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_queued_input() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    turn_id: uuid(3),
+                    accepted_input_id: uuid(5),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: InputContent::new("settings-aware turn".to_owned()),
+                },
+            },
+        )
+        .expect_err("queued settings must name the queued accepted input");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: terminal turn settings evidence belongs to the turn named by
+    /// the authoritative transcript projection.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_terminal_turn() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    turn_id: uuid(5),
+                    accepted_input_id: uuid(2),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Completed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: uuid(7),
+                    terminal_model_call_id: uuid(8),
+                },
+            },
+        )
+        .expect_err("terminal settings must name the projected turn");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: required-nullable turn settings cannot be omitted.
+    #[test]
+    fn inv033_transcript_turn_requires_model_settings_member() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}}"#,
+        );
     }
 
     /// INV-033: complete settings snapshots cannot contradict their retained
