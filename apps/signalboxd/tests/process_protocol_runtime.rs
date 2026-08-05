@@ -68,7 +68,7 @@ use signalbox_process_protocol::{
     ConversationSummary, CurrentModelCallState, EffectiveModelSettings, ErrorCode, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
     ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
     RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
     ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
@@ -390,6 +390,10 @@ fn primary_direct_selection_id() -> CanonicalUuid {
     CanonicalUuid::from_uuid(Uuid::from_u128(1))
 }
 
+fn next_direct_selection_id() -> CanonicalUuid {
+    CanonicalUuid::from_uuid(Uuid::from_u128(4))
+}
+
 fn low_reasoning_override() -> ModelSettingsOverlay {
     ModelSettingsOverlay {
         reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
@@ -661,6 +665,35 @@ async fn create_alias_session_with(
         ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
         message => Err(io::Error::other(format!(
             "unexpected create-session fixture response: {message:?}"
+        ))
+        .into()),
+    }
+}
+
+async fn create_direct_session_with_settings(
+    connection: &mut Connection,
+    selection_id: CanonicalUuid,
+    model_settings: ModelSettingsOverlay,
+) -> Result<(CanonicalUuid, ModelSettingsSnapshot), Box<dyn Error>> {
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSession {
+                command_id: command()?,
+                initial_model_selection: ModelSelection::Direct { selection_id },
+                model_settings,
+                system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
+            },
+        )
+        .await?;
+    match response_within(connection).await?.message() {
+        ServerMessage::SessionCreated {
+            session_id,
+            model_settings,
+        } => Ok((*session_id, *model_settings)),
+        message => Err(io::Error::other(format!(
+            "unexpected direct create-session response: {message:?}"
         ))
         .into()),
     }
@@ -1540,6 +1573,45 @@ struct TurnModelSettingsResolvedEventFacts {
     accepted_input_id: CanonicalUuid,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct SessionModelSettingsChangedEventFacts {
+    session_id: CanonicalUuid,
+    prior_defaults_version: u64,
+    installed_defaults_version: u64,
+    installed_settings: ModelSettingsSnapshot,
+    caller_override: ModelSettingsOverlay,
+    adjustments: Vec<ModelChangeAdjustment>,
+}
+
+#[track_caller]
+fn session_model_settings_changed_event_facts(
+    message: &ServerMessage,
+) -> SessionModelSettingsChangedEventFacts {
+    match message {
+        ServerMessage::SessionEvent {
+            session_id,
+            event:
+                SessionEvent::SessionModelSettingsChanged {
+                    prior_defaults_version,
+                    installed_defaults_version,
+                    installed_settings,
+                    caller_override,
+                    adjustments,
+                    ..
+                },
+            ..
+        } => SessionModelSettingsChangedEventFacts {
+            session_id: *session_id,
+            prior_defaults_version: prior_defaults_version.value(),
+            installed_defaults_version: installed_defaults_version.value(),
+            installed_settings: *installed_settings,
+            caller_override: *caller_override,
+            adjustments: adjustments.clone(),
+        },
+        message => panic!("fixture expected session-settings change event, got {message:?}"),
+    }
+}
+
 #[track_caller]
 fn turn_model_settings_resolved_event_facts(
     message: &ServerMessage,
@@ -1590,6 +1662,14 @@ fn protocol_error_code(message: &ServerMessage) -> ErrorCode {
     match message {
         ServerMessage::Error { code, .. } => *code,
         message => panic!("fixture expected protocol error, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn protocol_error_detail(message: &ServerMessage) -> Option<RejectionDetail> {
+    match message {
+        ServerMessage::Error { detail, .. } => detail.value(),
+        message => panic!("fixture expected protocol error detail, got {message:?}"),
     }
 }
 
@@ -5342,6 +5422,140 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
         ErrorCode::NotFound
     );
 
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-051: an explicit unsupported replacement value is a typed caller
+/// error even when changing models would have adjusted an inherited value.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv051_model_change_rejects_an_explicit_unsupported_setting()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let requested_reasoning = ReasoningLevel::Low;
+    let requested = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(requested_reasoning),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        requested,
+    )
+    .await?;
+
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: requested,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let error = response_within(&mut connection).await?.message().clone();
+
+    assert_eq!(protocol_error_code(&error), ErrorCode::Rejected);
+    assert_eq!(
+        protocol_error_detail(&error),
+        Some(RejectionDetail::UnsupportedReasoningLevel {
+            selection_id: next_direct_selection_id(),
+            requested: requested_reasoning,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-052 / INV-053: defaults replacement carries the prior session
+/// layer across a model change, clears an inherited incompatible value, and
+/// emits the exact automatic adjustment as durable follower evidence.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv052_inv053_model_change_clamps_inherited_session_settings()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let requested_reasoning = ReasoningLevel::Low;
+    let caller_session_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(requested_reasoning),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let (session_id, created_settings) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        caller_session_settings,
+    )
+    .await?;
+    let mut follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::One, 10, session_id).await?;
+
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let ServerMessage::SessionDefaultsReplaced {
+        defaults_version,
+        model_settings: installed_settings,
+        ..
+    } = *response_within(&mut connection).await?.message()
+    else {
+        panic!("model-changing defaults replacement must return its installed snapshot");
+    };
+    let event =
+        session_model_settings_changed_event_facts(response_within(&mut follow).await?.message());
+
+    assert_eq!(
+        created_settings.effective.reasoning_level,
+        Some(requested_reasoning)
+    );
+    assert_eq!(defaults_version.value(), 2);
+    assert_eq!(installed_settings.effective.reasoning_level, None);
+    assert_eq!(
+        installed_settings.precedence.session.reasoning_level,
+        SettingOverlay::ProviderDefault
+    );
+    assert_eq!(
+        installed_settings.validated_for_selection_id,
+        Some(next_direct_selection_id())
+    );
+    assert_eq!(event.session_id, session_id);
+    assert_eq!(event.prior_defaults_version, 1);
+    assert_eq!(event.installed_defaults_version, defaults_version.value());
+    assert_eq!(event.installed_settings, installed_settings);
+    assert_eq!(event.caller_override, ModelSettingsOverlay::inherit_all());
+    assert_eq!(
+        event.adjustments,
+        [ModelChangeAdjustment::ReasoningLevelCleared {
+            from: requested_reasoning,
+        }]
+    );
+
+    drop(follow);
     drop(connection);
     runtime.stop().await
 }

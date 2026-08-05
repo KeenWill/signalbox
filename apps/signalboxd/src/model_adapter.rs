@@ -263,8 +263,7 @@ context_window_tokens = 200000
 fast_mode = "alternate_target"
 fast_target_id = "20000000-0000-4000-8000-000000000002"
 
-[[models]]
-selection_id = "10000000-0000-4000-8000-000000000002"
+[[serving_targets]]
 target_id = "20000000-0000-4000-8000-000000000002"
 model_family = "anthropic"
 provider_model = "{fast_model}"
@@ -273,6 +272,7 @@ context_window_tokens = 200000
 "#,
         ))
         .expect("the declared alternate target is valid");
+        assert_eq!(configuration.model_capability_catalog().iter().count(), 1);
         let catalog = configuration.runtime_model_capability_catalog();
         let selected = ResolvedTarget::new(standard_model);
         let expected = ResolvedTarget::new(fast_model);

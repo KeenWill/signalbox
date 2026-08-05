@@ -7823,10 +7823,44 @@ where
         .await;
     };
     let replacement_model = domain_model_selection(model_selection);
-    let model_settings = match validate_session_model_settings(
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let prior_model_settings = match ProcessReadRepository::new(pool.clone())
+        .read_session_defaults(session, Some(expected_version))
+        .await
+    {
+        Ok(ProcessSessionDefaultsRead::Read(read)) => read.defaults().model_settings(),
+        Ok(
+            ProcessSessionDefaultsRead::SessionNotFound
+            | ProcessSessionDefaultsRead::VersionNotFound,
+        ) => ValidatedModelSettings::provider_defaults(),
+        Err(ProcessReadError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(ProcessReadError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SessionDefaultsCorruption,
+                ),
+            )
+            .await;
+        }
+    };
+    let caller_model_settings = domain_model_settings_overlay(model_settings);
+    let (model_settings, model_settings_adjustments) = match validate_replacement_model_settings(
         model_configuration,
         replacement_model,
-        model_settings,
+        caller_model_settings,
+        prior_model_settings,
     ) {
         Ok(settings) => settings,
         Err(error) => {
@@ -7866,11 +7900,13 @@ where
     } else {
         PromptMemberStatement::Stated
     };
-    let request = ReplaceSessionDefaultsRequest::try_new(
+    let request = ReplaceSessionDefaultsRequest::try_new_with_model_settings_adjustments(
         durable_command_id,
-        SessionId::from_uuid(session_id.into_uuid()),
+        session,
         expected_version,
         replacement,
+        caller_model_settings,
+        model_settings_adjustments.into_vec(),
         prompt_member,
     );
     let Ok(request) = request else {
@@ -10005,6 +10041,21 @@ fn validate_session_model_settings(
     selection: ModelSelectionRequest,
     value: WireModelSettingsOverlay,
 ) -> Result<ValidatedModelSettings, ModelSettingsAdmissionError> {
+    configuration
+        .validate_session_model_settings(selection, domain_model_settings_overlay(value))
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?
+        .map_err(|error| {
+            ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
+        })
+}
+
+fn validate_replacement_model_settings(
+    configuration: &HubModelConfiguration,
+    selection: ModelSelectionRequest,
+    caller: DomainModelSettingsOverlay,
+    prior: ValidatedModelSettings,
+) -> Result<(ValidatedModelSettings, Box<[DomainModelChangeAdjustment]>), ModelSettingsAdmissionError>
+{
     let direct = configuration
         .resolve_direct_selection(selection)
         .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
@@ -10012,19 +10063,61 @@ fn validate_session_model_settings(
     let capabilities = catalog
         .resolve(direct)
         .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    let (profile, global_default) = configuration
+        .model_settings_lower_layers(direct)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    let precedence = DomainModelSettingsPrecedence::new(
+        DomainModelSettingsOverlay::inherit_all(),
+        model_settings_overlay_inheriting_from(caller, prior.precedence().session()),
+        profile,
+        global_default,
+    );
+    if prior
+        .validated_for()
+        .is_some_and(|prior_selection| prior_selection != direct)
+    {
+        return capabilities
+            .validate_model_change(direct, precedence, caller)
+            .map(signalbox_domain::AdjustedModelSettings::into_parts)
+            .map_err(|error| {
+                ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
+            });
+    }
     capabilities
-        .validate_precedence(
-            direct,
-            DomainModelSettingsPrecedence::new(
-                DomainModelSettingsOverlay::inherit_all(),
-                domain_model_settings_overlay(value),
-                DomainModelSettingsOverlay::inherit_all(),
-                DomainModelSettingsOverlay::inherit_all(),
-            ),
-        )
+        .validate_precedence(direct, precedence)
+        .map(|settings| {
+            (
+                settings,
+                Vec::<DomainModelChangeAdjustment>::new().into_boxed_slice(),
+            )
+        })
         .map_err(|error| {
             ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
         })
+}
+
+const fn model_settings_overlay_inheriting_from(
+    caller: DomainModelSettingsOverlay,
+    prior: DomainModelSettingsOverlay,
+) -> DomainModelSettingsOverlay {
+    DomainModelSettingsOverlay::new(
+        match caller.reasoning_level() {
+            DomainSettingOverlay::Inherit => prior.reasoning_level(),
+            value @ (DomainSettingOverlay::ProviderDefault | DomainSettingOverlay::Value(_)) => {
+                value
+            }
+        },
+        match caller.fast_mode() {
+            DomainFastModeOverlay::Inherit => prior.fast_mode(),
+            value @ DomainFastModeOverlay::Value(_) => value,
+        },
+        match caller.service_tier() {
+            DomainSettingOverlay::Inherit => prior.service_tier(),
+            value @ (DomainSettingOverlay::ProviderDefault | DomainSettingOverlay::Value(_)) => {
+                value
+            }
+        },
+    )
 }
 
 enum ModelSettingsAdmissionError {

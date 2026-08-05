@@ -11,11 +11,12 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    AnthropicServiceTier, CodexCliServiceTier, DirectModelSelection, FastModeSupport,
-    FrozenAliasDefinition, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
-    ModelCapabilityDefinition, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    ProviderModelIdentity, ReasoningLevel, ResolvedProviderTarget, ServiceTier,
-    ToolApprovalPosture, ToolName,
+    AnthropicServiceTier, CodexCliServiceTier, DirectModelSelection, FastMode, FastModeOverlay,
+    FastModeSupport, FrozenAliasDefinition, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityDefinition, ModelSelectionRequest, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, OpenAiServiceTier,
+    ProviderModelIdentity, ReasoningLevel, ResolvedProviderTarget, ServiceTier, SettingOverlay,
+    ToolApprovalPosture, ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -266,6 +267,7 @@ pub struct HubModelConfiguration {
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
     model_capabilities: ModelCapabilityCatalog,
     runtime_model_capabilities: RuntimeModelCapabilityCatalog,
+    model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_kinds: HashMap<Arc<str>, BillingKind>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
@@ -280,6 +282,12 @@ pub struct HubModelConfiguration {
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModelSettingsLowerLayers {
+    profile: ModelSettingsOverlay,
+    global_default: ModelSettingsOverlay,
 }
 
 impl HubModelConfiguration {
@@ -300,7 +308,10 @@ impl HubModelConfiguration {
                 "credential_profiles",
                 "adapter_mappings",
                 "codex_cli",
+                "model_settings",
+                "model_settings_profiles",
                 "models",
+                "serving_targets",
                 "aliases",
                 "compaction",
                 "conversation_import",
@@ -313,6 +324,9 @@ impl HubModelConfiguration {
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
             return Err(HubModelConfigurationError::UnsupportedVersion);
         }
+        let global_model_settings = parse_model_settings_overlay(document.get("model_settings"))?;
+        let model_settings_profiles =
+            parse_model_settings_profiles(document.get("model_settings_profiles"))?;
         let compaction = document
             .get("compaction")
             .and_then(|item| item.as_table())
@@ -502,11 +516,13 @@ impl HubModelConfiguration {
         let mut domain_definitions = Vec::with_capacity(models.len());
         let mut runtime_definitions = Vec::with_capacity(models.len());
         let mut capability_definitions = Vec::with_capacity(models.len());
+        let mut model_settings_lower_layers = HashMap::with_capacity(models.len());
         let mut direct_selections = HashSet::with_capacity(models.len());
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
         let mut target_provider_models = HashMap::with_capacity(models.len());
+        let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
         let mut runtime_capability_projections = Vec::with_capacity(models.len());
         for model in models {
@@ -528,6 +544,7 @@ impl HubModelConfiguration {
                     "fast_mode",
                     "fast_target_id",
                     "service_tiers",
+                    "settings_profile",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -547,7 +564,36 @@ impl HubModelConfiguration {
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
+            selectable_targets.insert(target);
             let capabilities = parse_model_capabilities(model, mapping.adapter)?;
+            let profile = match model.get("settings_profile") {
+                None => ModelSettingsOverlay::inherit_all(),
+                Some(_) => {
+                    let profile_name = validated_name(required_string(model, "settings_profile")?)?;
+                    model_settings_profiles
+                        .get(&profile_name)
+                        .copied()
+                        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?
+                }
+            };
+            capabilities
+                .validate_precedence(
+                    selection,
+                    ModelSettingsPrecedence::new(
+                        ModelSettingsOverlay::inherit_all(),
+                        ModelSettingsOverlay::inherit_all(),
+                        profile,
+                        global_model_settings,
+                    ),
+                )
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            model_settings_lower_layers.insert(
+                selection,
+                ModelSettingsLowerLayers {
+                    profile,
+                    global_default: global_model_settings,
+                },
+            );
             let fast_target = match capabilities.fast_mode() {
                 FastModeSupport::AlternateTarget(target) => Some(target),
                 FastModeSupport::Unsupported | FastModeSupport::RequestControl => None,
@@ -607,6 +653,64 @@ impl HubModelConfiguration {
             });
         }
 
+        if let Some(serving_targets) = document
+            .get("serving_targets")
+            .map(|item| {
+                item.as_array_of_tables()
+                    .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+            })
+            .transpose()?
+        {
+            for serving_target in serving_targets {
+                reject_unknown_fields(
+                    serving_target,
+                    &[
+                        "target_id",
+                        "model_family",
+                        "provider_model",
+                        "max_output_tokens",
+                        "context_window_tokens",
+                    ],
+                )?;
+                let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    required_uuid(serving_target, "target_id")?,
+                ));
+                if target_provider_models.contains_key(&target) {
+                    return Err(HubModelConfigurationError::ConflictingTarget);
+                }
+                let model_family =
+                    validated_name(required_string(serving_target, "model_family")?)?;
+                let Some(mapping) = mappings.get(&model_family) else {
+                    return Err(HubModelConfigurationError::UnmappedModelFamily { model_family });
+                };
+                let provider_model = required_string(serving_target, "provider_model")?;
+                if provider_model.is_empty() || provider_model.trim() != provider_model {
+                    return Err(HubModelConfigurationError::InvalidProviderModel);
+                }
+                let provider_model = provider_model.to_owned();
+                let max_output_tokens = required_positive_u32(serving_target, "max_output_tokens")?;
+                let context_window_tokens =
+                    required_positive_u32(serving_target, "context_window_tokens")?;
+                target_provider_models.insert(target, provider_model.clone());
+                target_adapters.insert(target, mapping.adapter);
+                if let Some(previous) =
+                    provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
+                    && previous != mapping.adapter
+                {
+                    return Err(HubModelConfigurationError::ConflictingProviderModelRoute);
+                }
+                runtime_definitions.push(
+                    RuntimeModelDefinition::try_new(
+                        target,
+                        provider_model,
+                        max_output_tokens,
+                        context_window_tokens,
+                    )
+                    .map_err(|_| HubModelConfigurationError::InvalidField)?,
+                );
+            }
+        }
+
         if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
         {
             return Err(HubModelConfigurationError::DanglingApprovalJudgeSelection);
@@ -648,6 +752,7 @@ impl HubModelConfiguration {
             runtime_capability_projections,
             &target_provider_models,
             &target_adapters,
+            &selectable_targets,
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
@@ -674,6 +779,7 @@ impl HubModelConfiguration {
             routes,
             model_capabilities,
             runtime_model_capabilities,
+            model_settings_lower_layers,
             billing_kinds,
             billing_rates,
             target_adapters,
@@ -704,6 +810,36 @@ impl HubModelConfiguration {
     /// Returns the exact provider-target capability catalog used at preparation.
     pub fn runtime_model_capability_catalog(&self) -> RuntimeModelCapabilityCatalog {
         self.runtime_model_capabilities.clone()
+    }
+
+    /// Returns the copied profile and global layers for a direct selection.
+    pub fn model_settings_lower_layers(
+        &self,
+        selection: DirectModelSelection,
+    ) -> Option<(ModelSettingsOverlay, ModelSettingsOverlay)> {
+        self.model_settings_lower_layers
+            .get(&selection)
+            .map(|layers| (layers.profile, layers.global_default))
+    }
+
+    /// Resolves and validates one caller-owned session layer against its direct model.
+    pub fn validate_session_model_settings(
+        &self,
+        selection: ModelSelectionRequest,
+        session: ModelSettingsOverlay,
+    ) -> Option<Result<ValidatedModelSettings, UnsupportedModelSetting>> {
+        let direct = self.resolve_direct_selection(selection)?;
+        let capabilities = self.model_capabilities.resolve(direct)?;
+        let layers = self.model_settings_lower_layers.get(&direct)?;
+        Some(capabilities.validate_precedence(
+            direct,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                session,
+                layers.profile,
+                layers.global_default,
+            ),
+        ))
     }
 
     /// Returns the exact runtime delivery catalog used by the provider bridge.
@@ -1210,6 +1346,123 @@ fn required_positive_u32(table: &Table, key: &str) -> Result<u32, HubModelConfig
     }
 }
 
+fn parse_model_settings_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, ModelSettingsOverlay>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(HashMap::new());
+    };
+    let profiles = item
+        .as_array_of_tables()
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    let mut parsed = HashMap::with_capacity(profiles.len());
+    for profile in profiles {
+        reject_unknown_fields(
+            profile,
+            &["name", "reasoning_level", "fast_mode", "service_tier"],
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+        let name = validated_name(required_string(profile, "name")?)?;
+        let settings = parse_model_settings_overlay_table(profile)?;
+        if parsed.insert(name, settings).is_some() {
+            return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration);
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_model_settings_overlay(
+    item: Option<&Item>,
+) -> Result<ModelSettingsOverlay, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(ModelSettingsOverlay::inherit_all());
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    reject_unknown_fields(table, &["reasoning_level", "fast_mode", "service_tier"])
+        .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    parse_model_settings_overlay_table(table)
+}
+
+fn parse_model_settings_overlay_table(
+    table: &Table,
+) -> Result<ModelSettingsOverlay, HubModelConfigurationError> {
+    let reasoning_level = match table.get("reasoning_level") {
+        None => SettingOverlay::Inherit,
+        Some(item) => match item.as_str() {
+            Some("provider_default") => SettingOverlay::ProviderDefault,
+            Some(value) => SettingOverlay::Value(parse_configured_reasoning_level(value)?),
+            None => return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+        },
+    };
+    let fast_mode = match table.get("fast_mode").and_then(Item::as_str) {
+        None if table.get("fast_mode").is_none() => FastModeOverlay::Inherit,
+        Some("disabled") => FastModeOverlay::Value(FastMode::Disabled),
+        Some("enabled") => FastModeOverlay::Value(FastMode::Enabled),
+        _ => return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+    };
+    let service_tier = match table.get("service_tier") {
+        None => SettingOverlay::Inherit,
+        Some(item) if item.as_str() == Some("provider_default") => SettingOverlay::ProviderDefault,
+        Some(item) => SettingOverlay::Value(parse_configured_service_tier(item)?),
+    };
+    Ok(ModelSettingsOverlay::new(
+        reasoning_level,
+        fast_mode,
+        service_tier,
+    ))
+}
+
+fn parse_configured_reasoning_level(
+    value: &str,
+) -> Result<ReasoningLevel, HubModelConfigurationError> {
+    match value {
+        "none" => Ok(ReasoningLevel::None),
+        "minimal" => Ok(ReasoningLevel::Minimal),
+        "low" => Ok(ReasoningLevel::Low),
+        "medium" => Ok(ReasoningLevel::Medium),
+        "high" => Ok(ReasoningLevel::High),
+        "xhigh" => Ok(ReasoningLevel::XHigh),
+        "max" => Ok(ReasoningLevel::Max),
+        "ultra" => Ok(ReasoningLevel::Ultra),
+        _ => Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+    }
+}
+
+fn parse_configured_service_tier(item: &Item) -> Result<ServiceTier, HubModelConfigurationError> {
+    let table = item
+        .as_inline_table()
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    if table.len() != 2 || !table.contains_key("provider") || !table.contains_key("value") {
+        return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration);
+    }
+    let provider = table
+        .get("provider")
+        .and_then(toml_edit::Value::as_str)
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    let value = table
+        .get("value")
+        .and_then(toml_edit::Value::as_str)
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    match (provider, value) {
+        ("anthropic", "auto") => Ok(ServiceTier::Anthropic(AnthropicServiceTier::Auto)),
+        ("anthropic", "standard_only") => {
+            Ok(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))
+        }
+        ("open_ai", "auto") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Auto)),
+        ("open_ai", "default") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Default)),
+        ("open_ai", "flex") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Flex)),
+        ("open_ai", "scale") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Scale)),
+        ("open_ai", "priority") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
+        ("open_ai", "fast") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Fast)),
+        ("codex_cli", "default") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Default)),
+        ("codex_cli", "priority") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Priority)),
+        ("codex_cli", "flex") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Flex)),
+        _ => Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+    }
+}
+
 struct RuntimeCapabilityProjection {
     adapter: ModelAdapter,
     provider_model: String,
@@ -1220,6 +1473,7 @@ fn project_runtime_model_capabilities(
     projections: Vec<RuntimeCapabilityProjection>,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
+    selectable_targets: &HashSet<ResolvedProviderTarget>,
 ) -> Result<RuntimeModelCapabilityCatalog, HubModelConfigurationError> {
     let mut capabilities_by_provider_model = BTreeMap::new();
     for projection in projections {
@@ -1228,6 +1482,7 @@ fn project_runtime_model_capabilities(
             &projection.capabilities,
             target_provider_models,
             target_adapters,
+            selectable_targets,
         )?;
         if let Some(previous) =
             capabilities_by_provider_model.insert(projection.provider_model, capabilities.clone())
@@ -1254,6 +1509,7 @@ fn runtime_model_capabilities(
     capabilities: &ModelCapabilities,
     target_provider_models: &HashMap<ResolvedProviderTarget, String>,
     target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
+    selectable_targets: &HashSet<ResolvedProviderTarget>,
 ) -> Result<RuntimeModelCapabilities, HubModelConfigurationError> {
     let reasoning_levels = capabilities
         .reasoning_levels()
@@ -1265,6 +1521,9 @@ fn runtime_model_capabilities(
         FastModeSupport::Unsupported => None,
         FastModeSupport::RequestControl => Some(RuntimeFastModeTarget::SameTarget),
         FastModeSupport::AlternateTarget(target) => {
+            if selectable_targets.contains(&target) {
+                return Err(HubModelConfigurationError::InvalidModelCapabilities);
+            }
             let provider_model = target_provider_models
                 .get(&target)
                 .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
@@ -1506,6 +1765,8 @@ pub enum HubModelConfigurationError {
     DuplicateSelection,
     /// One per-model settings capability record was malformed.
     InvalidModelCapabilities,
+    /// A global, named-profile, or model-profile settings declaration was malformed.
+    InvalidModelSettingsConfiguration,
     /// The model catalog exceeded the process-protocol capability bound.
     TooManyModels,
     /// One target was assigned conflicting runtime meanings.
@@ -1596,6 +1857,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::InvalidModelCapabilities => {
                 "model configuration contains invalid model capabilities"
+            }
+            Self::InvalidModelSettingsConfiguration => {
+                "model configuration contains invalid model settings layers"
             }
             Self::TooManyModels => "model configuration contains too many models",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
@@ -1716,7 +1980,9 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        DirectModelSelection, ModelAlias, ModelSelectionRequest, ToolApprovalPosture,
+        AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, ModelAlias,
+        ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay, ReasoningLevel,
+        ServiceTier, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -2823,6 +3089,94 @@ extra = true"#,
         let configuration = CONFIGURATION.replace(
             "context_window_tokens = 200000",
             "context_window_tokens = 200000\nreasoning_levels = [\"ultra\"]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    #[test]
+    fn configuration_copies_named_profile_and_global_settings_layers_per_model() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[model_settings]\nreasoning_level = \"low\"\n\n[[model_settings_profiles]]\nname = \"deliberate\"\nreasoning_level = \"high\"\nfast_mode = \"enabled\"\nservice_tier = { provider = \"anthropic\", value = \"standard_only\" }",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nreasoning_levels = [\"low\", \"high\"]\nfast_mode = \"request_control\"\nservice_tiers = [\"standard_only\"]\nsettings_profile = \"deliberate\"",
+            );
+        let configured = HubModelConfiguration::parse(&configuration)
+            .expect("the selected model supports its copied lower layers");
+        let (profile, global_default) = configured
+            .model_settings_lower_layers(configured_judge_selection_fixture())
+            .expect("the direct model has copied lower settings layers");
+        let validated = configured
+            .validate_session_model_settings(
+                ModelSelectionRequest::Direct(configured_judge_selection_fixture()),
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the direct model is configured")
+            .expect("the inherited settings chain is supported");
+
+        assert_eq!(
+            profile.reasoning_level(),
+            SettingOverlay::Value(ReasoningLevel::High)
+        );
+        assert_eq!(
+            global_default.reasoning_level(),
+            SettingOverlay::Value(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            profile.fast_mode(),
+            FastModeOverlay::Value(FastMode::Enabled)
+        );
+        assert_eq!(
+            profile.service_tier(),
+            SettingOverlay::Value(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))
+        );
+        assert_eq!(
+            validated.effective().reasoning_level(),
+            Some(ReasoningLevel::High)
+        );
+        assert_eq!(
+            validated.resolved().reasoning_source(),
+            Some(ModelSettingSource::Profile)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_lower_layer_unsupported_by_the_selected_model() {
+        let configuration = CONFIGURATION.replace(
+            "version = 1",
+            "version = 1\n\n[model_settings]\nreasoning_level = \"low\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_selectable_model_as_an_alternate_fast_target() {
+        let configuration = format!(
+            r#"{}
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "anthropic"
+provider_model = "synthetic-selectable-fast-target"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+            CONFIGURATION.replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-000000000002\"",
+            )
         );
 
         assert_eq!(

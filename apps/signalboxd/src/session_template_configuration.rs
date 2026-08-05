@@ -16,10 +16,10 @@ use signalbox_application::{
     ReviewOrchestrationAttemptId, ReviewStageTemplateDigests, ReviewTemplateDigest,
 };
 use signalbox_domain::{
-    DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest, ReviewKey,
-    ReviewPolicy, ReviewTargetId, SessionConfigurationDefaults, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance,
-    SessionTemplateVersion,
+    DangerousToolAutoApproval, DirectModelSelection, ModelAlias, ModelSelectionRequest,
+    ModelSettingsOverlay, ReviewKey, ReviewPolicy, ReviewTargetId, SessionConfigurationDefaults,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SessionTemplateVersion, ValidatedModelSettings,
 };
 use toml_edit::{DocumentMut, Table};
 use uuid::Uuid;
@@ -305,11 +305,16 @@ fn parse_review_library(
         ReviewKey::try_new(required_string(table, "concern_set_version")?.to_owned())
             .map_err(|_| SessionTemplateConfigurationError::InvalidReviewKey)?;
     let model = parse_model_selection(table, models)?;
+    let model_settings = models
+        .validate_session_model_settings(model, ModelSettingsOverlay::inherit_all())
+        .and_then(Result::ok)
+        .ok_or(SessionTemplateConfigurationError::InvalidModelSettings)?;
     let approval = parse_approval(table)?;
     let shared_header = required_nonempty_string(table, "shared_header")?;
     let source = ReviewTemplateSource {
         version: source_version,
         model,
+        model_settings,
         approval,
         shared_header,
     };
@@ -397,6 +402,7 @@ fn parse_review_library(
 struct ReviewTemplateSource<'a> {
     version: SessionTemplateVersion,
     model: ModelSelectionRequest,
+    model_settings: ValidatedModelSettings,
     approval: DangerousToolAutoApproval,
     shared_header: &'a str,
 }
@@ -425,8 +431,13 @@ fn insert_review_template(
     prompt.push_str(body);
     let prompt = SessionSystemPrompt::try_new(prompt)
         .map_err(|_| SessionTemplateConfigurationError::InvalidPrompt)?;
-    let defaults =
-        SessionConfigurationDefaults::complete(source.model, source.approval, Some(prompt));
+    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        source.model,
+        source.approval,
+        Some(prompt),
+        source.model_settings,
+    )
+    .ok_or(SessionTemplateConfigurationError::InvalidModelSettings)?;
     let digest = SessionTemplateContentDigest::derive(source.version, &defaults)
         .ok_or(SessionTemplateConfigurationError::MissingPrompt)?;
     templates.insert(
@@ -618,8 +629,17 @@ fn parse_template(
     } else {
         DangerousToolAutoApproval::Disabled
     };
-    let defaults =
-        SessionConfigurationDefaults::complete(model, dangerous_tool_auto_approval, Some(prompt));
+    let model_settings = models
+        .validate_session_model_settings(model, ModelSettingsOverlay::inherit_all())
+        .and_then(Result::ok)
+        .ok_or(SessionTemplateConfigurationError::InvalidModelSettings)?;
+    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        model,
+        dangerous_tool_auto_approval,
+        Some(prompt),
+        model_settings,
+    )
+    .ok_or(SessionTemplateConfigurationError::InvalidModelSettings)?;
     let digest = SessionTemplateContentDigest::derive(version, &defaults)
         .ok_or(SessionTemplateConfigurationError::MissingPrompt)?;
     Ok(ResolvedSessionTemplate {
@@ -770,6 +790,7 @@ pub enum SessionTemplateConfigurationError {
     MissingModelSelection,
     ConflictingModelSelection,
     UnknownModelSelection,
+    InvalidModelSettings,
     MissingPrompt,
     ConflictingPrompt,
     InvalidPromptPath,
@@ -800,6 +821,9 @@ impl fmt::Display for SessionTemplateConfigurationError {
             Self::MissingModelSelection => "session template has no model selection",
             Self::ConflictingModelSelection => "session template has multiple model selections",
             Self::UnknownModelSelection => "session template names an unknown model selection",
+            Self::InvalidModelSettings => {
+                "session template model settings are invalid for its model selection"
+            }
             Self::MissingPrompt => "session template has no system prompt",
             Self::ConflictingPrompt => "session template has multiple system prompts",
             Self::InvalidPromptPath => "session template contains an invalid prompt path",
@@ -822,8 +846,8 @@ mod tests {
 
     use signalbox_application::ReviewOrchestrationAttemptId;
     use signalbox_domain::{
-        DangerousToolAutoApproval, ModelSelectionRequest, ReviewTargetId, SessionSystemPrompt,
-        SessionTemplateName,
+        DangerousToolAutoApproval, ModelSelectionRequest, ModelSettingSource, ReasoningLevel,
+        ReviewTargetId, SessionSystemPrompt, SessionTemplateName,
     };
 
     use super::{
@@ -877,6 +901,43 @@ selection_id = "{SELECTION_ID}"
 "#,
         ))
         .expect("synthetic model fixture is valid")
+    }
+
+    fn models_with_global_reasoning() -> HubModelConfiguration {
+        HubModelConfiguration::parse(&format!(
+            r#"
+version = 1
+
+[model_settings]
+reasoning_level = "low"
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
+[compaction]
+prompt = "Summarize the prior conversation faithfully for continuation."
+
+[[models]]
+selection_id = "{SELECTION_ID}"
+target_id = "{TARGET_ID}"
+model_family = "anthropic"
+provider_model = "synthetic-model"
+max_output_tokens = 1024
+context_window_tokens = 200000
+reasoning_levels = ["low"]
+
+[[aliases]]
+alias_id = "{ALIAS_ID}"
+selection_id = "{SELECTION_ID}"
+"#,
+        ))
+        .expect("synthetic lower-layer model fixture is valid")
     }
 
     fn inline_catalog(extra: &str) -> String {
@@ -960,6 +1021,33 @@ documentation-code-drift = "Find documentation drift."
         assert_eq!(
             template.provenance().content_digest().as_bytes(),
             &EXPECTED_TEMPLATE_DIGEST
+        );
+    }
+
+    #[test]
+    fn template_defaults_copy_the_selected_models_lower_settings_layers() {
+        let configuration = SessionTemplateConfiguration::parse_at(
+            &inline_catalog(""),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models_with_global_reasoning(),
+        )
+        .expect("valid settings-aware template catalog loads");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())
+            .expect("fixture template name is admitted");
+        let settings = configuration
+            .resolve(&name)
+            .expect("configured template resolves")
+            .defaults()
+            .model_settings();
+
+        assert_eq!(
+            settings.effective().reasoning_level(),
+            Some(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            settings.resolved().reasoning_source(),
+            Some(ModelSettingSource::GlobalDefault)
         );
     }
 
