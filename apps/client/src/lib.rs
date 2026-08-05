@@ -27,19 +27,20 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, DelegationWaitMode, DescendantTerminationScope,
-    ErrorCode, ErrorDetail, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState, InputContent,
-    InputDelivery, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_client_line, encode_server_line,
+    ConversationOriginFilter, ConversationSummary, DelegationMessageDirection, DelegationOutcome,
+    DelegationPolicy, DelegationProvenance, DelegationReason, DelegationWaitMode,
+    DescendantTerminationScope, ErrorCode, ErrorDetail, FrameEncodeError, GoalHistoryEvent,
+    GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+    MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
+    ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingsOverlay, ProtocolVersion,
+    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
+    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+    TurnState, decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -169,6 +170,171 @@ enum ConversationImportResponse {
         detail: ErrorDetail,
     },
     Unexpected,
+}
+
+enum DelegationResponse {
+    Spawned {
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        relationship: DelegationPolicy,
+    },
+    AwaitRegistered {
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        mode: DelegationWaitMode,
+    },
+    ChildResult {
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        content: Option<String>,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    },
+    MessageSent {
+        tool_request_id: CanonicalUuid,
+        message_id: CanonicalUuid,
+        direction: DelegationMessageDirection,
+        ordinal: CanonicalU64,
+        delivery_sequence: CanonicalU64,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+        detail: ErrorDetail,
+    },
+    Unexpected,
+}
+
+fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
+    match message {
+        ServerMessage::SessionSpawned {
+            tool_request_id,
+            child_session_id,
+            relationship,
+        } => DelegationResponse::Spawned {
+            tool_request_id,
+            child_session_id,
+            relationship,
+        },
+        ServerMessage::SessionAwaitRegistered {
+            tool_request_id,
+            child_session_id,
+            mode,
+        } => DelegationResponse::AwaitRegistered {
+            tool_request_id,
+            child_session_id,
+            mode,
+        },
+        ServerMessage::ChildResult {
+            await_request_id,
+            spawning_request_id,
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+        } => DelegationResponse::ChildResult {
+            await_request_id,
+            spawning_request_id,
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+        },
+        ServerMessage::SessionMessageSent {
+            tool_request_id,
+            message_id,
+            direction,
+            ordinal,
+            delivery_sequence,
+        } => DelegationResponse::MessageSent {
+            tool_request_id,
+            message_id,
+            direction,
+            ordinal,
+            delivery_sequence,
+        },
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => DelegationResponse::Error {
+            code,
+            message,
+            detail,
+        },
+        ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionPlacementUpdated { .. }
+        | ServerMessage::InputSubmitted { .. }
+        | ServerMessage::SteeringSubmitted { .. }
+        | ServerMessage::GoalTransitionApplied { .. }
+        | ServerMessage::GoalHistoryStart { .. }
+        | ServerMessage::GoalHistoryState { .. }
+        | ServerMessage::GoalHistoryItem { .. }
+        | ServerMessage::GoalHistoryEnd { .. }
+        | ServerMessage::SessionsStart {}
+        | ServerMessage::SessionSummary { .. }
+        | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::TemplatesStart {}
+        | ServerMessage::TemplateSummary { .. }
+        | ServerMessage::TemplatesEnd { .. }
+        | ServerMessage::SessionMetadataPageStart {}
+        | ServerMessage::SessionMetadataSummary { .. }
+        | ServerMessage::SessionMetadataPageEnd { .. }
+        | ServerMessage::ConversationPageStart {}
+        | ServerMessage::ConversationSummary { .. }
+        | ServerMessage::ConversationPageEnd { .. }
+        | ServerMessage::ModelAliasesStart {}
+        | ServerMessage::ModelAliasSummary { .. }
+        | ServerMessage::ModelAliasesEnd { .. }
+        | ServerMessage::ModelCapabilitiesStart {}
+        | ServerMessage::ModelCapabilityItem { .. }
+        | ServerMessage::ModelCapabilitiesEnd { .. }
+        | ServerMessage::SessionMetadata { .. }
+        | ServerMessage::SessionMetadataReplaced { .. }
+        | ServerMessage::SessionDefaultsReplaced { .. }
+        | ServerMessage::SessionDefaults { .. }
+        | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::SessionCompacted { .. }
+        | ServerMessage::ConversationImportBegun { .. }
+        | ServerMessage::ConversationImportAppended { .. }
+        | ServerMessage::ConversationImportInserted { .. }
+        | ServerMessage::ConversationImportAlreadyImported { .. }
+        | ServerMessage::ConversationImportAborted {}
+        | ServerMessage::ImportedConversationStart { .. }
+        | ServerMessage::ImportedConversationEntry { .. }
+        | ServerMessage::ImportedConversationEnd { .. }
+        | ServerMessage::TranscriptSnapshotStart { .. }
+        | ServerMessage::TranscriptTurn { .. }
+        | ServerMessage::TranscriptModelCallUsage { .. }
+        | ServerMessage::TranscriptModelCallsEnd { .. }
+        | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptTextEntry { .. }
+        | ServerMessage::TranscriptContent { .. }
+        | ServerMessage::TranscriptSnapshotEnd { .. }
+        | ServerMessage::SessionEvent { .. }
+        | ServerMessage::ProviderTextDelta { .. }
+        | ServerMessage::ReviewTargetCreated { .. }
+        | ServerMessage::ReviewRunStarted { .. }
+        | ServerMessage::ReviewPassActivated { .. }
+        | ServerMessage::ReviewPassCompleted { .. }
+        | ServerMessage::ReviewFindingsRecorded { .. }
+        | ServerMessage::ReviewFindingEventRecorded { .. }
+        | ServerMessage::ReviewExternalLinkReserved { .. }
+        | ServerMessage::ReviewExternalLinkAttached { .. }
+        | ServerMessage::ReviewTarget { .. }
+        | ServerMessage::ReviewRun { .. }
+        | ServerMessage::ReviewFinding { .. }
+        | ServerMessage::ReviewFindingsStart { .. }
+        | ServerMessage::ReviewFindingItem { .. }
+        | ServerMessage::ReviewFindingsEnd { .. }
+        | ServerMessage::ReviewOrchestrationStarted { .. }
+        | ServerMessage::ReviewOrchestrationAdvanced { .. }
+        | ServerMessage::ReviewOrchestration { .. } => DelegationResponse::Unexpected,
+    }
 }
 
 fn classify_conversation_import_response(message: ServerMessage) -> ConversationImportResponse {
@@ -969,23 +1135,36 @@ async fn session_delegation(
                     relationship,
                 })
                 .await?;
-            match connection.message().await.map_err(ClientError::mutation)? {
-                ServerMessage::SessionSpawned {
+            match classify_delegation_response(
+                connection.message().await.map_err(ClientError::mutation)?,
+            ) {
+                DelegationResponse::Spawned {
                     tool_request_id: recorded_request,
                     child_session_id,
                     relationship: recorded_relationship,
-                } if recorded_request == tool_request_id
-                    && recorded_relationship == relationship =>
-                {
-                    output.session_spawned(tool_request_id, child_session_id, relationship)?;
-                    Ok(())
+                } => {
+                    if recorded_request == tool_request_id && recorded_relationship == relationship
+                    {
+                        output.session_spawned(tool_request_id, child_session_id, relationship)?;
+                        Ok(())
+                    } else {
+                        Err(
+                            ClientError::Protocol("spawn returned an unexpected receipt")
+                                .mutation(),
+                        )
+                    }
                 }
-                ServerMessage::Error {
+                DelegationResponse::Error {
                     code,
                     message,
                     detail,
                 } => Err(ClientError::remote(code, message, detail).mutation()),
-                _ => Err(ClientError::Protocol("spawn returned an unexpected receipt").mutation()),
+                DelegationResponse::AwaitRegistered { .. }
+                | DelegationResponse::ChildResult { .. }
+                | DelegationResponse::MessageSent { .. }
+                | DelegationResponse::Unexpected => {
+                    Err(ClientError::Protocol("spawn returned an unexpected receipt").mutation())
+                }
             }
         }
         SessionCommand::Await {
@@ -1004,20 +1183,29 @@ async fn session_delegation(
                     mode,
                 })
                 .await?;
-            match connection.message().await.map_err(ClientError::mutation)? {
-                ServerMessage::SessionAwaitRegistered {
+            match classify_delegation_response(
+                connection.message().await.map_err(ClientError::mutation)?,
+            ) {
+                DelegationResponse::AwaitRegistered {
                     tool_request_id: recorded_request,
                     child_session_id: recorded_child,
                     mode: recorded_mode,
-                } if recorded_request == tool_request_id
-                    && recorded_child == child_session_id
-                    && recorded_mode == mode
-                    && mode == DelegationWaitMode::Background =>
-                {
-                    output.session_await_registered(tool_request_id, child_session_id, mode)?;
-                    Ok(())
+                } => {
+                    if recorded_request == tool_request_id
+                        && recorded_child == child_session_id
+                        && recorded_mode == mode
+                        && mode == DelegationWaitMode::Background
+                    {
+                        output.session_await_registered(tool_request_id, child_session_id, mode)?;
+                        Ok(())
+                    } else {
+                        Err(
+                            ClientError::Protocol("await returned an unexpected response")
+                                .mutation(),
+                        )
+                    }
                 }
-                ServerMessage::ChildResult {
+                DelegationResponse::ChildResult {
                     await_request_id: recorded_request,
                     spawning_request_id,
                     child_session_id: recorded_child,
@@ -1025,27 +1213,38 @@ async fn session_delegation(
                     content,
                     reason,
                     provenance,
-                } if mode == DelegationWaitMode::Foreground
-                    && recorded_request == tool_request_id
-                    && recorded_child == child_session_id =>
-                {
-                    output.child_result(
-                        tool_request_id,
-                        spawning_request_id,
-                        child_session_id,
-                        outcome,
-                        content.as_ref(),
-                        reason,
-                        provenance,
-                    )?;
-                    Ok(())
+                } => {
+                    if mode == DelegationWaitMode::Foreground
+                        && recorded_request == tool_request_id
+                        && recorded_child == child_session_id
+                    {
+                        output.child_result(
+                            tool_request_id,
+                            spawning_request_id,
+                            child_session_id,
+                            outcome,
+                            content.as_ref(),
+                            reason,
+                            provenance,
+                        )?;
+                        Ok(())
+                    } else {
+                        Err(
+                            ClientError::Protocol("await returned an unexpected response")
+                                .mutation(),
+                        )
+                    }
                 }
-                ServerMessage::Error {
+                DelegationResponse::Error {
                     code,
                     message,
                     detail,
                 } => Err(ClientError::remote(code, message, detail).mutation()),
-                _ => Err(ClientError::Protocol("await returned an unexpected response").mutation()),
+                DelegationResponse::Spawned { .. }
+                | DelegationResponse::MessageSent { .. }
+                | DelegationResponse::Unexpected => {
+                    Err(ClientError::Protocol("await returned an unexpected response").mutation())
+                }
             }
         }
         SessionCommand::Message {
@@ -1065,30 +1264,42 @@ async fn session_delegation(
                     content,
                 })
                 .await?;
-            match connection.message().await.map_err(ClientError::mutation)? {
-                ServerMessage::SessionMessageSent {
+            match classify_delegation_response(
+                connection.message().await.map_err(ClientError::mutation)?,
+            ) {
+                DelegationResponse::MessageSent {
                     tool_request_id: recorded_request,
                     message_id,
                     direction,
                     ordinal,
                     delivery_sequence,
-                } if recorded_request == tool_request_id => {
-                    output.session_message_sent(
-                        tool_request_id,
-                        peer_session_id,
-                        message_id,
-                        direction,
-                        ordinal.value(),
-                        delivery_sequence.value(),
-                    )?;
-                    Ok(())
+                } => {
+                    if recorded_request == tool_request_id {
+                        output.session_message_sent(
+                            tool_request_id,
+                            peer_session_id,
+                            message_id,
+                            direction,
+                            ordinal.value(),
+                            delivery_sequence.value(),
+                        )?;
+                        Ok(())
+                    } else {
+                        Err(
+                            ClientError::Protocol("message returned an unexpected receipt")
+                                .mutation(),
+                        )
+                    }
                 }
-                ServerMessage::Error {
+                DelegationResponse::Error {
                     code,
                     message,
                     detail,
                 } => Err(ClientError::remote(code, message, detail).mutation()),
-                _ => {
+                DelegationResponse::Spawned { .. }
+                | DelegationResponse::AwaitRegistered { .. }
+                | DelegationResponse::ChildResult { .. }
+                | DelegationResponse::Unexpected => {
                     Err(ClientError::Protocol("message returned an unexpected receipt").mutation())
                 }
             }

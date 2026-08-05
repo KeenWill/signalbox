@@ -21,8 +21,8 @@ The model/session-settings wire vocabulary was verified through PR #439
 The tool-approval decision event surface is verified against this implementing
 change.
 
-The session-delegation process and terminal surface was re-verified through
-`agent/delegation-client-verbs-v2`.
+The session-delegation process and terminal surface was re-verified through PR
+#459 (`agent/delegation-client-verbs-v2`).
 
 Verified against the implementing change in PR #323 (`agent/protocol-collapse`),
 the closed provider-failure/native transcript projections in PR #330
