@@ -3580,6 +3580,7 @@ mod tests {
         const SESSION: &str = "00000000-0000-0000-0000-000000000001";
         const TURN: &str = "00000000-0000-0000-0000-000000000002";
         const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        const TASK: &str = "inspect logs";
         let (session_id, turn_id, tool_request_id, task, relationship) =
             parsed_delegation_spawn(parse(
                 [
@@ -3589,7 +3590,7 @@ mod tests {
                     TURN,
                     REQUEST,
                     "--task",
-                    "inspect logs",
+                    TASK,
                     "--background",
                 ]
                 .map(Into::into),
@@ -3598,7 +3599,7 @@ mod tests {
         assert_eq!(session_id.to_string(), SESSION);
         assert_eq!(turn_id.to_string(), TURN);
         assert_eq!(tool_request_id.to_string(), REQUEST);
-        assert_eq!(task, "inspect logs");
+        assert_eq!(task, TASK);
         assert_eq!(relationship, DelegationPolicy::Background {});
     }
 
@@ -3656,6 +3657,7 @@ mod tests {
         const TURN: &str = "00000000-0000-0000-0000-000000000002";
         const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
         const PEER: &str = "00000000-0000-0000-0000-000000000004";
+        const CONTENT_FILE: &str = "message.txt";
         let (peer_session_id, path) = parsed_delegation_message(parse(
             [
                 "session",
@@ -3665,13 +3667,13 @@ mod tests {
                 REQUEST,
                 PEER,
                 "--content-file",
-                "message.txt",
+                CONTENT_FILE,
             ]
             .map(Into::into),
         ));
 
         assert_eq!(peer_session_id.to_string(), PEER);
-        assert_eq!(path, PathBuf::from("message.txt"));
+        assert_eq!(path, PathBuf::from(CONTENT_FILE));
     }
 
     #[test]
