@@ -747,8 +747,9 @@ The output-token ceiling is enforced by the cleared child environment, while
 reasoning level and fast mode use the explicit preparation mappings owned by
 [model/session settings](model-session-settings.md#adapter-translation).
 Temperature, top-p, and stop sequences are the capability-limited advisory
-exception for this adapter. Exact-target capability and mapping validation
-precedes the ambient-login reference check; a service tier is always rejected.
+exception for this adapter. When an operation carries an explicit
+catalog-governed control, exact-target capability and mapping validation
+precedes the ambient-login reference check. A service tier is always rejected.
 
 The adapter crate does not compose itself into signalboxd and defines no
 provider-selection or configuration mapping.

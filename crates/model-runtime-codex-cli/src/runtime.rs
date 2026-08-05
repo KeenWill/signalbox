@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentVariable,
-    CliProcessRequest, CodexCliServiceTier, DeliveryMode, FastMode, ModelCapabilityCatalog,
-    ModelOperation, ModelRuntime, ModelSettings, ObservationSink, PreparationDefect,
-    PreparationFailure, PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, ServiceTier,
-    TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
+    AnthropicServiceTier, CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal,
+    CliEnvironmentVariable, CliProcessRequest, CodexCliServiceTier, DeliveryMode, FastMode,
+    ModelCapabilityCatalog, ModelOperation, ModelRuntime, ModelSettings, ObservationSink,
+    OpenAiServiceTier, PreparationDefect, PreparationFailure, PreparationOutcome,
+    ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence, TerminalReport,
+    UnsentCause, execute_cli_process,
 };
 use tempfile::NamedTempFile;
 
@@ -464,7 +465,19 @@ fn codex_controls(
         }
         (
             FastMode::Disabled | FastMode::Enabled,
-            Some(ServiceTier::Anthropic(_) | ServiceTier::OpenAi(_)),
+            Some(
+                ServiceTier::Anthropic(
+                    AnthropicServiceTier::Auto | AnthropicServiceTier::StandardOnly,
+                )
+                | ServiceTier::OpenAi(
+                    OpenAiServiceTier::Auto
+                    | OpenAiServiceTier::Default
+                    | OpenAiServiceTier::Flex
+                    | OpenAiServiceTier::Scale
+                    | OpenAiServiceTier::Priority
+                    | OpenAiServiceTier::Fast,
+                ),
+            ),
         ) => {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: "Codex cannot enforce another provider's service tier".to_string(),
