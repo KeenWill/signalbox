@@ -18,17 +18,19 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The
-tool-attributed metadata command and reconstitution surface was verified through
-PR #265 (`agent/tool-batch-tier0`). The failed tool-attempt telemetry fields
-were verified through PR #285 (`agent/dev-instance-code-host-credential`). The
-current command/telemetry identity-generation, command-family, and
-ambiguity-ownership inventory was verified through PR #288
-(`agent/audit-fix-docs-coherence`); the context-compaction command lifecycle was
-verified through PR #314 (`agent/context-compaction-protocol`). The checked
-placement-update request boundary and path-scoped placement command family were
-verified through PR #400 (`agent/scoped-visibility-wiring`). The runner recovery
-command families are the foundation proposal at the bottom of their implementing
-stack and become verified only with those child pull requests.
+model-settings command version boundaries were verified through PR #441
+(`agent/model-settings-persistence`). The tool-attributed metadata command and
+reconstitution surface was verified through PR #265 (`agent/tool-batch-tier0`).
+The failed tool-attempt telemetry fields were verified through PR #285
+(`agent/dev-instance-code-host-credential`). The current command/telemetry
+identity-generation, command-family, and ambiguity-ownership inventory was
+verified through PR #288 (`agent/audit-fix-docs-coherence`); the
+context-compaction command lifecycle was verified through PR #314
+(`agent/context-compaction-protocol`). The checked placement-update request
+boundary and path-scoped placement command family were verified through PR #400
+(`agent/scoped-visibility-wiring`). The runner recovery command families are the
+foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests.
 
 ## Identity model
 
@@ -263,21 +265,26 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-New `CreateSession` records use storage version 6 and new
-`CreateSessionFromImportedFrontier` records remain written at version 3. Version
-4 is committed-unimplemented compatibility space for that command family's
-optional runner-placement payload: no present writer or decoder provides it. New
-`ReplaceSessionDefaults` records use version 3. All three families reconstitute
-version 1 with dangerous blanket approval disabled and versions 1 and 2 with no
-system prompt. Create-session versions 1 through 3 carry no template provenance;
-version 4 and every later version require provenance for template mode and
-require its absence for explicit mode. Version 5 adds the optional session
-runner placement but remains unsupported until that payload's decoder lands;
-version 6 composes it with path-scoped placement. Each field is absent before
-its introducing version, so an older reader rejects a newer creation record
-instead of discarding either decision. `ReplaceSessionMetadata`, `SubmitInput`,
-and `DecideToolRequest` use version 1. `CreateSession` records applied results
-only (its one preparation failure is an error, not a recorded rejection);
+New `CreateSession` records use storage version 7, new
+`CreateSessionFromImportedFrontier` records use version 5, new
+`ReplaceSessionDefaults` records use version 4, and new `SubmitInput` records
+use version 2. Those versions introduce the commands' model-settings member;
+earlier supported versions accept only the provider-default full settings or
+inherit-all overlay backfilled by the migration. Imported-creation version 4
+remains committed-unimplemented compatibility space for that command family's
+optional runner-placement payload: no present writer or decoder provides it. All
+three defaults-bearing creation and replacement families reconstitute version 1
+with dangerous blanket approval disabled and versions 1 and 2 with no system
+prompt. Create-session versions 1 through 3 carry no template provenance;
+version 4 and every later supported version require provenance for template mode
+and require its absence for explicit mode. Create-session version 5 reserves the
+optional session runner placement and remains unsupported until that payload's
+decoder lands; version 6 adds path-scoped placement, and version 7 composes
+model settings with that implemented shape. Each field is absent before its
+introducing version, so an older reader rejects a newer creation record instead
+of discarding either decision. `ReplaceSessionMetadata` and `DecideToolRequest`
+use version 1. `CreateSession` records applied results only (its one preparation
+failure is an error, not a recorded rejection);
 `CreateSessionFromImportedFrontier` also records applied results only, because a
 missing conversation named by the frontier or a boundary absent from that
 conversation is a pre-claim admission error rather than an authoritative

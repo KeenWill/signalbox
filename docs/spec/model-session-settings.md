@@ -2,7 +2,9 @@
 
 Verified against PR #436 (`agent/model-settings-domain`) for its foundation
 proposal and domain/runtime value shapes, and PR #437
-(`agent/model-settings-adapters`) for provider-adapter translation.
+(`agent/model-settings-adapters`) for provider-adapter translation. Persistence
+evidence and its legacy cutover were verified through PR #441
+(`agent/model-settings-persistence`).
 
 This page is the foundation proposal at the bottom of the model-settings
 implementation stack. It specifies the cross-crate contract for model reasoning,
@@ -218,9 +220,10 @@ preserving overrides on defaults replacement and origin-producing input, typed
 unsupported-setting results, and the two durable settings events above. A
 transcript turn committed with settings evidence carries that complete frozen
 fact in every later authoritative snapshot, so a follower that attaches after
-the outbox event remains settings-complete; legacy turns carry explicit null.
-The protocol freeze condition has not occurred, so the same-tree protocol
-changes in place.
+the outbox event remains settings-complete. Only configuration roots marked by
+the settings migration as predating evidence carry explicit null; absence on a
+settings-aware root is corruption. The protocol freeze condition has not
+occurred, so the same-tree protocol changes in place.
 
 The capability projection never exposes a mapped fast serving identity. Client
 choices name only the durable direct selection and supported setting values.

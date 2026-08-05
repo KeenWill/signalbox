@@ -49,7 +49,8 @@ use crate::{
     outbox,
 };
 
-const STORAGE_VERSION: i16 = 3;
+const STORAGE_VERSION: i16 = 5;
+const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 5;
 // Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
@@ -935,7 +936,6 @@ pub(crate) fn reconstitute_bounded_current(
         required(&row, "model_settings")?,
         "model selection",
     )?;
-
     let seed_records = match (
         row.try_get::<Option<Uuid>, _>("seed_session_id")?,
         row.try_get::<Option<Uuid>, _>("seed_context_frontier_id")?,
@@ -1365,6 +1365,15 @@ fn decode_versioned_selection(
         )
         .into());
     }
+    if stored.storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && defaults.model_settings()
+            != signalbox_domain::ValidatedModelSettings::provider_defaults()
+    {
+        return Err(ImportedSessionCorruption::Inconsistent(
+            "storage version without model settings",
+        )
+        .into());
+    }
     Ok(defaults)
 }
 
@@ -1398,7 +1407,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ImportedSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=3) {
+    if matches!(actual, 1..=3 | 5) {
         Ok(actual)
     } else {
         Err(ImportedSessionCorruption::Unsupported {

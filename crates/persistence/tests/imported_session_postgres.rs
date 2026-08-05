@@ -8,6 +8,7 @@
 mod support;
 
 use std::{
+    collections::BTreeSet,
     error::Error,
     sync::{
         Arc,
@@ -22,11 +23,13 @@ use signalbox_application::{
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     BoundedImportedSessionReconstitutionFailure, ContextFrontierId,
-    CreateSessionFromImportedFrontier, DangerousToolAutoApproval, DirectModelSelection,
-    DurableCommandId, ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
-    ImportedTranscriptEntryId, ModelSelectionRequest, SemanticTranscriptEntryId,
+    CreateSessionFromImportedFrontier, CreateSessionFromImportedFrontierAppliedResult,
+    DangerousToolAutoApproval, DirectModelSelection, DurableCommandId, FastModeOverlay,
+    FastModeSupport, ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, ModelCapabilities, ModelSelectionRequest, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ReasoningLevel, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionId, SessionPlacement, SessionPlacementPath,
-    SessionPlacementVersion, TranscriptAncestry, UpdateSessionPlacement,
+    SessionPlacementVersion, SettingOverlay, TranscriptAncestry, UpdateSessionPlacement,
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
@@ -116,6 +119,54 @@ fn defaults(value: u128) -> SessionConfigurationDefaults {
     ))
 }
 
+fn low_reasoning_defaults(value: u128) -> SessionConfigurationDefaults {
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(value));
+    let precedence = ModelSettingsPrecedence::new(
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::Low),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        ),
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::inherit_all(),
+    );
+    let settings = ModelCapabilities::new(
+        BTreeSet::from([ReasoningLevel::Low]),
+        FastModeSupport::Unsupported,
+        BTreeSet::new(),
+    )
+    .validate_precedence(selection, precedence)
+    .expect("the fixture capability admits low reasoning");
+    SessionConfigurationDefaults::complete_with_model_settings(
+        ModelSelectionRequest::Direct(selection),
+        DangerousToolAutoApproval::Disabled,
+        None,
+        settings,
+    )
+    .expect("the fixture settings belong to the direct selection")
+}
+
+#[track_caller]
+fn imported_creation_applied(
+    outcome: CreateSessionFromImportedFrontierOutcome,
+) -> CreateSessionFromImportedFrontierAppliedResult {
+    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = outcome else {
+        panic!("fixture creation must apply")
+    };
+    applied
+}
+
+#[track_caller]
+fn imported_inconsistent_reason(error: ImportedSessionRepositoryError) -> &'static str {
+    let ImportedSessionRepositoryError::Corruption(ImportedSessionCorruption::Inconsistent(reason)) =
+        error
+    else {
+        panic!("fixture operation must fail with inconsistent imported-session evidence")
+    };
+    reason
+}
+
 fn imported_command(
     command: u128,
     conversation: &ImportedConversation,
@@ -191,6 +242,57 @@ async fn s28_inv038_inv039_first_imported_frontier_creation_commits_exact_seed_a
     .fetch_one(&pool)
     .await?;
     assert_eq!(counts, (1, 1, 1, 2, 2, 1, 1));
+    Ok(())
+}
+
+/// S28 / INV-012 / INV-053: an imported-creation command predating settings
+/// cannot replay with an explicit settings document.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv012_inv053_legacy_imported_creation_rejects_explicit_model_settings()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(0x13a, 0x23a, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let command = CreateSessionFromImportedFrontier::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x33a)),
+        conversation
+            .frontiers()
+            .last()
+            .expect("the fixture conversation has one frontier"),
+        ImportedSessionRelationship::Resume,
+        low_reasoning_defaults(0x53a),
+    );
+    let repository = ImportedSessionRepository::new(pool.clone(), test_session_credential_pin());
+    repository
+        .handle(
+            command.clone(),
+            SessionId::from_uuid(Uuid::from_u128(0x43a)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x73a)),
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x63a)),
+        )
+        .await?;
+
+    sqlx::raw_sql(
+        "ALTER TABLE durable_command DISABLE TRIGGER USER;
+         ALTER TABLE create_session_from_imported_frontier_command DISABLE TRIGGER USER;
+         ALTER TABLE create_session_from_imported_frontier_command DROP CONSTRAINT create_session_from_imported_frontier_command_registry_fk;
+         UPDATE durable_command SET storage_version = 3 WHERE command_id = '00000000-0000-0000-0000-00000000033a';
+         UPDATE create_session_from_imported_frontier_command SET storage_version = 3 WHERE command_id = '00000000-0000-0000-0000-00000000033a';",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert!(matches!(
+        repository.load(command.command_id()).await,
+        Err(ImportedSessionRepositoryError::Corruption(
+            ImportedSessionCorruption::Inconsistent("storage version without model settings")
+        ))
+    ));
     Ok(())
 }
 
@@ -317,9 +419,7 @@ async fn s28_inv002_inv012_imported_creation_replay_rejects_a_lagging_placement_
             },
         )
         .await?;
-    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = created else {
-        panic!("fixture creation must apply")
-    };
+    let applied = imported_creation_applied(created);
     SessionPlacementRepository::new(pool.clone())
         .handle(UpdateSessionPlacement::new(
             DurableCommandId::from_uuid(Uuid::from_u128(
@@ -356,11 +456,7 @@ async fn s28_inv002_inv012_imported_creation_replay_rejects_a_lagging_placement_
         )
         .await
         .expect_err("imported creation replay rejects a lagging placement head");
-    let ImportedSessionRepositoryError::Corruption(ImportedSessionCorruption::Inconsistent(reason)) =
-        error
-    else {
-        panic!("lagging imported placement head fails with typed corruption")
-    };
+    let reason = imported_inconsistent_reason(error);
     assert_eq!(reason, "session placement head behind event history");
     Ok(())
 }
@@ -413,9 +509,7 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
             },
         )
         .await?;
-    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = created else {
-        panic!("fixture creation must apply")
-    };
+    let applied = imported_creation_applied(created);
 
     let recorded = repository
         .load(command.command_id())
@@ -435,10 +529,9 @@ async fn s28_inv002_inv008_inv038_inv039_command_load_reconstitutes_complete_che
     .bind(Uuid::from_u128(0x302))
     .fetch_one(&pool)
     .await?;
-    // The defaults-bearing command families write kind-scoped storage
-    // version three since the session system prompt joined the payload
-    // (docs/spec/persistence-protocol.md).
-    assert_eq!(versions, (3, 3));
+    // Imported creation skips committed runner-placement version four and
+    // writes settings-bearing storage version five.
+    assert_eq!(versions, (5, 5));
     Ok(())
 }
 

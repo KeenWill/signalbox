@@ -31,11 +31,12 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const WRITTEN_STORAGE_VERSION: i16 = 6;
+const WRITTEN_STORAGE_VERSION: i16 = 7;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
 const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
+const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 7;
 // Applied migrations freeze this legacy storage spelling.
 const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
@@ -1003,6 +1004,14 @@ fn decode_selection(
         .transpose()?;
     let model_settings = model_settings_from_json(stored.model_settings)
         .map_err(|_| CreateSessionCorruption::Inconsistent("model settings"))?;
+    if stored.storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults()
+    {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "storage version without model settings",
+        )
+        .into());
+    }
     SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,

@@ -87,7 +87,8 @@ use crate::{
     },
 };
 
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
+const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 2;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 
@@ -5534,13 +5535,16 @@ fn decode_complete(
     existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let typed_id: Uuid = required(&row, "typed_command_id")?;
     if typed_id != durable_command_id_to_uuid(command_id) {
         return Err(SubmitInputCorruption::Inconsistent("typed command identity").into());
     }
     require_spelling(&row, "typed_kind", SUBMIT_INPUT_KIND)?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(SubmitInputCorruption::Inconsistent("command storage version").into());
+    }
 
     // Decode-level checks reject unknown or malformed actor spellings here;
     // comparing the decoded actor against the canonical command's actor is
@@ -5549,6 +5553,12 @@ fn decode_complete(
         required(&row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
+    )?;
+    let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
+    require_model_settings_override_version(
+        &command_model_settings_override,
+        typed_version,
+        "command model settings override",
     )?;
     let command = SubmitInput::new(
         command_id,
@@ -5566,7 +5576,7 @@ fn decode_complete(
             row.try_get("command_replacement_model_kind")?,
             row.try_get("command_replacement_direct_id")?,
             row.try_get("command_replacement_alias_id")?,
-            required(&row, "command_model_settings_override")?,
+            command_model_settings_override,
             "command delivery",
         )?,
     );
@@ -5700,6 +5710,7 @@ fn decode_applied_turn_origin(
     result_turn: TurnId,
     predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
+    let command_storage_version: i16 = required(row, "typed_version")?;
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
         .map_err(|_| SubmitInputCorruption::Inconsistent("accepting command identity"))?;
@@ -5846,6 +5857,19 @@ fn decode_applied_turn_origin(
             );
         }
     };
+    if command_storage_version >= MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && stored_model_settings.is_none()
+    {
+        return Err(SubmitInputCorruption::Missing("turn model settings evidence").into());
+    }
+    if command_storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && stored_model_settings.is_some()
+    {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "storage version with turn model settings evidence",
+        )
+        .into());
+    }
 
     Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         SubmitInputAppliedTurnOriginReconstitutionInput {
@@ -6318,20 +6342,38 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), SubmitInputRepositoryError> {
+) -> Result<i16, SubmitInputRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1..=STORAGE_VERSION) {
+        Ok(actual)
     } else {
         Err(SubmitInputCorruption::Unsupported {
             field,
             value: actual.to_string(),
         }
         .into())
+    }
+}
+
+fn require_model_settings_override_version(
+    value: &Value,
+    storage_version: i16,
+    field: &'static str,
+) -> Result<(), SubmitInputRepositoryError> {
+    let overlay = model_settings_overlay_from_json(value.clone())
+        .map_err(|_| SubmitInputCorruption::Inconsistent(field))?;
+    if storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && overlay != signalbox_domain::ModelSettingsOverlay::inherit_all()
+    {
+        Err(
+            SubmitInputCorruption::Inconsistent("storage version without model settings override")
+                .into(),
+        )
+    } else {
+        Ok(())
     }
 }
 
