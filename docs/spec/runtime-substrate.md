@@ -27,12 +27,14 @@ shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
 (`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
-projection is verified against PR #389 (`agent/cost-accounting`). It covers the
-provider-neutral operation, observation, and evidence vocabulary; SSE framing;
-structured-output and tool decode; `ScriptedModel`; the four provider adapters;
-and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
+mappings and advisory exceptions are verified against PR #437
+(`agent/model-settings-adapters`). This page covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the four provider adapters; and their
+credential boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -74,9 +76,10 @@ no durable state, makes no lifecycle decisions, and performs no logging.
 `ResolvedTarget`), optional system text, typed conversation history
 (`ConversationMessage` with text, replayed tool calls, tool results, and signed
 or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
-optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
-`ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
-a `DeliveryMode` (buffered or streamed). Settings are provider-enforced request
+optional temperature, top-p, stop sequences, reasoning level, fast mode, and
+provider-tagged service tier), declared `ToolDefinition`s, a `ToolChoice`
+(automatic/any/named), an optional `StructuredOutputContract`, and a
+`DeliveryMode` (buffered or streamed). Settings are provider-enforced request
 controls unless an adapter's owning section records a capability-limited
 advisory exception; an adapter never silently presents prompt instructions as
 hard transport controls.
@@ -425,6 +428,12 @@ Usage is provider-stated only, never estimated; OpenAI's cache-read count comes
 from `prompt_tokens_details.cached_tokens` and no cache-creation count is
 fabricated.
 
+Anthropic preflight input counting preserves the generation request's
+prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped
+fast serving identity consumes the fast toggle during preparation, so neither
+the `speed` field nor its beta header is emitted for the counting or generation
+request in addition to that alternate target.
+
 ## Codex CLI provider adapter
 
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
@@ -538,6 +547,14 @@ two, and top-p outside zero through one as unsupported caller input. The offline
 fake CLI verifies the advisory rendering and applies the same strict-schema
 validation to every spawned exchange, so a schema shape the live API refuses
 cannot pass the fixture corpus.
+
+Reasoning level, fast mode, and service tier are enforced through the explicit
+preparation mappings owned by
+[model/session settings](model-session-settings.md#adapter-translation); they
+are not part of the advisory exception above. The adapter validates the exact
+target capability record before checking its ambient-login reference whenever an
+operation carries an explicit catalog-governed control, and never delegates
+validation to the CLI. Provider-default-only operations need no catalog lookup.
 
 The adapter bounds every stdout event while copying and drains stderr while
 retaining only a bounded prefix. Streamed credential lookbehind retains at most
@@ -725,6 +742,14 @@ reads, copies, or logs a credential store. Provider-controlled text,
 identifiers, errors, reasoning, and tool JSON pass through the same
 credential-shape and cross-fragment redaction discipline as the Codex CLI
 adapter before observations or terminal evidence leave the crate.
+
+The output-token ceiling is enforced by the cleared child environment, while
+reasoning level and fast mode use the explicit preparation mappings owned by
+[model/session settings](model-session-settings.md#adapter-translation).
+Temperature, top-p, and stop sequences are the capability-limited advisory
+exception for this adapter. When an operation carries an explicit
+catalog-governed control, exact-target capability and mapping validation
+precedes the ambient-login reference check. A service tier is always rejected.
 
 The adapter crate does not compose itself into signalboxd and defines no
 provider-selection or configuration mapping.
