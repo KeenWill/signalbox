@@ -17,20 +17,35 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and differ behavior below is verified against this PR
-(`agent/repo-watch-persistence`). Polling and rule dispatch become implemented
-only in the later child pull requests named by their verification references.
+(`agent/repo-watch-persistence`). Polling behavior is verified against this PR
+(`agent/repo-watch-poller`). Rule dispatch becomes implemented only in the later
+child pull request named by its verification reference.
 
 ## Configuration and credential boundary
 
-**Foundation contract.** Repository watch has one optional, versioned TOML
-section. It contains a list of repositories, a list of signal-reviewer logins,
-and versioned structured rules. Each repository entry names exactly one
-`namespace/name` repository, a positive polling interval, and its own credential
-file reference. Duplicate repositories, missing credential-file references,
-unknown keys, unsupported versions, zero intervals, malformed values, and
-invalid rules fail configuration before any watch task starts. Other daemon
-GitHub credentials do not substitute for a missing repository-watch credential
-reference.
+**Implemented behavior.** Repository watch has one optional, versioned TOML
+section containing a list of repositories and a list of signal-reviewer logins.
+Each repository entry names exactly one `namespace/name` repository, a positive
+polling interval, and its own credential file reference. Duplicate repositories,
+watch credentials shared between repositories or with the daemon's session
+GitHub tools, missing credential-file references, unknown keys, unsupported
+versions, zero intervals, malformed values, and invalid entries fail
+configuration before either runtime starts. Other daemon GitHub credentials do
+not substitute for a missing repository-watch credential reference. Credential
+paths are absolute and cannot contain parent-directory components, so lexical
+and filesystem aliases cannot bypass duplicate-reference validation. On Unix,
+existing files are also compared by device and inode, so hard links cannot
+bypass the boundary. Final and intermediate symlink components are resolved even
+while their target file or directory is absent; later creation of that target
+therefore cannot turn two admitted references into one shared credential. The
+daemon's session GitHub credential reference is likewise normalized before this
+overlap check, including when an intermediate lexical component does not yet
+exist.
+
+**Committed unimplemented functionality.** Slice 4 adds versioned structured
+rules to this same section and makes invalid rules a startup configuration
+failure. No present configuration surface accepts rules; this paragraph binds
+only that compatibility constraint.
 
 **Implemented behavior.** Repository identities normalize to ASCII lowercase at
 construction. Both slug segments are nonempty ASCII letters, digits, dots,
@@ -39,7 +54,7 @@ managed-user, and App-bot logins likewise normalize to ASCII lowercase so exact
 author matching and signal-reviewer filtering use GitHub's case-insensitive
 identity semantics.
 
-**Foundation contract.** Credential files follow the house credential-file
+**Implemented behavior.** Credential files follow the house credential-file
 pattern: configuration stores paths rather than secrets; request preparation
 reopens the selected file and reads a bounded value; errors and telemetry name
 only the reference, never the secret; and rotation affects later requests
@@ -51,20 +66,45 @@ dispatch record, session parameter, error, or log.
 
 ## Poll transport and differ
 
-**Foundation contract.** Version one uses conditional-request polling with one
+**Implemented behavior.** Version one uses conditional-request polling with one
 independent task per configured repository and the repository's configured
 interval. Each resource request sends `If-None-Match` only when the repository
 task's process-local cache holds that resource's ETag and typed accepted state.
-A resource-level `304 Not Modified` reuses only that resource's accepted state
-and does not skip the remaining fetches; GitHub does not count a conditional
-`304` against the primary rate limit. Cache keys are bounded, non-secret
-resource/page identifiers rather than query strings. The cache starts empty on
-every daemon start, so the first poll and the first poll after restart perform
-one complete unconditional fetch. A failed, rejected, partial, or unparseable
-poll submits no persistence candidate. The next poll occurs after the
-per-repository interval; version one has no webhook fallback and no speculative
-second polling transport. No present runtime performs these polls; Slice 3
-implements this constraint.
+A production task sends only to the fixed `https://api.github.com` origin. REST
+paths are anchored to the configured base repository, and GraphQL variables name
+that same repository. The client requires TLS 1.2 or newer and disables
+redirects, environment proxies, and automatic retries so credential-bearing
+requests cannot be redirected or silently replayed outside their repository
+attempt. A resource-level `304 Not Modified` reuses only that resource's
+accepted state and does not skip the remaining fetches; GitHub does not count a
+conditional `304` against the primary rate limit. Cache keys are bounded,
+non-secret resource/page identifiers rather than query strings. The cache starts
+empty on every daemon start, so the first poll and the first poll after restart
+perform one complete unconditional fetch. When a current poll replaces a
+resource at the cache's entry bound, admission evicts an untouched stale entry
+before enforcing that bound; replacement within the bound cannot wedge later
+polls. REST continuation follows GitHub's `Link` relation for the next page, not
+response cardinality: a full terminal page at the 100-page bound completes the
+projection, while a next relation beyond that bound fails the poll. Because a
+`304` can omit changed pagination metadata, a cached full terminal page
+conservatively probes one bounded successor; the cap page is reread
+unconditionally so that probe never manufactures page 101. A failed, rejected,
+partial, or unparseable poll submits no persistence candidate. The next poll
+occurs after the per-repository interval; version one has no webhook fallback
+and no speculative second polling transport.
+
+**Implemented behavior.** Check-suite and check-run requests explicitly select
+all attempts and follow bounded result pages. Check runs are enumerated through
+each suite returned by the paginated commit suite inventory rather than the
+provider's commit check-run search, whose 1,000-suite cap cannot represent a
+complete baseline. Every completed provider identity returned by that projection
+enters the comparison baseline; the provider's latest-attempt default cannot
+silently discard a completion between polls.
+
+**Implemented behavior.** Daemon shutdown wins a race with a repository task's
+clean exit. Once shutdown is observable, the supervisor drains every watch task
+and reports a clean stop; a task that exits cleanly before shutdown remains a
+runtime lifecycle defect.
 
 **Implemented behavior.** The versioned durable cursor retains only the complete
 normalized repository state and exact signal-reviewer set needed for comparison.
@@ -79,28 +119,45 @@ events is rejected. The relational event table admits an event row only in the
 database transaction that inserts its referenced cursor generation, preventing
 later maintenance or future writers from changing an already-committed batch.
 
+**Implemented behavior.** The version-one cursor reader remains compatible with
+the earlier version-one workflow record that lacked a workflow-definition ID. It
+admits only the otherwise-canonical legacy shape, uses the retained run ID as
+the definition-identity sentinel, suppresses the same completed run attempt by
+branch, run ID, and attempt number, and writes the complete current shape on the
+next successful commit. A legacy cursor therefore cannot permanently block its
+repository.
+
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
 (`workflow_id`, `run_id`, `run_attempt`), producing only the closed version-one
 event vocabulary below in deterministic order. The cursor retains provider
 identity and completion generation for completed check suites and check runs,
 plus provider identities for reviews, threads, and both the workflow definition
-and branch-workflow run. A rerequested suite or run therefore emits its later
-completion even when its provider identity and conclusion are unchanged.
-Workflows that share a display name remain distinct, and renaming a workflow
-cannot re-emit its already-observed run. The display name remains the
-rule-visible event payload. A provider fact retained in the consecutive
-comparison baseline is not re-emitted. Rules receive only events: they cannot
-inspect normalized snapshots or rerun the differ. Why: transport independence
-requires both polling and a later authenticated webhook receiver to feed the
-same durable facts.
+and branch-workflow run attempt. The poller uses the provider's `updated_at`
+value as the completion generation for both completed check suites and check
+runs, so an edited completed run conclusion is observable even when its
+`completed_at` value is unchanged. A rerequested suite or run therefore emits
+its later completion even when its provider identity and conclusion are
+unchanged. Workflows that share a display name remain distinct, renaming a
+workflow cannot re-emit its already observed run attempt, and a new attempt
+under an unchanged run ID does emit. The display name remains the rule-visible
+event payload. A provider fact retained in the consecutive comparison baseline
+is not re-emitted. Rules receive only events: they cannot inspect normalized
+snapshots or rerun the differ. Why: transport independence requires both polling
+and a later authenticated webhook receiver to feed the same durable facts.
 
-**Foundation contract.** Polling fetches repository state, not rule inputs. The
+**Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
-the transport follows every result page needed to build that finite projection
-and retains its per-page validator only in the repository task's process-local
-cache. Slice 3 implements this transport behavior.
+the transport scans each workflow's result pages once and collects every branch
+match from that scan. When the newest watched-repository run for a branch and
+workflow is queued or in progress, the projection retains its prior completed
+baseline until that run completes rather than selecting an older completed run
+from later in the result stream. Per-page validators remain only in the
+repository task's process-local cache. A same-named branch on a fork does not
+enter this projection: the poller accepts a run only when its provider
+head-repository identity equals the configured watched repository and continues
+through bounded result pages past foreign or absent head repositories.
 
 ## Durable event vocabulary
 
@@ -118,6 +175,12 @@ transition contradicts that event's complete current pull-request context. A
 Label names admit up to 50 Unicode scalar values, including their full UTF-8
 representation.
 
+**Implemented behavior.** GitHub can return a null head repository after a
+tracked pull request's fork is deleted. For that same previously observed pull
+request, the poller retains the prior canonical head-repository identity while
+accepting the new lifecycle and other current fields; a new pull request with no
+current or prior head-repository identity still fails closed.
+
 **Implemented behavior.** Accepted events append in observation order as durable
 facts and are never updated, deleted, or truncated. The relational storage row
 fixes the event version to one, closes both target and payload discriminators,
@@ -134,7 +197,8 @@ repository event history in cursor-generation and event-ordinal order.
 - `HeadChanged { previous, current }`
 - `MergeableStateChanged { current }`, where current is `mergeable`,
   `conflicting`, or `unknown`
-- `ChecksCompleted { outcome }`, where outcome is `success` or `failure`
+- `ChecksCompleted { outcome }`, where outcome is `success` or `failure`;
+  completed `success`, `neutral`, and `skipped` suites normalize to `success`
 - `CheckRunCompleted { name, conclusion }`
 - `BranchWorkflowRunCompleted { branch, workflow, conclusion }`, a branch-level
   event rather than a PR event, including when the watched branch is `main`
@@ -154,13 +218,20 @@ kind is constructible.
 
 **Implemented behavior.** The differ emits `ReviewSubmitted` only for a newly
 submitted review. A later GitHub dismissal is not a version-one fact and emits
-no event.
+no event. When GitHub returns a null author for a historical review whose
+account was deleted, normalization reuses the prior reviewer only for the same
+provider review identity; a new identity-less review is omitted.
 
 **Implemented behavior.** Reaction ingestion includes only reactions by a login
 in the configured signal-reviewer list. Reactions from every other actor are
-excluded while normalizing state, so they cannot create durable
-`ReactionChanged` events. Why: reviewer signals are actionable facts; the full
-ambient emoji stream is neither a rule input nor retained noise.
+excluded while normalizing state, and a reaction whose deleted actor has no
+current login identity is never added. When any current reaction for one subject
+lacks actor identity, normalization conservatively carries forward the prior
+retained reactions for that subject only when their reactors remain in the
+current signal-reviewer set, so identity loss cannot manufacture removals and a
+filter change cannot preserve an excluded reactor. Why: reviewer signals are
+actionable facts; the full ambient emoji stream is neither a rule input nor
+retained noise.
 
 **Implemented behavior.** The cursor binds its filtered reaction projection to
 the exact canonical signal-reviewer login set. When that set changes, the next
@@ -188,7 +259,7 @@ not a string DSL. Fields within one rule are conjunctive and distinct rules are
 disjunctive. Omitting every target field means everything; requiring labels or
 supplying regex fields narrows only that rule. There is no global targeting
 switch. No present configuration or execution surface loads or evaluates these
-rules; Slices 3 and 4 implement this constraint.
+rules; Slice 4 implements this constraint.
 
 **Implemented behavior.** The version-one matcher value has exactly these
 fields:
