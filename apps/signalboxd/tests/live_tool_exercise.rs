@@ -39,8 +39,9 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    ModelSelection, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionPlacement,
-    SystemPromptMember, ToolDecision, TurnState, decode_server_line, encode_client_line,
+    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerFrame, ServerMessage,
+    SessionPlacement, SystemPromptMember, ToolDecision, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
 use signalbox_tools_conversations::{
@@ -1047,13 +1048,14 @@ async fn create_session(connection: &mut Connection) -> SmokeResult<CanonicalUui
             initial_model_selection: ModelSelection::Alias {
                 alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(SMOKE_ALIAS)),
             },
+            model_settings: ModelSettingsOverlay::inherit_all(),
             system_prompt: SystemPromptMember::present(None),
             placement: SessionPlacement::Pathless {},
         })
         .await?;
     let response = connection.response_within().await?;
     match response.message() {
-        ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+        ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
         message => {
             Err(io::Error::other(format!("unexpected create-session response: {message:?}")).into())
         }
@@ -1071,6 +1073,7 @@ async fn submit_turn(
             session_id: session,
             content: InputContent::new(content.to_owned()),
             expected_defaults_version: Some(CanonicalU64::new(1)),
+            model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: None,
         })
         .await?;
