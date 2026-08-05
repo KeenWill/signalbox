@@ -104,8 +104,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — sixty files, `202607180001` through
-`202608030002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty-one files, `202607180001` through
+`202608030003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -238,7 +238,7 @@ Representation rules, all enforced in the schema:
   foreign keys, because megabyte text cannot join a btree key; the empty bytea
   stands for an absent prompt so a `MATCH SIMPLE` member never skips enforcement
   ([sessions-and-transcript](sessions-and-transcript.md)).
-- Migration `202608030002` advances native creation to storage version 7,
+- Migration `202608030003` advances native creation to storage version 7,
   imported creation to version 5, defaults replacement to version 4, and
   submit-input to version 2 for their settings-bearing command payloads. Rust
   decoders require provider-default full settings or an inherit-all overlay on
