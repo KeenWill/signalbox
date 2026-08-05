@@ -1116,8 +1116,13 @@ async fn run_hub(
                 SanitizedStartupCause::Static(anthropic_construction_cause(&error)),
             )
         })?;
+    let anthropic_model_capabilities = model_configuration.runtime_model_capability_catalog();
     let anthropic = credential_access
-        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .map(|credential_access| {
+            let mut adapter_configuration = AnthropicConfig::new();
+            adapter_configuration.model_capabilities = anthropic_model_capabilities;
+            AnthropicRuntime::new(adapter_configuration, credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(

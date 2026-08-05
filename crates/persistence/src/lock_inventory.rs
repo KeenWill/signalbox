@@ -50,6 +50,11 @@ pub(crate) const CONTEXT_COMPACTION_DEFAULTS: &str = "SELECT current_version
           WHERE session_id = $1
           FOR UPDATE";
 
+pub(crate) const REPLACE_SESSION_DEFAULTS_CURRENT: &str = "SELECT current_version
+           FROM session_current_defaults
+          WHERE session_id = $1
+          FOR UPDATE";
+
 pub(crate) const CONTEXT_COMPACTION_LIFECYCLE_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 

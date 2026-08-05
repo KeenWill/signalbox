@@ -15,6 +15,22 @@
 # above the model's cap.
 version = 1
 
+# Omitted members inherit. Nullable knobs also accept "provider_default" to
+# preserve an explicit clear in durable provenance; fast_mode accepts
+# "enabled" or "disabled". A service tier is a provider-tagged inline table,
+# for example { provider = "anthropic", value = "standard_only" }.
+[model_settings]
+# reasoning_level = "high"
+# fast_mode = "disabled"
+# service_tier = { provider = "anthropic", value = "auto" }
+
+# Named profiles use the same three members. A model opts into at most one with
+# settings_profile = "deliberate"; profile/global values must be admitted by
+# that model's capability record.
+# [[model_settings_profiles]]
+# name = "deliberate"
+# reasoning_level = "high"
+
 # Every model credential profile declares how calls authenticated through that
 # profile are billed. api_metered produces real dollar cost; subscription
 # produces metered-equivalent cost. Keep a profile name's billing meaning
@@ -41,6 +57,17 @@ credential_profile = "anthropic-primary"
 # [codex_cli]
 # executable = "/absolute/path/to/codex"
 # working_directory = "/absolute/path/to/workspace"
+
+# A provider that implements fast mode through a distinct serving identity
+# declares that identity here without a selection_id. A selectable [[models]]
+# record may then use fast_mode = "alternate_target" and point fast_target_id
+# at this target. Serving targets never appear in the client capability catalog.
+# [[serving_targets]]
+# target_id = "fa57fa57-fa57-4a57-8a57-fa57fa57fa57"
+# model_family = "anthropic"
+# provider_model = "synthetic-fast-serving-identity"
+# max_output_tokens = 8192
+# context_window_tokens = 200000
 
 # This exact prompt is deployment-owned and used as the system instruction for
 # every dedicated summary call. Change it only when future compactions should
@@ -144,6 +171,8 @@ model_family = "anthropic"
 provider_model = "claude-fable-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+service_tiers = ["auto", "standard_only"]
 # Rates are decimal USD strings per million tokens. Declare the complete
 # five-field versioned set or omit all five; omission yields no dollar figure.
 rate_version = "example-2026-08-01"
@@ -160,6 +189,9 @@ model_family = "anthropic"
 provider_model = "claude-opus-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+fast_mode = "request_control"
+service_tiers = ["auto", "standard_only"]
 
 # Hard cap: 128000.
 [[models]]
@@ -169,6 +201,9 @@ model_family = "anthropic"
 provider_model = "claude-opus-4-8"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+fast_mode = "request_control"
+service_tiers = ["auto", "standard_only"]
 
 # Hard cap: 128000.
 [[models]]
@@ -178,6 +213,8 @@ model_family = "anthropic"
 provider_model = "claude-opus-4-7"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+service_tiers = ["auto", "standard_only"]
 
 # Hard cap: 128000.
 [[models]]
@@ -187,6 +224,8 @@ model_family = "anthropic"
 provider_model = "claude-opus-4-6"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "max"]
+service_tiers = ["auto", "standard_only"]
 
 # Hard cap: 128000.
 [[models]]
@@ -196,6 +235,8 @@ model_family = "anthropic"
 provider_model = "claude-sonnet-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+service_tiers = ["auto", "standard_only"]
 
 # Hard cap: 128000.
 [[models]]
@@ -205,6 +246,8 @@ model_family = "anthropic"
 provider_model = "claude-sonnet-4-6"
 max_output_tokens = 8192
 context_window_tokens = 200000
+reasoning_levels = ["low", "medium", "high", "max"]
+service_tiers = ["auto", "standard_only"]
 
 # Fastest and least expensive of the set. Hard cap: 64000.
 [[models]]
@@ -214,6 +257,7 @@ model_family = "anthropic"
 provider_model = "claude-haiku-4-5"
 max_output_tokens = 8192
 context_window_tokens = 200000
+service_tiers = ["auto", "standard_only"]
 
 # Aliases carry no name field: an alias is an opaque identity clients name
 # directly, and each one freezes to its selection at acceptance time. The

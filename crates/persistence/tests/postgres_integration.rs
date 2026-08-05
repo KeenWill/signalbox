@@ -99,7 +99,8 @@ use signalbox_persistence::{
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
-        ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
+        ReplaceSessionDefaultsRejectionOnlyOutcome, ReplaceSessionDefaultsRepository,
+        ReplaceSessionDefaultsRepositoryError,
     },
     scheduler::PostgresEligibilitySweep,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
@@ -13623,6 +13624,90 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
     .fetch_one(&pool)
     .await?;
     assert_eq!(counts, (3, 3, 3));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A future expected epoch reaches the locked durable CAS boundary without
+/// permitting its server-only placeholder replacement to apply.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn future_defaults_epoch_records_mismatch_without_applying_placeholder()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository =
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    let creation = prepared(0x2111, 0x7111, direct(0x8111));
+    create_repository.handle(creation.clone()).await?;
+    let matching_request = replacement_request(0x2120, 0x7111, 1, alias(0x8120));
+    let matching_command = ReplaceSessionDefaults::with_model_settings(
+        matching_request.command_id(),
+        matching_request.session(),
+        matching_request.expected_current_version(),
+        matching_request.replacement().clone(),
+        matching_request.caller_model_settings(),
+    );
+    let repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+
+    assert_eq!(
+        repository
+            .handle_rejection_only_where_prompt_member(
+                matching_command,
+                PromptMemberStatement::Stated,
+            )
+            .await?,
+        ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched
+    );
+    assert!(
+        repository
+            .load(matching_request.command_id())
+            .await?
+            .is_none()
+    );
+
+    let request = replacement_request(0x2121, 0x7111, 2, alias(0x8121));
+    let command = ReplaceSessionDefaults::with_model_settings(
+        request.command_id(),
+        request.session(),
+        request.expected_current_version(),
+        request.replacement().clone(),
+        request.caller_model_settings(),
+    );
+    let outcome = repository
+        .handle_rejection_only_where_prompt_member(command, PromptMemberStatement::Stated)
+        .await?;
+    let ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
+        ReplaceSessionDefaultsHandlingOutcome::Rejected(
+            ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(rejected),
+        ),
+    ) = outcome
+    else {
+        panic!("the future epoch must record a mismatch");
+    };
+    let current = SessionRepository::new(pool.clone())
+        .load_session(creation.session().id())
+        .await?
+        .expect("the created session remains present");
+
+    assert_eq!(rejected.expected(), request.expected_current_version());
+    assert_eq!(
+        rejected.current(),
+        SessionConfigurationDefaultsVersion::first()
+    );
+    assert_eq!(
+        current.current_configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::first()
+    );
+    assert_eq!(
+        current.current_configuration_defaults().defaults().model(),
+        creation
+            .session()
+            .configuration_defaults()
+            .defaults()
+            .model()
+    );
 
     pool.close().await;
     drop(container);
