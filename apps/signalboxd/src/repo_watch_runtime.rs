@@ -597,11 +597,8 @@ impl GitHubRepositoryPoller {
                     if run.status == "completed" {
                         observations.push(RepoWatchCheckRunObservation::new(
                             object_id(run.id)?,
-                            RepoWatchCheckCompletionGeneration::try_new(
-                                run.completed_at
-                                    .ok_or(RepositoryWatchAttemptError::Normalization)?,
-                            )
-                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                            RepoWatchCheckCompletionGeneration::try_new(run.updated_at)
+                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             CheckRunName::try_new(run.name)
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
@@ -1667,7 +1664,7 @@ struct CheckRunResponse {
     status: String,
     name: String,
     conclusion: Option<String>,
-    completed_at: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1893,7 +1890,8 @@ mod tests {
     const PULL_LABEL: &str = "watch-me";
     const CHECK_RUN_NAME: &str = "build";
     const CHECK_SUITE_COMPLETION_GENERATION: &str = "2026-08-03T12:34:56Z";
-    const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:07Z";
+    const CHECK_RUN_COMPLETED_AT: &str = "2026-08-03T12:35:07Z";
+    const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:08Z";
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
     const REVIEWER: &str = "signal-reviewer";
@@ -1988,14 +1986,16 @@ mod tests {
                     "status": "completed",
                     "name": CHECK_RUN_NAME,
                     "conclusion": "failure",
-                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
+                    "completed_at": CHECK_RUN_COMPLETED_AT,
+                    "updated_at": CHECK_RUN_COMPLETION_GENERATION
                 },
                 {
                     "id": IN_PROGRESS_CHECK_RUN_ID,
                     "status": "in_progress",
                     "name": IN_PROGRESS_CHECK_RUN_NAME,
                     "conclusion": null,
-                    "completed_at": null
+                    "completed_at": null,
+                    "updated_at": QUEUED_CHECK_SUITE_UPDATED_AT
                 }
             ]
         })

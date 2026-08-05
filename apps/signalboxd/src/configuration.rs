@@ -1018,16 +1018,15 @@ fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelCo
         }
         let metadata = match fs::symlink_metadata(&resolved) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(_) => {
-                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-            }
+            Err(_) => return unresolved_credential_file_reference(&resolved),
         };
         if !metadata.file_type().is_symlink() {
-            break;
+            return unresolved_credential_file_reference(&resolved);
         }
-        let target = fs::read_link(&resolved)
-            .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        let target = match fs::read_link(&resolved) {
+            Ok(target) => target,
+            Err(_) => return unresolved_credential_file_reference(&resolved),
+        };
         let target = if target.is_absolute() {
             target
         } else {
@@ -1041,6 +1040,12 @@ fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelCo
     if fs::symlink_metadata(&resolved).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
+    unresolved_credential_file_reference(&resolved)
+}
+
+fn unresolved_credential_file_reference(
+    resolved: &Path,
+) -> Result<PathBuf, HubModelConfigurationError> {
     let file_name = resolved
         .file_name()
         .filter(|name| !name.is_empty())
@@ -2169,6 +2174,24 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
         );
+    }
+
+    #[test]
+    fn repository_watch_defers_an_unreadable_credential_file_reference() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("the credential fixture directory becomes unreadable");
+
+        let parsed = HubModelConfiguration::parse(&configured);
+
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("the credential fixture directory becomes removable");
+        parsed.expect("credential readability is deferred until request preparation");
     }
 
     #[test]

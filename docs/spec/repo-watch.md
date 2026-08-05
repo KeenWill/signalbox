@@ -127,15 +127,18 @@ per-pull-request state, branch heads, and completed branch-workflow identities
 event vocabulary below in deterministic order. The cursor retains provider
 identity and completion generation for completed check suites and check runs,
 plus provider identities for reviews, threads, and both the workflow definition
-and branch-workflow run attempt. A rerequested suite or run therefore emits its
-later completion even when its provider identity and conclusion are unchanged.
-Workflows that share a display name remain distinct, renaming a workflow cannot
-re-emit its already observed run attempt, and a new attempt under an unchanged
-run ID does emit. The display name remains the rule-visible event payload. A
-provider fact retained in the consecutive comparison baseline is not re-emitted.
-Rules receive only events: they cannot inspect normalized snapshots or rerun the
-differ. Why: transport independence requires both polling and a later
-authenticated webhook receiver to feed the same durable facts.
+and branch-workflow run attempt. The poller uses the provider's `updated_at`
+value as the completion generation for both completed check suites and check
+runs, so an edited completed run conclusion is observable even when its
+`completed_at` value is unchanged. A rerequested suite or run therefore emits
+its later completion even when its provider identity and conclusion are
+unchanged. Workflows that share a display name remain distinct, renaming a
+workflow cannot re-emit its already observed run attempt, and a new attempt
+under an unchanged run ID does emit. The display name remains the rule-visible
+event payload. A provider fact retained in the consecutive comparison baseline
+is not re-emitted. Rules receive only events: they cannot inspect normalized
+snapshots or rerun the differ. Why: transport independence requires both polling
+and a later authenticated webhook receiver to feed the same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
