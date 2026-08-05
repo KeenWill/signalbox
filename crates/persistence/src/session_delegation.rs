@@ -10,7 +10,7 @@ use signalbox_domain::{
     DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance,
     DelegationProvenanceReconstitutionInput, DelegationTransitionFailure, DelegationWait,
     DelegationWaitMode, DescendantTerminationScope, DurableCommandId, GoalGeneration,
-    SessionDelegation, SessionDelegationReconstitutionFailure,
+    ReconstitutedToolAttempt, SessionDelegation, SessionDelegationReconstitutionFailure,
     SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
     ToolDispatchAuthority, ToolEffectClass, ToolRequestId, ToolResultContent, ToolResultText,
     TurnId,
@@ -28,8 +28,9 @@ use crate::{
         tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     tool_loop::{
-        ToolLoopRepositoryError, load_active_batch_from_connection, load_request_by_id,
-        lock_tool_session, persist_ended_attempt,
+        ToolLoopRepositoryError, load_active_batch_from_connection,
+        load_optional_foreground_delegation_outcome, load_request_by_id, lock_tool_session,
+        persist_ended_attempt,
     },
 };
 
@@ -56,6 +57,23 @@ pub struct RecordedDelegationMessage {
     direction: DelegationMessageDirection,
     ordinal: DelegationEventOrdinal,
     delivery_sequence: NonZeroU64,
+}
+
+/// One exact foreground delivery selected from durable relationship state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedDelegationDelivery {
+    relation: SessionDelegation,
+    event: DelegationEvent,
+}
+
+impl RecordedDelegationDelivery {
+    pub const fn relation(&self) -> &SessionDelegation {
+        &self.relation
+    }
+
+    pub const fn event(&self) -> &DelegationEvent {
+        &self.event
+    }
 }
 
 impl RecordedDelegationMessage {
@@ -92,6 +110,12 @@ pub enum DelegationOperationRejection {
     MessageIdentityCollision,
     DeliverySequenceExhausted,
     Transition(DelegationTransitionFailure),
+}
+
+#[derive(Clone, Copy)]
+enum DispatchSource<'a> {
+    Issued(&'a ToolDispatchAuthority),
+    Reconstitute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,6 +212,15 @@ impl SessionDelegationRepository {
         request: DelegationAwaitRequest,
         dispatch: &ToolDispatchAuthority,
     ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
+        self.record_wait_with_source(request, DispatchSource::Issued(dispatch))
+            .await
+    }
+
+    async fn record_wait_with_source(
+        &self,
+        request: DelegationAwaitRequest,
+        dispatch: DispatchSource<'_>,
+    ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, request.request().session()).await?;
@@ -215,12 +248,14 @@ impl SessionDelegationRepository {
                 ));
             };
             let relation = load_relation(&mut transaction, spawning_request).await?;
-            if !dispatch_is_current(&mut transaction, dispatch).await? {
+            let Some(dispatch) =
+                resolve_dispatch(&mut transaction, request.request(), dispatch).await?
+            else {
                 return Ok(RecordDelegationWaitOutcome::Rejected(
                     DelegationOperationRejection::StaleDispatch,
                 ));
-            }
-            let wait = match relation.register_wait(&request, dispatch) {
+            };
+            let wait = match relation.register_wait(&request, &dispatch) {
                 Ok(wait) => wait,
                 Err(error) => {
                     return Ok(RecordDelegationWaitOutcome::Rejected(
@@ -260,7 +295,7 @@ impl SessionDelegationRepository {
 
             match wait.mode() {
                 DelegationWaitMode::Background => {
-                    let ended = complete_attempt(dispatch, wait_receipt(wait)?)?;
+                    let ended = complete_attempt(&dispatch, wait_receipt(wait)?)?;
                     persist_ended_attempt(&mut transaction, &ended).await?;
                 }
                 DelegationWaitMode::Foreground => {
@@ -306,6 +341,16 @@ impl SessionDelegationRepository {
         message: DelegationMessageId,
         dispatch: &ToolDispatchAuthority,
     ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
+        self.record_message_with_source(request, message, DispatchSource::Issued(dispatch))
+            .await
+    }
+
+    async fn record_message_with_source(
+        &self,
+        request: DelegationMessageRequest,
+        message: DelegationMessageId,
+        dispatch: DispatchSource<'_>,
+    ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, request.request().session()).await?;
@@ -320,11 +365,13 @@ impl SessionDelegationRepository {
                 ));
             };
             let relation = load_relation(&mut transaction, spawning_request).await?;
-            if !dispatch_is_current(&mut transaction, dispatch).await? {
+            let Some(dispatch) =
+                resolve_dispatch(&mut transaction, request.request(), dispatch).await?
+            else {
                 return Ok(RecordDelegationMessageOutcome::Rejected(
                     DelegationOperationRejection::StaleDispatch,
                 ));
-            }
+            };
             if dispatch.attempt().effect_class() != ToolEffectClass::ExternalEffect {
                 return Err(SessionDelegationRepositoryError::InvalidTransition(
                     "send_session_message requires an external-effect attempt",
@@ -335,7 +382,7 @@ impl SessionDelegationRepository {
                     DelegationOperationRejection::MessageIdentityCollision,
                 ));
             }
-            let (relation, event) = match relation.deliver_message(request, message, dispatch) {
+            let (relation, event) = match relation.deliver_message(request, message, &dispatch) {
                 Ok(recorded) => recorded,
                 Err(error) => {
                     return Ok(RecordDelegationMessageOutcome::Rejected(
@@ -393,12 +440,102 @@ impl SessionDelegationRepository {
                 ordinal,
                 delivery_sequence,
             };
-            let ended = complete_attempt(dispatch, message_receipt(dispatch, &receipt)?)?;
+            let ended = complete_attempt(&dispatch, message_receipt(&dispatch, &receipt)?)?;
             persist_ended_attempt(&mut transaction, &ended).await?;
             Ok(RecordDelegationMessageOutcome::Recorded(Box::new(receipt)))
         }
         .await;
         finish(transaction, result).await
+    }
+
+    /// Executes one exact process-protocol await from its stored tool request.
+    pub async fn record_process_wait(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        request: ToolRequestId,
+        child: SessionId,
+        mode: DelegationWaitMode,
+    ) -> Result<
+        Option<(DelegationAwaitRequest, RecordDelegationWaitOutcome)>,
+        SessionDelegationRepositoryError,
+    > {
+        let mut connection = self.pool.acquire().await?;
+        let Some(stored) = load_request_by_id(&mut connection, request).await? else {
+            return Ok(None);
+        };
+        if stored.session() != session || stored.turn() != turn {
+            return Ok(None);
+        }
+        let Ok(logical) = DelegationAwaitRequest::parse(stored, child, mode) else {
+            return Ok(None);
+        };
+        drop(connection);
+        let outcome = self
+            .record_wait_with_source(logical.clone(), DispatchSource::Reconstitute)
+            .await?;
+        Ok(Some((logical, outcome)))
+    }
+
+    /// Executes one exact process-protocol message from its stored tool request.
+    pub async fn record_process_message(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        request: ToolRequestId,
+        peer: SessionId,
+        content: String,
+        message: DelegationMessageId,
+    ) -> Result<
+        Option<(DelegationMessageRequest, RecordDelegationMessageOutcome)>,
+        SessionDelegationRepositoryError,
+    > {
+        let mut connection = self.pool.acquire().await?;
+        let Some(stored) = load_request_by_id(&mut connection, request).await? else {
+            return Ok(None);
+        };
+        if stored.session() != session || stored.turn() != turn {
+            return Ok(None);
+        }
+        let Ok(logical) = DelegationMessageRequest::parse(stored, peer, content) else {
+            return Ok(None);
+        };
+        drop(connection);
+        let outcome = self
+            .record_message_with_source(logical.clone(), message, DispatchSource::Reconstitute)
+            .await?;
+        Ok(Some((logical, outcome)))
+    }
+
+    /// Reads the immutable result selected by one exact foreground delivery.
+    pub async fn load_foreground_delivery(
+        &self,
+        wait: DelegationWait,
+    ) -> Result<Option<RecordedDelegationDelivery>, SessionDelegationRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome = load_optional_foreground_delegation_outcome(
+            &mut transaction,
+            wait.parent(),
+            wait.awaiting_request(),
+            wait.spawning_request(),
+            wait.child(),
+        )
+        .await?;
+        let Some(outcome) = outcome else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let relation = load_relation(&mut transaction, wait.spawning_request()).await?;
+        let event = relation
+            .events()
+            .iter()
+            .find(|event| event.outcome() == Some(&outcome))
+            .cloned()
+            .ok_or(SessionDelegationCorruption::Inconsistent(
+                "foreground result event",
+            ))?;
+        transaction.rollback().await?;
+        Ok(Some(RecordedDelegationDelivery { relation, event }))
     }
 }
 
@@ -437,6 +574,35 @@ async fn dispatch_is_current(
     Ok(batch
         .resume_in_flight_dispatch(dispatch.attempt().attempt())
         .is_ok_and(|stored| stored == *dispatch))
+}
+
+async fn resolve_dispatch(
+    connection: &mut PgConnection,
+    request: &signalbox_domain::ToolRequest,
+    source: DispatchSource<'_>,
+) -> Result<Option<ToolDispatchAuthority>, SessionDelegationRepositoryError> {
+    match source {
+        DispatchSource::Issued(dispatch) => dispatch_is_current(connection, dispatch)
+            .await
+            .map(|current| current.then(|| dispatch.clone())),
+        DispatchSource::Reconstitute => {
+            let Some(batch) =
+                load_active_batch_from_connection(connection, request.session(), request.turn())
+                    .await?
+            else {
+                return Ok(None);
+            };
+            let Some(ReconstitutedToolAttempt::Current(attempt)) = batch.attempt(request.id())
+            else {
+                return Ok(None);
+            };
+            let dispatch = batch
+                .resume_in_flight_dispatch(attempt.attempt())
+                .ok()
+                .filter(|dispatch| dispatch.request() == request);
+            Ok(dispatch)
+        }
+    }
 }
 
 fn complete_attempt(

@@ -6,6 +6,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The daemon web-tool composition and conservative declaration defaults are
 verified against PR #433 (`agent/web-search-wiring`).
 
+The session-delegation scheduling executor and daemon catalog composition are
+verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -792,14 +795,17 @@ The daemon catalog adds three automatic, daemon-local tools. Their invoking
 session, turn, and request always come from trusted dispatch correlation and
 never from model arguments.
 
-- `spawn_session` takes `task` plus a `relationship` object. The relationship is
-  either `background`, or `bound` with separately labeled `on_parent_stopped`
-  and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`). It
-  atomically creates one delegated, no-ancestry child and its initial task work,
-  then returns the child session identity. Equal physical replay of the same
-  logical request returns that child; a second child cannot attach to the
-  request. Version one imposes no fixed active-child-count limit; admission
-  checks the complete locked relationship inventory for request and child
+- `spawn_session` declares `task` plus a `relationship` object. The relationship
+  is either `background`, or `bound` with separately labeled `on_parent_stopped`
+  and `on_parent_cancelled` actions (`keep_running`, `stop`, or `cancel`).
+  **Committed unimplemented functionality.** No present tool or process
+  execution surface creates the child; the daemon rejects execution until the
+  placement-owned creation transaction implements the decided parent-directory
+  default. That transaction must atomically create one delegated, no-ancestry
+  child and its initial task work, then return the child session identity. Equal
+  physical replay must return that child; a second child cannot attach to the
+  request. Version one imposes no fixed active-child-count limit; admission must
+  check the complete locked relationship inventory for request and child
   uniqueness.
 
 - `await_session` takes the related child identity and `foreground` or
@@ -835,7 +841,10 @@ child transcript. The scheduling-aware executor returns a distinct
 application accepts that disposition, persistence rereads the complete parked
 batch and exact ended dispatch fence; absent or cross-wired wait evidence fails
 closed, and the generic observation path never attempts a second terminal
-commit.
+commit. This remains true when the result predates registration: the await
+transaction parks the attempt and records its result delivery and wake
+atomically, while the scheduling executor reports the same durable-wait
+disposition so the scheduler resumes from stored result evidence.
 
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a

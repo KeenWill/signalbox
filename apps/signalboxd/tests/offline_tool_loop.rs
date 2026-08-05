@@ -59,8 +59,8 @@ use signalbox_process_protocol::{
     decode_server_line, encode_client_line,
 };
 use signalbox_tools_web::{
-    WEB_FETCH_NAME, WEB_SEARCH_NAME, WebSearchRequest, WebSearchTransport,
-    WebSearchTransportFailure, WebSearchTransportOutcome,
+    WEB_FETCH_NAME, WebSearchRequest, WebSearchTransport, WebSearchTransportFailure,
+    WebSearchTransportOutcome,
 };
 use signalboxd::{
     ActivatedTurnExecution, CHANGE_REQUEST_CHANGED_FILES_NAME, CHANGE_REQUEST_CHECKS_STATUS_NAME,
@@ -81,15 +81,15 @@ use signalboxd::{
     MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
     PostgresConversationIntrospection, PostgresProviderModelExecution,
     PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
-    REPOSITORY_READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass,
-    ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose, ReviewThread,
-    ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
-    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
-    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
-    SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
-    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
-    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
-    WebFetchTransport, WebFetchTransportFailure,
+    REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
+    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
+    ReviewThreadFields, ReviewThreadInventoryFields, ReviewThreadInventoryItem,
+    ReviewThreadResolution, ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields,
+    ReviewerVerdictStatus, SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter,
+    StackStateFields, StackStateResult, ThreadInventoryResult, ThreadReplyResult,
+    ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME, WebFetchBodyCompleteness,
+    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
+    WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -768,37 +768,6 @@ fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>, expected
         .map(|definition| definition.name.as_str().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(names, expected_names);
-    assert!(names.iter().any(|name| name == REPOSITORY_READ_FILE_NAME));
-    assert!(names.iter().any(|name| name == PULL_REQUEST_METADATA_NAME));
-    assert!(
-        names
-            .iter()
-            .any(|name| name == PULL_REQUEST_PUBLISH_REVIEW_NAME)
-    );
-    assert!(names.iter().any(|name| name == READ_FILE_NAME));
-    assert!(names.iter().any(|name| name == WRITE_FILE_NAME));
-    assert!(
-        names
-            .iter()
-            .any(|name| name == signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME)
-    );
-    assert!(
-        names
-            .iter()
-            .any(|name| name == signalbox_tools_sessions::SPAWN_SESSION_NAME)
-    );
-    assert!(
-        names
-            .iter()
-            .any(|name| name == signalbox_tools_sessions::AWAIT_SESSION_NAME)
-    );
-    assert!(
-        names
-            .iter()
-            .any(|name| name == signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME)
-    );
-    assert!(names.iter().any(|name| name == WEB_FETCH_NAME));
-    assert!(names.iter().any(|name| name == WEB_SEARCH_NAME));
 }
 
 fn commissioned_catalog_names(catalog: &impl ToolCatalog) -> Vec<String> {

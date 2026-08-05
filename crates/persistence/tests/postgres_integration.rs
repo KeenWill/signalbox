@@ -110,7 +110,8 @@ use signalbox_persistence::{
         SessionCredentialPin, SessionModelCredential, current_session_credential,
     },
     session_delegation::{
-        RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, SessionDelegationRepository,
+        RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, RecordedDelegationMessage,
+        RecordedDelegationWait, SessionDelegationRepository,
     },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
@@ -974,6 +975,38 @@ async fn repository_message_dispatch(
         .map_err(Into::into)
 }
 
+fn recorded_wait(outcome: RecordDelegationWaitOutcome) -> RecordedDelegationWait {
+    match outcome {
+        RecordDelegationWaitOutcome::Recorded(recorded) => recorded,
+        RecordDelegationWaitOutcome::Rejected(rejection) => {
+            panic!("fixture wait was rejected: {rejection:?}")
+        }
+    }
+}
+
+fn process_wait(
+    outcome: Option<(DelegationAwaitRequest, RecordDelegationWaitOutcome)>,
+) -> (DelegationAwaitRequest, RecordedDelegationWait) {
+    let (request, outcome) = outcome.expect("the exact stored await request reconstitutes");
+    (request, recorded_wait(outcome))
+}
+
+fn recorded_message(outcome: RecordDelegationMessageOutcome) -> Box<RecordedDelegationMessage> {
+    match outcome {
+        RecordDelegationMessageOutcome::Recorded(recorded) => recorded,
+        RecordDelegationMessageOutcome::Rejected(rejection) => {
+            panic!("fixture message was rejected: {rejection:?}")
+        }
+    }
+}
+
+fn process_message(
+    outcome: Option<(DelegationMessageRequest, RecordDelegationMessageOutcome)>,
+) -> (DelegationMessageRequest, Box<RecordedDelegationMessage>) {
+    let (request, outcome) = outcome.expect("the exact stored message request reconstitutes");
+    (request, recorded_message(outcome))
+}
+
 /// S17 / INV-032: a background wait, its completed receipt, and its update are
 /// one replay-idempotent commit.
 #[tokio::test(flavor = "multi_thread")]
@@ -983,21 +1016,30 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
-    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
-    let request = DelegationAwaitRequest::parse(
-        dispatch.request().clone(),
-        fixture.child,
-        DelegationWaitMode::Background,
-    )?;
+    repository_wait_dispatch(&pool, fixture, seed).await?;
     let repository = SessionDelegationRepository::new(pool.clone());
-    let recorded = repository.record_wait(request.clone(), &dispatch).await?;
-    let RecordDelegationWaitOutcome::Recorded(recorded) = recorded else {
-        panic!("the related background await records")
-    };
-    let replayed = repository.record_wait(request, &dispatch).await?;
-    let RecordDelegationWaitOutcome::Recorded(replayed) = replayed else {
-        panic!("the equal wait replay returns its recorded receipt")
-    };
+    let (request, recorded) = process_wait(
+        repository
+            .record_process_wait(
+                fixture.parent,
+                fixture.parent_turn,
+                fixture.awaiting_request,
+                fixture.child,
+                DelegationWaitMode::Background,
+            )
+            .await?,
+    );
+    let (replayed_request, replayed) = process_wait(
+        repository
+            .record_process_wait(
+                fixture.parent,
+                fixture.parent_turn,
+                fixture.awaiting_request,
+                fixture.child,
+                DelegationWaitMode::Background,
+            )
+            .await?,
+    );
     let evidence: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_wait
@@ -1014,6 +1056,7 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
     .await?;
 
     assert_eq!(recorded, replayed);
+    assert_eq!(request, replayed_request);
     assert_eq!(recorded.wait().mode(), DelegationWaitMode::Background);
     assert_eq!((evidence.0, evidence.1, evidence.2), (1, 1, 1));
     assert_eq!(
@@ -1048,18 +1091,14 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
     )?;
     let repository = SessionDelegationRepository::new(pool.clone());
     let recorded = repository.record_wait(request.clone(), &dispatch).await?;
-    let RecordDelegationWaitOutcome::Recorded(recorded) = recorded else {
-        panic!("the related foreground await records")
-    };
+    let recorded = recorded_wait(recorded);
     let durable_wait = CorrelatedDurableChildWait::try_new(dispatch.correlation(), recorded.wait())
         .expect("recorded foreground wait matches its dispatch");
     let authenticated = PostgresToolLoopRepository::new(pool.clone())
         .reread_durable_child_wait(durable_wait)
         .await?;
     let replayed = repository.record_wait(request, &dispatch).await?;
-    let RecordDelegationWaitOutcome::Recorded(replayed) = replayed else {
-        panic!("the parked wait replays before stale-dispatch validation")
-    };
+    let replayed = recorded_wait(replayed);
     let evidence: (String, Option<Uuid>, String, String, String, i64) = sqlx::query_as(
         "SELECT lifecycle.active_phase_kind, lifecycle.current_attempt_id,
                 attempt.state_kind, attempt.terminal_disposition_kind,
@@ -1102,30 +1141,33 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
-    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
-    let request = DelegationMessageRequest::parse(
-        dispatch.request().clone(),
-        fixture.child,
-        RAW_DELEGATED_MESSAGE.to_owned(),
-    )?;
+    repository_message_dispatch(&pool, fixture, seed).await?;
     let message = DelegationMessageId::from_uuid(fixture.message_id);
     let repository = SessionDelegationRepository::new(pool.clone());
-    let recorded = repository
-        .record_message(request.clone(), message, &dispatch)
-        .await?;
-    let RecordDelegationMessageOutcome::Recorded(recorded) = recorded else {
-        panic!("the related parent-to-child message records")
-    };
-    let replayed = repository
-        .record_message(
-            request,
-            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
-            &dispatch,
-        )
-        .await?;
-    let RecordDelegationMessageOutcome::Recorded(replayed) = replayed else {
-        panic!("the equal message replay returns its original identity")
-    };
+    let (request, recorded) = process_message(
+        repository
+            .record_process_message(
+                fixture.parent,
+                fixture.parent_turn,
+                fixture.message_request,
+                fixture.child,
+                RAW_DELEGATED_MESSAGE.to_owned(),
+                message,
+            )
+            .await?,
+    );
+    let (replayed_request, replayed) = process_message(
+        repository
+            .record_process_message(
+                fixture.parent,
+                fixture.parent_turn,
+                fixture.message_request,
+                fixture.child,
+                RAW_DELEGATED_MESSAGE.to_owned(),
+                DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            )
+            .await?,
+    );
     let evidence: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_event
@@ -1144,6 +1186,7 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     .await?;
 
     assert_eq!(recorded, replayed);
+    assert_eq!(request, replayed_request);
     assert_eq!(recorded.message(), message);
     assert_eq!(
         recorded.direction(),

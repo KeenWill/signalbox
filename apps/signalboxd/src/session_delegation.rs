@@ -5,14 +5,14 @@ use std::{error::Error, fmt};
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::{
     DelegatedSpawnRequest, DelegationAwaitRequest, DelegationMessageId, DelegationMessageRequest,
-    DelegationWaitMode, ToolDispatchAuthority,
+    DelegationWait, DelegationWaitMode, SessionId, ToolDispatchAuthority, ToolRequestId, TurnId,
 };
 use signalbox_persistence::session_delegation::{
     DelegationOperationRejection, RecordDelegationMessageOutcome, RecordDelegationWaitOutcome,
     SessionDelegationRepository, SessionDelegationRepositoryError,
 };
 use signalbox_tools_sessions::{
-    AwaitSessionPortOutcome, AwaitSessionReceipt, SessionDelegationPort,
+    AwaitSessionPortOutcome, AwaitSessionReceipt, DeliveredChildResult, SessionDelegationPort,
     SessionDelegationPortOutcome, SessionMessageReceipt, SpawnSessionReceipt,
 };
 use sqlx::PgPool;
@@ -45,6 +45,103 @@ impl PostgresSessionDelegationPort {
         Self {
             repository: SessionDelegationRepository::new(pool),
         }
+    }
+
+    async fn project_wait(
+        &self,
+        request: &DelegationAwaitRequest,
+        outcome: RecordDelegationWaitOutcome,
+    ) -> Result<AwaitSessionPortOutcome, PostgresSessionDelegationPortError> {
+        let RecordDelegationWaitOutcome::Recorded(recorded) = outcome else {
+            return Ok(AwaitSessionPortOutcome::Rejected);
+        };
+        let wait = recorded.wait();
+        match wait.mode() {
+            DelegationWaitMode::Background => AwaitSessionReceipt::from_wait(request, wait)
+                .map(AwaitSessionPortOutcome::BackgroundRegistered)
+                .ok_or(PostgresSessionDelegationPortError::Contract),
+            DelegationWaitMode::Foreground => {
+                self.load_foreground_delivery(wait).await.map(|delivered| {
+                    delivered.map_or(
+                        AwaitSessionPortOutcome::ForegroundPending(wait),
+                        AwaitSessionPortOutcome::Delivered,
+                    )
+                })
+            }
+        }
+    }
+
+    pub(crate) async fn await_process_session(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        request: ToolRequestId,
+        child: SessionId,
+        mode: DelegationWaitMode,
+    ) -> Result<AwaitSessionPortOutcome, PostgresSessionDelegationPortError> {
+        let Some((logical, outcome)) = self
+            .repository
+            .record_process_wait(session, turn, request, child, mode)
+            .await?
+        else {
+            return Ok(AwaitSessionPortOutcome::Rejected);
+        };
+        self.project_wait(&logical, outcome).await
+    }
+
+    pub(crate) async fn send_process_message(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        request: ToolRequestId,
+        peer: SessionId,
+        content: String,
+    ) -> Result<
+        SessionDelegationPortOutcome<SessionMessageReceipt>,
+        PostgresSessionDelegationPortError,
+    > {
+        loop {
+            let message = DelegationMessageId::from_uuid(uuid::Uuid::now_v7());
+            let Some((logical, outcome)) = self
+                .repository
+                .record_process_message(session, turn, request, peer, content.clone(), message)
+                .await?
+            else {
+                return Ok(SessionDelegationPortOutcome::Rejected);
+            };
+            match outcome {
+                RecordDelegationMessageOutcome::Recorded(recorded) => {
+                    let receipt = SessionMessageReceipt::from_relation_event(
+                        &logical,
+                        recorded.relation(),
+                        recorded.event(),
+                        recorded.delivery_sequence(),
+                    )
+                    .ok_or(PostgresSessionDelegationPortError::Contract)?;
+                    return Ok(SessionDelegationPortOutcome::Applied(receipt));
+                }
+                RecordDelegationMessageOutcome::Rejected(
+                    DelegationOperationRejection::MessageIdentityCollision,
+                ) => {}
+                RecordDelegationMessageOutcome::Rejected(_) => {
+                    return Ok(SessionDelegationPortOutcome::Rejected);
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn load_foreground_delivery(
+        &self,
+        wait: DelegationWait,
+    ) -> Result<Option<DeliveredChildResult>, PostgresSessionDelegationPortError> {
+        self.repository
+            .load_foreground_delivery(wait)
+            .await?
+            .map(|delivery| {
+                DeliveredChildResult::try_new(wait, delivery.relation(), delivery.event())
+                    .map_err(|_| PostgresSessionDelegationPortError::Contract)
+            })
+            .transpose()
     }
 }
 
@@ -129,23 +226,11 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
         request: DelegationAwaitRequest,
         dispatch: ToolDispatchAuthority,
     ) -> Result<AwaitSessionPortOutcome, Self::Error> {
-        let retained = request.clone();
-        match self.repository.record_wait(request, &dispatch).await? {
-            RecordDelegationWaitOutcome::Recorded(recorded) => {
-                let wait = recorded.wait();
-                match wait.mode() {
-                    DelegationWaitMode::Background => {
-                        AwaitSessionReceipt::from_wait(&retained, wait)
-                            .map(AwaitSessionPortOutcome::BackgroundRegistered)
-                            .ok_or(PostgresSessionDelegationPortError::Contract)
-                    }
-                    DelegationWaitMode::Foreground => {
-                        Ok(AwaitSessionPortOutcome::ForegroundPending(wait))
-                    }
-                }
-            }
-            RecordDelegationWaitOutcome::Rejected(_) => Ok(AwaitSessionPortOutcome::Rejected),
-        }
+        let outcome = self
+            .repository
+            .record_wait(request.clone(), &dispatch)
+            .await?;
+        self.project_wait(&request, outcome).await
     }
 
     async fn send_session_message(

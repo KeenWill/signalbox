@@ -1943,6 +1943,16 @@ mod tests {
     }
 
     #[track_caller]
+    fn assert_child_wait_reconciliation_error(
+        error: ToolExecutionServiceError<FakeError, FakeError>,
+    ) {
+        assert!(matches!(
+            error,
+            ToolExecutionServiceError::ChildWaitReconciliation(FakeError::Ordinary)
+        ));
+    }
+
+    #[track_caller]
     fn current_attempt_fixture(batch: &ToolBatch) -> signalbox_domain::CurrentToolAttempt {
         match batch.attempt(batch.requests()[0].id()) {
             Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
@@ -2686,9 +2696,7 @@ mod tests {
             .await
             .expect("retained wait authentication retries");
 
-        let ToolExecutionServiceError::ChildWaitReconciliation(FakeError::Ordinary) = first else {
-            panic!("transient reread retains the child-wait stage")
-        };
+        assert_child_wait_reconciliation_error(first);
         assert_eq!(
             retried,
             ToolExecutionServiceOutcome::ChildWaitParked(expected)

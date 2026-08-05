@@ -40,21 +40,26 @@ use signalbox_conversation_import_codex::{
 use signalbox_domain::{
     AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal,
-    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection,
-    GoalCommandResult, GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement,
-    GoalUserAction, GoalUserCommand, ImportedConversation, ImportedConversationFormat,
-    ImportedConversationId, ImportedSessionRelationship as DomainImportedSessionRelationship,
-    ImportedSourceAttestation, ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
+    DecideToolRequestRejectedResult, DecideToolRequestResult,
+    DelegationMessageDirection as DomainDelegationMessageDirection,
+    DelegationOutcomeKind as DomainDelegationOutcomeKind,
+    DelegationOutcomeReason as DomainDelegationOutcomeReason,
+    DelegationProvenance as DomainDelegationProvenance, DelegationWait,
+    DelegationWaitMode as DomainDelegationWaitMode, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal, GoalBlockProvenance,
+    GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
+    GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
+    ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
     ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, PerInputConfigurationChoices, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
-    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
-    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
-    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ModelSelectionRequest, ParentTerminationCommandSource, PerInputConfigurationChoices,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
+    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
+    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
+    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -154,6 +159,9 @@ use signalbox_process_protocol::{
     content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
+use signalbox_tools_sessions::{
+    AwaitSessionPortOutcome, DeliveredChildResult, SessionDelegationPortOutcome,
+};
 use sqlx::{PgPool, Row};
 use tokio::{
     io::{
@@ -174,6 +182,7 @@ use crate::{
         ReviewOrchestrationInternalCause, ReviewOrchestrationRuntimeError,
         execute_review_orchestration_request, read_review_orchestration_request,
     },
+    session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError},
     usage_limits::context_compaction_usage_exceeds_configured_limits,
 };
 
@@ -2034,10 +2043,49 @@ where
             )
             .await
         }
-        request @ (ClientRequest::SpawnSession { .. }
-        | ClientRequest::AwaitSession { .. }
-        | ClientRequest::SendSessionMessage { .. }) => {
-            reject_uncomposed_delegation(writer, version, request_id, request).await
+        request @ ClientRequest::SpawnSession { .. } => {
+            reject_uncomposed_spawn(writer, version, request_id, request).await
+        }
+        ClientRequest::AwaitSession {
+            session_id,
+            turn_id,
+            tool_request_id,
+            child_session_id,
+            mode,
+        } => {
+            handle_await_session(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                child_session_id,
+                mode,
+                services,
+                shutdown,
+            )
+            .await
+        }
+        ClientRequest::SendSessionMessage {
+            session_id,
+            turn_id,
+            tool_request_id,
+            peer_session_id,
+            content,
+        } => {
+            handle_send_session_message(
+                writer,
+                version,
+                request_id,
+                session_id,
+                turn_id,
+                tool_request_id,
+                peer_session_id,
+                content,
+                &services.pool,
+            )
+            .await
         }
         ClientRequest::DecideToolRequest {
             command_id,
@@ -2061,7 +2109,7 @@ where
     }
 }
 
-async fn reject_uncomposed_delegation<Writer>(
+async fn reject_uncomposed_spawn<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -2070,12 +2118,7 @@ async fn reject_uncomposed_delegation<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    debug_assert!(matches!(
-        request,
-        ClientRequest::SpawnSession { .. }
-            | ClientRequest::AwaitSession { .. }
-            | ClientRequest::SendSessionMessage { .. }
-    ));
+    debug_assert!(matches!(request, ClientRequest::SpawnSession { .. }));
     write_error(
         writer,
         version,
@@ -2083,6 +2126,348 @@ where
         ProtocolError::without_detail(ErrorCode::InvalidRequest),
     )
     .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed await request keeps every durable correlation explicit"
+)]
+async fn handle_await_session<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    child_session_id: CanonicalUuid,
+    mode: WireDelegationWaitMode,
+    services: &ConnectionServices,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let turn = TurnId::from_uuid(turn_id.into_uuid());
+    let request = ToolRequestId::from_uuid(tool_request_id.into_uuid());
+    let child = SessionId::from_uuid(child_session_id.into_uuid());
+    let mode = match mode {
+        WireDelegationWaitMode::Foreground => DomainDelegationWaitMode::Foreground,
+        WireDelegationWaitMode::Background => DomainDelegationWaitMode::Background,
+    };
+    let mut subscription = services.fanouts.durable.subscribe();
+    let port = PostgresSessionDelegationPort::new(services.pool.clone());
+    let Some(outcome) = run_until_shutdown(
+        &mut shutdown,
+        port.await_process_session(session, turn, request, child, mode),
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    match outcome {
+        Ok(AwaitSessionPortOutcome::BackgroundRegistered(receipt)) => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionAwaitRegistered {
+                    tool_request_id: wire_uuid(receipt.tool_request().into_uuid()),
+                    child_session_id: wire_uuid(receipt.child().into_uuid()),
+                    mode: WireDelegationWaitMode::Background,
+                },
+            )
+            .await
+        }
+        Ok(AwaitSessionPortOutcome::Delivered(result)) => {
+            write_message(writer, version, request_id, wire_child_result(&result)?).await
+        }
+        Ok(AwaitSessionPortOutcome::ForegroundPending(wait)) => {
+            wait_for_foreground_child_result(
+                writer,
+                version,
+                request_id,
+                &port,
+                wait,
+                &mut subscription,
+                shutdown,
+            )
+            .await
+        }
+        Ok(AwaitSessionPortOutcome::Rejected) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Err(error) => {
+            write_delegation_port_error(writer, version, request_id, session_id, error).await
+        }
+    }
+}
+
+async fn wait_for_foreground_child_result<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    port: &PostgresSessionDelegationPort,
+    wait: DelegationWait,
+    subscription: &mut broadcast::Receiver<ProcessUpdate>,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    loop {
+        let Some(delivery) =
+            run_until_shutdown(&mut shutdown, port.load_foreground_delivery(wait)).await
+        else {
+            return Ok(());
+        };
+        match delivery {
+            Ok(Some(result)) => {
+                return write_message(writer, version, request_id, wire_child_result(&result)?)
+                    .await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return write_delegation_port_error(
+                    writer,
+                    version,
+                    request_id,
+                    wire_uuid(wait.parent().into_uuid()),
+                    error,
+                )
+                .await;
+            }
+        }
+        loop {
+            let update = tokio::select! {
+                () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                update = subscription.recv() => update,
+            };
+            match update {
+                Ok(update) if update_signals_child_result(&update, wait) => break,
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => break,
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            }
+        }
+    }
+}
+
+fn update_signals_child_result(update: &ProcessUpdate, wait: DelegationWait) -> bool {
+    matches!(
+        update,
+        ProcessUpdate::Durable {
+            session,
+            event:
+                ProcessUpdateEvent::DelegationUpdate(DispatchedDelegationUpdate::ChildResult {
+                    spawning_request,
+                    child,
+                    ..
+                }),
+            ..
+        } if *session == wait.parent()
+            && *spawning_request == wait.spawning_request()
+            && *child == wait.child()
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed message request keeps every durable correlation explicit"
+)]
+async fn handle_send_session_message<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    peer_session_id: CanonicalUuid,
+    content: String,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let port = PostgresSessionDelegationPort::new(pool.clone());
+    let result = port
+        .send_process_message(
+            SessionId::from_uuid(session_id.into_uuid()),
+            TurnId::from_uuid(turn_id.into_uuid()),
+            ToolRequestId::from_uuid(tool_request_id.into_uuid()),
+            SessionId::from_uuid(peer_session_id.into_uuid()),
+            content,
+        )
+        .await;
+    match result {
+        Ok(SessionDelegationPortOutcome::Applied(receipt)) => {
+            let direction = match receipt.direction() {
+                DomainDelegationMessageDirection::ParentToChild => {
+                    signalbox_process_protocol::DelegationMessageDirection::ParentToChild
+                }
+                DomainDelegationMessageDirection::ChildToParent => {
+                    signalbox_process_protocol::DelegationMessageDirection::ChildToParent
+                }
+            };
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionMessageSent {
+                    tool_request_id: wire_uuid(receipt.tool_request().into_uuid()),
+                    message_id: wire_uuid(receipt.message().into_uuid()),
+                    direction,
+                    ordinal: CanonicalU64::new(receipt.ordinal().get()),
+                    delivery_sequence: CanonicalU64::new(receipt.delivery_sequence().get()),
+                },
+            )
+            .await
+        }
+        Ok(SessionDelegationPortOutcome::Rejected) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Err(error) => {
+            write_delegation_port_error(writer, version, request_id, session_id, error).await
+        }
+    }
+}
+
+fn wire_child_result(
+    result: &DeliveredChildResult,
+) -> Result<ServerMessage, ProcessConnectionError> {
+    let wait = result.wait();
+    let outcome = match result.kind() {
+        DomainDelegationOutcomeKind::ResultReturned => WireDelegationOutcome::Returned,
+        DomainDelegationOutcomeKind::ChildFailed => WireDelegationOutcome::Failed,
+        DomainDelegationOutcomeKind::ChildStopped => WireDelegationOutcome::Stopped,
+        DomainDelegationOutcomeKind::ChildCancelled => WireDelegationOutcome::Cancelled,
+        DomainDelegationOutcomeKind::AlreadyTerminal
+        | DomainDelegationOutcomeKind::ContinueRunning => {
+            return Err(ProcessConnectionError::EncodeInvariant);
+        }
+    };
+    let reason = match result.reason() {
+        DomainDelegationOutcomeReason::ChildCompleted => WireDelegationReason::ChildCompleted,
+        DomainDelegationOutcomeReason::ChildExecutionFailed => {
+            WireDelegationReason::ChildExecutionFailed
+        }
+        DomainDelegationOutcomeReason::ChildResultUnavailable => {
+            WireDelegationReason::ChildResultUnavailable
+        }
+        DomainDelegationOutcomeReason::ChildCancelled => WireDelegationReason::ChildCancelled,
+        DomainDelegationOutcomeReason::ParentStopped { .. } => WireDelegationReason::ParentStopped,
+        DomainDelegationOutcomeReason::ParentCancelled { .. } => {
+            WireDelegationReason::ParentCancelled
+        }
+    };
+    Ok(ServerMessage::ChildResult {
+        await_request_id: wire_uuid(wait.awaiting_request().into_uuid()),
+        spawning_request_id: wire_uuid(wait.spawning_request().into_uuid()),
+        child_session_id: wire_uuid(wait.child().into_uuid()),
+        outcome,
+        content: result.content().map(|content| content.as_str().to_owned()),
+        reason,
+        provenance: wire_domain_delegation_provenance(result.provenance())?,
+    })
+}
+
+fn wire_domain_delegation_provenance(
+    provenance: DomainDelegationProvenance,
+) -> Result<WireDelegationProvenance, ProcessConnectionError> {
+    if let Some((session, turn)) = provenance.child_turn() {
+        return Ok(WireDelegationProvenance::ChildTurn {
+            child_session_id: wire_uuid(session.into_uuid()),
+            child_turn_id: wire_uuid(turn.into_uuid()),
+        });
+    }
+    let Some(authority) = provenance.parent_command() else {
+        return Err(ProcessConnectionError::EncodeInvariant);
+    };
+    let descendant_scope = match authority.scope() {
+        DescendantTerminationScope::ParentAlone => WireDescendantTerminationScope::ParentAlone,
+        DescendantTerminationScope::ParentAndDescendants => {
+            WireDescendantTerminationScope::ParentAndDescendants
+        }
+    };
+    match authority.source() {
+        ParentTerminationCommandSource::Turn { turn } => {
+            Ok(WireDelegationProvenance::ParentTurnCommand {
+                parent_session_id: wire_uuid(authority.parent().into_uuid()),
+                parent_turn_id: wire_uuid(turn.into_uuid()),
+                command_id: wire_uuid(authority.command().into_uuid()),
+                descendant_scope,
+            })
+        }
+        ParentTerminationCommandSource::Goal { generation } => {
+            Ok(WireDelegationProvenance::ParentGoalCommand {
+                parent_session_id: wire_uuid(authority.parent().into_uuid()),
+                goal_generation: CanonicalU64::new(generation.get()),
+                command_id: wire_uuid(authority.command().into_uuid()),
+                descendant_scope,
+            })
+        }
+    }
+}
+
+async fn write_delegation_port_error<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    error: PostgresSessionDelegationPortError,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let protocol_error = match error {
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::Database(
+                _,
+            ),
+        ) => unavailable_protocol_error(InternalDiagnostic::SessionDelegationDatabase),
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::CommitAmbiguous(
+                _,
+            ),
+        ) => unavailable_protocol_error(InternalDiagnostic::SessionDelegationCommitAmbiguous),
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::ToolLoop(
+                error,
+            ),
+        ) => {
+            return write_tool_loop_error(writer, version, request_id, session_id, error).await;
+        }
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::Corruption(
+                _,
+            ),
+        ) => internal_protocol_error(
+            Some(session_id.into_uuid()),
+            InternalDiagnostic::SessionDelegationCorruption,
+        ),
+        PostgresSessionDelegationPortError::Repository(
+            signalbox_persistence::session_delegation::SessionDelegationRepositoryError::InvalidTransition(
+                _,
+            ),
+        )
+        | PostgresSessionDelegationPortError::Contract => internal_protocol_error(
+            Some(session_id.into_uuid()),
+            InternalDiagnostic::SessionDelegationContract,
+        ),
+    };
+    write_error(writer, version, request_id, protocol_error).await
 }
 
 async fn handle_review_orchestration_mutation<Writer>(
@@ -10481,6 +10866,10 @@ enum InternalDiagnostic {
     SessionDefaultsCommitAmbiguous,
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
+    SessionDelegationDatabase,
+    SessionDelegationCommitAmbiguous,
+    SessionDelegationCorruption,
+    SessionDelegationContract,
     SystemPromptMemberMissing,
     SubmitInputCommandKindMismatch,
     SubmitInputIdentityCollision,
@@ -10503,13 +10892,15 @@ impl InternalDiagnostic {
             | Self::ImportedConversationDatabase
             | Self::SessionCreationDatabase
             | Self::SessionMetadataDatabase
-            | Self::SessionDefaultsDatabase => OperatorFailureClass::Infrastructure {
+            | Self::SessionDefaultsDatabase
+            | Self::SessionDelegationDatabase => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
             Self::ImportedSessionCommitAmbiguous
             | Self::SessionCreationCommitAmbiguous
             | Self::SessionMetadataCommitAmbiguous
-            | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
+            | Self::SessionDefaultsCommitAmbiguous
+            | Self::SessionDelegationCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
             Self::ConversationImportAllocationFailure => OperatorFailureClass::Infrastructure {
@@ -10524,6 +10915,7 @@ impl InternalDiagnostic {
             | Self::SessionCreationCommandKindMismatch
             | Self::SessionMetadataCommandKindMismatch
             | Self::SessionDefaultsCommandKindMismatch
+            | Self::SessionDelegationContract
             | Self::ContextCompactionUnconfiguredTarget
             | Self::SystemPromptMemberMissing
             | Self::SubmitInputCommandKindMismatch
@@ -10553,6 +10945,7 @@ impl InternalDiagnostic {
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
             | Self::SessionDefaultsCorruption
+            | Self::SessionDelegationCorruption
             | Self::SubmitInputCorruption
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
@@ -10611,6 +11004,10 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommitAmbiguous => "session_defaults_commit_ambiguous",
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
+            Self::SessionDelegationDatabase => "session_delegation_database",
+            Self::SessionDelegationCommitAmbiguous => "session_delegation_commit_ambiguous",
+            Self::SessionDelegationCorruption => "session_delegation_corruption",
+            Self::SessionDelegationContract => "session_delegation_contract",
             Self::SystemPromptMemberMissing => "system_prompt_member_missing",
             Self::SubmitInputCommandKindMismatch => "submit_input_command_kind_mismatch",
             Self::SubmitInputIdentityCollision => "submit_input_identity_collision",
