@@ -75,7 +75,9 @@ It serializes competing commits, appends the cursor and every event together,
 rolls back the whole batch on failure, reports a stale generation as conflict,
 and recognizes only an exact candidate-and-event replay. An unchanged candidate
 with no events does not advance the cursor; an unchanged candidate carrying
-events is rejected.
+events is rejected. The relational event table admits an event row only in the
+database transaction that inserts its referenced cursor generation, preventing
+later maintenance or future writers from changing an already-committed batch.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -154,7 +156,7 @@ kind is constructible.
 submitted review. A later GitHub dismissal is not a version-one fact and emits
 no event.
 
-**Foundation contract.** Reaction ingestion includes only reactions by a login
+**Implemented behavior.** Reaction ingestion includes only reactions by a login
 in the configured signal-reviewer list. Reactions from every other actor are
 excluded while normalizing state, so they cannot create durable
 `ReactionChanged` events. Why: reviewer signals are actionable facts; the full
