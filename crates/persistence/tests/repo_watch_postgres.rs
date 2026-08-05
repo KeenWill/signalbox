@@ -825,6 +825,42 @@ async fn comment_reaction_constraint_accepts_a_u64_maximum_subject_id() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn comment_reaction_constraint_rejects_an_empty_content() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, repository) = migrated_cursor_fixture().await?;
+    let insert = sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal, event_version,
+            target_kind, event_kind, pull_request_number, head_sha, head_repository,
+            base_branch, head_branch, title, body, labels, draft,
+            reaction_subject_kind, reaction_subject_id, reaction_reactor,
+            reaction_content, reaction_change
+         ) VALUES (
+            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
+            'issue_comment', $11::numeric, $12, '', 'added'
+         )",
+    )
+    .bind(Uuid::now_v7())
+    .bind(repository.as_str())
+    .bind(RepoWatchCursorGeneration::INITIAL.get() as i64)
+    .bind(PULL_REQUEST as i64)
+    .bind(INITIAL_HEAD)
+    .bind(HEAD_REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(HEAD_BRANCH)
+    .bind(TITLE)
+    .bind(BODY)
+    .bind(U64_MAX_NUMERIC)
+    .bind(AUTHOR)
+    .execute(&pool)
+    .await;
+
+    assert!(insert.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn label_array_constraint_rejects_a_null_member() -> Result<(), Box<dyn Error>> {
     let (_container, pool, repository) = migrated_cursor_fixture().await?;
     let insert = sqlx::query(
