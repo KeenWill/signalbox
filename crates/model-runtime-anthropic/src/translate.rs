@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
-    AnthropicServiceTier, ConversationMessage, ConversationRole, DeliveryMode, FastMode,
-    MessagePart, ModelOperation, PreparationFailure, ReasoningLevel, ServiceTier, ToolChoice,
+    AnthropicServiceTier, CodexCliServiceTier, ConversationMessage, ConversationRole, DeliveryMode,
+    FastMode, MessagePart, ModelOperation, OpenAiServiceTier, PreparationFailure, ReasoningLevel,
+    ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
@@ -142,7 +143,21 @@ fn anthropic_service_tier<C>(
         (FastMode::Disabled, None) => Ok(None),
         (
             FastMode::Disabled | FastMode::Enabled,
-            Some(ServiceTier::OpenAi(_) | ServiceTier::CodexCli(_)),
+            Some(
+                ServiceTier::OpenAi(
+                    OpenAiServiceTier::Auto
+                    | OpenAiServiceTier::Default
+                    | OpenAiServiceTier::Flex
+                    | OpenAiServiceTier::Scale
+                    | OpenAiServiceTier::Priority
+                    | OpenAiServiceTier::Fast,
+                )
+                | ServiceTier::CodexCli(
+                    CodexCliServiceTier::Default
+                    | CodexCliServiceTier::Priority
+                    | CodexCliServiceTier::Flex,
+                ),
+            ),
         ) => Err(PreparationFailure::UnsupportedOperation {
             detail: "Anthropic cannot enforce another provider's service tier".to_string(),
         }),
