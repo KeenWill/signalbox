@@ -10,6 +10,8 @@ use std::time::Duration;
 /// credential value.
 #[derive(Debug, Clone)]
 pub struct CodexCliConfig {
+    /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     /// Absolute path to the locally installed Codex executable.
     pub executable: PathBuf,
     /// Absolute existing directory used as the CLI's working root.
@@ -36,6 +38,7 @@ impl CodexCliConfig {
         credential_reference: signalbox_model_runtime::CredentialReference,
     ) -> Self {
         Self {
+            model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             executable: executable.into(),
             working_directory: working_directory.into(),
             credential_reference,

@@ -65,10 +65,11 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
     ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-    ConversationSummary, CurrentModelCallState, DescendantTerminationScope, ErrorCode,
-    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
-    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelSelection, ProtocolVersion, RejectionDetail, RequestId,
+    ConversationSummary, CurrentModelCallState, DescendantTerminationScope, EffectiveModelSettings,
+    ErrorCode, FastMode, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
+    ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+    InputContent, InputDelivery, MetadataActor, ModelSelection, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, RejectionDetail, RequestId,
     ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
     ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
     ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
@@ -364,6 +365,26 @@ fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
+fn provider_default_model_settings() -> ModelSettingsSnapshot {
+    ModelSettingsSnapshot {
+        precedence: ModelSettingsPrecedence {
+            per_call: ModelSettingsOverlay::inherit_all(),
+            session: ModelSettingsOverlay::inherit_all(),
+            profile: ModelSettingsOverlay::inherit_all(),
+            global_default: ModelSettingsOverlay::inherit_all(),
+        },
+        effective: EffectiveModelSettings {
+            reasoning_level: None,
+            fast_mode: FastMode::Disabled,
+            service_tier: None,
+        },
+        reasoning_source: None,
+        fast_mode_source: None,
+        service_tier_source: None,
+        validated_for_selection_id: None,
+    }
+}
+
 #[derive(Debug)]
 struct FixedImportIds {
     conversations: VecDeque<ImportedConversationId>,
@@ -617,13 +638,14 @@ async fn create_alias_session_with(
             ClientRequest::CreateSession {
                 command_id: command()?,
                 initial_model_selection: ModelSelection::Alias { alias_id },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement,
             },
         )
         .await?;
     match connection.response().await?.message() {
-        ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+        ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
         message => Err(io::Error::other(format!(
             "unexpected create-session fixture response: {message:?}"
         ))
@@ -783,6 +805,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: unknown_selection,
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
             },
@@ -812,6 +835,7 @@ async fn submit_first_input(
                 session_id,
                 content: InputContent::new(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -822,6 +846,7 @@ async fn submit_first_input(
             accepted_input_id,
             acceptance_position,
             turn_id,
+            ..
         } if *submitted_session == session_id && acceptance_position.value() == 1 => {
             Ok((*accepted_input_id, *turn_id))
         }
@@ -1894,6 +1919,7 @@ async fn s28_continuation_names_the_selectable_position_range() -> Result<(), Bo
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -1937,6 +1963,7 @@ async fn s28_continuation_names_an_absent_imported_conversation() -> Result<(), 
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -2080,6 +2107,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
             selection_id: replacement_selection,
         },
         dangerous_tool_auto_approval: false,
+        model_settings: ModelSettingsOverlay::inherit_all(),
         system_prompt: SystemPromptMember::present(None),
     };
 
@@ -2095,6 +2123,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -2111,6 +2140,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -2128,6 +2158,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(999)),
                 },
                 dangerous_tool_auto_approval: false,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
             },
         )
@@ -3023,6 +3054,7 @@ async fn s28_submit_accepts_imported_session_continuation() -> Result<(), Box<dy
                 session_id,
                 content: InputContent::new(String::from("native continuation")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3050,6 +3082,7 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
                 session_id,
                 content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3175,6 +3208,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 session_id,
                 content: InputContent::new(String::from("work while the ambiguity is unresolved")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3198,6 +3232,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3328,6 +3363,7 @@ async fn connection_reconciles_the_parked_turn(
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after the wedge")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3361,6 +3397,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: unparked_turn_id,
                 content: InputContent::new(String::from("names no parked turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3382,6 +3419,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3397,6 +3435,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("the decision is already recorded")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3431,6 +3470,7 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
         expected_active_turn_id: parked_turn_id,
         content: InputContent::new(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -3476,6 +3516,7 @@ async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decis
         expected_active_turn_id: parked_turn_id,
         content: InputContent::new(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     let mut first = Connection::connect(runtime.socket()).await?;
     let mut second = Connection::connect(runtime.socket()).await?;
@@ -3519,6 +3560,7 @@ async fn s04_reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Bo
                 expected_active_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xB3)),
                 content: InputContent::new(String::from("names no session")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3613,6 +3655,7 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
                 session_id,
                 content: second_content.clone(),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -4107,6 +4150,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
                 content: InputContent::new(successor_content.clone()),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4157,6 +4201,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4192,6 +4237,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 content: InputContent::new(String::from("a second distinct stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4230,6 +4276,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 content: InputContent::new(String::from("names no active turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4255,6 +4302,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 content: InputContent::new(String::from("names a stale turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4290,6 +4338,7 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
         content: InputContent::new(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
         descendant_scope: DescendantTerminationScope::ParentAlone,
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -4339,6 +4388,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 content: InputContent::new(String::from("stop during the approval wait")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4398,6 +4448,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 content: InputContent::new(String::from("continue after the denied round")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4412,6 +4463,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 session_id,
                 content: InputContent::new(String::from("ordinary later work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -4695,6 +4747,7 @@ async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reus
                 session_id,
                 content: InputContent::new(String::from("claims a submit identity")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -4843,6 +4896,7 @@ async fn submit_queued_input(
                 session_id,
                 content: InputContent::new(content.to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
                     expected_active_turn_id,
                 }),
@@ -4897,6 +4951,7 @@ async fn s08_steering_without_an_active_turn_is_a_typed_rejection() -> Result<()
                 session_id,
                 content: InputContent::new(String::from("steer no turn")),
                 expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
                     expected_active_turn_id,
                 }),
@@ -5012,12 +5067,13 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: selection,
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(Some(prompt.clone())),
                 placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
-    let ServerMessage::SessionCreated { session_id } =
+    let ServerMessage::SessionCreated { session_id, .. } =
         *response_within(&mut connection).await?.message()
     else {
         panic!("prompted creation must return its session");
@@ -5042,6 +5098,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: Some(prompt.clone()),
         }
     );
@@ -5060,6 +5117,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                     selection_id: selection,
                 },
                 dangerous_tool_auto_approval: false,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
             },
         )
@@ -5073,6 +5131,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -5096,6 +5155,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: Some(prompt),
         }
     );
@@ -5341,6 +5401,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
                 session_id,
                 content: InputContent::new(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -5726,6 +5787,7 @@ async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
                     "scheduler race successor remains singular",
                 )),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -5820,6 +5882,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
                 session_id,
                 content: InputContent::new(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -5965,6 +6028,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
                 session_id,
                 content: InputContent::new(oversized_suffix),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -6566,7 +6630,7 @@ impl ReviewRuntimeDriver {
             )
             .await?;
         match response_within(&mut self.connection).await?.message() {
-            ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+            ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
             message => Err(io::Error::other(format!(
                 "unexpected review-template session response: {message:?}"
             ))
@@ -6588,6 +6652,7 @@ impl ReviewRuntimeDriver {
                     session_id: session,
                     content: InputContent::new(format!("review pass fixture {seed}")),
                     expected_defaults_version: Some(CanonicalU64::new(1)),
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: None,
                 },
             )

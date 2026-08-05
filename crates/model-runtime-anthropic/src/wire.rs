@@ -29,10 +29,21 @@ pub(crate) struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
     pub stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct OutputConfig {
+    pub effort: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +105,10 @@ pub(crate) struct CountTokensRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<WireTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<WireToolChoice>,
@@ -105,6 +120,8 @@ impl From<MessagesRequest> for CountTokensRequest {
             model: request.model,
             messages: request.messages,
             system: request.system,
+            output_config: request.output_config,
+            speed: request.speed,
             tools: request.tools,
             tool_choice: request.tool_choice,
         }

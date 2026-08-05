@@ -70,8 +70,8 @@ pub use capability::{
 #[cfg(feature = "cli-process")]
 pub use cli_process::{
     CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CliDecodeFailure, CliDecodeFailureClass,
-    CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
-    CliTerminalTextCapture, execute_cli_process,
+    CliEnvironmentOverride, CliEnvironmentVariable, CliProcessLabels, CliProcessRequest,
+    CliSession, CliTerminalTextCapture, execute_cli_process,
 };
 pub use cli_redaction::{
     REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,
