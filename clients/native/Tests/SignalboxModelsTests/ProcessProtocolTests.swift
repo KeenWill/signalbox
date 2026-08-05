@@ -41,7 +41,7 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"command_id":"\#(turnID)","content":"Stop and continue","descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+      #"{"request":{"command_id":"\#(turnID)","content":"Stop and continue","descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
     )
   }
 
