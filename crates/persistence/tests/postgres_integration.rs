@@ -22,9 +22,9 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
-    CommitModelCallObservationTransaction, CreateSessionError, CreateSessionOutcome,
-    CreateSessionRequest, CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome,
-    EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
+    CommitModelCallObservationTransaction, CorrelatedDurableChildWait, CreateSessionError,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
+    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
@@ -1051,6 +1051,11 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
     let RecordDelegationWaitOutcome::Recorded(recorded) = recorded else {
         panic!("the related foreground await records")
     };
+    let durable_wait = CorrelatedDurableChildWait::try_new(dispatch.correlation(), recorded.wait())
+        .expect("recorded foreground wait matches its dispatch");
+    let authenticated = PostgresToolLoopRepository::new(pool.clone())
+        .reread_durable_child_wait(durable_wait)
+        .await?;
     let replayed = repository.record_wait(request, &dispatch).await?;
     let RecordDelegationWaitOutcome::Recorded(replayed) = replayed else {
         panic!("the parked wait replays before stale-dispatch validation")
@@ -1074,6 +1079,7 @@ async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomicall
     .await?;
 
     assert_eq!(recorded, replayed);
+    assert!(authenticated);
     assert_eq!(recorded.wait().mode(), DelegationWaitMode::Foreground);
     assert_eq!(evidence.0, "awaiting_child");
     assert_eq!(evidence.1, None);

@@ -44,8 +44,10 @@ impl RecordedDelegationWait {
 }
 
 /// One successful peer-message receipt, equal replay included.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationMessage {
+    relation: SessionDelegation,
+    event: DelegationEvent,
     message: DelegationMessageId,
     direction: DelegationMessageDirection,
     ordinal: DelegationEventOrdinal,
@@ -53,19 +55,27 @@ pub struct RecordedDelegationMessage {
 }
 
 impl RecordedDelegationMessage {
-    pub const fn message(self) -> DelegationMessageId {
+    pub const fn relation(&self) -> &SessionDelegation {
+        &self.relation
+    }
+
+    pub const fn event(&self) -> &DelegationEvent {
+        &self.event
+    }
+
+    pub const fn message(&self) -> DelegationMessageId {
         self.message
     }
 
-    pub const fn direction(self) -> DelegationMessageDirection {
+    pub const fn direction(&self) -> DelegationMessageDirection {
         self.direction
     }
 
-    pub const fn ordinal(self) -> DelegationEventOrdinal {
+    pub const fn ordinal(&self) -> DelegationEventOrdinal {
         self.ordinal
     }
 
-    pub const fn delivery_sequence(self) -> NonZeroU64 {
+    pub const fn delivery_sequence(&self) -> NonZeroU64 {
         self.delivery_sequence
     }
 }
@@ -86,9 +96,9 @@ pub enum RecordDelegationWaitOutcome {
     Rejected(DelegationOperationRejection),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordDelegationMessageOutcome {
-    Recorded(RecordedDelegationMessage),
+    Recorded(Box<RecordedDelegationMessage>),
     Rejected(DelegationOperationRejection),
 }
 
@@ -296,7 +306,7 @@ impl SessionDelegationRepository {
         let result = async {
             lock_tool_session(&mut transaction, request.request().session()).await?;
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
-                return Ok(RecordDelegationMessageOutcome::Recorded(receipt));
+                return Ok(RecordDelegationMessageOutcome::Recorded(Box::new(receipt)));
             }
             let Some(spawning_request) =
                 find_relation_for_message(&mut transaction, &request).await?
@@ -321,7 +331,7 @@ impl SessionDelegationRepository {
                     DelegationOperationRejection::MessageIdentityCollision,
                 ));
             }
-            let (_, event) = match relation.deliver_message(request, message, dispatch) {
+            let (relation, event) = match relation.deliver_message(request, message, dispatch) {
                 Ok(recorded) => recorded,
                 Err(error) => {
                     return Ok(RecordDelegationMessageOutcome::Rejected(
@@ -368,15 +378,20 @@ impl SessionDelegationRepository {
                 stored_message.id(),
             )
             .await?;
+            let message = stored_message.id();
+            let direction = stored_message.direction();
+            let ordinal = event.ordinal();
             let receipt = RecordedDelegationMessage {
-                message: stored_message.id(),
-                direction: stored_message.direction(),
-                ordinal: event.ordinal(),
+                relation,
+                event,
+                message,
+                direction,
+                ordinal,
                 delivery_sequence,
             };
-            let ended = complete_attempt(dispatch, message_receipt(dispatch, receipt)?)?;
+            let ended = complete_attempt(dispatch, message_receipt(dispatch, &receipt)?)?;
             persist_ended_attempt(&mut transaction, &ended).await?;
-            Ok(RecordDelegationMessageOutcome::Recorded(receipt))
+            Ok(RecordDelegationMessageOutcome::Recorded(Box::new(receipt)))
         }
         .await;
         finish(transaction, result).await
@@ -454,7 +469,7 @@ fn wait_receipt(wait: DelegationWait) -> Result<ToolResultText, SessionDelegatio
 
 fn message_receipt(
     dispatch: &ToolDispatchAuthority,
-    receipt: RecordedDelegationMessage,
+    receipt: &RecordedDelegationMessage,
 ) -> Result<ToolResultText, SessionDelegationRepositoryError> {
     ToolResultText::try_new(
         serde_json::json!({
@@ -480,7 +495,7 @@ async fn load_wait_replay_subject(
           WHERE awaiting_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(request))
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await
     .map(|value| value.map(tool_request_id_from_uuid))
     .map_err(Into::into)
@@ -1246,7 +1261,8 @@ async fn load_message_replay(
     request: &DelegationMessageRequest,
 ) -> Result<Option<RecordedDelegationMessage>, SessionDelegationRepositoryError> {
     let row = sqlx::query(
-        "SELECT relation.parent_session_id, relation.child_session_id,
+        "SELECT event.spawning_tool_request_id,
+                relation.parent_session_id, relation.child_session_id,
                 message.message_id, message.direction, message.content_text,
                 message.event_ordinal, delivery.delivery_sequence
            FROM session_delegation_event AS event
@@ -1262,13 +1278,14 @@ async fn load_message_replay(
             AND event.provenance_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(request.request().id()))
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
         return Ok(None);
     };
     let parent = session_id_from_uuid(required(&row, "parent_session_id")?);
     let child = session_id_from_uuid(required(&row, "child_session_id")?);
+    let spawning_request = tool_request_id_from_uuid(required(&row, "spawning_tool_request_id")?);
     let direction = decode_direction(&required::<String>(&row, "direction")?)?;
     let content: String = required(&row, "content_text")?;
     if content != request.content().as_str()
@@ -1283,7 +1300,25 @@ async fn load_message_replay(
     {
         return Err(SessionDelegationCorruption::Inconsistent("message replay").into());
     }
+    let relation = load_relation(connection, spawning_request).await?;
+    let event = relation
+        .events()
+        .iter()
+        .find(|event| {
+            event.message().is_some_and(|message| {
+                message
+                    .provenance()
+                    .tool_request()
+                    .is_some_and(|(_, _, tool_request)| tool_request == request.request().id())
+            })
+        })
+        .cloned()
+        .ok_or(SessionDelegationCorruption::Missing(
+            "replayed message event",
+        ))?;
     Ok(Some(RecordedDelegationMessage {
+        relation,
+        event,
         message: DelegationMessageId::from_uuid(required(&row, "message_id")?),
         direction,
         ordinal: decode_ordinal(required(&row, "event_ordinal")?)?,

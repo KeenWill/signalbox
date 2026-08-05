@@ -6150,12 +6150,32 @@ impl CorrelatedToolExecutorEvidence {
     // accessors: correlation(), evidence()
 }
 
+pub struct CorrelatedDurableChildWait { /* private */ }
+impl CorrelatedDurableChildWait {
+    pub fn try_new(
+        correlation: ToolAttemptDispatchCorrelation,
+        wait: DelegationWait,
+    ) -> Option<Self>;
+    // accessors: correlation(), wait(), child_wait()
+}
+
+pub enum ToolExecutorDisposition {
+    Completed(CorrelatedToolExecutorEvidence),
+    DurableChildWait(CorrelatedDurableChildWait),
+}
+
 pub trait ToolExecutor {
     type Error: ClassifyOperatorFailure;
     fn execute(
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> impl Future<Output = Result<CorrelatedToolExecutorEvidence, Self::Error>> + Send;
+    fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> impl Future<Output = Result<ToolExecutorDisposition, Self::Error>> + Send
+    where
+        Self: Send;
 }
 
 pub trait ToolApprovalIdGenerator {
@@ -6195,6 +6215,7 @@ pub enum ToolExecutionServiceOutcome {
     AwaitingApproval(ToolRequestId),
     AwaitingRecovery(ToolAttemptId),
     ChildWaitResumed(TurnAttemptId),
+    ChildWaitParked(ChildWait),
     AttemptCheckpointed(ToolAttemptId),
     PreflightFailed(Box<EndedToolAttempt>),
     ObservationCommitted(Box<EndedToolAttempt>),
@@ -6223,6 +6244,8 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ExecutorCorrelationMismatchCrashClassification(TransactionError),
     ObservationCommit(TransactionError),
     ObservationReconciliation(TransactionError),
+    ChildWaitReconciliation(TransactionError),
+    ChildWaitMismatch,
     CrashClassification(TransactionError),
     Continuation(TransactionError),
     CatalogDrift,
@@ -7472,6 +7495,10 @@ pub trait ToolExecutionTransaction {
         &mut self,
         observation: &CorrelatedToolAttemptObservation,
     ) -> impl Future<Output = Result<RetainedToolAttemptObservationStatus, Self::Error>> + Send;
+    fn reread_durable_child_wait(
+        &mut self,
+        wait: CorrelatedDurableChildWait,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     fn classify_crash_loss<NextTurn>(
         &mut self,
         session: SessionId,
@@ -9427,7 +9454,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
 | application: model_execution                       | 32 (incl. 8 traits)  |
-| application: tool_loop                             | 23 (incl. 5 traits)  |
+| application: tool_loop                             | 25 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
@@ -9439,4 +9466,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **205**              |
+| **signalbox-application total**                    | **207**              |

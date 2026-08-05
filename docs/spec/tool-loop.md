@@ -830,7 +830,12 @@ executor kept in flight. It ends any current physical attempt before committing
 `AwaitingChild`; restart therefore resumes from durable wait/result rows and
 cannot duplicate an external effect. The delivered tool result is copied from
 the child's terminal result record. The executor never reads or returns the
-child transcript.
+child transcript. The scheduling-aware executor returns a distinct
+`DurableChildWait` disposition instead of terminal result evidence. Before the
+application accepts that disposition, persistence rereads the complete parked
+batch and exact ended dispatch fence; absent or cross-wired wait evidence fails
+closed, and the generic observation path never attempts a second terminal
+commit.
 
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a

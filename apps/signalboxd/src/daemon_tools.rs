@@ -3,9 +3,10 @@
 use std::{collections::BTreeMap, error::Error, fmt, path::Path, sync::Arc};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionInvocation, ToolExecutor,
+    ClassifyOperatorFailure, CompiledToolCatalog, CorrelatedDurableChildWait,
+    CorrelatedToolExecutorEvidence, OperatorFailureClass, ToolCatalog,
+    ToolCatalogValidationFailure, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    ToolExecutorDisposition,
 };
 use signalbox_domain::{NormalizedToolArguments, ToolApprovalPosture, ToolName};
 use signalbox_model_runtime::CredentialAccess;
@@ -27,6 +28,10 @@ use signalbox_tools_github::{
     GitHubTransport,
 };
 use signalbox_tools_plan::{PLAN_TOOL_NAMES, PlanExecutor, PlanTools, SessionPlanPort};
+use signalbox_tools_sessions::{
+    SESSION_DELEGATION_TOOL_NAMES, SessionDelegationExecutionDisposition,
+    SessionDelegationExecutor, SessionDelegationTools,
+};
 use signalbox_tools_web::{
     ReqwestWebFetchTransport, ReqwestWebSearchTransport, WEB_FETCH_NAME, WEB_SEARCH_NAME,
     WebFetchEgressPolicy, WebFetchExecutor, WebFetchTool, WebFetchTransport,
@@ -47,6 +52,7 @@ use tokio::sync::Mutex;
 use crate::{
     FileCredentialAccess, PostgresConversationIntrospection,
     goal_mode::{GOAL_DECLARE_NAME, GoalDeclarationExecutor, GoalDeclarationTool},
+    session_delegation::DaemonSessionDelegationPort,
 };
 
 /// Daemon-local filesystem adapter that shares one pinned root across both
@@ -147,6 +153,7 @@ struct ComposedToolFamilies<
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
+    delegation: SessionDelegationTools<DaemonSessionDelegationPort>,
     goal: Option<GoalDeclarationTool>,
 }
 
@@ -250,6 +257,9 @@ impl<Clock>
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let goal = GoalDeclarationTool::try_new(pool.clone())
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
+        let delegation =
+            SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(pool.clone()))
+                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -264,6 +274,7 @@ impl<Clock>
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
                 plan,
+                delegation,
                 goal: Some(goal),
             },
         )
@@ -295,6 +306,9 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::GoalDeclaration)?;
         let code_host = CodeHostTools::try_new(code_host, code_host_transport)
             .map_err(|_| DaemonToolsConstructionError::CodeHost)?;
+        let delegation =
+            SessionDelegationTools::try_new(DaemonSessionDelegationPort::postgres(pool.clone()))
+                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         let plan = PlanTools::try_new(SessionPlanRepository::new(pool))
             .map_err(|_| DaemonToolsConstructionError::Plan)?;
         Self::try_new_with_tools(
@@ -309,6 +323,7 @@ impl<Clock>
                 workspace_mutation: None,
                 conversations: None,
                 plan,
+                delegation,
                 goal: Some(goal),
             },
         )
@@ -385,6 +400,9 @@ where
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
+        let delegation =
+            SessionDelegationTools::try_new(DaemonSessionDelegationPort::unavailable())
+                .map_err(|_| DaemonToolsConstructionError::SessionDelegation)?;
         Self::try_new_with_tools(
             clock,
             ComposedToolFamilies {
@@ -397,6 +415,7 @@ where
                 workspace_mutation: Some(workspace_mutation),
                 conversations: Some(conversations),
                 plan,
+                delegation,
                 goal: None,
             },
         )
@@ -426,6 +445,7 @@ where
             workspace_mutation,
             conversations,
             plan,
+            delegation,
             goal,
         } = families;
         let (current_time_catalog, current_time) = CurrentTimeTool::try_new(clock)
@@ -443,6 +463,7 @@ where
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
+        let (delegation_catalog, delegation) = delegation.into_parts();
         let goal = goal.map(GoalDeclarationTool::into_parts);
         let mut catalogs = vec![
             current_time_catalog,
@@ -452,6 +473,7 @@ where
             status_catalog,
             code_host_catalog,
             plan_catalog,
+            delegation_catalog,
         ];
         catalogs.extend(github.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(workspace_read.as_ref().map(|(catalog, _)| catalog.clone()));
@@ -479,6 +501,7 @@ where
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
+                delegation,
                 goal: goal.map(|(_, executor)| executor),
             },
         })
@@ -533,6 +556,8 @@ pub enum DaemonToolsConstructionError {
     Conversations,
     /// The plan declarations or session plan port were invalid.
     Plan,
+    /// The session-delegation declarations were invalid.
+    SessionDelegation,
     /// The goal declaration or its static validation details were invalid.
     GoalDeclaration,
     /// Two declarations unexpectedly shared one name.
@@ -553,6 +578,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
+            Self::SessionDelegation => "session-delegation tool suite construction failed",
             Self::GoalDeclaration => "goal_declare tool construction failed",
             Self::Duplicate => "daemon tool catalog contains a duplicate name",
         })
@@ -655,6 +681,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
         || name == GOAL_DECLARE_NAME
         || CODE_HOST_TOOL_NAMES.contains(&name)
         || PLAN_TOOL_NAMES.contains(&name)
+        || SESSION_DELEGATION_TOOL_NAMES.contains(&name)
         || mapped_family_contains
 }
 
@@ -779,6 +806,7 @@ pub struct DaemonToolExecutor<
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
+    delegation: SessionDelegationExecutor<DaemonSessionDelegationPort>,
     goal: Option<GoalDeclarationExecutor>,
 }
 
@@ -917,6 +945,17 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if SESSION_DELEGATION_TOOL_NAMES.contains(&name) => match self
+                .delegation
+                .execute_nonblocking(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error))?
+            {
+                SessionDelegationExecutionDisposition::Completed(evidence) => Ok(evidence),
+                SessionDelegationExecutionDisposition::ForegroundPending(_) => {
+                    Err(DaemonToolExecutorError::unknown_tool())
+                }
+            },
             GOAL_DECLARE_NAME => self
                 .goal
                 .as_mut()
@@ -931,6 +970,32 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             _ => Err(DaemonToolExecutorError::unknown_tool()),
         }
+    }
+
+    async fn execute_with_scheduling(
+        &mut self,
+        invocation: ToolExecutionInvocation,
+    ) -> Result<ToolExecutorDisposition, Self::Error> {
+        if SESSION_DELEGATION_TOOL_NAMES.contains(&invocation.request().name().as_str()) {
+            return match self
+                .delegation
+                .execute_nonblocking(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error))?
+            {
+                SessionDelegationExecutionDisposition::Completed(evidence) => {
+                    Ok(ToolExecutorDisposition::Completed(evidence))
+                }
+                SessionDelegationExecutionDisposition::ForegroundPending(pending) => {
+                    CorrelatedDurableChildWait::try_new(pending.correlation(), pending.wait())
+                        .map(ToolExecutorDisposition::DurableChildWait)
+                        .ok_or_else(DaemonToolExecutorError::unknown_tool)
+                }
+            };
+        }
+        self.execute(invocation)
+            .await
+            .map(ToolExecutorDisposition::Completed)
     }
 }
 
@@ -1341,6 +1406,10 @@ mod tests {
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
+                delegation: SessionDelegationTools::try_new(
+                    DaemonSessionDelegationPort::unavailable(),
+                )
+                .expect("offline session-delegation tools compile"),
                 goal: None,
             },
         )
@@ -1353,6 +1422,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                signalbox_tools_sessions::AWAIT_SESSION_NAME,
                 CHANGE_REQUEST_CHANGED_FILES_NAME,
                 CHANGE_REQUEST_CHECKS_STATUS_NAME,
                 CHANGE_REQUEST_CI_JOB_LOG_NAME,
@@ -1373,7 +1443,9 @@ mod tests {
                 REPOSITORY_LIST_DIRECTORY_NAME,
                 REPOSITORY_READ_FILE_NAME,
                 REVIEW_GATE_CHECK_NAME,
+                signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME,
                 SESSION_STATUS_UPDATE_NAME,
+                signalbox_tools_sessions::SPAWN_SESSION_NAME,
                 WEB_FETCH_NAME,
                 WEB_SEARCH_NAME,
             ]
@@ -1414,6 +1486,7 @@ mod tests {
             names,
             [
                 APPLY_PATCH_NAME,
+                signalbox_tools_sessions::AWAIT_SESSION_NAME,
                 CHANGE_REQUEST_CHANGED_FILES_NAME,
                 CHANGE_REQUEST_CHECKS_STATUS_NAME,
                 CHANGE_REQUEST_CI_JOB_LOG_NAME,
@@ -1447,7 +1520,9 @@ mod tests {
                 REPOSITORY_READ_FILE_NAME,
                 REVIEW_GATE_CHECK_NAME,
                 SEARCH_FILES_NAME,
+                signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME,
                 SESSION_STATUS_UPDATE_NAME,
+                signalbox_tools_sessions::SPAWN_SESSION_NAME,
                 WEB_FETCH_NAME,
                 WEB_SEARCH_NAME,
                 WRITE_FILE_NAME,

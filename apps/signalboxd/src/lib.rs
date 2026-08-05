@@ -47,6 +47,7 @@ pub mod model_adapter;
 mod process_runtime;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
+mod session_delegation;
 mod session_template_configuration;
 mod single_hub;
 mod telemetry;
@@ -69,6 +70,7 @@ pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError};
 pub use session_template_configuration::{
     ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
 };
@@ -1243,7 +1245,8 @@ where
                                 ApprovalJudgeLoopOutcome::Parked => return Ok(()),
                             }
                         }
-                        ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        ToolExecutionServiceOutcome::ChildWaitParked(_)
+                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
                             return Ok(());
                         }

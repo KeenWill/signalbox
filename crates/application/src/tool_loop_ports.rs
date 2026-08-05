@@ -15,6 +15,7 @@ use signalbox_domain::{
 };
 
 use crate::ClassifyOperatorFailure;
+use crate::CorrelatedDurableChildWait;
 
 /// Storage-resolved authority for one tool-related semantic entry.
 ///
@@ -274,6 +275,13 @@ pub trait ToolExecutionTransaction {
         &mut self,
         observation: &CorrelatedToolAttemptObservation,
     ) -> impl Future<Output = Result<RetainedToolAttemptObservationStatus, Self::Error>> + Send;
+
+    /// Authenticates that executor-reported foreground wait evidence is the
+    /// exact durable parked state for its dispatch.
+    fn reread_durable_child_wait(
+        &mut self,
+        wait: CorrelatedDurableChildWait,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     /// Classifies one prior-process live attempt without retrying it.
     fn classify_crash_loss<NextTurn>(

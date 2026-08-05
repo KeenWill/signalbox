@@ -114,12 +114,13 @@ pub use submit_input::{
 };
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
 pub use tool_loop::{
-    CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence, DecideToolRequestService,
-    DuplicateToolDefinition, NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator,
-    ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
-    ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
-    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence,
-    ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
+    CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CorrelatedToolExecutorEvidence,
+    DecideToolRequestService, DuplicateToolDefinition, NoToolCatalog, RetainedToolExecutionState,
+    ToolApprovalIdGenerator, ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure,
+    ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
+    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition,
+    ToolExecutorEvidence, ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure,
+    UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
