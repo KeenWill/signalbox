@@ -290,6 +290,14 @@ impl HubConfiguration {
         self.github_token_file.clone()
     }
 
+    fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
+        configuration.repository_watch().is_some_and(|watch| {
+            watch.repositories().iter().any(|repository| {
+                credential_files_conflict(&self.github_token_file, repository.credential_file())
+            })
+        })
+    }
+
     fn brave_api_key_file(&self) -> PathBuf {
         self.brave_api_key_file.clone()
     }
@@ -329,6 +337,31 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     process_artifacts
         .iter()
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+}
+
+fn credential_files_conflict(left: &Path, right: &Path) -> bool {
+    resolved_file_reference(left) == resolved_file_reference(right)
+}
+
+fn resolved_file_reference(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    fs::canonicalize(&absolute).unwrap_or_else(|_| {
+        let Some(file_name) = absolute.file_name().filter(|name| !name.is_empty()) else {
+            return absolute;
+        };
+        let Some(parent) = absolute.parent() else {
+            return absolute;
+        };
+        fs::canonicalize(parent)
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(file_name)
+    })
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -938,6 +971,16 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    if configuration.repository_watch_credential_conflicts(&model_configuration) {
+        let error = HubConfigurationError::new(
+            GITHUB_TOKEN_FILE_ENVIRONMENT,
+            RequiredSettingFailure::Conflicts,
+        );
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        ));
+    }
     let daemon_tool_configuration = model_configuration.daemon_tools();
     let tool_composition = match daemon_tool_configuration {
         Some(_) => DaemonToolComposition::WithMappedFamilies,
@@ -1712,9 +1755,10 @@ mod tests {
         RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
         SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
         TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, database_close_failure_outcome,
-        drain_runtime_tasks, erase_startup_cause, migrate_scan_then_schedule, operator_filter,
-        process_runtime_failure_class, report_database_close_failure, run_scheduler_until_shutdown,
+        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
+        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
+        migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
@@ -2128,6 +2172,24 @@ mod tests {
                 RequiredSettingFailure::Conflicts,
             )
         );
+    }
+
+    #[test]
+    fn repository_watch_credential_cannot_equal_the_github_tool_credential() {
+        let credential = std::path::Path::new("/tmp/signalbox-github-token");
+
+        assert!(credential_files_conflict(credential, credential));
+    }
+
+    #[test]
+    fn repository_watch_credential_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let alias = directory.path().join("watch-token");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+
+        assert!(credential_files_conflict(&credential, &alias));
     }
 
     #[test]
