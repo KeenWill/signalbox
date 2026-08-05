@@ -8,12 +8,13 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
-    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationOutcome, DelegationPolicy,
-    DelegationProvenance, DelegationReason, DelegationWaitMode, DescendantTerminationScope,
-    FailedModelCallCause, FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason,
-    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-    ImportedSpeaker, ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor,
-    MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationMessageDirection,
+    DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
+    DelegationWaitMode, DescendantTerminationScope, FailedModelCallCause,
+    FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent,
+    GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+    ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter,
+    ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
     ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
     ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
     ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
@@ -641,6 +642,86 @@ impl<'a> Output<'a> {
 
     pub(crate) fn session_created(&mut self, session_id: CanonicalUuid) -> io::Result<()> {
         writeln!(self.stdout, "{session_id}")
+    }
+
+    pub(crate) fn session_spawned(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        relationship: DelegationPolicy,
+    ) -> io::Result<()> {
+        match relationship {
+            DelegationPolicy::Background {} => writeln!(
+                self.stdout,
+                "spawn_request={tool_request_id} child_session={child_session_id} relationship=background"
+            ),
+            DelegationPolicy::Bound {
+                on_parent_stopped,
+                on_parent_cancelled,
+            } => writeln!(
+                self.stdout,
+                "spawn_request={tool_request_id} child_session={child_session_id} \
+                 relationship=bound on_parent_stopped={} on_parent_cancelled={}",
+                bound_child_action(on_parent_stopped),
+                bound_child_action(on_parent_cancelled)
+            ),
+        }
+    }
+
+    pub(crate) fn session_await_registered(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        mode: DelegationWaitMode,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "await_request={tool_request_id} child_session={child_session_id} mode={}",
+            delegation_wait_mode(mode)
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn child_result(
+        &mut self,
+        await_request_id: CanonicalUuid,
+        spawning_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        content: Option<&String>,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    ) -> io::Result<()> {
+        let content = content.map_or_else(
+            || String::from("null"),
+            |content| self.render_field(content, TextField::TrailingOnLine),
+        );
+        writeln!(
+            self.stdout,
+            "await_request={await_request_id} spawning_request={spawning_request_id} \
+             child_session={child_session_id} delivery=foreground outcome={} reason={} \
+             provenance={} content={content}",
+            delegation_outcome(outcome),
+            delegation_reason(reason),
+            delegation_provenance(&provenance)
+        )
+    }
+
+    pub(crate) fn session_message_sent(
+        &mut self,
+        tool_request_id: CanonicalUuid,
+        peer_session_id: CanonicalUuid,
+        message_id: CanonicalUuid,
+        direction: DelegationMessageDirection,
+        ordinal: u64,
+        delivery_sequence: u64,
+    ) -> io::Result<()> {
+        writeln!(
+            self.stdout,
+            "message_request={tool_request_id} peer_session={peer_session_id} \
+             message={message_id} direction={} ordinal={ordinal} delivery_sequence={delivery_sequence}",
+            delegation_message_direction(direction)
+        )
     }
 
     pub(crate) fn goal_transition_applied(
@@ -2620,6 +2701,13 @@ const fn delegation_wait_mode(mode: DelegationWaitMode) -> &'static str {
     match mode {
         DelegationWaitMode::Foreground => "foreground",
         DelegationWaitMode::Background => "background",
+    }
+}
+
+const fn delegation_message_direction(direction: DelegationMessageDirection) -> &'static str {
+    match direction {
+        DelegationMessageDirection::ParentToChild => "parent_to_child",
+        DelegationMessageDirection::ChildToParent => "child_to_parent",
     }
 }
 

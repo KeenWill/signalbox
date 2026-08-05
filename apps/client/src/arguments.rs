@@ -4,9 +4,9 @@ use clap::{
     ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind,
 };
 use signalbox_process_protocol::{
-    CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId, ConversationCursor,
-    ConversationImportFormat, ConversationOrigin, ConversationOriginFilter,
-    ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+    BoundChildAction, CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId, ConversationCursor,
+    ConversationImportFormat, ConversationOrigin, ConversationOriginFilter, DelegationPolicy,
+    DelegationWaitMode, ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
     MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
     ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
     ReviewFindingInput, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
@@ -68,6 +68,7 @@ pub(crate) enum Command {
     Imported {
         imported_conversation_id: CanonicalUuid,
     },
+    Session(SessionCommand),
     Goal(GoalCommand),
     List,
     Templates,
@@ -129,6 +130,37 @@ pub(crate) enum Command {
         tool_request_id: CanonicalUuid,
         reason: String,
         command_id: Option<CommandId>,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum DelegationTextArgument {
+    Inline(String),
+    File(PathBuf),
+}
+
+#[derive(Debug)]
+pub(crate) enum SessionCommand {
+    Spawn {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        task: DelegationTextArgument,
+        relationship: DelegationPolicy,
+    },
+    Await {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        child_session_id: CanonicalUuid,
+        mode: DelegationWaitMode,
+    },
+    Message {
+        session_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        tool_request_id: CanonicalUuid,
+        peer_session_id: CanonicalUuid,
+        content: DelegationTextArgument,
     },
 }
 
@@ -363,6 +395,8 @@ enum CliCommand {
     Compact(CompactArguments),
     /// Print one imported conversation's selectable entry positions.
     Imported(ImportedArguments),
+    /// Operate an already-issued delegated-session tool request.
+    Session(SessionDelegationArguments),
     /// Commission, inspect, or transition one session goal.
     Goal(GoalArguments),
     /// List current sessions.
@@ -399,6 +433,145 @@ enum CliCommand {
     Approve(DecideArguments),
     /// Deny one pending tool request with an explicit reason.
     Deny(DenyArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+struct SessionDelegationArguments {
+    #[command(subcommand)]
+    command: SessionDelegationSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionDelegationSubcommand {
+    /// Spawn one child with an explicit lifecycle relationship.
+    Spawn(SpawnSessionArguments),
+    /// Await one related child in foreground or background mode.
+    Await(AwaitSessionArguments),
+    /// Send bounded content to one related parent or child.
+    Message(MessageSessionArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("task_source")
+        .required(true)
+        .multiple(false)
+        .args(["task", "task_file"])
+))]
+#[command(group(
+    ArgGroup::new("relationship")
+        .required(true)
+        .multiple(false)
+        .args(["background", "bound"])
+))]
+struct SpawnSessionArguments {
+    /// Parent session that issued the spawn request.
+    #[arg(value_name = "PARENT_SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Parent turn that issued the spawn request.
+    #[arg(value_name = "PARENT_TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    /// Exact logical spawn tool request.
+    #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
+    tool_request_id: CanonicalUuid,
+    /// Exact child task.
+    #[arg(long, value_name = "TEXT")]
+    task: Option<String>,
+    /// Read the exact child task from one file.
+    #[arg(long, value_name = "PATH")]
+    task_file: Option<PathBuf>,
+    /// Keep the child independent of parent terminalization.
+    #[arg(long)]
+    background: bool,
+    /// Apply the two explicit parent-terminal policies.
+    #[arg(long)]
+    bound: bool,
+    /// Bound-child action when the parent stops.
+    #[arg(long, value_enum, requires = "bound")]
+    on_parent_stopped: Option<BoundChildActionArgument>,
+    /// Bound-child action when the parent is cancelled.
+    #[arg(long, value_enum, requires = "bound")]
+    on_parent_cancelled: Option<BoundChildActionArgument>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BoundChildActionArgument {
+    #[value(name = "keep_running")]
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+
+impl BoundChildActionArgument {
+    const fn wire(self) -> BoundChildAction {
+        match self {
+            Self::KeepRunning => BoundChildAction::KeepRunning,
+            Self::Stop => BoundChildAction::Stop,
+            Self::Cancel => BoundChildAction::Cancel,
+        }
+    }
+}
+
+#[derive(Debug, ClapArgs)]
+struct AwaitSessionArguments {
+    /// Session that issued the await request.
+    #[arg(value_name = "PARENT_SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Turn that issued the await request.
+    #[arg(value_name = "PARENT_TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    /// Exact logical await tool request.
+    #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
+    tool_request_id: CanonicalUuid,
+    /// Related child whose result is awaited.
+    #[arg(value_name = "CHILD_SESSION", value_parser = canonical_uuid)]
+    child_session_id: CanonicalUuid,
+    /// Retain the parent turn or wake the parent later.
+    #[arg(long, value_enum)]
+    mode: DelegationWaitModeArgument,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DelegationWaitModeArgument {
+    Foreground,
+    Background,
+}
+
+impl DelegationWaitModeArgument {
+    const fn wire(self) -> DelegationWaitMode {
+        match self {
+            Self::Foreground => DelegationWaitMode::Foreground,
+            Self::Background => DelegationWaitMode::Background,
+        }
+    }
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("content_source")
+        .required(true)
+        .multiple(false)
+        .args(["content", "content_file"])
+))]
+struct MessageSessionArguments {
+    /// Session that issued the message request.
+    #[arg(value_name = "SENDER_SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Turn that issued the message request.
+    #[arg(value_name = "SENDER_TURN", value_parser = canonical_uuid)]
+    turn_id: CanonicalUuid,
+    /// Exact logical message tool request.
+    #[arg(value_name = "TOOL_REQUEST", value_parser = canonical_uuid)]
+    tool_request_id: CanonicalUuid,
+    /// Related session receiving the message.
+    #[arg(value_name = "PEER_SESSION", value_parser = canonical_uuid)]
+    peer_session_id: CanonicalUuid,
+    /// Exact message content.
+    #[arg(long, value_name = "TEXT")]
+    content: Option<String>,
+    /// Read the exact message content from one file.
+    #[arg(long, value_name = "PATH")]
+    content_file: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -1455,6 +1628,51 @@ pub(crate) fn parse(
         CliCommand::Imported(arguments) => Command::Imported {
             imported_conversation_id: arguments.imported_conversation_id,
         },
+        CliCommand::Session(arguments) => Command::Session(match arguments.command {
+            SessionDelegationSubcommand::Spawn(arguments) => {
+                let relationship = match (
+                    arguments.background,
+                    arguments.bound,
+                    arguments.on_parent_stopped,
+                    arguments.on_parent_cancelled,
+                ) {
+                    (true, false, None, None) => DelegationPolicy::Background {},
+                    (false, true, Some(on_parent_stopped), Some(on_parent_cancelled)) => {
+                        DelegationPolicy::Bound {
+                            on_parent_stopped: on_parent_stopped.wire(),
+                            on_parent_cancelled: on_parent_cancelled.wire(),
+                        }
+                    }
+                    _ => {
+                        return Err(UsageError(Cli::command().error(
+                            ErrorKind::ArgumentConflict,
+                            "session spawn --bound requires both --on-parent-stopped and --on-parent-cancelled",
+                        )));
+                    }
+                };
+                SessionCommand::Spawn {
+                    session_id: arguments.session_id,
+                    turn_id: arguments.turn_id,
+                    tool_request_id: arguments.tool_request_id,
+                    task: delegation_text_argument(arguments.task, arguments.task_file)?,
+                    relationship,
+                }
+            }
+            SessionDelegationSubcommand::Await(arguments) => SessionCommand::Await {
+                session_id: arguments.session_id,
+                turn_id: arguments.turn_id,
+                tool_request_id: arguments.tool_request_id,
+                child_session_id: arguments.child_session_id,
+                mode: arguments.mode.wire(),
+            },
+            SessionDelegationSubcommand::Message(arguments) => SessionCommand::Message {
+                session_id: arguments.session_id,
+                turn_id: arguments.turn_id,
+                tool_request_id: arguments.tool_request_id,
+                peer_session_id: arguments.peer_session_id,
+                content: delegation_text_argument(arguments.content, arguments.content_file)?,
+            },
+        }),
         CliCommand::Goal(arguments) => Command::Goal(match arguments.command {
             GoalSubcommand::Attach(arguments) => GoalCommand::Attach {
                 session_id: arguments.session_id,
@@ -2068,6 +2286,20 @@ fn command_id(value: &str) -> Result<CommandId, String> {
         .map_err(|_| "command UUID uses a reserved value".to_owned())
 }
 
+fn delegation_text_argument(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> Result<DelegationTextArgument, UsageError> {
+    match (inline, file) {
+        (Some(text), None) => Ok(DelegationTextArgument::Inline(text)),
+        (None, Some(path)) => Ok(DelegationTextArgument::File(path)),
+        (Some(_), Some(_)) | (None, None) => Err(UsageError(Cli::command().error(
+            ErrorKind::ArgumentConflict,
+            "delegation content requires exactly one inline or file source",
+        ))),
+    }
+}
+
 fn template_name(value: &str) -> Result<String, String> {
     const MAX_UTF8_BYTES: usize = 128;
 
@@ -2188,20 +2420,25 @@ fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::Path};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ConversationCursor, ConversationImportFormat,
-        ConversationOrigin, ConversationOriginFilter, ImportedSessionRelationship,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, SessionPlacement,
+        ConversationOrigin, ConversationOriginFilter, DelegationPolicy, DelegationWaitMode,
+        ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
+        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        SessionPlacement,
     };
     use uuid::Uuid;
 
     use super::{
         Arguments, Command, ConversationsPageRequest, DangerousToolAutoApprovalArgument,
-        GoalCommand, GoalTextArgument, ImportSourceArgument, ParseOutcome, SendDeliveryArgument,
-        SessionMetadataPageRequest, ThroughPositionArgument, UsageError, parse,
+        DelegationTextArgument, GoalCommand, GoalTextArgument, ImportSourceArgument, ParseOutcome,
+        SendDeliveryArgument, SessionCommand, SessionMetadataPageRequest, ThroughPositionArgument,
+        UsageError, parse,
     };
 
     #[derive(Clone, Copy)]
@@ -3277,6 +3514,136 @@ mod tests {
                 ..
             })) if session_id.to_string() == session && turn_id.to_string() == turn
         ));
+    }
+
+    #[test]
+    fn delegation_spawn_parses_background_task_and_canonical_provenance() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+        const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        let Ok(ParseOutcome::Run(arguments)) = parse(
+            [
+                "session",
+                "spawn",
+                SESSION,
+                TURN,
+                REQUEST,
+                "--task",
+                "inspect logs",
+                "--background",
+            ]
+            .map(Into::into),
+        ) else {
+            panic!("the background spawn fixture must parse");
+        };
+        let Command::Session(SessionCommand::Spawn {
+            session_id,
+            turn_id,
+            tool_request_id,
+            task: DelegationTextArgument::Inline(task),
+            relationship,
+        }) = arguments.command
+        else {
+            panic!("the fixture must select session spawn");
+        };
+
+        assert_eq!(session_id.to_string(), SESSION);
+        assert_eq!(turn_id.to_string(), TURN);
+        assert_eq!(tool_request_id.to_string(), REQUEST);
+        assert_eq!(task, "inspect logs");
+        assert_eq!(relationship, DelegationPolicy::Background {});
+    }
+
+    #[test]
+    fn delegation_spawn_requires_both_bound_terminal_actions() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+        const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        let parsed = parse(
+            [
+                "session",
+                "spawn",
+                SESSION,
+                TURN,
+                REQUEST,
+                "--task",
+                "inspect logs",
+                "--bound",
+                "--on-parent-stopped",
+                "stop",
+            ]
+            .map(Into::into),
+        );
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn delegation_await_parses_explicit_background_mode() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+        const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        const CHILD: &str = "00000000-0000-0000-0000-000000000004";
+        let Ok(ParseOutcome::Run(arguments)) = parse(
+            [
+                "session",
+                "await",
+                SESSION,
+                TURN,
+                REQUEST,
+                CHILD,
+                "--mode",
+                "background",
+            ]
+            .map(Into::into),
+        ) else {
+            panic!("the background await fixture must parse");
+        };
+        let Command::Session(SessionCommand::Await {
+            child_session_id,
+            mode,
+            ..
+        }) = arguments.command
+        else {
+            panic!("the fixture must select session await");
+        };
+
+        assert_eq!(child_session_id.to_string(), CHILD);
+        assert_eq!(mode, DelegationWaitMode::Background);
+    }
+
+    #[test]
+    fn delegation_message_parses_file_content_and_peer() {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+        const REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        const PEER: &str = "00000000-0000-0000-0000-000000000004";
+        let Ok(ParseOutcome::Run(arguments)) = parse(
+            [
+                "session",
+                "message",
+                SESSION,
+                TURN,
+                REQUEST,
+                PEER,
+                "--content-file",
+                "message.txt",
+            ]
+            .map(Into::into),
+        ) else {
+            panic!("the file-backed message fixture must parse");
+        };
+        let Command::Session(SessionCommand::Message {
+            peer_session_id,
+            content: DelegationTextArgument::File(path),
+            ..
+        }) = arguments.command
+        else {
+            panic!("the fixture must select session message");
+        };
+
+        assert_eq!(peer_session_id.to_string(), PEER);
+        assert_eq!(path, PathBuf::from("message.txt"));
     }
 
     #[test]

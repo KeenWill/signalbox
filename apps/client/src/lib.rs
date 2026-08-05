@@ -10,9 +10,9 @@ use std::{
 };
 
 use arguments::{
-    Command, DangerousToolAutoApprovalArgument, GoalCommand, GoalTextArgument,
-    ImportSourceArgument, ParseOutcome, ReviewCommand, SendDeliveryArgument, SystemPromptArgument,
-    ThroughPositionArgument,
+    Command, DangerousToolAutoApprovalArgument, DelegationTextArgument, GoalCommand,
+    GoalTextArgument, ImportSourceArgument, ParseOutcome, ReviewCommand, SendDeliveryArgument,
+    SessionCommand, SystemPromptArgument, ThroughPositionArgument,
 };
 use connection::ProcessClient;
 use error::ClientError;
@@ -27,8 +27,8 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, DescendantTerminationScope, ErrorCode,
-    ErrorDetail, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState, InputContent,
+    ConversationOriginFilter, ConversationSummary, DelegationWaitMode, DescendantTerminationScope,
+    ErrorCode, ErrorDetail, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState, InputContent,
     InputDelivery, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
     ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
@@ -394,6 +394,7 @@ async fn execute(
         | Command::Place { .. }
         | Command::Continue { .. }
         | Command::Compact { .. }
+        | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
         | Command::List
@@ -424,6 +425,7 @@ async fn execute(
         Command::Create { .. }
         | Command::Place { .. }
         | Command::Compact { .. }
+        | Command::Session(_)
         | Command::Goal(_)
         | Command::List
         | Command::Templates
@@ -526,6 +528,7 @@ async fn execute(
         Command::Imported {
             imported_conversation_id,
         } => imported(&mut client, &mut output, imported_conversation_id).await,
+        Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
@@ -767,6 +770,50 @@ async fn read_goal_text_argument(argument: GoalTextArgument) -> Result<String, C
     }
 }
 
+async fn read_delegation_text_argument(
+    argument: DelegationTextArgument,
+) -> Result<String, ClientError> {
+    match argument {
+        DelegationTextArgument::Inline(text) => validate_delegation_content(text),
+        DelegationTextArgument::File(path) => read_delegation_content_file(&path).await,
+    }
+}
+
+async fn read_delegation_content_file(path: &Path) -> Result<String, ClientError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| ClientError::delegation_content_file(path, error))?;
+    let read_limit = u64::try_from(MAX_CONTENT_FRAGMENT_BYTES)
+        .ok()
+        .and_then(|bound| bound.checked_add(1))
+        .ok_or(ClientError::Protocol(
+            "delegation content read bound overflow",
+        ))?;
+    let mut bounded = file.take(read_limit);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| ClientError::delegation_content_file(path, error))?;
+    if bytes.len() > MAX_CONTENT_FRAGMENT_BYTES {
+        return Err(ClientError::Input(
+            "delegation content exceeds the 1 MiB UTF-8 byte limit",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ClientError::Input("delegation content must be valid UTF-8"))?;
+    validate_delegation_content(text)
+}
+
+fn validate_delegation_content(text: String) -> Result<String, ClientError> {
+    if text.is_empty() || text.len() > MAX_CONTENT_FRAGMENT_BYTES || text.contains('\0') {
+        return Err(ClientError::Input(
+            "delegation content must be nonempty, at most 1 MiB, and contain no U+0000",
+        ));
+    }
+    Ok(text)
+}
+
 async fn read_goal_text_file(path: &Path) -> Result<String, ClientError> {
     let file = tokio::fs::File::open(path)
         .await
@@ -896,6 +943,156 @@ async fn create(
             detail,
         } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
+    }
+}
+
+async fn session_delegation(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    command: SessionCommand,
+) -> Result<(), ClientError> {
+    match command {
+        SessionCommand::Spawn {
+            session_id,
+            turn_id,
+            tool_request_id,
+            task,
+            relationship,
+        } => {
+            let task = read_delegation_text_argument(task).await?;
+            let mut connection = client
+                .mutation_request(ClientRequest::SpawnSession {
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    task,
+                    relationship,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::SessionSpawned {
+                    tool_request_id: recorded_request,
+                    child_session_id,
+                    relationship: recorded_relationship,
+                } if recorded_request == tool_request_id
+                    && recorded_relationship == relationship =>
+                {
+                    output.session_spawned(tool_request_id, child_session_id, relationship)?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol("spawn returned an unexpected receipt").mutation()),
+            }
+        }
+        SessionCommand::Await {
+            session_id,
+            turn_id,
+            tool_request_id,
+            child_session_id,
+            mode,
+        } => {
+            let mut connection = client
+                .mutation_request(ClientRequest::AwaitSession {
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    child_session_id,
+                    mode,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::SessionAwaitRegistered {
+                    tool_request_id: recorded_request,
+                    child_session_id: recorded_child,
+                    mode: recorded_mode,
+                } if recorded_request == tool_request_id
+                    && recorded_child == child_session_id
+                    && recorded_mode == mode
+                    && mode == DelegationWaitMode::Background =>
+                {
+                    output.session_await_registered(tool_request_id, child_session_id, mode)?;
+                    Ok(())
+                }
+                ServerMessage::ChildResult {
+                    await_request_id: recorded_request,
+                    spawning_request_id,
+                    child_session_id: recorded_child,
+                    outcome,
+                    content,
+                    reason,
+                    provenance,
+                } if mode == DelegationWaitMode::Foreground
+                    && recorded_request == tool_request_id
+                    && recorded_child == child_session_id =>
+                {
+                    output.child_result(
+                        tool_request_id,
+                        spawning_request_id,
+                        child_session_id,
+                        outcome,
+                        content.as_ref(),
+                        reason,
+                        provenance,
+                    )?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => Err(ClientError::Protocol("await returned an unexpected response").mutation()),
+            }
+        }
+        SessionCommand::Message {
+            session_id,
+            turn_id,
+            tool_request_id,
+            peer_session_id,
+            content,
+        } => {
+            let content = read_delegation_text_argument(content).await?;
+            let mut connection = client
+                .mutation_request(ClientRequest::SendSessionMessage {
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    peer_session_id,
+                    content,
+                })
+                .await?;
+            match connection.message().await.map_err(ClientError::mutation)? {
+                ServerMessage::SessionMessageSent {
+                    tool_request_id: recorded_request,
+                    message_id,
+                    direction,
+                    ordinal,
+                    delivery_sequence,
+                } if recorded_request == tool_request_id => {
+                    output.session_message_sent(
+                        tool_request_id,
+                        peer_session_id,
+                        message_id,
+                        direction,
+                        ordinal.value(),
+                        delivery_sequence.value(),
+                    )?;
+                    Ok(())
+                }
+                ServerMessage::Error {
+                    code,
+                    message,
+                    detail,
+                } => Err(ClientError::remote(code, message, detail).mutation()),
+                _ => {
+                    Err(ClientError::Protocol("message returned an unexpected receipt").mutation())
+                }
+            }
+        }
     }
 }
 
@@ -4580,15 +4777,17 @@ mod tests {
         fs,
         io::{self, Cursor},
         os::unix::fs::symlink,
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::ExitCode,
         time::Duration,
     };
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-        ConversationSummary, DescendantTerminationScope, EffectiveModelSettings, FastMode,
+        BoundChildAction, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
+        ContentFragment, ConversationImportFormat, ConversationImportSource,
+        ConversationOriginFilter, ConversationSummary, DelegationMessageDirection,
+        DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
+        DelegationWaitMode, DescendantTerminationScope, EffectiveModelSettings, FastMode,
         FrameEncodeError, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
         ImportedContentKind, ImportedSessionRelationship, ImportedSourceSpeaker, InputContent,
         InputDelivery, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition,
@@ -4672,6 +4871,33 @@ mod tests {
         terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
     use crate::{error::ClientError, presentation::Output};
+
+    async fn accept_request_and_reply(
+        listener: &UnixListener,
+        expected: &ClientRequest,
+        response: ServerMessage,
+    ) -> io::Result<()> {
+        let (stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        let request = decode_client_line(&line).map_err(io::Error::other)?;
+        assert_eq!(request.request(), expected);
+        let frame =
+            ServerFrame::try_new_for_version(request.version(), request.request_id(), response)
+                .map_err(io::Error::other)?;
+        writer
+            .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
+            .await
+    }
+
+    fn client_arguments(socket: &Path, command: &[&str]) -> Vec<OsString> {
+        [OsString::from("--socket"), socket.as_os_str().to_owned()]
+            .into_iter()
+            .chain(command.iter().map(OsString::from))
+            .collect()
+    }
 
     #[test]
     fn s19_descendant_scope_follows_the_explicit_cli_choice() {
@@ -7444,6 +7670,217 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_verbs_encode_exact_requests_and_render_typed_receipts()
+    -> Result<(), Box<dyn Error>> {
+        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+        const TURN: &str = "00000000-0000-0000-0000-000000000002";
+        const SPAWN_REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+        const CHILD: &str = "00000000-0000-0000-0000-000000000004";
+        const AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000005";
+        const CHILD_TURN: &str = "00000000-0000-0000-0000-000000000006";
+        const MESSAGE_REQUEST: &str = "00000000-0000-0000-0000-000000000007";
+        const MESSAGE: &str = "00000000-0000-0000-0000-000000000008";
+        const BACKGROUND_AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000009";
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(TURN)?);
+        let spawn_request_id = CanonicalUuid::from_uuid(Uuid::parse_str(SPAWN_REQUEST)?);
+        let child_session_id = CanonicalUuid::from_uuid(Uuid::parse_str(CHILD)?);
+        let await_request_id = CanonicalUuid::from_uuid(Uuid::parse_str(AWAIT_REQUEST)?);
+        let child_turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(CHILD_TURN)?);
+        let message_request_id = CanonicalUuid::from_uuid(Uuid::parse_str(MESSAGE_REQUEST)?);
+        let message_id = CanonicalUuid::from_uuid(Uuid::parse_str(MESSAGE)?);
+        let background_await_request_id =
+            CanonicalUuid::from_uuid(Uuid::parse_str(BACKGROUND_AWAIT_REQUEST)?);
+        let relationship = DelegationPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let server = tokio::spawn(async move {
+            accept_request_and_reply(
+                &listener,
+                &ClientRequest::SpawnSession {
+                    session_id,
+                    turn_id,
+                    tool_request_id: spawn_request_id,
+                    task: String::from("inspect logs"),
+                    relationship,
+                },
+                ServerMessage::SessionSpawned {
+                    tool_request_id: spawn_request_id,
+                    child_session_id,
+                    relationship,
+                },
+            )
+            .await?;
+            accept_request_and_reply(
+                &listener,
+                &ClientRequest::AwaitSession {
+                    session_id,
+                    turn_id,
+                    tool_request_id: await_request_id,
+                    child_session_id,
+                    mode: DelegationWaitMode::Foreground,
+                },
+                ServerMessage::ChildResult {
+                    await_request_id,
+                    spawning_request_id: spawn_request_id,
+                    child_session_id,
+                    outcome: DelegationOutcome::Returned,
+                    content: Some(String::from("done\nnow")),
+                    reason: DelegationReason::ChildCompleted,
+                    provenance: DelegationProvenance::ChildTurn {
+                        child_session_id,
+                        child_turn_id,
+                    },
+                },
+            )
+            .await?;
+            accept_request_and_reply(
+                &listener,
+                &ClientRequest::AwaitSession {
+                    session_id,
+                    turn_id,
+                    tool_request_id: background_await_request_id,
+                    child_session_id,
+                    mode: DelegationWaitMode::Background,
+                },
+                ServerMessage::SessionAwaitRegistered {
+                    tool_request_id: background_await_request_id,
+                    child_session_id,
+                    mode: DelegationWaitMode::Background,
+                },
+            )
+            .await?;
+            accept_request_and_reply(
+                &listener,
+                &ClientRequest::SendSessionMessage {
+                    session_id,
+                    turn_id,
+                    tool_request_id: message_request_id,
+                    peer_session_id: child_session_id,
+                    content: String::from("status ready"),
+                },
+                ServerMessage::SessionMessageSent {
+                    tool_request_id: message_request_id,
+                    message_id,
+                    direction: DelegationMessageDirection::ParentToChild,
+                    ordinal: CanonicalU64::new(1),
+                    delivery_sequence: CanonicalU64::new(1),
+                },
+            )
+            .await
+        });
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let spawn_exit = run(
+            client_arguments(
+                &socket,
+                &[
+                    "session",
+                    "spawn",
+                    SESSION,
+                    TURN,
+                    SPAWN_REQUEST,
+                    "--task",
+                    "inspect logs",
+                    "--bound",
+                    "--on-parent-stopped",
+                    "stop",
+                    "--on-parent-cancelled",
+                    "cancel",
+                ],
+            ),
+            None,
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let await_exit = run(
+            client_arguments(
+                &socket,
+                &[
+                    "session",
+                    "await",
+                    SESSION,
+                    TURN,
+                    AWAIT_REQUEST,
+                    CHILD,
+                    "--mode",
+                    "foreground",
+                ],
+            ),
+            None,
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let background_await_exit = run(
+            client_arguments(
+                &socket,
+                &[
+                    "session",
+                    "await",
+                    SESSION,
+                    TURN,
+                    BACKGROUND_AWAIT_REQUEST,
+                    CHILD,
+                    "--mode",
+                    "background",
+                ],
+            ),
+            None,
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let message_exit = run(
+            client_arguments(
+                &socket,
+                &[
+                    "session",
+                    "message",
+                    SESSION,
+                    TURN,
+                    MESSAGE_REQUEST,
+                    CHILD,
+                    "--content",
+                    "status ready",
+                ],
+            ),
+            None,
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(spawn_exit, ExitCode::SUCCESS);
+        assert_eq!(await_exit, ExitCode::SUCCESS);
+        assert_eq!(background_await_exit, ExitCode::SUCCESS);
+        assert_eq!(message_exit, ExitCode::SUCCESS);
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!(
+                "spawn_request={spawn_request_id} child_session={child_session_id} relationship=bound on_parent_stopped=stop on_parent_cancelled=cancel\n\
+                 await_request={await_request_id} spawning_request={spawn_request_id} child_session={child_session_id} delivery=foreground outcome=returned reason=child_completed provenance=child_turn:{child_session_id}:{child_turn_id} content=done\\u{{a}}now\n\
+                 await_request={background_await_request_id} child_session={child_session_id} mode=background\n\
+                 message_request={message_request_id} peer_session={child_session_id} message={message_id} direction=parent_to_child ordinal=1 delivery_sequence=1\n"
+            )
+        );
+        assert_eq!(String::from_utf8(stderr)?, "");
         server.await??;
         Ok(())
     }
