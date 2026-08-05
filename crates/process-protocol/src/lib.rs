@@ -6547,6 +6547,12 @@ impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
+            Self::SessionAwaitRegistered {
+                mode: DelegationWaitMode::Foreground,
+                ..
+            } => {
+                return Err(FrameValidationError::DelegationShape);
+            }
             Self::ChildResult {
                 await_request_id,
                 spawning_request_id,
@@ -12431,6 +12437,7 @@ mod tests {
     fn inv033_delegation_receipt_shapes_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
         const REPEATED_REQUEST_FRAME_REQUEST: u64 = 48;
         const ZERO_DELIVERY_FRAME_REQUEST: u64 = 49;
+        const FOREGROUND_REGISTRATION_FRAME_REQUEST: u64 = 50;
         let ids = delegation_wire_identities();
         let repeated_request = ServerFrame::try_new(
             request(REPEATED_REQUEST_FRAME_REQUEST)?,
@@ -12457,9 +12464,21 @@ mod tests {
                 delivery_sequence: CanonicalU64::new(0),
             },
         );
+        let foreground_registration = ServerFrame::try_new(
+            request(FOREGROUND_REGISTRATION_FRAME_REQUEST)?,
+            ServerMessage::SessionAwaitRegistered {
+                tool_request_id: ids.await_request,
+                child_session_id: ids.child_session,
+                mode: DelegationWaitMode::Foreground,
+            },
+        );
 
         assert_eq!(repeated_request, Err(FrameValidationError::DelegationShape));
         assert_eq!(zero_delivery, Err(FrameValidationError::DelegationShape));
+        assert_eq!(
+            foreground_registration,
+            Err(FrameValidationError::DelegationShape)
+        );
         Ok(())
     }
 
