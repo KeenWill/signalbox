@@ -18,7 +18,7 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
     ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
+    SubmitInputService, ToolCatalog, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
     ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
@@ -761,21 +761,52 @@ fn continuation_result_json(
 }
 
 #[track_caller]
-fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>) {
+fn assert_commissioned_catalog(operation: &ModelOperation<ModelCallId>, expected_names: &[String]) {
     let names = operation
         .tools
         .iter()
-        .map(|definition| definition.name.as_str())
+        .map(|definition| definition.name.as_str().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 38);
-    assert!(names.contains(&REPOSITORY_READ_FILE_NAME));
-    assert!(names.contains(&PULL_REQUEST_METADATA_NAME));
-    assert!(names.contains(&PULL_REQUEST_PUBLISH_REVIEW_NAME));
-    assert!(names.contains(&READ_FILE_NAME));
-    assert!(names.contains(&WRITE_FILE_NAME));
-    assert!(names.contains(&signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME));
-    assert!(names.contains(&WEB_FETCH_NAME));
-    assert!(names.contains(&WEB_SEARCH_NAME));
+    assert_eq!(names, expected_names);
+    assert!(names.iter().any(|name| name == REPOSITORY_READ_FILE_NAME));
+    assert!(names.iter().any(|name| name == PULL_REQUEST_METADATA_NAME));
+    assert!(
+        names
+            .iter()
+            .any(|name| name == PULL_REQUEST_PUBLISH_REVIEW_NAME)
+    );
+    assert!(names.iter().any(|name| name == READ_FILE_NAME));
+    assert!(names.iter().any(|name| name == WRITE_FILE_NAME));
+    assert!(
+        names
+            .iter()
+            .any(|name| name == signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME)
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name == signalbox_tools_sessions::SPAWN_SESSION_NAME)
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name == signalbox_tools_sessions::AWAIT_SESSION_NAME)
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name == signalbox_tools_sessions::SEND_SESSION_MESSAGE_NAME)
+    );
+    assert!(names.iter().any(|name| name == WEB_FETCH_NAME));
+    assert!(names.iter().any(|name| name == WEB_SEARCH_NAME));
+}
+
+fn commissioned_catalog_names(catalog: &impl ToolCatalog) -> Vec<String> {
+    catalog
+        .definitions()
+        .iter()
+        .map(|definition| definition.name().as_str().to_owned())
+        .collect()
 }
 
 fn expected_tool_call(request: ToolRequestId, name: &str, arguments_json: &str) -> MessagePart {
@@ -2504,6 +2535,7 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
     let arguments = serde_json::json!({
         "repository": "KeenWill/signalbox",
         "number": 17
@@ -2529,7 +2561,7 @@ async fn s10_composed_github_read_executes_offline() -> Result<(), Box<dyn Error
     assert_eq!(github.credential_matches(), vec![true]);
     assert_eq!(github.policy_matches(), vec![true]);
     assert_eq!(continuation_result_json(&runtime)?, expected);
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
@@ -2550,6 +2582,7 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
     let arguments = serde_json::json!({"path": relative_path, "max_bytes": 1024}).to_string();
     let (execution, runtime) = fixture.execution(
         [
@@ -2574,7 +2607,7 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
             "truncated": false
         })
     );
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
@@ -2592,6 +2625,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         workspace.path(),
     )?
     .into_parts();
+    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
     let arguments = serde_json::json!({
         "after_position": null,
         "max_entries": 100,
@@ -2636,7 +2670,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "truncated": false
         })
     );
-    assert_commissioned_catalog(&runtime.received_operations()[0]);
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }
 
