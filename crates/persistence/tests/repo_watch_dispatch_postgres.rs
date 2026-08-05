@@ -240,6 +240,13 @@ fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
     )
 }
 
+fn changed_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
+    matches!(
+        error,
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. }
+    )
+}
+
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
     matches!(outcome, RepoWatchRuleEvaluationOutcome::Dispatched { .. })
 }
@@ -404,7 +411,7 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
             .await?,
     );
     dispatch_store
-        .reconcile_rules(&repository, &[(rule.id().clone(), rule.version())])
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
         .await?;
     let event = conflict_event(101, FIRST_HEAD)?;
     let observation = observation(context(FIRST_HEAD)?)?;
@@ -579,10 +586,7 @@ async fn retired_rule_identity_cannot_resume_from_its_old_activation() -> Result
         .await?;
     let error = fixture
         .store
-        .reconcile_rules(
-            &fixture.repository,
-            &[(fixture.rule.id().clone(), fixture.rule.version())],
-        )
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&fixture.rule))
         .await
         .expect_err("retired rule identity must not reactivate");
 
@@ -601,14 +605,26 @@ async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<
         .await?;
     let error = fixture
         .store
-        .reconcile_rules(
-            &fixture.repository,
-            &[(fixture.rule.id().clone(), fixture.rule.version())],
-        )
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&fixture.rule))
         .await
         .expect_err("a rule from a removed repository must be retired");
 
     assert!(reused_rule_identity(&error));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn active_rule_identity_rejects_in_place_content_changes() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let changed_rule = cooldown_rule()?;
+    let error = fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&changed_rule))
+        .await
+        .expect_err("active rule semantics require a new identity");
+
+    assert!(changed_rule_identity(&error));
     Ok(())
 }
 

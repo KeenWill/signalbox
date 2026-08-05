@@ -145,13 +145,15 @@ branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
 the transport scans each workflow's result pages once and collects every branch
 match from that scan. When the newest watched-repository run for a branch and
-workflow is queued or in progress, the projection retains its prior completed
-baseline until that run completes rather than selecting an older completed run
-from later in the result stream. Per-page validators remain only in the
-repository task's process-local cache. A same-named branch on a fork does not
-enter this projection: the poller accepts a run only when its provider
-head-repository identity equals the configured watched repository and continues
-through bounded result pages past foreign or absent head repositories.
+workflow is queued or in progress, the projection continues scanning for the
+latest completed candidate and retains whichever of that candidate and its prior
+completed baseline is later. It therefore observes a completion not yet present
+in the cursor without regressing to an older completion while the active run
+remains unfinished. Per-page validators remain only in the repository task's
+process-local cache. A same-named branch on a fork does not enter this
+projection: the poller accepts a run only when its provider head-repository
+identity equals the configured watched repository and continues through bounded
+result pages past foreign or absent head repositories.
 
 ## Durable event vocabulary
 
@@ -393,9 +395,13 @@ any watch task starts, including the empty set when the repository-watch section
 is absent; the absent section still starts no watch runtime or polling task.
 Configuration reconciliation and evaluation are serialized per repository: an
 evaluation already committed may replay, but an already-loaded event cannot
-create a dispatch after deactivation commits. A deactivated rule identity and
-version cannot be configured again; the replacement uses a new identity so no
-events observed during its absence can be consumed through the old activation.
+create a dispatch after deactivation commits. Activation stores a digest of the
+complete versioned matcher, ordered action list, singleton scope, and cooldown;
+changing any of those semantics while retaining an active identity is a
+permanent configuration failure. A deactivated rule identity and version cannot
+be configured again; either kind of replacement uses a new identity so no events
+can be evaluated under semantics different from the activation that admitted
+them.
 
 ## First live rule
 

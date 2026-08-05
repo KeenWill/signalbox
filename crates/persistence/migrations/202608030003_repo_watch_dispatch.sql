@@ -19,6 +19,7 @@ CREATE TABLE repo_watch_rule_activation (
     repository text NOT NULL,
     rule_id text NOT NULL,
     rule_version bigint NOT NULL,
+    rule_digest bytea NOT NULL,
     after_cursor_generation bigint,
     after_event_ordinal integer,
     activated_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
@@ -27,6 +28,7 @@ CREATE TABLE repo_watch_rule_activation (
     CHECK (repo_watch_repository_is_valid(repository)),
     CHECK (repo_watch_rule_id_is_valid(rule_id)),
     CHECK (rule_version = 1),
+    CHECK (octet_length(rule_digest) = 32),
     CHECK (
         (after_cursor_generation IS NULL AND after_event_ordinal IS NULL)
         OR (

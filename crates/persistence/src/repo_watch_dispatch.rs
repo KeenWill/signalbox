@@ -1,6 +1,10 @@
 //! Durable repository-watch rule consumption, singleton admission, and dispatch audit.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -9,7 +13,8 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     FrozenAliasDefinition, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, SessionId,
+    RepoWatchEventId, RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug,
+    SessionId,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -28,6 +33,10 @@ pub enum RepoWatchDispatchRepositoryError {
     SessionCreation(crate::create_session::CreateSessionRepositoryError),
     InitialInput(crate::submit_input::SubmitInputRepositoryError),
     ReusedRuleIdentity {
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+    },
+    ChangedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
     },
@@ -57,6 +66,15 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
                 rule_id.as_str(),
                 rule_version.get()
             ),
+            Self::ChangedRuleIdentity {
+                rule_id,
+                rule_version,
+            } => write!(
+                formatter,
+                "repository-watch rule {} version {} changed without a new identity",
+                rule_id.as_str(),
+                rule_version.get()
+            ),
             Self::Corruption(reason) => {
                 write!(
                     formatter,
@@ -74,7 +92,9 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::EventStore(error) => Some(error),
             Self::SessionCreation(error) => Some(error),
             Self::InitialInput(error) => Some(error),
-            Self::ReusedRuleIdentity { .. } | Self::Corruption(_) => None,
+            Self::ReusedRuleIdentity { .. }
+            | Self::ChangedRuleIdentity { .. }
+            | Self::Corruption(_) => None,
         }
     }
 }
@@ -156,22 +176,26 @@ impl PostgresRepoWatchDispatchStore {
     pub async fn reconcile_rules(
         &self,
         repository: &RepositorySlug,
-        configured: &[(RepoWatchRuleId, RepoWatchRuleVersion)],
+        configured: &[RepoWatchRule],
     ) -> Result<(), RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
         lock_text(&mut transaction, repository.as_str()).await?;
         let configured = configured
             .iter()
-            .map(|(rule_id, rule_version)| {
+            .map(|rule| {
                 Ok((
-                    rule_id.as_str().to_owned(),
-                    stored_rule_version(*rule_version)?,
+                    (
+                        rule.id().as_str().to_owned(),
+                        stored_rule_version(rule.version())?,
+                    ),
+                    *rule.content_digest().as_bytes(),
                 ))
             })
-            .collect::<Result<BTreeSet<_>, RepoWatchDispatchRepositoryError>>()?;
+            .collect::<Result<BTreeMap<_, _>, RepoWatchDispatchRepositoryError>>()?;
+        let configured_identities = configured.keys().cloned().collect::<BTreeSet<_>>();
         let existing = sqlx::query(
-            "SELECT activation.rule_id, activation.rule_version,
+            "SELECT activation.rule_id, activation.rule_version, activation.rule_digest,
                     deactivation.rule_id IS NOT NULL AS deactivated
                FROM repo_watch_rule_activation AS activation
                LEFT JOIN repo_watch_rule_deactivation AS deactivation
@@ -187,10 +211,23 @@ impl PostgresRepoWatchDispatchStore {
             let identity = (row.try_get("rule_id")?, row.try_get("rule_version")?);
             historical.insert(identity.clone());
             if !row.try_get::<bool, _>("deactivated")? {
+                let stored_digest: Vec<u8> = row.try_get("rule_digest")?;
+                if configured
+                    .get(&identity)
+                    .is_some_and(|digest| stored_digest.as_slice() != digest)
+                {
+                    transaction.rollback().await?;
+                    return Err(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+                        rule_id: RepoWatchRuleId::try_new(identity.0).map_err(|_| {
+                            RepoWatchDispatchRepositoryError::Corruption("stored rule identifier")
+                        })?,
+                        rule_version: RepoWatchRuleVersion::V1,
+                    });
+                }
                 active.insert(identity);
             }
         }
-        for (rule_id, rule_version) in active.difference(&configured) {
+        for (rule_id, rule_version) in active.difference(&configured_identities) {
             sqlx::query(
                 "INSERT INTO repo_watch_rule_deactivation
                     (repository, rule_id, rule_version)
@@ -202,7 +239,7 @@ impl PostgresRepoWatchDispatchStore {
             .execute(&mut *transaction)
             .await?;
         }
-        for (rule_id, rule_version) in configured.difference(&active) {
+        for (rule_id, rule_version) in configured_identities.difference(&active) {
             if historical.contains(&(rule_id.clone(), *rule_version)) {
                 transaction.rollback().await?;
                 return Err(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
@@ -214,9 +251,9 @@ impl PostgresRepoWatchDispatchStore {
             }
             sqlx::query(
                 "INSERT INTO repo_watch_rule_activation
-                (repository, rule_id, rule_version,
+                (repository, rule_id, rule_version, rule_digest,
                  after_cursor_generation, after_event_ordinal)
-             SELECT $1, $2, $3, tail.cursor_generation, tail.event_ordinal
+             SELECT $1, $2, $3, $4, tail.cursor_generation, tail.event_ordinal
                FROM (VALUES (true)) AS seed(present)
                LEFT JOIN LATERAL (
                     SELECT cursor_generation, event_ordinal
@@ -230,6 +267,9 @@ impl PostgresRepoWatchDispatchStore {
             .bind(repository.as_str())
             .bind(rule_id)
             .bind(rule_version)
+            .bind(configured.get(&(rule_id.clone(), *rule_version)).ok_or(
+                RepoWatchDispatchRepositoryError::Corruption("configured rule digest missing"),
+            )?)
             .execute(&mut *transaction)
             .await?;
         }

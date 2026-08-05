@@ -8548,6 +8548,11 @@ pub enum RepoWatchRuleValidationError {
 }
 // implements Error.
 
+pub struct RepoWatchRuleContentDigest(/* private [u8; 32] */);
+impl RepoWatchRuleContentDigest {
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
 pub struct RepoWatchRule { /* private */ }
 impl RepoWatchRule {
     pub fn try_new(
@@ -8562,8 +8567,8 @@ impl RepoWatchRule {
         &self,
         declarations: &[RepoWatchTemplateContextDeclaration],
     ) -> Result<(), RepoWatchRuleValidationError>;
-    // accessors: id(), version(), matcher(), actions(), singleton_per(),
-    //   cooldown()
+    pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    // accessors: id(), version(), matcher(), actions(), singleton_per(), cooldown()
 }
 ```
 
@@ -9386,7 +9391,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 4                    |
 | domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
-| domain: repo_watch                                 | 48                   |
+| domain: repo_watch                                 | 49                   |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
@@ -9407,7 +9412,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **737 (+7 free fn)** |
+| **signalbox-domain total**                         | **738 (+7 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)    |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |

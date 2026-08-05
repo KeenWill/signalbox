@@ -314,13 +314,8 @@ impl RepositoryWatchTask {
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
-        let configured = self
-            .rules
-            .iter()
-            .map(|rule| (rule.id().clone(), rule.version()))
-            .collect::<Vec<_>>();
         self.dispatch_store
-            .reconcile_rules(&self.repository, &configured)
+            .reconcile_rules(&self.repository, &self.rules)
             .await
             .map_err(rule_activation_error)
     }
@@ -648,6 +643,7 @@ enum RepositoryWatchAttemptError {
     Dispatch,
     Persistence,
     RetiredRuleIdentity,
+    ChangedRuleIdentity,
 }
 
 impl RepositoryWatchAttemptError {
@@ -666,11 +662,12 @@ impl RepositoryWatchAttemptError {
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
+            Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
         }
     }
 
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity)
+        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
     }
 }
 
@@ -678,6 +675,9 @@ fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryW
     match error {
         RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::RetiredRuleIdentity
+        }
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. } => {
+            RepositoryWatchAttemptError::ChangedRuleIdentity
         }
         _ => RepositoryWatchAttemptError::Persistence,
     }
@@ -1379,17 +1379,7 @@ impl GitHubRepositoryPoller {
                 if head_repository != self.repository {
                     continue;
                 }
-                pending_branches.remove(branch.as_str());
                 if run.status != "completed" {
-                    observations.extend(
-                        previous
-                            .iter()
-                            .find(|prior| {
-                                prior.branch() == &branch
-                                    && prior.workflow_id() == workflow_identity
-                            })
-                            .cloned(),
-                    );
                     continue;
                 }
                 let run_id = object_id(run.id)?;
@@ -1397,16 +1387,43 @@ impl GitHubRepositoryPoller {
                     NonZeroU64::new(run.run_attempt)
                         .ok_or(RepositoryWatchAttemptError::Normalization)?,
                 );
-                observations.push(RepoWatchWorkflowRunObservation::new(
+                let candidate = RepoWatchWorkflowRunObservation::new(
                     run_id,
                     workflow_identity,
                     run_attempt,
-                    branch,
+                    branch.clone(),
                     workflow_name.clone(),
                     normalize_conclusion(run.conclusion.as_deref())?,
-                ));
+                );
+                let latest = previous
+                    .iter()
+                    .find(|prior| {
+                        prior.branch() == &branch && prior.workflow_id() == workflow_identity
+                    })
+                    .filter(|prior| {
+                        (prior.id().get(), prior.attempt().get())
+                            > (candidate.id().get(), candidate.attempt().get())
+                    })
+                    .cloned()
+                    .unwrap_or(candidate);
+                observations.push(latest);
+                pending_branches.remove(branch.as_str());
             }
-            if pending_branches.is_empty() || !has_next {
+            if pending_branches.is_empty() {
+                return Ok(observations);
+            }
+            if !has_next {
+                for branch in pending_branches.values() {
+                    observations.extend(
+                        previous
+                            .iter()
+                            .find(|prior| {
+                                prior.branch() == *branch
+                                    && prior.workflow_id() == workflow_identity
+                            })
+                            .cloned(),
+                    );
+                }
                 return Ok(observations);
             }
             page = next_page(page)?;
@@ -2647,6 +2664,21 @@ mod tests {
         )
     }
 
+    fn older_main_workflow_run() -> RepoWatchWorkflowRunObservation {
+        RepoWatchWorkflowRunObservation::new(
+            object_id(WORKFLOW_RUN_IDS[0] - 1).expect("fixture workflow-run identity is positive"),
+            object_id(WORKFLOW_ID).expect("fixture workflow identity is positive"),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(WORKFLOW_RUN_ATTEMPT)
+                    .expect("fixture workflow-run attempt is positive"),
+            ),
+            BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is valid"),
+            WorkflowName::try_new(String::from(WORKFLOW_NAME))
+                .expect("fixture workflow name is valid"),
+            EXPECTED_MAIN_WORKFLOW_CONCLUSION,
+        )
+    }
+
     fn full_workflow_page() -> String {
         let workflows = (1..=PAGE_SIZE)
             .map(|identity| {
@@ -2947,6 +2979,19 @@ mod tests {
         assert!(error.is_permanent());
     }
 
+    #[test]
+    fn changed_rule_identity_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("changed-rule"))
+            .expect("fixture rule ID is valid");
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::ChangedRuleIdentity);
+        assert!(error.is_permanent());
+    }
+
     #[tokio::test]
     async fn resource_level_not_modified_reuses_only_its_typed_accepted_state() {
         let server = ScriptedServer::start(
@@ -3111,6 +3156,35 @@ mod tests {
         server.finish().await;
 
         assert_eq!(run, previous);
+    }
+
+    #[tokio::test]
+    async fn active_run_does_not_hide_a_newer_completed_workflow_baseline() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            MAIN_WORKFLOW_TARGET,
+            active_rerun_then_stale_workflow_run(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let branch = base_branch_head();
+        let workflow = workflow_response();
+        let previous = older_main_workflow_run();
+
+        let run = fixture
+            .poller
+            .fetch_workflow_runs(
+                std::slice::from_ref(&branch),
+                &workflow,
+                std::slice::from_ref(&previous),
+            )
+            .await
+            .expect("unfiltered workflow-run response is valid")
+            .into_iter()
+            .next()
+            .expect("newer completed run for the watched branch becomes visible");
+        server.finish().await;
+
+        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
     }
 
     #[tokio::test]
