@@ -20,6 +20,7 @@ mod imported_conversation;
 mod imported_session;
 mod model_call;
 mod model_execution;
+mod model_settings;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
@@ -51,7 +52,7 @@ pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-    OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
     SessionSystemPromptError, SessionSystemPromptFailure, TurnConfigurationProvenance,
     UnknownModelAlias, VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
@@ -133,6 +134,15 @@ pub use model_execution::{
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
     ToolResultAttemptCorrelation, ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+};
+pub use model_settings::{
+    AdjustedModelSettings, AnthropicServiceTier, CodexCliServiceTier, CompatibleModelSettings,
+    EffectiveModelSettings, FastMode, FastModeOverlay, FastModeSupport, ModelCapabilities,
+    ModelCapabilityCatalog, ModelCapabilityCatalogError, ModelCapabilityDefinition,
+    ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
+    OpenAiServiceTier, ReasoningLevel, ResolvedModelSettings, ServiceTier,
+    SessionModelSettingsChanged, SettingOverlay, TurnModelSettingsResolved,
+    UnsupportedModelSetting, ValidatedModelSettings,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,

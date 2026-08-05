@@ -11,8 +11,9 @@
 //! acknowledgement.
 
 use crate::{
-    DurableCommandId, Session, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionId, VersionedSessionConfigurationDefaults,
+    DurableCommandId, ModelChangeAdjustment, ModelSettingsOverlay, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    VersionedSessionConfigurationDefaults,
 };
 
 /// The canonical caller payload for replacing one session's defaults.
@@ -24,30 +25,75 @@ use crate::{
 ///
 /// # Comparison payload
 ///
-/// Structural equality and hashing exclude `command_id` and include every
-/// other caller-supplied semantic field. The command identifier is looked up
-/// separately at the user-global durable-command boundary.
+/// Structural equality and hashing exclude `command_id` and server-normalized
+/// settings/adjustments. They include the target, expected version, caller's
+/// model/tool/prompt choices, and exact caller settings overlay. The command
+/// identifier is looked up separately at the user-global durable-command
+/// boundary.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaults {
     command_id: DurableCommandId,
     session: SessionId,
     expected_current_version: SessionConfigurationDefaultsVersion,
     replacement: SessionConfigurationDefaults,
+    caller_model_settings: ModelSettingsOverlay,
+    model_settings_adjustments: Box<[ModelChangeAdjustment]>,
 }
 
 impl ReplaceSessionDefaults {
     /// Constructs the complete canonical caller payload.
-    pub const fn new(
+    pub fn new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
+    ) -> Self {
+        let caller_model_settings = replacement.model_settings().precedence().session();
+        Self::with_model_settings(
+            command_id,
+            session,
+            expected_current_version,
+            replacement,
+            caller_model_settings,
+        )
+    }
+
+    /// Constructs the payload while retaining the caller's exact settings
+    /// overlay separately from any automatic installed adjustment.
+    pub fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+    ) -> Self {
+        Self::with_model_settings_adjustments(
+            command_id,
+            session,
+            expected_current_version,
+            replacement,
+            caller_model_settings,
+            Vec::new(),
+        )
+    }
+
+    /// Constructs the payload with server-derived automatic adjustment
+    /// evidence. Adjustments are excluded from caller-payload equality.
+    pub fn with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
     ) -> Self {
         Self {
             command_id,
             session,
             expected_current_version,
             replacement,
+            caller_model_settings,
+            model_settings_adjustments: model_settings_adjustments.into_boxed_slice(),
         }
     }
 
@@ -69,6 +115,16 @@ impl ReplaceSessionDefaults {
     /// Borrows the complete replacement defaults.
     pub const fn replacement(&self) -> &SessionConfigurationDefaults {
         &self.replacement
+    }
+
+    /// Returns the caller's provenance-preserving session contribution.
+    pub const fn caller_model_settings(&self) -> ModelSettingsOverlay {
+        self.caller_model_settings
+    }
+
+    /// Borrows ordered automatic adjustments derived for the installed epoch.
+    pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment] {
+        &self.model_settings_adjustments
     }
 
     /// Prepares the authoritative rejection for a target proven absent by the
@@ -102,7 +158,7 @@ impl ReplaceSessionDefaults {
     ) -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError> {
         if self.session != current.id() {
             return Err(ReplaceSessionDefaultsPreparationError {
-                command: self,
+                command: Box::new(self),
                 provided_session: current.id(),
             });
         }
@@ -158,7 +214,11 @@ impl PartialEq for ReplaceSessionDefaults {
     fn eq(&self, other: &Self) -> bool {
         self.session == other.session
             && self.expected_current_version == other.expected_current_version
-            && self.replacement == other.replacement
+            && self.replacement.model() == other.replacement.model()
+            && self.replacement.dangerous_tool_auto_approval()
+                == other.replacement.dangerous_tool_auto_approval()
+            && self.replacement.system_prompt() == other.replacement.system_prompt()
+            && self.caller_model_settings == other.caller_model_settings
     }
 }
 
@@ -168,7 +228,10 @@ impl std::hash::Hash for ReplaceSessionDefaults {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.session.hash(state);
         self.expected_current_version.hash(state);
-        self.replacement.hash(state);
+        self.replacement.model().hash(state);
+        self.replacement.dangerous_tool_auto_approval().hash(state);
+        self.replacement.system_prompt().hash(state);
+        self.caller_model_settings.hash(state);
     }
 }
 
@@ -307,7 +370,7 @@ impl PreparedReplaceSessionDefaults {
 /// command rejection, and therefore does not claim the command identifier.
 #[derive(Clone, Debug)]
 pub struct ReplaceSessionDefaultsPreparationError {
-    command: ReplaceSessionDefaults,
+    command: Box<ReplaceSessionDefaults>,
     provided_session: SessionId,
 }
 
@@ -324,7 +387,7 @@ impl ReplaceSessionDefaultsPreparationError {
 
     /// Returns both unchanged correlation inputs.
     pub fn into_parts(self) -> (ReplaceSessionDefaults, SessionId) {
-        (self.command, self.provided_session)
+        (*self.command, self.provided_session)
     }
 }
 
@@ -676,6 +739,8 @@ impl ReconstitutedReplaceSessionDefaults {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use expect_test::expect;
 
     use super::{
@@ -688,9 +753,11 @@ mod tests {
 
     use crate::test_support::{command_id, direct, session_id};
     use crate::{
-        ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-        SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
-        TranscriptAncestry,
+        DangerousToolAutoApproval, FastModeOverlay, FastModeSupport, ModelCapabilities,
+        ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+        ModelSettingsPrecedence, ReasoningLevel, SessionConfigurationDefaults,
+        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+        SessionReconstitutionInput, SettingOverlay, TranscriptAncestry,
     };
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
@@ -784,8 +851,8 @@ mod tests {
         }
     }
 
-    /// S01 / INV-012: comparison excludes only command identity and includes
-    /// the target, expected version, and complete replacement.
+    /// S01 / INV-012: comparison excludes command identity and includes the
+    /// stable target, expected version, and caller-owned replacement fields.
     #[test]
     fn s01_inv012_comparison_payload_is_structural() {
         let target = session_id(1);
@@ -803,6 +870,113 @@ mod tests {
         assert_ne!(baseline, different_target);
         assert_ne!(baseline, different_expected_version);
         assert_ne!(baseline, different_replacement);
+    }
+
+    /// S37 / INV-012 / INV-053: server-derived adjustment evidence travels
+    /// with a new command but does not alter caller-payload replay equality.
+    #[test]
+    fn s37_inv012_inv053_adjustment_evidence_is_not_caller_payload() {
+        let target = session_id(1);
+        let adjustment = ModelChangeAdjustment::ReasoningLevelClamped {
+            from: ReasoningLevel::High,
+            to: ReasoningLevel::Low,
+        };
+        let with_adjustment = ReplaceSessionDefaults::with_model_settings_adjustments(
+            command_id(1),
+            target,
+            version(1),
+            defaults(2),
+            ModelSettingsOverlay::inherit_all(),
+            vec![adjustment],
+        );
+        let replay = ReplaceSessionDefaults::with_model_settings(
+            command_id(1),
+            target,
+            version(1),
+            defaults(2),
+            ModelSettingsOverlay::inherit_all(),
+        );
+
+        assert_eq!(with_adjustment, replay);
+        assert_eq!(with_adjustment.model_settings_adjustments(), [adjustment]);
+    }
+
+    /// S37 / INV-012 / INV-053: replay equality follows the stable caller
+    /// overlay instead of a server-normalized installed settings snapshot.
+    #[test]
+    fn s37_inv012_inv053_server_normalized_settings_are_not_caller_payload() {
+        let target = session_id(1);
+        let selection = direct(2);
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low, ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        );
+        let low = capabilities
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Low),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the fixture level is supported");
+        let high = capabilities
+            .validate_precedence(
+                selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::High),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the fixture level is supported");
+        let low_replacement = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            low,
+        )
+        .expect("the low settings match the direct replacement");
+        let high_replacement = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            high,
+        )
+        .expect("the high settings match the direct replacement");
+        assert_ne!(
+            low_replacement.model_settings(),
+            high_replacement.model_settings(),
+        );
+        let caller = ModelSettingsOverlay::inherit_all();
+        let recorded = ReplaceSessionDefaults::with_model_settings(
+            command_id(1),
+            target,
+            version(1),
+            low_replacement,
+            caller,
+        );
+        let replay = ReplaceSessionDefaults::with_model_settings(
+            command_id(1),
+            target,
+            version(1),
+            high_replacement,
+            caller,
+        );
+
+        assert_eq!(recorded, replay);
     }
 
     /// S01 / INV-008: matching current state installs one complete immutable
