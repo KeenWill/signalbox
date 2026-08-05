@@ -804,7 +804,7 @@ pub struct ForegroundAwaitPending {
 }
 
 impl ForegroundAwaitPending {
-    /// Returns the issued physical dispatch correlation to end before parking.
+    /// Returns the dispatch correlation whose physical attempt is already closed.
     pub const fn correlation(self) -> ToolAttemptDispatchCorrelation {
         self.correlation
     }
@@ -815,11 +815,37 @@ impl ForegroundAwaitPending {
     }
 }
 
-/// Nonblocking executor result: terminal evidence or a scheduler parking handoff.
+/// Exact scheduling handoff for an already-delivered foreground child result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForegroundAwaitDelivered {
+    correlation: ToolAttemptDispatchCorrelation,
+    result: DeliveredChildResult,
+}
+
+impl ForegroundAwaitDelivered {
+    /// Returns the issued physical dispatch correlation.
+    pub const fn correlation(&self) -> ToolAttemptDispatchCorrelation {
+        self.correlation
+    }
+
+    /// Borrows the typed child outcome selected by the exact foreground wait.
+    pub const fn result(&self) -> &DeliveredChildResult {
+        &self.result
+    }
+
+    /// Returns the typed child outcome selected by the exact foreground wait.
+    pub fn into_result(self) -> DeliveredChildResult {
+        self.result
+    }
+}
+
+/// Nonblocking executor result: ordinary evidence or a typed scheduler handoff.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionDelegationExecutionDisposition {
     /// Ordinary completed or known-failed tool evidence bound to its dispatch.
     Completed(CorrelatedToolExecutorEvidence),
+    /// An already-delivered foreground result retaining its typed outcome.
+    ForegroundDelivered(ForegroundAwaitDelivered),
     /// A foreground wait registered without retaining a physical future.
     ForegroundPending(ForegroundAwaitPending),
 }
@@ -896,6 +922,7 @@ where
 
 enum UnboundExecutionDisposition {
     Completed(ToolExecutorEvidence),
+    ForegroundDelivered(DeliveredChildResult),
     ForegroundPending(DelegationWait),
 }
 
@@ -917,6 +944,14 @@ where
             UnboundExecutionDisposition::Completed(evidence) => Ok(
                 SessionDelegationExecutionDisposition::Completed(invocation.bind(evidence)),
             ),
+            UnboundExecutionDisposition::ForegroundDelivered(result) => {
+                Ok(SessionDelegationExecutionDisposition::ForegroundDelivered(
+                    ForegroundAwaitDelivered {
+                        correlation,
+                        result,
+                    },
+                ))
+            }
             UnboundExecutionDisposition::ForegroundPending(wait) => {
                 Ok(SessionDelegationExecutionDisposition::ForegroundPending(
                     ForegroundAwaitPending { correlation, wait },
@@ -978,9 +1013,7 @@ where
                             && result.wait().child() == expected_child
                             && result.wait().mode() == expected_mode =>
                     {
-                        let rendered = render_delivered_child_result(result)
-                            .map_err(|_| SessionDelegationExecutorError::ResultEncoding)?;
-                        completed(rendered)
+                        Ok(UnboundExecutionDisposition::ForegroundDelivered(result))
                     }
                     AwaitSessionPortOutcome::ForegroundPending(wait)
                         if expected_mode == DelegationWaitMode::Foreground

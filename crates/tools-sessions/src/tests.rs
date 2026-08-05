@@ -229,6 +229,13 @@ fn completed_text(disposition: UnboundExecutionDisposition) -> String {
     result
 }
 
+fn foreground_result(disposition: UnboundExecutionDisposition) -> DeliveredChildResult {
+    let UnboundExecutionDisposition::ForegroundDelivered(result) = disposition else {
+        panic!("fixture operation delivers one typed foreground result")
+    };
+    result
+}
+
 #[track_caller]
 fn assert_port_contract(
     result: Result<UnboundExecutionDisposition, SessionDelegationExecutorError<FakeError>>,
@@ -660,7 +667,7 @@ fn background_await_returns_registration_without_child_content() {
 }
 
 #[test]
-fn already_delivered_foreground_result_returns_exact_child_content() {
+fn already_delivered_foreground_result_retains_exact_child_content() {
     let child = session(15);
     let raw = await_request(16, child, "foreground");
     let awaiting = decoded_await(&raw);
@@ -675,8 +682,16 @@ fn already_delivered_foreground_result_returns_exact_child_content() {
     let authority = dispatch(&raw, ToolEffectClass::EffectFree);
     let disposition = run_ready(executor.execute_operation(operation, authority))
         .expect("already-delivered result succeeds");
+    let delivered = foreground_result(disposition);
 
-    assert_eq!(completed_text(disposition), RETURNED_CONTENT);
+    assert_eq!(delivered.kind(), DelegationOutcomeKind::ResultReturned);
+    assert_eq!(
+        delivered
+            .content()
+            .expect("returned result has content")
+            .as_str(),
+        RETURNED_CONTENT
+    );
 }
 
 #[test]
@@ -720,13 +735,23 @@ fn failed_child_result_retains_reason_and_turn_provenance() {
         outcome,
         &awaiting,
     );
-    let terminal_turn = result
+    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::awaiting(
+        AwaitSessionPortOutcome::Delivered(result),
+    ))
+    .expect("fixture tools compile")
+    .into_parts();
+    let operation = decode_operation(&awaiting_raw).expect("fixture foreground await is canonical");
+    let authority = dispatch(&awaiting_raw, ToolEffectClass::EffectFree);
+    let disposition = run_ready(executor.execute_operation(operation, authority))
+        .expect("typed child failure succeeds");
+    let delivered = foreground_result(disposition);
+    let terminal_turn = delivered
         .provenance()
         .child_turn()
         .expect("fixture provenance is a child turn");
 
     let output: Value = serde_json::from_str(
-        &render_delivered_child_result(result).expect("typed child failure renders"),
+        &render_delivered_child_result(delivered).expect("typed child failure renders"),
     )
     .expect("child outcome is compact JSON");
 
