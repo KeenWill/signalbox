@@ -1125,20 +1125,28 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: crate::ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
-        self.prepare_cancellation_projection_with_delegation(entry_ids, result_frontier, None)
+        self.prepare_cancellation_projection_with_delegation(
+            entry_ids,
+            result_frontier,
+            false,
+            None,
+        )
     }
 
-    /// Builds interrupt closure while retaining one delivered foreground result.
+    /// Builds interrupt closure for one foreground child wait, retaining a
+    /// delivered result when descendant termination materialized one and
+    /// otherwise closing the request with the parent turn.
     pub fn prepare_delegation_cancellation_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: crate::ContextFrontierId,
-        outcome: crate::DelegationOutcome,
+        outcome: Option<crate::DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
         self.prepare_cancellation_projection_with_delegation(
             entry_ids,
             result_frontier,
-            Some(outcome),
+            true,
+            outcome,
         )
     }
 
@@ -1146,9 +1154,13 @@ impl ToolBatch {
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: crate::ContextFrontierId,
+        closes_delegation_wait: bool,
         delegation_outcome: Option<crate::DelegationOutcome>,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
-        if !matches!(self.phase, ToolBatchPhase::Executing { .. })
+        let phase_can_close = matches!(self.phase, ToolBatchPhase::Executing { .. })
+            || (closes_delegation_wait
+                && matches!(self.phase, ToolBatchPhase::AwaitingChild { .. }));
+        if !phase_can_close
             || entry_ids.len() != self.requests.len()
             || self
                 .attempts
@@ -1180,7 +1192,7 @@ impl ToolBatch {
                 )
             })
             .count();
-        if delegation_outcome.is_some() != (child_wait_count == 1) {
+        if closes_delegation_wait != (child_wait_count == 1) {
             return Err(ToolResultProjectionError {
                 failure: ToolResultProjectionFailure::BatchNotResolved,
             });
@@ -1219,18 +1231,18 @@ impl ToolBatch {
                                     failure: ToolResultProjectionFailure::TurnLevelFailure,
                                 });
                             };
-                            let Some(outcome) = delegation_outcome.take() else {
-                                return Err(ToolResultProjectionError {
-                                    failure: ToolResultProjectionFailure::BatchNotResolved,
-                                });
-                            };
-                            SemanticTranscriptEntryPayload::DelegationResult {
-                                awaiting_request: request.id(),
-                                spawning_request: *spawning_request,
-                                child: *child,
-                                mode: crate::DelegationWaitMode::Foreground,
-                                delivery_sequence: None,
-                                outcome,
+                            match delegation_outcome.take() {
+                                Some(outcome) => SemanticTranscriptEntryPayload::DelegationResult {
+                                    awaiting_request: request.id(),
+                                    spawning_request: *spawning_request,
+                                    child: *child,
+                                    mode: crate::DelegationWaitMode::Foreground,
+                                    delivery_sequence: None,
+                                    outcome,
+                                },
+                                None => SemanticTranscriptEntryPayload::ToolClosed {
+                                    request: request.id(),
+                                },
                             }
                         }
                         Some(ReconstitutedToolAttempt::Current(_)) => {
@@ -2974,6 +2986,13 @@ mod tests {
                 outcome.clone(),
             )
             .expect("the delivered child result closes the logical request");
+        let interrupted = waiting
+            .prepare_delegation_cancellation_projection(
+                vec![semantic_transcript_entry_id(18)],
+                context_frontier_id(19),
+                None,
+            )
+            .expect("a parent-only interrupt closes the child wait without a result");
 
         assert_eq!(
             waiting.phase(),
@@ -2992,6 +3011,12 @@ mod tests {
                 mode: crate::DelegationWaitMode::Foreground,
                 delivery_sequence: None,
                 outcome: Box::new(outcome),
+            }
+        );
+        assert_eq!(
+            interrupted.entries()[0].payload(),
+            &SemanticTranscriptEntryPayload::ToolClosed {
+                request: awaited.id(),
             }
         );
     }

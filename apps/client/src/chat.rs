@@ -8,8 +8,8 @@ use std::{
 
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, DescendantTerminationScope, ErrorCode,
-    InputContent, ModelSelection, ServerMessage, SessionEvent, SystemPromptMember, ToolDecision,
-    TurnState,
+    InputContent, ModelSelection, ServerMessage, SessionEvent, SystemPromptMember,
+    SystemPromptText, ToolDecision, TurnState,
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, ReadBuf},
@@ -1094,24 +1094,26 @@ async fn replace_model(
 ) -> Result<u64, ClientError> {
     let replacement_system_prompt = observed.system_prompt.clone();
     let mut connection = client
-        .mutation_request(ClientRequest::ReplaceSessionDefaults {
+        .mutation_request(model_replacement_request(
             command_id,
             session_id,
-            expected_defaults_version: observed.version,
-            model_selection: selection,
-            dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
-            system_prompt: SystemPromptMember::present(replacement_system_prompt.clone()),
-        })
+            selection,
+            &observed,
+            replacement_system_prompt.clone(),
+        ))
         .await?;
     match connection.message().await.map_err(ClientError::mutation)? {
         ServerMessage::SessionDefaultsReplaced {
             session_id: replaced_session,
             defaults_version: installed_version,
             model_selection,
+            model_settings,
             dangerous_tool_auto_approval,
             system_prompt: receipt_system_prompt,
+            ..
         } if replaced_session == session_id
             && model_selection == selection
+            && model_settings.precedence.session == observed.model_settings
             && dangerous_tool_auto_approval == observed.dangerous_tool_auto_approval
             && receipt_system_prompt.value() == Some(&replacement_system_prompt)
             && observed
@@ -1130,6 +1132,24 @@ async fn replace_model(
         _ => Err(
             ClientError::Protocol("model replacement returned an unexpected response").mutation(),
         ),
+    }
+}
+
+fn model_replacement_request(
+    command_id: CommandId,
+    session_id: CanonicalUuid,
+    selection: ModelSelection,
+    observed: &ObservedSessionDefaults,
+    replacement_system_prompt: Option<SystemPromptText>,
+) -> ClientRequest {
+    ClientRequest::ReplaceSessionDefaults {
+        command_id,
+        session_id,
+        expected_defaults_version: observed.version,
+        model_selection: selection,
+        model_settings: observed.model_settings,
+        dangerous_tool_auto_approval: observed.dangerous_tool_auto_approval,
+        system_prompt: SystemPromptMember::present(replacement_system_prompt),
     }
 }
 
@@ -1175,6 +1195,8 @@ fn update_turns_from_event(turns: &mut ChatTurns, event: &SessionEvent) -> TurnE
         }
         SessionEvent::ToolApprovalDecided { .. } => TurnEventEffect::ApprovalDecided,
         SessionEvent::SessionCreated {}
+        | SessionEvent::SessionModelSettingsChanged { .. }
+        | SessionEvent::TurnModelSettingsResolved { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::ToolBatchTransition { .. }
         | SessionEvent::ContextCompacted { .. }
@@ -1319,8 +1341,51 @@ fn parse_uuid(value: &str, message: &'static str) -> Result<CanonicalUuid, ChatS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_process_protocol::{
+        FastModeOverlay, ModelSettingsOverlay, ReasoningLevel, SettingOverlay,
+    };
 
     const REQUEST: &str = "00000000-0000-0000-0000-000000000123";
+
+    #[test]
+    fn chat_model_replacement_preserves_the_observed_session_settings() {
+        let command_id = CommandId::try_from_uuid(Uuid::from_u128(1))
+            .expect("fixture command identity is admitted");
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let model_settings = ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::High),
+            fast_mode: FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        };
+        let observed = ObservedSessionDefaults {
+            version: CanonicalU64::new(4),
+            model_settings,
+            dangerous_tool_auto_approval: false,
+            system_prompt: None,
+        };
+
+        let request = model_replacement_request(
+            command_id,
+            session_id,
+            ModelSelection::Direct { selection_id },
+            &observed,
+            None,
+        );
+
+        assert_eq!(
+            request,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: observed.version,
+                model_selection: ModelSelection::Direct { selection_id },
+                model_settings,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            }
+        );
+    }
 
     #[tokio::test]
     async fn terminal_input_reads_async_channel_chunks() {

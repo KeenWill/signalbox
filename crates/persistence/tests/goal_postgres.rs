@@ -25,11 +25,13 @@ use signalbox_domain::{
     Goal, GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
     GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, PreparedCreateSession, ProviderModelIdentity,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
+    PreparedCreateSession, ProviderModelIdentity, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
-    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -2816,7 +2818,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             task_entry: 0xf313,
             selection: 0xf204,
             policy_kind: "bound",
-            on_parent_stopped: Some("stop"),
+            on_parent_stopped: Some("cancel"),
             on_parent_cancelled: Some("cancel"),
         },
     )
@@ -2977,7 +2979,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
         queued_terminal_turn.state(),
         &ProcessTurnState::DelegationTerminated {
             spawning_request: tool_request(queued_bound_request),
-            outcome: DispatchedDelegationOutcome::ChildStopped,
+            outcome: DispatchedDelegationOutcome::ChildCancelled,
             reason: DispatchedDelegationReason::ParentStoppedWithDescendants,
             provenance: DispatchedDelegationProvenance::ParentGoalCommand {
                 session: session(parent),
@@ -3015,7 +3017,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             ),
             (
                 Uuid::from_u128(queued_bound_request),
-                "child_stopped".into(),
+                "child_cancelled".into(),
                 "parent_stopped_parent_and_descendants".into(),
                 "parent_goal_command".into(),
                 Uuid::from_u128(stop_command),
@@ -3082,19 +3084,36 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             .await?
             .is_some()
     );
-    assert_applied_command(
-        repository
-            .handle_user_command(
-                GoalUserCommand::new(
-                    command(0xf160),
-                    session(bound_child),
-                    GoalUserAction::Attach(statement("run independent work after the cascade")),
-                ),
-                Some(turn_candidates(0xf161)),
-                |_| None,
-            )
-            .await?,
-    );
+    let restarted_input = SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            SubmitInput::new(
+                command(0xf160),
+                session(bound_child),
+                UserContent::try_text(String::from("run independent work after the cascade"))
+                    .expect("fixture input content is admitted"),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xf161)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xf162))),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xf163)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xf164)),
+            ),
+            |_| panic!("the new input has no steering to reclassify"),
+            |_| panic!("the new input has no tool batch to cancel"),
+        )
+        .await?;
+    assert!(matches!(
+        restarted_input,
+        signalbox_persistence::submit_input::SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(_))
+        )
+    ));
     let restarted = StartEligibleTurnRepository::new(pool.clone())
         .handle(session(bound_child), activation_identities(0xf170))
         .await?;

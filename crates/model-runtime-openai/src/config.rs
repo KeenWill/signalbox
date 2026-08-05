@@ -11,6 +11,8 @@ use std::time::Duration;
 /// (`docs/spec/configuration-and-credentials.md`).
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
+    /// Exact per-model reasoning, fast-mode, and service-tier capabilities.
+    pub model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog,
     /// Base URL of the API; the adapter appends `/v1/chat/completions`. The
     /// scheme must be `https`, except that `http` is admitted for a literal
     /// loopback IP host. User information, query, and fragment are rejected.
@@ -33,6 +35,7 @@ impl OpenAiConfig {
     /// 10-minute exchange timeout, 8 MiB SSE record limit.
     pub fn new() -> Self {
         Self {
+            model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             base_url: "https://api.openai.com".to_string(),
             connect_timeout: None,
             exchange_timeout: Duration::from_secs(10 * 60),

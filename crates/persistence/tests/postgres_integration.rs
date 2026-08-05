@@ -16660,6 +16660,237 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
     Ok(())
 }
 
+async fn checkpoint_foreground_child_wait_without_result(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<(RestartModelCallFixture, ToolRequestId, ToolRequestId), Box<dyn Error>> {
+    let (fixture, _, _, requests) = checkpoint_confirmed_tool_batch(
+        pool,
+        seed,
+        &[("spawn_session", "{}"), ("await_session", "{}")],
+    )
+    .await?;
+    let [spawning_request, awaiting_request] = requests.as_slice() else {
+        panic!("the foreground fixture has spawn and await requests")
+    };
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(seed + 0x100, seed + 0x101, direct(seed + 5)))
+        .await?;
+    let child = Uuid::from_u128(seed + 0x101);
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                *spawning_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || panic!("the first approval does not start execution"),
+        )
+        .await?;
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+                *awaiting_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    let spawn_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            spawn_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved spawn request prepares one attempt");
+    let authorized_spawn = repository
+        .authorize_attempt(fixture.session, fixture.turn, spawn_attempt)
+        .await?;
+    repository
+        .commit_observation(authorized_spawn.executor_fence().bind(
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(child.to_string()).expect("bounded child identity"),
+                ),
+            },
+        ))
+        .await?;
+    let await_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe2));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            await_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved await request prepares one attempt");
+
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt DISABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_wait
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, parent_turn_id, child_session_id, wait_mode)
+         VALUES ($1, $2, $3, $4, $5, 'foreground')",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(child)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'awaiting_child',
+                wait_spawning_request_id = $1,
+                wait_child_session_id = $2
+          WHERE attempt_id = $3",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child)
+    .bind(await_attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(issuing_attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_phase_kind = 'awaiting_child', current_attempt_id = NULL,
+                child_wait_request_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(awaiting_request.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL;
+         ALTER TABLE tool_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_attempt ENABLE TRIGGER ALL;
+         ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL;",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok((fixture, *spawning_request, *awaiting_request))
+}
+
+/// S17 / INV-005 / INV-032: a parent-only interrupt closes a foreground
+/// child wait without fabricating a child result or requiring cascade output.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv005_inv032_parent_only_interrupt_closes_foreground_wait_without_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xaa00;
+    let (fixture, spawning_request, awaiting_request) =
+        checkpoint_foreground_child_wait_without_result(&pool, seed).await?;
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0xf2));
+    let outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 0xf0,
+                seed + 1,
+                "interrupt only the foreground-waiting parent",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0xf1)),
+            Some(successor),
+        )
+        .await?;
+    let evidence: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE source_session_id = $1
+                AND payload_kind = 'tool_closed_by_turn_end'
+                AND tool_result_request_id = $2),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE source_session_id = $1
+                AND payload_kind = 'delegation_result'
+                AND delegation_result_spawning_tool_request_id = $3),
+            (SELECT count(*) FROM session_child_result
+              WHERE spawning_tool_request_id = $3)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(awaiting_request.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    assert_eq!(evidence, (1, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S17 / INV-005 / INV-032: a durable foreground result reopens its exact
 /// parked tool batch under a fresh continued attempt after restart.
 #[tokio::test(flavor = "multi_thread")]

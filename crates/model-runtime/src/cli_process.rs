@@ -1,5 +1,6 @@
 //! Provider-independent CLI process supervision and session orchestration.
 
+use std::ffi::OsString;
 use std::ops::{Deref, DerefMut};
 use std::process::Stdio;
 use std::time::Duration;
@@ -45,6 +46,34 @@ pub struct CliProcessLabels {
 pub struct CliEnvironmentVariable {
     name: &'static str,
     credential_home: bool,
+}
+
+/// One adapter-owned child-environment value.
+///
+/// This type deliberately implements no diagnostic formatting so a control
+/// value cannot be emitted by callers that format a complete process request.
+pub struct CliEnvironmentOverride {
+    name: &'static str,
+    value: OsString,
+}
+
+impl CliEnvironmentOverride {
+    /// Constructs one adapter-owned non-credential control.
+    pub fn new(name: &'static str, value: impl Into<OsString>) -> Self {
+        Self {
+            name,
+            value: value.into(),
+        }
+    }
+
+    /// Returns the fixed environment-variable name.
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn into_parts(self) -> (&'static str, OsString) {
+        (self.name, self.value)
+    }
 }
 
 impl CliEnvironmentVariable {
@@ -108,6 +137,8 @@ pub struct CliProcessRequest<D> {
     /// Environment variables permitted to reach the child, each bound to its
     /// value-handling policy.
     pub environment: &'static [CliEnvironmentVariable],
+    /// Adapter-owned non-credential controls applied after ambient values.
+    pub environment_overrides: Vec<CliEnvironmentOverride>,
 }
 
 /// Provider-neutral classification of an event decoding failure.
@@ -295,6 +326,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         event_limit,
         stderr_limit,
         environment,
+        environment_overrides,
     } = request;
     let correlation = decoder.correlation().clone();
     let mut command = Command::from(command);
@@ -304,8 +336,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    let environment_policy = environment;
     let environment =
-        match allowlisted_environment(environment, labels, |name| std::env::var_os(name)) {
+        match allowlisted_environment(environment_policy, labels, |name| std::env::var_os(name)) {
             Ok(environment) => environment,
             Err(rejection) => {
                 // Nothing was sent: the rejection precedes `SendCommenced` and the
@@ -316,7 +349,23 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 });
             }
         };
+    let environment_overrides = match validated_environment_overrides(
+        environment_overrides,
+        environment_policy.iter().map(|variable| variable.name()),
+    ) {
+        Ok(overrides) => overrides,
+        Err(name) => {
+            return invalid_process_request(
+                labels,
+                &format!("child-environment override `{name}` is duplicate or invalid"),
+            );
+        }
+    };
     for (name, value) in environment {
+        command.env(name, value);
+    }
+    for override_value in environment_overrides {
+        let (name, value) = override_value.into_parts();
         command.env(name, value);
     }
     #[cfg(unix)]
@@ -846,6 +895,22 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             ))))
         }
     }
+}
+
+fn validated_environment_overrides(
+    overrides: Vec<CliEnvironmentOverride>,
+    inherited_names: impl IntoIterator<Item = &'static str>,
+) -> Result<Vec<CliEnvironmentOverride>, &'static str> {
+    let mut names = inherited_names
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for override_value in &overrides {
+        let name = override_value.name();
+        if name.is_empty() || name.contains('=') || name.contains('\0') || !names.insert(name) {
+            return Err(name);
+        }
+    }
+    Ok(overrides)
 }
 
 /// `CODEX_HOME` names the CLI's login store — with `HOME` supplying its
@@ -1503,11 +1568,11 @@ fn pre_exchange_boundary_loss(cause: LossCause) -> TerminalEvidence {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliEnvironmentVariable,
-        CliProcessLabels, CliProcessRequest, CliSession, CliTerminalTextCapture,
-        EnvironmentRejection, EnvironmentRejectionReason, TRUNCATION_SUFFIX,
-        absolute_credential_home, allowlisted_environment, execute_cli_process, read_bounded_line,
-        read_bounded_output, sanitized_stderr,
+        BoundedOutput, CliDecodeFailure, CliDecodeFailureClass, CliEnvironmentOverride,
+        CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
+        CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason,
+        TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, execute_cli_process,
+        read_bounded_line, read_bounded_output, sanitized_stderr, validated_environment_overrides,
     };
     use crate::{
         CancellationSignal, LossCause, ProviderErrorKind, REDACTED, RedactingSink,
@@ -1614,6 +1679,7 @@ mod tests {
             event_limit: 1_024,
             stderr_limit: 1_024,
             environment: &[],
+            environment_overrides: Vec::new(),
         }
     }
 
@@ -1941,6 +2007,45 @@ mod tests {
             EnvironmentRejectionReason::DuplicatePolicyName
         );
         assert!(rejection.diagnostic().contains(repeated_name));
+    }
+
+    #[test]
+    fn adapter_environment_override_cannot_replace_an_inherited_value() {
+        let overrides = vec![CliEnvironmentOverride::new("PATH", "fixture-path")];
+
+        assert!(matches!(
+            validated_environment_overrides(overrides, ["PATH"]),
+            Err("PATH")
+        ));
+    }
+
+    #[test]
+    fn adapter_environment_override_cannot_replace_an_absent_declared_value() {
+        let declared_name = TEST_ENVIRONMENT[3].name();
+        let overrides = vec![CliEnvironmentOverride::new(
+            declared_name,
+            "fixture-relative",
+        )];
+
+        let rejected_name = validated_environment_overrides(
+            overrides,
+            TEST_ENVIRONMENT.iter().map(|variable| variable.name()),
+        )
+        .err()
+        .expect("an override cannot replace an absent declared value");
+
+        assert_eq!(rejected_name, declared_name);
+    }
+
+    #[test]
+    fn distinct_adapter_environment_override_is_admitted() {
+        let override_name = "FIXTURE_OUTPUT_LIMIT";
+        let overrides = vec![CliEnvironmentOverride::new(override_name, "64")];
+
+        let admitted = validated_environment_overrides(overrides, ["PATH"])
+            .expect("the fixed control is distinct from inherited names");
+
+        assert_eq!(admitted[0].name(), override_name);
     }
 
     /// Assembles the environment with exactly `name=value` set and returns the

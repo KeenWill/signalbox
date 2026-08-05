@@ -5004,13 +5004,9 @@ async fn persist_cancelled(
         )
         .await?;
     }
-    persist_ended_attempt(
-        connection,
-        cancelled.session(),
-        cancelled.turn(),
-        cancelled.attempt(),
-    )
-    .await?;
+    if let Some(attempt) = cancelled.attempt() {
+        persist_ended_attempt(connection, cancelled.session(), cancelled.turn(), attempt).await?;
+    }
     if !cancelled.tool_result_entries().is_empty() {
         crate::tool_loop::persist_result_entry_slice(connection, cancelled.tool_result_entries())
             .await
@@ -5047,7 +5043,9 @@ async fn persist_cancelled(
         cancelled.turn(),
         "cancelled",
         cancelled.terminal_snapshot().frontier().snapshot(),
-        Some(cancelled.attempt().id()),
+        cancelled
+            .attempt()
+            .map(signalbox_domain::EndedTurnAttempt::id),
         cancelled.call().map(signalbox_domain::EndedModelCall::id),
     )
     .await?;
@@ -5838,6 +5836,7 @@ async fn terminalize_lifecycle(
                 recovery_model_call_id = NULL,
                 active_tool_round_call_id = NULL,
                 approval_tool_request_id = NULL,
+                child_wait_request_id = NULL,
                 recovery_tool_attempt_id = NULL,
                 terminal_attempt_id = $2,
                 terminal_model_call_id = $3,
@@ -5855,6 +5854,13 @@ async fn terminalize_lifecycle(
                     $4 = 'reconciliation_required'
                     AND active_phase_kind = 'awaiting_model_call_recovery'
                     AND recovery_model_call_id = $3
+                )
+                OR (
+                    $4 = 'cancelled'
+                    AND $2::uuid IS NULL
+                    AND $3::uuid IS NULL
+                    AND active_phase_kind = 'awaiting_child'
+                    AND child_wait_request_id IS NOT NULL
                 )
             )",
     )

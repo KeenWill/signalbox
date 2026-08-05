@@ -878,7 +878,7 @@ impl ModelCallExecution {
                     session: self.session,
                     turn: self.turn,
                 },
-                self.current_attempt,
+                Some(self.current_attempt),
                 ended_call,
                 CancellationFrontierSource::new(self.current_snapshot, &[]),
                 proof,
@@ -962,7 +962,7 @@ impl ModelCallExecution {
                 session: self.session,
                 turn: self.turn,
             },
-            self.current_attempt,
+            Some(self.current_attempt),
             None,
             CancellationFrontierSource::new(self.current_snapshot, &result_entries),
             interrupt.proof(),
@@ -1940,7 +1940,7 @@ fn apply_terminal_observation(
                 .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
                 close_cancelled_turn(
                     scope,
-                    attempt,
+                    Some(attempt),
                     Some(ended_call),
                     CancellationFrontierSource::new(source, &[]),
                     proof,
@@ -2860,7 +2860,7 @@ pub struct CancelledModelCallTurn {
     session: SessionId,
     turn: TurnId,
     call: Option<EndedModelCall>,
-    attempt: EndedTurnAttempt,
+    attempt: Option<EndedTurnAttempt>,
     disposition: TurnDisposition,
     tool_result_entries: Box<[SemanticTranscriptEntry]>,
     cancellation_entry: SemanticTranscriptEntry,
@@ -2881,9 +2881,9 @@ impl CancelledModelCallTurn {
     pub const fn call(&self) -> Option<&EndedModelCall> {
         self.call.as_ref()
     }
-    /// Borrows the ended attempt.
-    pub const fn attempt(&self) -> &EndedTurnAttempt {
-        &self.attempt
+    /// Borrows the ended attempt when cancellation closed live execution.
+    pub const fn attempt(&self) -> Option<&EndedTurnAttempt> {
+        self.attempt.as_ref()
     }
     /// Borrows the proof-bearing cancelled disposition.
     pub const fn disposition(&self) -> &TurnDisposition {
@@ -4280,21 +4280,36 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
 pub(crate) fn apply_interrupt_to_executing_tool_batch(
     active_turn: ActivatedTurn,
     batch: crate::ToolBatch,
-    result_entries: Vec<SemanticTranscriptEntryId>,
-    result_frontier: ContextFrontierId,
+    result_projection: PreparedToolResultProjection,
     interrupt: AppliedInterruptCommandResult,
     identities: CancelledModelCallTurnIdentities,
 ) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
     let proof = interrupt.proof();
-    let ActiveTurnPhase::Running { current_attempt } = active_turn.phase() else {
-        return Err(ModelCallClosureError::AttemptStateMismatch);
-    };
-    let crate::ToolBatchPhase::Executing { turn_attempt } = batch.phase() else {
-        return Err(ModelCallClosureError::AttemptStateMismatch);
+    let attempt = match (active_turn.phase(), batch.phase()) {
+        (
+            ActiveTurnPhase::Running { current_attempt },
+            crate::ToolBatchPhase::Executing { turn_attempt },
+        ) if turn_attempt == current_attempt.id() => Some(current_attempt.clone()),
+        (
+            ActiveTurnPhase::AwaitingChild { wait },
+            crate::ToolBatchPhase::AwaitingChild {
+                request,
+                spawning_request,
+                child,
+            },
+        ) if request == wait.awaiting_request()
+            && spawning_request == wait.spawning_request()
+            && child == wait.child() =>
+        {
+            None
+        }
+        (ActiveTurnPhase::Running { .. }, crate::ToolBatchPhase::Executing { .. }) => {
+            return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+        }
+        _ => return Err(ModelCallClosureError::AttemptStateMismatch),
     };
     if batch.session() != active_turn.session()
         || batch.turn() != active_turn.turn()
-        || turn_attempt != current_attempt.id()
         || interrupt.session() != active_turn.session()
         || proof.predecessor() != active_turn.turn()
         || interrupt.successor() == active_turn.turn()
@@ -4306,9 +4321,15 @@ pub(crate) fn apply_interrupt_to_executing_tool_batch(
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
     let source_snapshot = batch.yielded_snapshot().clone();
-    let result_projection = batch
-        .prepare_cancellation_projection(result_entries, result_frontier)
-        .map_err(|_| ModelCallClosureError::InterruptCorrelationMismatch)?;
+    if result_projection.turn() != active_turn.turn()
+        || result_projection.snapshot().frontier().owning_session() != active_turn.session()
+        || result_projection.source_frontier() != source_snapshot.frontier().snapshot()
+        || !source_snapshot.is_semantic_prefix_of(result_projection.snapshot())
+        || result_projection.snapshot().entry_count()
+            != source_snapshot.entry_count() + result_projection.entries().len()
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
     let reclassified_pending_steering =
         reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
     let (tool_result_entries, _result_snapshot) = result_projection.into_parts();
@@ -4317,7 +4338,7 @@ pub(crate) fn apply_interrupt_to_executing_tool_batch(
             session: active_turn.session(),
             turn: active_turn.turn(),
         },
-        current_attempt.clone(),
+        attempt,
         None,
         CancellationFrontierSource::new(source_snapshot, &tool_result_entries),
         proof,
@@ -4498,7 +4519,7 @@ impl<'a> CancellationFrontierSource<'a> {
 
 fn close_cancelled_turn(
     scope: ModelCallTurnScope,
-    attempt: CurrentTurnAttempt,
+    attempt: Option<CurrentTurnAttempt>,
     call: Option<EndedModelCall>,
     source: CancellationFrontierSource<'_>,
     proof: AppliedInterruptProof,
@@ -4510,7 +4531,10 @@ fn close_cancelled_turn(
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
     let ended_attempt = attempt
-        .end_after_cancellation(proof, CancellationStopDisposition::Cancelled)
+        .map(|attempt| {
+            attempt.end_after_cancellation(proof, CancellationStopDisposition::Cancelled)
+        })
+        .transpose()
         .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
     let cancellation_entry = SemanticTranscriptEntry::from_validated_parts(
         identities.cancellation_entry,
@@ -6410,7 +6434,10 @@ mod tests {
 
         assert!(cancelled.call().is_none());
         assert_eq!(
-            cancelled.attempt().end(),
+            cancelled
+                .attempt()
+                .expect("unsent cancellation closes its prepared attempt")
+                .end(),
             &crate::AttemptEnd::AfterCancellation {
                 cause: interrupt.proof(),
                 disposition: CancellationStopDisposition::Cancelled,
@@ -6482,12 +6509,17 @@ mod tests {
         )
         .reconstitute()
         .expect("the crash-lost prepared attempt remains terminalizable");
+        let result_projection = batch
+            .prepare_cancellation_projection(
+                vec![semantic_transcript_entry_id(45)],
+                context_frontier_id(46),
+            )
+            .expect("the resolved batch projects its terminal result");
         let interrupt = applied_interrupt(&execution);
         let cancelled = apply_interrupt_to_executing_tool_batch(
             execution.active_turn,
             batch,
-            vec![semantic_transcript_entry_id(45)],
-            context_frontier_id(46),
+            result_projection,
             interrupt,
             CancelledModelCallTurnIdentities::new(
                 semantic_transcript_entry_id(47),
@@ -6496,7 +6528,11 @@ mod tests {
         )
         .expect("the prepared tool checkpoint closes directly");
 
-        let AttemptEnd::AfterCancellation { cause, disposition } = cancelled.attempt().end() else {
+        let AttemptEnd::AfterCancellation { cause, disposition } = cancelled
+            .attempt()
+            .expect("the executing batch retains its live turn attempt")
+            .end()
+        else {
             panic!("the interrupted attempt ends after cancellation");
         };
         assert_eq!(*cause, interrupt.proof());
@@ -6700,7 +6736,10 @@ mod tests {
             ModelCallDisposition::Cancelled
         );
         assert_eq!(
-            cancelled.attempt().end(),
+            cancelled
+                .attempt()
+                .expect("prepared-call cancellation closes its turn attempt")
+                .end(),
             &crate::AttemptEnd::AfterCancellation {
                 cause: interrupt.proof(),
                 disposition: CancellationStopDisposition::Cancelled,
@@ -6774,7 +6813,10 @@ mod tests {
             ModelCallDisposition::Cancelled
         );
         assert_eq!(
-            cancelled.attempt().end(),
+            cancelled
+                .attempt()
+                .expect("issued-call cancellation closes its turn attempt")
+                .end(),
             &crate::AttemptEnd::AfterCancellation {
                 cause: interrupt.proof(),
                 disposition: CancellationStopDisposition::Cancelled,

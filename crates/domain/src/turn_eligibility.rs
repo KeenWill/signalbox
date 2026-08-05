@@ -2182,7 +2182,7 @@ struct ActiveExecutingToolBatchCorrelation {
     turn: TurnId,
     producing_call: crate::ModelCallId,
     yielded_frontier: ContextFrontierId,
-    turn_attempt: TurnAttemptId,
+    turn_attempt: Option<TurnAttemptId>,
 }
 
 impl AcceptedInputSchedulingProjection {
@@ -2306,23 +2306,28 @@ impl AcceptedInputSchedulingProjection {
 
     /// Closes one executing tool batch under a newly applied interrupt.
     ///
-    /// The checked scheduling projection supplies the current turn attempt;
-    /// the batch supplies the exact yielded frontier and complete physical
-    /// attempt inventory. Result identities are consumed only after both
-    /// projections agree.
+    /// The checked scheduling projection supplies the current active phase;
+    /// the batch supplies its exact yielded frontier and complete physical
+    /// attempt inventory, while the result projection supplies the already
+    /// checked logical closures. Result identities are consumed only after
+    /// all three projections agree.
     pub fn apply_interrupt_to_tool_batch(
         self,
         batch: crate::ToolBatch,
-        result_entries: Vec<crate::SemanticTranscriptEntryId>,
-        result_frontier: ContextFrontierId,
+        result_projection: crate::PreparedToolResultProjection,
         interrupt: AppliedInterruptCommandResult,
         identities: crate::CancelledModelCallTurnIdentities,
     ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
         let Some(correlation) = self.active_executing_tool_batch else {
             return Err(crate::ModelCallClosureError::InterruptCorrelationMismatch);
         };
-        let crate::ToolBatchPhase::Executing { turn_attempt } = batch.phase() else {
-            return Err(crate::ModelCallClosureError::AttemptStateMismatch);
+        let turn_attempt = match batch.phase() {
+            crate::ToolBatchPhase::Executing { turn_attempt } => Some(turn_attempt),
+            crate::ToolBatchPhase::AwaitingChild { .. } => None,
+            crate::ToolBatchPhase::AwaitingApproval { .. }
+            | crate::ToolBatchPhase::AwaitingRecovery { .. } => {
+                return Err(crate::ModelCallClosureError::AttemptStateMismatch);
+            }
         };
         if correlation.session != batch.session()
             || correlation.turn != batch.turn()
@@ -2338,8 +2343,7 @@ impl AcceptedInputSchedulingProjection {
         crate::model_execution::apply_interrupt_to_executing_tool_batch(
             active_turn.into(),
             batch,
-            result_entries,
-            result_frontier,
+            result_projection,
             interrupt,
             identities,
         )
@@ -5304,15 +5308,13 @@ fn reconstitute_inner(
                     }
                     referenced_model_calls.insert(tool_batch.producing_call);
                     referenced_snapshots.insert(yielded_frontier);
-                    if let Some(turn_attempt) = tool_batch.batch_attempt {
-                        active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
-                            session,
-                            turn,
-                            producing_call: tool_batch.producing_call,
-                            yielded_frontier,
-                            turn_attempt,
-                        });
-                    }
+                    active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
+                        session,
+                        turn,
+                        producing_call: tool_batch.producing_call,
+                        yielded_frontier,
+                        turn_attempt: tool_batch.batch_attempt,
+                    });
                 }
                 ReconstitutedSchedulingState::Active {
                     start,
@@ -9425,7 +9427,7 @@ mod tests {
                 turn: active.turn(),
                 producing_call,
                 yielded_frontier: yielded_frontier.id(),
-                turn_attempt: continuation_attempt,
+                turn_attempt: Some(continuation_attempt),
             })
         );
         let active_execution = projection
