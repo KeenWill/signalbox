@@ -36,7 +36,7 @@ verified against this implementing change; and the session-placement event,
 current head, and creation transaction were verified through PR #415
 (`agent/scoped-visibility-creation`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
-through PR #441 (`agent/model-settings-persistence`). This page covers the
+through this PR (`agent/model-settings-persistence`). This page covers the
 Postgres representation in `crates/persistence` (source and migrations),
 migration discipline, durable command storage and replay equality, the
 fail-closed reconstitution boundary, the lock protocol, pending-steering durable

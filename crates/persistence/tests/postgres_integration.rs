@@ -21216,20 +21216,23 @@ async fn s24_inv012_inv053_process_read_rejects_missing_turn_settings_evidence()
     sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query(
+    let deleted_outbox = sqlx::query(
         "DELETE FROM turn_model_settings_resolved_outbox_event
           WHERE accepted_input_id = $1",
     )
     .bind(accepted_input.into_uuid())
     .execute(&pool)
     .await?;
+    assert_eq!(deleted_outbox.rows_affected(), 1);
     sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM turn_model_settings_resolved WHERE accepted_input_id = $1")
-        .bind(accepted_input.into_uuid())
-        .execute(&pool)
-        .await?;
+    let deleted_settings =
+        sqlx::query("DELETE FROM turn_model_settings_resolved WHERE accepted_input_id = $1")
+            .bind(accepted_input.into_uuid())
+            .execute(&pool)
+            .await?;
+    assert_eq!(deleted_settings.rows_affected(), 1);
     sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -22953,20 +22956,23 @@ async fn s24_inv012_inv053_replacement_replay_requires_settings_change_evidence(
     sqlx::query("ALTER TABLE session_model_settings_changed_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query(
+    let deleted_outbox = sqlx::query(
         "DELETE FROM session_model_settings_changed_outbox_event
           WHERE session_id = $1",
     )
     .bind(replacement.session.into_uuid())
     .execute(&pool)
     .await?;
+    assert_eq!(deleted_outbox.rows_affected(), 1);
     sqlx::query("ALTER TABLE session_model_settings_changed DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    sqlx::query("DELETE FROM session_model_settings_changed WHERE command_id = $1")
-        .bind(replacement.command.into_uuid())
-        .execute(&pool)
-        .await?;
+    let deleted_change =
+        sqlx::query("DELETE FROM session_model_settings_changed WHERE command_id = $1")
+            .bind(replacement.command.into_uuid())
+            .execute(&pool)
+            .await?;
+    assert_eq!(deleted_change.rows_affected(), 1);
     sqlx::query("ALTER TABLE session_model_settings_changed ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;

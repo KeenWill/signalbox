@@ -5,7 +5,7 @@ The user-vocabulary surface on this page was re-verified through PR #378
 
 The daemon web-tool composition and conservative declaration defaults are
 verified against PR #433 (`agent/web-search-wiring`). The durable-command
-version cross-link was re-verified through PR #441
+version cross-link was re-verified through this PR
 (`agent/model-settings-persistence`).
 
 This page specifies the implemented daemon-owned tool subsystem as verified

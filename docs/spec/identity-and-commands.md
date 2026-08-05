@@ -18,7 +18,7 @@ transaction mechanics, locking, and the reconstitution seam are owned by
 are owned by [sessions-and-transcript](sessions-and-transcript.md),
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
 [configuration-and-credentials](configuration-and-credentials.md). The
-model-settings command version boundaries were verified through PR #441
+model-settings command version boundaries were verified through this PR
 (`agent/model-settings-persistence`). The tool-attributed metadata command and
 reconstitution surface was verified through PR #265 (`agent/tool-batch-tier0`).
 The failed tool-attempt telemetry fields were verified through PR #285
