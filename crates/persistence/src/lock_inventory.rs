@@ -88,6 +88,29 @@ pub(crate) const DELEGATION_TERMINAL_RELATION_IDENTITY: &str =
 pub(crate) const DELEGATION_TERMINAL_PARENT_SESSION: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
+pub(crate) const DELEGATION_FIND_RELATION_FOR_WAIT: &str = "SELECT spawning_tool_request_id
+       FROM session_delegation
+      WHERE parent_session_id = $1 AND child_session_id = $2
+      FOR UPDATE";
+
+pub(crate) const DELEGATION_FIND_RELATION_FOR_MESSAGE: &str = "SELECT spawning_tool_request_id
+       FROM session_delegation
+      WHERE (parent_session_id = $1 AND child_session_id = $2)
+         OR (parent_session_id = $2 AND child_session_id = $1)
+      FOR UPDATE";
+
+pub(crate) const DELEGATION_LOAD_RELATION: &str =
+    "SELECT relation.parent_session_id, relation.parent_turn_id,
+            relation.child_session_id, relation.policy_kind,
+            relation.on_parent_stopped, relation.on_parent_cancelled,
+            task.turn_id AS child_turn_id, task.task_content
+       FROM session_delegation AS relation
+       JOIN session_delegation_initial_task AS task
+         ON task.spawning_tool_request_id = relation.spawning_tool_request_id
+        AND task.child_session_id = relation.child_session_id
+      WHERE relation.spawning_tool_request_id = $1
+      FOR UPDATE OF relation";
+
 pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
