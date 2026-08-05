@@ -2727,6 +2727,9 @@ impl ActivatedDelegatedTurn {
 
 /// Origin-agnostic active turn consumed by model execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Both variants remain inline so activation reconstitution preserves the
+// established public value shape across accepted-input and delegation origins.
+#[allow(clippy::large_enum_variant)]
 pub enum ActivatedTurn {
     Accepted(ActivatedAcceptedInputTurn),
     Delegated(ActivatedDelegatedTurn),

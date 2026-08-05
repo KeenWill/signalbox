@@ -1362,6 +1362,9 @@ async fn prepare_against_locked_state(
             SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
                 SubmitInputCorruption::Inconsistent("interrupt queue order").into()
             }
+            SubmitInputPreparationFailure::ModelSettingsResolution(_) => {
+                SubmitInputCorruption::Inconsistent("model settings resolution").into()
+            }
         })
 }
 
@@ -6344,6 +6347,8 @@ fn decode_applied_turn_origin(
             defaults,
             stored_requested_model,
             stored_frozen_model,
+            stored_model_settings: None,
+            stored_model_settings_adjustments: Vec::new(),
         },
     ))
 }
