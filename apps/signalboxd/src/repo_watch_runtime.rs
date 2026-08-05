@@ -422,8 +422,14 @@ impl GitHubRepositoryPoller {
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
         let mut workflow_runs = Vec::new();
+        let previous_workflow_runs = previous
+            .map(|observation| observation.state().workflow_runs())
+            .unwrap_or_default();
         for workflow in &workflows {
-            workflow_runs.extend(self.fetch_workflow_runs(&branch_heads, workflow).await?);
+            workflow_runs.extend(
+                self.fetch_workflow_runs(&branch_heads, workflow, previous_workflow_runs)
+                    .await?,
+            );
         }
         let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests,
@@ -959,6 +965,7 @@ impl GitHubRepositoryPoller {
         &mut self,
         branches: &[RepoWatchBranchHead],
         workflow: &WorkflowResponse,
+        previous: &[RepoWatchWorkflowRunObservation],
     ) -> Result<Vec<RepoWatchWorkflowRunObservation>, RepositoryWatchAttemptError> {
         if branches.is_empty() {
             return Ok(Vec::new());
@@ -990,9 +997,6 @@ impl GitHubRepositoryPoller {
                 .await?;
             let has_next = response.has_next_page;
             for run in response.value.workflow_runs {
-                if run.status != "completed" {
-                    continue;
-                }
                 let Some(branch) = run
                     .head_branch
                     .as_deref()
@@ -1002,27 +1006,40 @@ impl GitHubRepositoryPoller {
                 else {
                     continue;
                 };
-                let run_id = object_id(run.id)?;
-                let run_attempt = RepoWatchWorkflowRunAttempt::new(
-                    NonZeroU64::new(run.run_attempt)
-                        .ok_or(RepositoryWatchAttemptError::Normalization)?,
-                );
                 let Some(head_repository) = run.head_repository else {
                     continue;
                 };
                 let head_repository = RepositorySlug::try_new(head_repository.full_name)
                     .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-                if head_repository == self.repository {
-                    pending_branches.remove(branch.as_str());
-                    observations.push(RepoWatchWorkflowRunObservation::new(
-                        run_id,
-                        workflow_identity,
-                        run_attempt,
-                        branch,
-                        workflow_name.clone(),
-                        normalize_conclusion(run.conclusion.as_deref())?,
-                    ));
+                if head_repository != self.repository {
+                    continue;
                 }
+                pending_branches.remove(branch.as_str());
+                if run.status != "completed" {
+                    observations.extend(
+                        previous
+                            .iter()
+                            .find(|prior| {
+                                prior.branch() == &branch
+                                    && prior.workflow_id() == workflow_identity
+                            })
+                            .cloned(),
+                    );
+                    continue;
+                }
+                let run_id = object_id(run.id)?;
+                let run_attempt = RepoWatchWorkflowRunAttempt::new(
+                    NonZeroU64::new(run.run_attempt)
+                        .ok_or(RepositoryWatchAttemptError::Normalization)?,
+                );
+                observations.push(RepoWatchWorkflowRunObservation::new(
+                    run_id,
+                    workflow_identity,
+                    run_attempt,
+                    branch,
+                    workflow_name.clone(),
+                    normalize_conclusion(run.conclusion.as_deref())?,
+                ));
             }
             if pending_branches.is_empty() || !has_next {
                 return Ok(observations);
@@ -1800,7 +1817,7 @@ struct PageInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+    use std::{fs, num::NonZeroU64, path::PathBuf, sync::Arc, time::Duration};
 
     use tempfile::TempDir;
     use tokio::{
@@ -1815,8 +1832,9 @@ mod tests {
         MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
         ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepositorySlug, RepositoryWatchAttemptError,
-        RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowResponse,
+        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
+        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse,
         normalize_pull_request_context, object_id, supervise_repository_tasks,
     };
     use signalbox_domain::{BranchName, CommitSha, ReactionSubject};
@@ -2144,7 +2162,7 @@ mod tests {
         .to_string()
     }
 
-    fn irrelevant_then_watched_workflow_runs() -> String {
+    fn active_rerun_then_stale_workflow_run() -> String {
         serde_json::json!({
             "workflow_runs": [
                 {
@@ -2157,7 +2175,7 @@ mod tests {
                 },
                 {
                     "id": FOREIGN_WORKFLOW_RUN_ID + 1,
-                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT + 1,
                     "head_branch": BASE_BRANCH,
                     "status": "in_progress",
                     "conclusion": null,
@@ -2239,6 +2257,22 @@ mod tests {
             id: WORKFLOW_ID,
             name: String::from(WORKFLOW_NAME),
         }
+    }
+
+    fn previous_main_workflow_run() -> RepoWatchWorkflowRunObservation {
+        RepoWatchWorkflowRunObservation::new(
+            object_id(FOREIGN_WORKFLOW_RUN_ID + 1)
+                .expect("fixture workflow-run identity is positive"),
+            object_id(WORKFLOW_ID).expect("fixture workflow identity is positive"),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(WORKFLOW_RUN_ATTEMPT)
+                    .expect("fixture workflow-run attempt is positive"),
+            ),
+            BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is valid"),
+            WorkflowName::try_new(String::from(WORKFLOW_NAME))
+                .expect("fixture workflow name is valid"),
+            EXPECTED_MAIN_WORKFLOW_CONCLUSION,
+        )
     }
 
     fn full_workflow_page() -> String {
@@ -2654,7 +2688,7 @@ mod tests {
 
         let run = fixture
             .poller
-            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow)
+            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow, &[])
             .await
             .expect("workflow-run response is valid")
             .into_iter()
@@ -2666,27 +2700,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_listing_avoids_capped_filters_and_skips_irrelevant_runs() {
+    async fn active_rerun_retains_the_previous_completed_workflow_baseline() {
         let server = ScriptedServer::start(vec![ScriptedResponse::ok(
             MAIN_WORKFLOW_TARGET,
-            irrelevant_then_watched_workflow_runs(),
+            active_rerun_then_stale_workflow_run(),
         )])
         .await;
         let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let branch = base_branch_head();
         let workflow = workflow_response();
+        let previous = previous_main_workflow_run();
 
         let run = fixture
             .poller
-            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow)
+            .fetch_workflow_runs(
+                std::slice::from_ref(&branch),
+                &workflow,
+                std::slice::from_ref(&previous),
+            )
             .await
             .expect("unfiltered workflow-run response is valid")
             .into_iter()
             .next()
-            .expect("latest completed run for the watched branch remains visible");
+            .expect("previous completed run for the watched branch remains visible");
         server.finish().await;
 
-        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
+        assert_eq!(run, previous);
     }
 
     #[tokio::test]
@@ -2702,7 +2741,7 @@ mod tests {
 
         let run = fixture
             .poller
-            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow)
+            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow, &[])
             .await
             .expect("workflow-run pages are valid")
             .into_iter()
