@@ -1,5 +1,48 @@
 -- Durable model/session settings snapshots and change evidence.
 
+-- Settings-bearing command payloads advance their owning representations so
+-- the defaults backfilled below cannot be reinterpreted as caller-supplied
+-- settings on a legacy command.
+ALTER TABLE durable_command
+    DROP CONSTRAINT durable_command_storage_version_supported,
+    ADD CONSTRAINT durable_command_storage_version_supported CHECK (
+        (command_kind = 'create_session'
+            AND storage_version IN (1, 2, 3, 4, 5, 6, 7))
+        OR (command_kind IN (
+            'replace_session_defaults'
+        ) AND storage_version IN (1, 2, 3, 4))
+        OR (command_kind = 'create_session_from_imported_frontier'
+            AND storage_version IN (1, 2, 3, 5))
+        OR (command_kind = 'submit_input' AND storage_version IN (1, 2))
+        OR (command_kind IN (
+            'replace_session_metadata', 'decide_tool_request',
+            'review_workflow', 'review_orchestration', 'compact_session',
+            'goal', 'update_session_placement'
+        ) AND storage_version = 1)
+    );
+
+ALTER TABLE create_session_command
+    DROP CONSTRAINT create_session_command_storage_version_supported,
+    ADD CONSTRAINT create_session_command_storage_version_supported
+        CHECK (storage_version IN (1, 2, 3, 4, 5, 6, 7));
+
+ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT
+        create_session_from_imported_frontier_command_version_supported,
+    ADD CONSTRAINT
+        create_session_from_imported_frontier_command_version_supported
+        CHECK (storage_version IN (1, 2, 3, 5));
+
+ALTER TABLE replace_session_defaults_command
+    DROP CONSTRAINT replace_session_defaults_command_storage_version_supported,
+    ADD CONSTRAINT replace_session_defaults_command_storage_version_supported
+        CHECK (storage_version IN (1, 2, 3, 4));
+
+ALTER TABLE submit_input_command
+    DROP CONSTRAINT submit_input_command_storage_version_supported,
+    ADD CONSTRAINT submit_input_command_storage_version_supported
+        CHECK (storage_version IN (1, 2));
+
 ALTER TABLE session_defaults_version
     ADD COLUMN model_settings jsonb NOT NULL DEFAULT
         '{"precedence":{"per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}},"effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},"reasoning_source":null,"fast_mode_source":null,"service_tier_source":null,"validated_for_selection_id":null}'::jsonb,
@@ -12,11 +55,50 @@ ALTER TABLE accepted_input
     ADD CONSTRAINT accepted_input_model_settings_override_object
         CHECK (jsonb_typeof(model_settings_override) = 'object');
 
+-- Existing configuration roots predate per-turn settings evidence. New roots
+-- require it; reclassified turns resolve through the recursive chain to the
+-- original root and therefore inherit the correct side of this cutover.
+ALTER TABLE queued_input_origin
+    ADD COLUMN model_settings_evidence_required boolean NOT NULL DEFAULT FALSE;
+
+ALTER TABLE queued_input_origin
+    ALTER COLUMN model_settings_evidence_required SET DEFAULT TRUE;
+
 ALTER TABLE submit_input_command
     ADD COLUMN model_settings_override jsonb NOT NULL DEFAULT
         '{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}'::jsonb,
     ADD CONSTRAINT submit_input_command_model_settings_override_object
         CHECK (jsonb_typeof(model_settings_override) = 'object');
+
+ALTER TABLE accepted_input
+    DROP CONSTRAINT accepted_input_command_result_fk;
+
+ALTER TABLE submit_input_command
+    ADD CONSTRAINT submit_input_command_settings_result_key
+        UNIQUE (
+            command_id,
+            result_accepted_input_id,
+            result_session_id,
+            model_settings_override
+        );
+
+ALTER TABLE accepted_input
+    ADD CONSTRAINT accepted_input_command_settings_result_fk
+        FOREIGN KEY (
+            accepting_command_id,
+            accepted_input_id,
+            session_id,
+            model_settings_override
+        )
+        REFERENCES submit_input_command (
+            command_id,
+            result_accepted_input_id,
+            result_session_id,
+            model_settings_override
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE replace_session_defaults_command
     ADD COLUMN replacement_model_settings jsonb NOT NULL DEFAULT
@@ -175,6 +257,8 @@ CREATE TABLE session_model_settings_changed_outbox_event (
         CHECK (event_kind = 'session_model_settings_changed'),
     CONSTRAINT session_model_settings_changed_outbox_version_supported
         CHECK (storage_version = 1),
+    CONSTRAINT session_model_settings_changed_outbox_source_key
+        UNIQUE (session_id, installed_defaults_version),
     CONSTRAINT session_model_settings_changed_outbox_header_fk
         FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
         REFERENCES outbox_event (

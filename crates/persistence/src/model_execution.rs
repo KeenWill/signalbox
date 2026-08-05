@@ -4540,6 +4540,33 @@ async fn persist_reclassified_pending_steering(
     source_turn: TurnId,
     successors: &[ReclassifiedPendingSteeringTurn],
 ) -> Result<(), ModelCallRepositoryError> {
+    if successors.is_empty() {
+        return Ok(());
+    }
+    let model_settings_evidence_required: bool = sqlx::query_scalar(
+        "WITH RECURSIVE configuration_chain AS (
+            SELECT source.*
+              FROM queued_input_origin AS source
+             WHERE source.turn_id = $1
+               AND source.session_id = $2
+            UNION
+            SELECT ancestor.*
+              FROM configuration_chain AS current
+              JOIN queued_input_origin AS ancestor
+                ON ancestor.turn_id = current.source_configuration_turn_id
+               AND ancestor.session_id = current.session_id
+         )
+         SELECT model_settings_evidence_required
+           FROM configuration_chain
+          WHERE source_configuration_turn_id IS NULL",
+    )
+    .bind(turn_id_to_uuid(source_turn))
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing(
+        "reclassified source configuration root",
+    ))?;
     for successor in successors {
         let AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. } =
             successor.accepted_input().disposition()
@@ -4689,6 +4716,9 @@ async fn persist_reclassified_pending_steering(
             return Err(ModelCallRepositoryError::Corruption(
                 ModelCallCorruption::Inconsistent("reclassified successor model settings"),
             ));
+        }
+        if settings_rows == 0 && model_settings_evidence_required {
+            return Err(ModelCallCorruption::Missing("reclassified source model settings").into());
         }
         if settings_rows == 1 {
             outbox::append(

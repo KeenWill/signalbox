@@ -1407,10 +1407,16 @@ fn prepared_with_low_reasoning(
     .expect("user-initiated creation without ancestry is preparable")
 }
 
-async fn record_settings_replacement(
+#[derive(Clone, Copy, Debug)]
+struct RecordedSettingsReplacement {
+    session: SessionId,
+    command: DurableCommandId,
+}
+
+async fn record_settings_replacement_fixture(
     pool: &PgPool,
     seed: u128,
-) -> Result<SessionId, Box<dyn Error>> {
+) -> Result<RecordedSettingsReplacement, Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
     let initial_selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 2));
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -1448,8 +1454,9 @@ async fn record_settings_replacement(
         installed_settings,
     )
     .expect("the replacement settings belong to the direct selection");
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 5));
     let replacement = ReplaceSessionDefaults::with_model_settings(
-        DurableCommandId::from_uuid(Uuid::from_u128(seed + 5)),
+        command,
         session,
         SessionConfigurationDefaultsVersion::try_from_u64(1)
             .expect("the fixture version is positive"),
@@ -1459,7 +1466,16 @@ async fn record_settings_replacement(
     ReplaceSessionDefaultsRepository::new(pool.clone())
         .handle(replacement)
         .await?;
-    Ok(session)
+    Ok(RecordedSettingsReplacement { session, command })
+}
+
+async fn record_settings_replacement(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<SessionId, Box<dyn Error>> {
+    Ok(record_settings_replacement_fixture(pool, seed)
+        .await?
+        .session)
 }
 
 async fn append_session_created_test_event(
@@ -1772,9 +1788,12 @@ async fn insert_malformed_submit_rejection(
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         SELECT $1, command_kind, storage_version, transaction_timestamp()
+           FROM durable_command
+          WHERE command_id = $2",
     )
     .bind(command_id)
+    .bind(source_command_id)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -1826,9 +1845,12 @@ async fn insert_cross_wired_occupied_rejection(
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         SELECT $1, command_kind, storage_version, transaction_timestamp()
+           FROM durable_command
+          WHERE command_id = $2",
     )
     .bind(command_id)
+    .bind(source_command_id)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -1883,9 +1905,12 @@ async fn insert_parked_approval_interrupt_rejection(
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         SELECT $1, command_kind, storage_version, transaction_timestamp()
+           FROM durable_command
+          WHERE command_id = $2",
     )
     .bind(command_id)
+    .bind(source_command_id)
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -1946,6 +1971,14 @@ impl SessionIdGenerator for FixedSessionIds {
             .pop_front()
             .expect("the integration test supplies one identity per invocation")
     }
+}
+
+#[track_caller]
+fn applied_session(outcome: CreateSessionOutcome) -> SessionId {
+    let CreateSessionOutcome::Applied(applied) = outcome else {
+        panic!("fixture session creation must apply")
+    };
+    applied.session()
 }
 
 #[derive(Debug)]
@@ -11643,9 +11676,18 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     Ok(())
 }
 
-/// S04 / S08 / INV-016 / INV-053: a turn accepted before settings evidence
-/// existed can still reclassify pending steering after upgrade; the successor
-/// remains legacy-null instead of inventing settings evidence.
+#[track_caller]
+fn assert_refused_reclassified_successor(outcome: &ModelCallTerminalOutcome, successor: TurnId) {
+    let ModelCallTerminalOutcome::Refused(refused) = outcome else {
+        panic!("the source call must refuse and reclassify its steering")
+    };
+    assert_eq!(refused.reclassified_pending_steering().len(), 1);
+    assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
+}
+
+/// S04 / S08 / INV-016 / INV-053: reclassification rejects missing settings
+/// for a post-cutover source, while a genuine pre-evidence source can still
+/// reclassify pending steering and leave the successor legacy-null.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_settings()
@@ -11700,6 +11742,76 @@ async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_setting
         .await?;
 
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
+    let missing_settings = repository
+        .apply_terminal_observation(
+            fixture.session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+            )),
+            |_| successor,
+        )
+        .await;
+    assert!(
+        matches!(
+            &missing_settings,
+            Err(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Scheduling(SubmitInputCorruption::Missing(
+                    "turn model settings evidence"
+                ))
+            ))
+        ),
+        "unexpected missing-settings outcome: {missing_settings:?}"
+    );
+
+    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE queued_input_origin DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let registry_downgrade = sqlx::query(
+        "UPDATE durable_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 8))
+    .execute(&pool)
+    .await?;
+    let command_downgrade = sqlx::query(
+        "UPDATE submit_input_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 8))
+    .execute(&pool)
+    .await?;
+    let legacy_root = sqlx::query(
+        "UPDATE queued_input_origin
+            SET model_settings_evidence_required = FALSE
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(registry_downgrade.rows_affected(), 1);
+    assert_eq!(command_downgrade.rows_affected(), 1);
+    assert_eq!(legacy_root.rows_affected(), 1);
+    sqlx::query("ALTER TABLE queued_input_origin ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE durable_command ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
     let outcome = repository
         .apply_terminal_observation(
             fixture.session,
@@ -11715,11 +11827,42 @@ async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_setting
             },
         )
         .await?;
-    let ModelCallTerminalOutcome::Refused(refused) = outcome else {
-        panic!("the source call refuses and reclassifies its steering")
-    };
-    assert_eq!(refused.reclassified_pending_steering().len(), 1);
-    assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
+    assert_refused_reclassified_successor(&outcome, successor);
+
+    let evidence_cutover: Vec<(Uuid, bool)> = sqlx::query_as(
+        "SELECT turn.turn_id, configuration_origin.model_settings_evidence_required
+           FROM turn_lifecycle AS turn
+           JOIN LATERAL (
+                WITH RECURSIVE configuration_chain AS (
+                    SELECT queued.*
+                      FROM queued_input_origin AS queued
+                     WHERE queued.turn_id = turn.turn_id
+                       AND queued.session_id = turn.session_id
+                    UNION
+                    SELECT source.*
+                      FROM configuration_chain AS current
+                      JOIN queued_input_origin AS source
+                        ON source.turn_id = current.source_configuration_turn_id
+                       AND source.session_id = current.session_id
+                )
+                SELECT *
+                  FROM configuration_chain
+                 WHERE source_configuration_turn_id IS NULL
+           ) AS configuration_origin ON TRUE
+          WHERE turn.turn_id IN ($1, $2)
+          ORDER BY turn.acceptance_position",
+    )
+    .bind(fixture.turn.into_uuid())
+    .bind(successor.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        evidence_cutover,
+        vec![
+            (fixture.turn.into_uuid(), false),
+            (successor.into_uuid(), false),
+        ]
+    );
 
     let successor_evidence: (i64, i64) = sqlx::query_as(
         "SELECT
@@ -12224,11 +12367,9 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
     let replay = service.execute(replay_after_edit).await?;
 
     assert_eq!(first, replay);
-    let CreateSessionOutcome::Applied(replay_receipt) = replay else {
-        panic!("same-name replay must return the recorded receipt");
-    };
-    assert_eq!(replay_receipt.session(), winner);
-    assert_ne!(replay_receipt.session(), replay_candidate);
+    let replayed_session = applied_session(replay);
+    assert_eq!(replayed_session, winner);
+    assert_ne!(replayed_session, replay_candidate);
 
     let stored = sqlx::query(
         "SELECT s.template_name AS session_template_name,
@@ -12265,7 +12406,7 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
         original_provenance.content_digest().as_bytes()
     );
     assert_eq!(registry_storage_version, command_storage_version);
-    assert_eq!(command_storage_version, 6);
+    assert_eq!(command_storage_version, 7);
 
     let loaded = LoadSessionService::new(SessionRepository::new(pool.clone()))
         .execute(winner)
@@ -20967,13 +21108,14 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e41));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xae41));
+    let defaults_version = SessionConfigurationDefaultsVersion::first();
     SubmitInputRepository::new(pool.clone())
         .handle(
             start_input(
                 0x4e42,
                 0x8e41,
                 "projected user request",
-                1,
+                defaults_version.as_u64(),
                 ModelSelectionOverride::UseSessionDefault,
             ),
             accepted_input,
@@ -21002,7 +21144,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .expect("the settings-aware turn retains its frozen settings evidence");
     assert_eq!(queued_settings.accepted_input(), accepted_input);
     assert_eq!(queued_settings.turn(), turn);
-    assert_eq!(queued_settings.defaults_version().as_u64(), 1);
+    assert_eq!(queued_settings.defaults_version(), defaults_version);
     assert_eq!(
         queued_settings.selection(),
         &FrozenModelSelection::Direct(selection)
@@ -21066,6 +21208,105 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
             content: "projected user request".to_owned(),
         }]
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-012 / INV-053: a settings-aware turn cannot become legacy-null
+/// when its required resolution event is absent.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv012_inv053_process_read_rejects_missing_turn_settings_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e51));
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e51));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae51));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x4e51, 0x8e51, direct(0xce51)))
+        .await?;
+    let command = start_input(
+        0x4e52,
+        0x8e51,
+        "settings evidence required",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle(command.clone(), accepted_input, Some(turn))
+        .await?;
+
+    sqlx::raw_sql(
+        "ALTER TABLE durable_command DISABLE TRIGGER USER;
+         ALTER TABLE submit_input_command DISABLE TRIGGER USER;
+         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;",
+    )
+    .execute(&pool)
+    .await?;
+    let registry_downgrade = sqlx::query(
+        "UPDATE durable_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .execute(&pool)
+    .await?;
+    let typed_downgrade = sqlx::query(
+        "UPDATE submit_input_command
+            SET storage_version = 1
+          WHERE command_id = $1",
+    )
+    .bind(command.command_id().into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(registry_downgrade.rows_affected(), 1);
+    assert_eq!(typed_downgrade.rows_affected(), 1);
+
+    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let deleted_outbox = sqlx::query(
+        "DELETE FROM turn_model_settings_resolved_outbox_event
+          WHERE accepted_input_id = $1",
+    )
+    .bind(accepted_input.into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(deleted_outbox.rows_affected(), 1);
+    sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let deleted_settings =
+        sqlx::query("DELETE FROM turn_model_settings_resolved WHERE accepted_input_id = $1")
+            .bind(accepted_input.into_uuid())
+            .execute(&pool)
+            .await?;
+    assert_eq!(deleted_settings.rows_affected(), 1);
+    sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        ProcessReadRepository::new(pool.clone())
+            .read_transcript(session)
+            .await,
+        Err(ProcessReadError::Corruption(
+            ProcessReadCorruption::Missing("turn model settings evidence")
+        ))
+    ));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .load(command.command_id())
+            .await,
+        Err(SubmitInputRepositoryError::Corruption(
+            SubmitInputCorruption::Missing("turn model settings evidence")
+        ))
+    ));
 
     pool.close().await;
     drop(container);
@@ -22753,9 +22994,289 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
     Ok(())
 }
 
+/// S24 / INV-012 / INV-053: replay of a settings-aware defaults replacement
+/// fails closed when its required settings-change evidence is absent.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv012_inv053_replacement_replay_requires_settings_change_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x3750;
+    let replacement = record_settings_replacement_fixture(&pool, seed).await?;
+
+    sqlx::query("ALTER TABLE session_model_settings_changed_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let deleted_outbox = sqlx::query(
+        "DELETE FROM session_model_settings_changed_outbox_event
+          WHERE session_id = $1",
+    )
+    .bind(replacement.session.into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(deleted_outbox.rows_affected(), 1);
+    sqlx::query("ALTER TABLE session_model_settings_changed DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let deleted_change =
+        sqlx::query("DELETE FROM session_model_settings_changed WHERE command_id = $1")
+            .bind(replacement.command.into_uuid())
+            .execute(&pool)
+            .await?;
+    assert_eq!(deleted_change.rows_affected(), 1);
+    sqlx::query("ALTER TABLE session_model_settings_changed ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_model_settings_changed_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        ReplaceSessionDefaultsRepository::new(pool.clone())
+            .load(replacement.command)
+            .await,
+        Err(ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Inconsistent("settings change evidence")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-012 / INV-053: replay authenticates settings-change evidence
+/// against the immutable command and defaults records.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv012_inv053_replacement_replay_rejects_cross_wired_settings_change_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let replacement = record_settings_replacement_fixture(&pool, 0x3760).await?;
+
+    sqlx::query("ALTER TABLE session_model_settings_changed DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE session_model_settings_changed
+            SET prior_model_settings = installed_model_settings
+          WHERE command_id = $1",
+    )
+    .bind(replacement.command.into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(update.rows_affected(), 1);
+    sqlx::query("ALTER TABLE session_model_settings_changed ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        ReplaceSessionDefaultsRepository::new(pool.clone())
+            .load(replacement.command)
+            .await,
+        Err(ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Inconsistent("settings event evidence")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032 / INV-053: one defaults epoch can source exactly one durable
+/// settings-change outbox event.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_inv053_settings_change_outbox_is_unique_per_epoch() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let replacement = record_settings_replacement_fixture(&pool, 0x3770).await?;
+
+    let duplicate = sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ('session_model_settings_changed', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO session_model_settings_changed_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             installed_defaults_version)
+         SELECT event_sequence, event_kind, storage_version, session_id, 2
+           FROM header",
+    )
+    .bind(replacement.session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("one defaults epoch cannot produce two settings-change events");
+    assert_eq!(
+        duplicate
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_model_settings_changed_outbox_source_key")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012 / INV-053: legacy command versions accept only the provider-default
+/// settings documents that the migration backfills.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let native_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3741));
+    let native = prepared_with_low_reasoning(0x3742, 0x3743, native_selection);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(native.clone())
+        .await?;
+    let replacement_seed = 0x3748;
+    let replacement = record_settings_replacement_fixture(&pool, replacement_seed).await?;
+    let submit_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3751));
+    let submit_creation = prepared_with_low_reasoning(0x3752, 0x3753, submit_selection);
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(submit_creation)
+        .await?;
+    let per_call = ModelSettingsOverlay::new(
+        SettingOverlay::ProviderDefault,
+        FastModeOverlay::Inherit,
+        SettingOverlay::Inherit,
+    );
+    let submit = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x3754)),
+        SessionId::from_uuid(Uuid::from_u128(0x3753)),
+        UserContent::try_text(String::from("versioned settings payload"))
+            .expect("fixture content is admitted"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::with_model_settings(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+                per_call,
+            ),
+        },
+    );
+    let submit_capabilities =
+        ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
+            submit_selection,
+            ModelCapabilities::new(
+                BTreeSet::from([ReasoningLevel::Low]),
+                FastModeSupport::Unsupported,
+                BTreeSet::new(),
+            ),
+        )])
+        .expect("one fixture capability forms a catalog");
+    SubmitInputRepository::with_model_capabilities(pool.clone(), submit_capabilities)
+        .handle(
+            submit.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x3755)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0x3756))),
+        )
+        .await?;
+
+    sqlx::raw_sql(
+        "ALTER TABLE durable_command DISABLE TRIGGER USER;
+         ALTER TABLE create_session_command DISABLE TRIGGER USER;
+         ALTER TABLE replace_session_defaults_command DISABLE TRIGGER USER;
+         ALTER TABLE submit_input_command DISABLE TRIGGER USER;
+         ALTER TABLE create_session_command DROP CONSTRAINT create_session_command_registry_fk;
+         ALTER TABLE replace_session_defaults_command DROP CONSTRAINT replace_session_defaults_command_registry_fk;
+         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;",
+    )
+    .execute(&pool)
+    .await?;
+    let native_registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 6 WHERE command_id = $1")
+            .bind(native.command().command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let native_typed_downgrade =
+        sqlx::query("UPDATE create_session_command SET storage_version = 6 WHERE command_id = $1")
+            .bind(native.command().command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let replacement_registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 3 WHERE command_id = $1")
+            .bind(replacement.command.into_uuid())
+            .execute(&pool)
+            .await?;
+    let replacement_typed_downgrade = sqlx::query(
+        "UPDATE replace_session_defaults_command SET storage_version = 3 WHERE command_id = $1",
+    )
+    .bind(replacement.command.into_uuid())
+    .execute(&pool)
+    .await?;
+    let submit_registry_downgrade =
+        sqlx::query("UPDATE durable_command SET storage_version = 1 WHERE command_id = $1")
+            .bind(submit.command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    let submit_typed_downgrade =
+        sqlx::query("UPDATE submit_input_command SET storage_version = 1 WHERE command_id = $1")
+            .bind(submit.command_id().into_uuid())
+            .execute(&pool)
+            .await?;
+    assert_eq!(native_registry_downgrade.rows_affected(), 1);
+    assert_eq!(native_typed_downgrade.rows_affected(), 1);
+    assert_eq!(replacement_registry_downgrade.rows_affected(), 1);
+    assert_eq!(replacement_typed_downgrade.rows_affected(), 1);
+    assert_eq!(submit_registry_downgrade.rows_affected(), 1);
+    assert_eq!(submit_typed_downgrade.rows_affected(), 1);
+
+    assert!(matches!(
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+            .load(native.command().command_id())
+            .await,
+        Err(CreateSessionRepositoryError::Corruption(
+            CreateSessionCorruption::Inconsistent("storage version without model settings")
+        ))
+    ));
+    assert!(matches!(
+        ReplaceSessionDefaultsRepository::new(pool.clone())
+            .load(replacement.command)
+            .await,
+        Err(ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Inconsistent(
+                "storage version without caller model settings"
+            )
+        ))
+    ));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .load(submit.command_id())
+            .await,
+        Err(SubmitInputRepositoryError::Corruption(
+            SubmitInputCorruption::Inconsistent("storage version without model settings override")
+        ))
+    ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(native.applied_result().session())
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults storage version without model settings")
+        ))
+    ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(replacement.session)
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults storage version without model settings")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S01 / INV-008 / INV-012 / INV-053: native session creation retains the
 /// caller's settings independently from its effect row, so a cross-wired
-/// defaults snapshot cannot authenticate command replay.
+/// defaults snapshot cannot authenticate command replay or current reads.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv008_inv012_inv053_native_creation_authenticates_command_settings()
@@ -22794,6 +23315,70 @@ async fn s01_inv008_inv012_inv053_native_creation_authenticates_command_settings
             CreateSessionCorruption::Domain(_)
         ))
     ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(command.applied_result().session())
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults model settings disagree with command")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 / INV-053: the accepted-input settings copy must equal the
+/// independently retained submit-command payload.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_inv053_accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x3767));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x3768, 0x3769, direct(0x376a)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x376b,
+                0x3769,
+                "settings correlation request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(TurnId::from_uuid(Uuid::from_u128(0x376c))),
+        )
+        .await?;
+
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let mismatch = sqlx::query(
+        "UPDATE accepted_input
+            SET model_settings_override = $1
+          WHERE accepted_input_id = $2",
+    )
+    .bind(serde_json::json!({
+        "reasoning_level": { "kind": "provider_default" },
+        "fast_mode": { "kind": "inherit" },
+        "service_tier": { "kind": "inherit" }
+    }))
+    .bind(accepted_input.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("accepted settings must remain command-correlated");
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        mismatch
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("accepted_input_command_settings_result_fk")
+    );
 
     pool.close().await;
     drop(container);
@@ -22834,7 +23419,7 @@ async fn s24_inv032_inv053_dispatcher_rejects_crosswired_turn_settings_origin()
         OutboxDispatchOutcome::Delivered { sequence: 1 }
     );
 
-    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query(
@@ -22850,7 +23435,7 @@ async fn s24_inv032_inv053_dispatcher_rejects_crosswired_turn_settings_origin()
     .bind(accepted_input.into_uuid())
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
 

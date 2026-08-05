@@ -85,16 +85,17 @@ Migration `202608020016_session_placement_path.sql` adds the append-only
 `session_placement_event` history, its one-row mutable current pointer, and the
 typed `update_session_placement_command` record. Every existing session is
 backfilled with a pathless version-one creation event. Post-migration legacy
-native creation records below storage version 6 and imported creation records
-materialize that same pathless event and head when their typed creation receipt
-is inserted, so a daemon spanning the migration cannot create an unreadable
-session. A deferred reverse check requires every newly inserted session to end
-its transaction with a complete selected placement event. New native creation
-records use storage version 6, store the optional path and explicit
-root-global-read-intent bit, and append the same event atomically with the
-session. Checks make the intent bit true exactly for a one-segment root path and
-false for pathless and non-root scoped values. The current pointer may advance
-only to the next event; event rows and typed command records are immutable.
+native creation records below storage version 6 and supported imported creation
+records below their model-settings version materialize that same pathless event
+and head when their typed creation receipt is inserted, so a daemon spanning the
+migration cannot create an unreadable session. A deferred reverse check requires
+every newly inserted session to end its transaction with a complete selected
+placement event. Native creation records at storage version 6 or later store the
+optional path and explicit root-global-read-intent bit and append the same event
+atomically with the session. Checks make the intent bit true exactly for a
+one-segment root path and false for pathless and non-root scoped values. The
+current pointer may advance only to the next event; event rows and typed command
+records are immutable.
 
 Connection options are explicit: production parsing forces
 `PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing
@@ -103,8 +104,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — fifty-seven files, `202607180001` through
-`202608020016` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — sixty files, `202607180001` through
+`202608030002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -237,6 +238,16 @@ Representation rules, all enforced in the schema:
   foreign keys, because megabyte text cannot join a btree key; the empty bytea
   stands for an absent prompt so a `MATCH SIMPLE` member never skips enforcement
   ([sessions-and-transcript](sessions-and-transcript.md)).
+- Migration `202608030002` advances native creation to storage version 7,
+  imported creation to version 5, defaults replacement to version 4, and
+  submit-input to version 2 for their settings-bearing command payloads. Rust
+  decoders require provider-default full settings or an inherit-all overlay on
+  every earlier supported version. Imported-creation version 4 remains
+  unsupported and reserved for its committed runner-placement shape. Existing
+  queued configuration roots are marked as predating settings evidence; every
+  root inserted after the migration requires a correlated
+  `turn_model_settings_resolved` row, and transcript reconstruction treats its
+  absence as corruption rather than legacy null.
 - Migration `202607280201` adds the closed `model_identity_changed`
   semantic-entry payload, whose turn, positive defaults epoch, and direct
   selection are total only for that kind. Deferred checks bind it to the named
@@ -453,24 +464,24 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
 `review_workflow`, `review_orchestration`, `compact_session`, `goal`,
 `update_session_placement`) and a kind-scoped `storage_version`. The gates above
-fix the current numbers: create-session records write version 6;
-defaults-bearing imported-create and replace-defaults records write version 3;
-every other closed kind writes version 1. Create-session records reconstitute
-version 1 with the disabled dangerous-tool posture, and versions 1 and 2 with no
-system prompt — a pre-version-three row carrying one fails closed in both the
-schema and every Rust reader. A pre-version-four create row carrying template
-provenance and a pre-version-five create row carrying a runner placement
-likewise fail closed; therefore a rollback reader that supports only versions 1
-through 4 rejects every new create record instead of projecting a runner-backed
-creation as daemon-only, exactly as a reader supporting only versions 1 through
-3 rejects every template-provenance record instead of projecting template
-creation as explicit creation. Metadata, submit, decision, review-workflow,
-compaction, and runner-recovery records use version 1. Each kind has one typed
-subordinate request record keyed by `command_id` that stores every
-caller-supplied semantic field in typed, `CHECK`-constrained columns. Every kind
-except runner replacement also stores the terminal `applied`/`rejected` result
-and typed result fields there. `replace_lost_runner_command` is the immutable
-request and provisioning-authorization root; at most one append-only
+fix the current numbers: create-session records write version 7, imported-create
+records write version 5, replace-defaults records write version 4, and
+submit-input records write version 2; every other closed kind writes version 1.
+The four settings-bearing families require the migration's provider-default full
+settings or inherit-all overlay on every earlier supported version.
+Create-session records reconstitute version 1 with the disabled dangerous-tool
+posture, and versions 1 and 2 with no system prompt — a pre-version-three row
+carrying one fails closed in both the schema and every Rust reader. A
+pre-version-four create row carrying template provenance and a pre-version-six
+create row carrying path placement likewise fail closed. Imported-create version
+4 remains unsupported compatibility space for committed runner placement, so the
+model-settings writer skips it. Metadata, decision, review-workflow, compaction,
+and runner-recovery records use version 1. Each kind has one typed subordinate
+request record keyed by `command_id` that stores every caller-supplied semantic
+field in typed, `CHECK`-constrained columns. Every kind except runner
+replacement also stores the terminal `applied`/`rejected` result and typed
+result fields there. `replace_lost_runner_command` is the immutable request and
+provisioning-authorization root; at most one append-only
 `replace_lost_runner_result` supplies its terminal result after off-transaction
 runner I/O. Result-shape `CHECK` constraints tie each rejection kind to exactly
 its fields. Deferred reverse constraints require exactly one typed request per

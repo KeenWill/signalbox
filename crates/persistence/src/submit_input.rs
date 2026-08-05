@@ -87,7 +87,8 @@ use crate::{
     },
 };
 
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
+const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 2;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 
@@ -4690,6 +4691,8 @@ async fn load_complete_rows(
             queued.known_provider_failure_retry,
             queued.model_fallback,
             queued.dangerous_tool_auto_approval AS queued_tool_auto_approval,
+            configuration_origin.model_settings_evidence_required
+                AS origin_model_settings_evidence_required,
             defaults.session_id AS defaults_session_id,
             defaults.version AS defaults_version,
             defaults.model_selection_kind AS defaults_model_kind,
@@ -4723,6 +4726,23 @@ async fn load_complete_rows(
            ON accepted.accepted_input_id = typed.result_accepted_input_id
          LEFT JOIN queued_input_origin AS queued
            ON queued.accepted_input_id = accepted.accepted_input_id
+         LEFT JOIN LATERAL (
+              WITH RECURSIVE configuration_chain AS (
+                  SELECT origin.*
+                    FROM queued_input_origin AS origin
+                   WHERE origin.turn_id = queued.turn_id
+                     AND origin.session_id = queued.session_id
+                  UNION
+                  SELECT source.*
+                    FROM configuration_chain AS current
+                    JOIN queued_input_origin AS source
+                      ON source.turn_id = current.source_configuration_turn_id
+                     AND source.session_id = current.session_id
+              )
+              SELECT model_settings_evidence_required
+                FROM configuration_chain
+               WHERE source_configuration_turn_id IS NULL
+         ) AS configuration_origin ON TRUE
          LEFT JOIN session_defaults_version AS defaults
            ON defaults.session_id = typed.result_session_id
           AND defaults.version = COALESCE(
@@ -5534,13 +5554,16 @@ fn decode_complete(
     existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let typed_id: Uuid = required(&row, "typed_command_id")?;
     if typed_id != durable_command_id_to_uuid(command_id) {
         return Err(SubmitInputCorruption::Inconsistent("typed command identity").into());
     }
     require_spelling(&row, "typed_kind", SUBMIT_INPUT_KIND)?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(SubmitInputCorruption::Inconsistent("command storage version").into());
+    }
 
     // Decode-level checks reject unknown or malformed actor spellings here;
     // comparing the decoded actor against the canonical command's actor is
@@ -5549,6 +5572,12 @@ fn decode_complete(
         required(&row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
+    )?;
+    let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
+    require_model_settings_override_version(
+        &command_model_settings_override,
+        typed_version,
+        "command model settings override",
     )?;
     let command = SubmitInput::new(
         command_id,
@@ -5566,7 +5595,7 @@ fn decode_complete(
             row.try_get("command_replacement_model_kind")?,
             row.try_get("command_replacement_direct_id")?,
             row.try_get("command_replacement_alias_id")?,
-            required(&row, "command_model_settings_override")?,
+            command_model_settings_override,
             "command delivery",
         )?,
     );
@@ -5700,6 +5729,7 @@ fn decode_applied_turn_origin(
     result_turn: TurnId,
     predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
+    let command_storage_version: i16 = required(row, "typed_version")?;
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
         .map_err(|_| SubmitInputCorruption::Inconsistent("accepting command identity"))?;
@@ -5758,6 +5788,8 @@ fn decode_applied_turn_origin(
     require_spelling(row, "known_provider_failure_retry", "disabled")?;
     require_spelling(row, "model_fallback", "disabled")?;
     let defaults_version = decode_defaults_version(row, "queued_defaults_version")?;
+    let model_settings_evidence_required: bool =
+        required(row, "origin_model_settings_evidence_required")?;
 
     let defaults_session = session_id_from_uuid(required(row, "defaults_session_id")?);
     let joined_defaults_version = decode_defaults_version(row, "defaults_version")?;
@@ -5846,6 +5878,17 @@ fn decode_applied_turn_origin(
             );
         }
     };
+    if model_settings_evidence_required && stored_model_settings.is_none() {
+        return Err(SubmitInputCorruption::Missing("turn model settings evidence").into());
+    }
+    if command_storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && stored_model_settings.is_some()
+    {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "storage version with turn model settings evidence",
+        )
+        .into());
+    }
 
     Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         SubmitInputAppliedTurnOriginReconstitutionInput {
@@ -6318,20 +6361,38 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), SubmitInputRepositoryError> {
+) -> Result<i16, SubmitInputRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1..=STORAGE_VERSION) {
+        Ok(actual)
     } else {
         Err(SubmitInputCorruption::Unsupported {
             field,
             value: actual.to_string(),
         }
         .into())
+    }
+}
+
+fn require_model_settings_override_version(
+    value: &Value,
+    storage_version: i16,
+    field: &'static str,
+) -> Result<(), SubmitInputRepositoryError> {
+    let overlay = model_settings_overlay_from_json(value.clone())
+        .map_err(|_| SubmitInputCorruption::Inconsistent(field))?;
+    if storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && overlay != signalbox_domain::ModelSettingsOverlay::inherit_all()
+    {
+        Err(
+            SubmitInputCorruption::Inconsistent("storage version without model settings override")
+                .into(),
+        )
+    } else {
+        Ok(())
     }
 }
 

@@ -1339,9 +1339,9 @@ One logical snapshot is a bounded message sequence sharing the request identity:
    requires the same complete nullable `runner` object as the session summary;
 2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`
    and required-nullable `model_settings`; a settings-aware turn carries the
-   complete accepted input, defaults epoch, requested and selected model,
-   per-call override, resolved settings, and adjustment provenance, while a turn
-   committed before settings evidence existed carries null;
+   complete owning turn, accepted input, defaults epoch, requested and selected
+   model, per-call override, resolved settings, and adjustment provenance, while
+   a turn committed before settings evidence existed carries null;
 3. one `transcript_model_call_usage` per terminal model call followed by one
    `transcript_model_calls_end`;
 4. the entry messages below in frontier-member order; and

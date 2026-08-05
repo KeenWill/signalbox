@@ -2251,6 +2251,8 @@ async fn load_next_transcript_turn(
             configuration_origin.frozen_model_alias_id AS origin_frozen_alias_id,
             configuration_origin.frozen_alias_selected_direct_id
                 AS origin_frozen_alias_selected_direct_id,
+            configuration_origin.model_settings_evidence_required
+                AS origin_model_settings_evidence_required,
             origin_accepted.model_settings_override
                 AS origin_model_settings_override,
             origin_defaults.model_settings AS origin_defaults_model_settings,
@@ -2440,7 +2442,12 @@ fn decode_transcript_turn_model_settings(
         && stored_settings.is_none()
         && stored_adjustments.is_none();
     if absent {
-        return Ok(None);
+        let evidence_required: bool = required(row, "origin_model_settings_evidence_required")?;
+        return if evidence_required {
+            Err(ProcessReadCorruption::Missing("turn model settings evidence").into())
+        } else {
+            Ok(None)
+        };
     }
     let (Some(stored_accepted), Some(stored_turn), Some(stored_session), Some(stored_defaults)) = (
         stored_accepted,

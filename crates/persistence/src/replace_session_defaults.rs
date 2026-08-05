@@ -34,7 +34,8 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
-const STORAGE_VERSION: i16 = 3;
+const STORAGE_VERSION: i16 = 4;
+pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 4;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -784,13 +785,28 @@ async fn load_from_connection(
             installed.dangerous_tool_auto_approval AS installed_tool_auto_approval,
             installed.system_prompt AS installed_system_prompt,
             installed.model_settings AS installed_model_settings,
+            prior.session_id AS prior_session_id,
+            prior.version AS prior_version,
+            prior.model_selection_kind AS prior_model_kind,
+            prior.direct_model_selection_id AS prior_direct_id,
+            prior.model_alias_id AS prior_alias_id,
+            prior.dangerous_tool_auto_approval AS prior_tool_auto_approval,
+            prior.system_prompt AS prior_system_prompt,
+            prior.model_settings AS prior_model_settings,
+            settings_event.command_id AS settings_event_command_id,
+            settings_event.prior_model_settings AS settings_event_prior_model_settings,
+            settings_event.installed_model_settings AS settings_event_installed_model_settings,
+            settings_event.caller_model_settings AS settings_event_caller_model_settings,
             settings_event.adjustments AS model_settings_adjustments
          FROM durable_command AS command
          LEFT JOIN replace_session_defaults_command AS typed
            ON typed.command_id = command.command_id
          LEFT JOIN session_defaults_version AS installed
-           ON installed.session_id = typed.result_session_id
-          AND installed.version = typed.result_installed_version
+          ON installed.session_id = typed.result_session_id
+         AND installed.version = typed.result_installed_version
+         LEFT JOIN session_defaults_version AS prior
+           ON prior.session_id = typed.session_id
+          AND prior.version = typed.expected_current_version
          LEFT JOIN session_model_settings_changed AS settings_event
            ON settings_event.command_id = typed.command_id
          WHERE command.command_id = $1",
@@ -817,12 +833,47 @@ fn decode_complete(
         );
     }
 
-    let adjustments = row
-        .try_get::<Option<Value>, _>("model_settings_adjustments")?
-        .map(model_change_adjustments_from_json)
-        .transpose()
-        .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("settings adjustments"))?
-        .unwrap_or_default();
+    let settings_event_command: Option<Uuid> = row.try_get("settings_event_command_id")?;
+    let settings_event_prior: Option<Value> = row.try_get("settings_event_prior_model_settings")?;
+    let settings_event_installed: Option<Value> =
+        row.try_get("settings_event_installed_model_settings")?;
+    let settings_event_caller: Option<Value> =
+        row.try_get("settings_event_caller_model_settings")?;
+    let settings_event_adjustments: Option<Value> = row.try_get("model_settings_adjustments")?;
+    let (settings_event_values, adjustments) = match (
+        settings_event_command,
+        settings_event_prior,
+        settings_event_installed,
+        settings_event_caller,
+        settings_event_adjustments,
+    ) {
+        (None, None, None, None, None) => (None, Vec::new()),
+        (Some(event_command), Some(prior), Some(installed), Some(caller), Some(adjustments))
+            if event_command == durable_command_id_to_uuid(command_id) =>
+        {
+            let adjustments = model_change_adjustments_from_json(adjustments).map_err(|_| {
+                ReplaceSessionDefaultsCorruption::Inconsistent("settings adjustments")
+            })?;
+            (Some((prior, installed, caller)), adjustments)
+        }
+        _ => {
+            return Err(
+                ReplaceSessionDefaultsCorruption::Inconsistent("settings event shape").into(),
+            );
+        }
+    };
+    let command_caller_model_settings: Value = required(&row, "caller_model_settings")?;
+    let caller_model_settings =
+        model_settings_overlay_from_json(command_caller_model_settings.clone())
+            .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("caller model settings"))?;
+    if typed_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && caller_model_settings != signalbox_domain::ModelSettingsOverlay::inherit_all()
+    {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "storage version without caller model settings",
+        )
+        .into());
+    }
     let command = ReplaceSessionDefaults::with_model_settings_adjustments(
         command_id,
         session_id_from_uuid(required(&row, "session_id")?),
@@ -839,8 +890,7 @@ fn decode_complete(
             },
             "command model selection",
         )?,
-        model_settings_overlay_from_json(required(&row, "caller_model_settings")?)
-            .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("caller model settings"))?,
+        caller_model_settings,
         adjustments,
     );
     let result_kind: String = required(&row, "result_kind")?;
@@ -864,6 +914,7 @@ fn decode_complete(
                 ))?;
             let installed_session = session_id_from_uuid(required(&row, "installed_session_id")?);
             let installed_version = decode_ordinal(&row, "installed_version")?;
+            let installed_model_settings: Value = required(&row, "installed_model_settings")?;
             let installed_defaults = decode_selection(
                 required(&row, "installed_model_kind")?,
                 row.try_get("installed_direct_id")?,
@@ -871,11 +922,54 @@ fn decode_complete(
                 StoredConfigurationFields {
                     dangerous_tool_auto_approval: required(&row, "installed_tool_auto_approval")?,
                     system_prompt: row.try_get("installed_system_prompt")?,
-                    model_settings: required(&row, "installed_model_settings")?,
+                    model_settings: installed_model_settings.clone(),
                     storage_version: typed_version,
                 },
                 "installed model selection",
             )?;
+            let prior_session = session_id_from_uuid(required(&row, "prior_session_id")?);
+            let prior_version = decode_ordinal(&row, "prior_version")?;
+            if prior_session != command.session()
+                || prior_version != command.expected_current_version()
+            {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings event prior defaults identity",
+                )
+                .into());
+            }
+            let prior_model_settings: Value = required(&row, "prior_model_settings")?;
+            let prior_defaults = decode_selection(
+                required(&row, "prior_model_kind")?,
+                row.try_get("prior_direct_id")?,
+                row.try_get("prior_alias_id")?,
+                StoredConfigurationFields {
+                    dangerous_tool_auto_approval: required(&row, "prior_tool_auto_approval")?,
+                    system_prompt: row.try_get("prior_system_prompt")?,
+                    model_settings: prior_model_settings.clone(),
+                    storage_version: typed_version,
+                },
+                "prior model selection",
+            )?;
+            if let Some((event_prior, event_installed, event_caller)) = &settings_event_values
+                && (event_prior != &prior_model_settings
+                    || event_installed != &installed_model_settings
+                    || event_caller != &command_caller_model_settings)
+            {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings event evidence",
+                )
+                .into());
+            }
+            let records_settings_change = prior_defaults.model() != installed_defaults.model()
+                || prior_defaults.model_settings() != installed_defaults.model_settings();
+            let requires_settings_event =
+                typed_version >= MODEL_SETTINGS_FROM_STORAGE_VERSION && records_settings_change;
+            if settings_event_values.is_some() != requires_settings_event {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings change evidence",
+                )
+                .into());
+            }
             ReplaceSessionDefaultsReconstitutionInput::applied(
                 command,
                 result_session,
@@ -1002,7 +1096,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ReplaceSessionDefaultsRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=3) {
+    if matches!(actual, 1..=4) {
         Ok(actual)
     } else {
         Err(ReplaceSessionDefaultsCorruption::Unsupported {
@@ -1096,6 +1190,14 @@ fn decode_selection(
         .transpose()?;
     let model_settings = model_settings_from_json(stored.model_settings)
         .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("model settings"))?;
+    if stored.storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults()
+    {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "storage version without model settings",
+        )
+        .into());
+    }
     SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,

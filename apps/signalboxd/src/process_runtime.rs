@@ -10475,6 +10475,7 @@ fn wire_turn_model_settings(
     event: &DomainTurnModelSettingsResolved,
 ) -> WireTurnModelSettingsSnapshot {
     WireTurnModelSettingsSnapshot {
+        turn_id: wire_uuid(event.turn().into_uuid()),
         accepted_input_id: wire_uuid(event.accepted_input().into_uuid()),
         defaults_version: CanonicalU64::new(event.defaults_version().as_u64()),
         requested_model: wire_frozen_model_selection(event.selection()),

@@ -138,9 +138,10 @@ impl SessionRepository {
     /// current-defaults pointer and exactly the immutable defaults row selected
     /// by that pointer. Imported ancestry additionally joins its one-to-one
     /// seed record and seed-frontier header as a constant-size proof. Native
-    /// template provenance additionally correlates the creation command's
-    /// storage version. The selected placement is then checked against its
-    /// complete authenticated event-and-receipt chain on the same connection.
+    /// template provenance and every selected defaults epoch additionally
+    /// correlate the command storage version that introduced their durable
+    /// fields. The selected placement is then checked against its complete
+    /// authenticated event-and-receipt chain on the same connection.
     /// It intentionally loads no imported aggregate, frontier membership,
     /// semantic entry, turn history, or unselected defaults version.
     pub async fn load_session(
@@ -175,6 +176,9 @@ pub(crate) async fn load_session_from_connection(
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             creation.storage_version AS create_storage_version,
+            creation.model_settings AS create_command_model_settings,
+            imported_creation.storage_version AS imported_create_storage_version,
+            imported_creation.model_settings AS imported_create_command_model_settings,
             s.imported_conversation_id AS stored_conversation_id,
             s.imported_frontier_entry_id AS stored_frontier_entry_id,
             s.imported_frontier_position AS stored_frontier_position,
@@ -189,6 +193,9 @@ pub(crate) async fn load_session_from_connection(
             v.dangerous_tool_auto_approval,
             v.system_prompt,
             v.model_settings,
+            defaults_replacement.storage_version AS replace_storage_version,
+            defaults_replacement.replacement_model_settings
+                AS replace_command_model_settings,
             seed.session_id AS seed_session_id,
             seed.seed_context_frontier_id,
             seed_frontier.owning_session_id AS seed_frontier_session_id,
@@ -219,6 +226,12 @@ pub(crate) async fn load_session_from_connection(
           AND v.version = p.current_version
          LEFT JOIN create_session_command AS creation
            ON creation.created_session_id = s.session_id
+         LEFT JOIN create_session_from_imported_frontier_command AS imported_creation
+           ON imported_creation.created_session_id = s.session_id
+         LEFT JOIN replace_session_defaults_command AS defaults_replacement
+           ON defaults_replacement.result_session_id = v.session_id
+          AND defaults_replacement.result_installed_version = v.version
+          AND defaults_replacement.result_kind = 'applied'
          LEFT JOIN imported_session_seed AS seed
            ON seed.session_id = s.session_id
          LEFT JOIN context_frontier AS seed_frontier
@@ -295,6 +308,7 @@ fn decode_complete(
     requested_session: SessionId,
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
+    let settings_authentication = authenticate_defaults_settings_version(&row, &ancestry);
     if ancestry == "imported_conversation" {
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
@@ -310,7 +324,7 @@ fn decode_complete(
         }
         let placement =
             decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
-        return create_session_from_imported_frontier::reconstitute_bounded_current(
+        let session = create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
             placement.current_session,
@@ -318,7 +332,9 @@ fn decode_complete(
             placement.event_session,
             placement.placement,
         )
-        .map_err(map_imported_error);
+        .map_err(map_imported_error)?;
+        settings_authentication?;
+        return Ok(session);
     }
     if row.try_get::<Option<Uuid>, _>("seed_session_id")?.is_some() {
         return Err(
@@ -354,7 +370,7 @@ fn decode_complete(
     )?;
     let placement = decode_current_placement(&row, PlacementCreationFamily::Native)?;
 
-    SessionReconstitutionInput::new_with_template_and_placement(
+    let session = SessionReconstitutionInput::new_with_template_and_placement(
         requested_session,
         stored_session,
         provenance,
@@ -372,7 +388,64 @@ fn decode_complete(
         },
     )
     .reconstitute()
-    .map_err(|error| SessionCorruption::Domain(error.failure()).into())
+    .map_err(|error| SessionCorruption::Domain(error.failure()))?;
+    settings_authentication?;
+    Ok(session)
+}
+
+fn authenticate_defaults_settings_version(
+    row: &PgRow,
+    ancestry: &str,
+) -> Result<(), SessionRepositoryError> {
+    let defaults_version = decode_ordinal(row, "selected_defaults_version")?;
+    let stored_model_settings: Value = required(row, "model_settings")?;
+    let model_settings = model_settings_from_json(stored_model_settings.clone())
+        .map_err(|_| SessionCorruption::Inconsistent("model settings"))?;
+    if defaults_version != SessionConfigurationDefaultsVersion::first()
+        && model_settings == signalbox_domain::ValidatedModelSettings::provider_defaults()
+        && row
+            .try_get::<Option<i16>, _>("replace_storage_version")?
+            .is_none()
+    {
+        return Ok(());
+    }
+    let (storage_version, settings_cutover, command_settings_field): (i16, i16, &'static str) =
+        if defaults_version == SessionConfigurationDefaultsVersion::first() {
+            match ancestry {
+                "none" => (
+                    required(row, "create_storage_version")?,
+                    crate::create_session::MODEL_SETTINGS_FROM_STORAGE_VERSION,
+                    "create_command_model_settings",
+                ),
+                "imported_conversation" => (
+                    required(row, "imported_create_storage_version")?,
+                    create_session_from_imported_frontier::MODEL_SETTINGS_FROM_STORAGE_VERSION,
+                    "imported_create_command_model_settings",
+                ),
+                _ => return Ok(()),
+            }
+        } else {
+            (
+                required(row, "replace_storage_version")?,
+                crate::replace_session_defaults::MODEL_SETTINGS_FROM_STORAGE_VERSION,
+                "replace_command_model_settings",
+            )
+        };
+    let command_model_settings: Value = required(row, command_settings_field)?;
+    if storage_version < settings_cutover {
+        if model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults() {
+            return Err(SessionCorruption::Inconsistent(
+                "defaults storage version without model settings",
+            )
+            .into());
+        }
+    } else if command_model_settings != stored_model_settings {
+        return Err(SessionCorruption::Inconsistent(
+            "defaults model settings disagree with command",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

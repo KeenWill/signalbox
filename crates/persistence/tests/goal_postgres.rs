@@ -21,9 +21,10 @@ use signalbox_domain::{
     GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
     GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
     GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, ToolRequestId,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    ReplaceSessionDefaults, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionInputPosition, SubmitInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnId, TurnModelSettingsResolved, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -34,9 +35,13 @@ use signalbox_persistence::{
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
     outbox::{
-        DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxDeliveryDecision,
+        OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::ProcessReadRepository,
+    replace_session_defaults::{
+        ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
+    },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
@@ -92,6 +97,14 @@ fn command(value: u128) -> DurableCommandId {
 
 fn tool_request(value: u128) -> ToolRequestId {
     ToolRequestId::from_uuid(Uuid::from_u128(value))
+}
+
+#[track_caller]
+fn turn_model_settings_event(event: &DispatchedOutboxEvent) -> &TurnModelSettingsResolved {
+    match event.kind() {
+        DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) => settings,
+        _ => panic!("the event has a turn-settings payload"),
+    }
 }
 
 fn credential_pin() -> SessionCredentialPin {
@@ -628,9 +641,7 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     );
     let settings = settings.expect("the goal settings event was offered");
     assert_eq!(settings.session(), session(SESSION));
-    let DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) = settings.kind() else {
-        panic!("the goal settings event has its typed payload")
-    };
+    let settings = turn_model_settings_event(&settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
 
@@ -2235,19 +2246,19 @@ async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Resul
         attached_turn.turn()
     );
     mark_goal_turn_completed(&pool, attached_turn.turn()).await?;
-    sqlx::query(
-        "INSERT INTO session_defaults_version
-            (session_id, version, model_selection_kind, model_alias_id)
-         VALUES ($1, 2, 'alias', $2)",
-    )
-    .bind(Uuid::from_u128(SESSION))
-    .bind(changed_alias.into_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("UPDATE session_current_defaults SET current_version = 2 WHERE session_id = $1")
-        .bind(Uuid::from_u128(SESSION))
-        .execute(&pool)
+    let replacement = ReplaceSessionDefaults::new(
+        command(0x972),
+        session(SESSION),
+        SessionConfigurationDefaultsVersion::first(),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Alias(changed_alias)),
+    );
+    let replaced = ReplaceSessionDefaultsRepository::new(pool.clone())
+        .handle(replacement)
         .await?;
+    assert!(matches!(
+        replaced,
+        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+    ));
     assert_eq!(
         repository
             .reconcile_current_after_execution(

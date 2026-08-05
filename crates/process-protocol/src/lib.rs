@@ -1528,6 +1528,8 @@ pub struct ModelSettingsSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnModelSettingsSnapshot {
+    /// Turn that owns this frozen settings evidence.
+    pub turn_id: CanonicalUuid,
     /// Accepted input that originated the turn.
     pub accepted_input_id: CanonicalUuid,
     /// Session-defaults epoch resolved for the origin.
@@ -5800,9 +5802,24 @@ impl ServerMessage {
             }
             Self::SessionEvent { event, .. } => validate_settings_event(event)?,
             Self::TranscriptTurn {
+                turn_id,
                 model_settings: Some(settings),
+                state,
                 ..
-            } => settings.validate()?,
+            } => {
+                settings.validate()?;
+                if settings.turn_id != *turn_id
+                    || (matches!(
+                        state,
+                        TurnState::Queued {
+                            accepted_input_id,
+                            ..
+                        } if settings.accepted_input_id != *accepted_input_id
+                    ))
+                {
+                    return Err(FrameValidationError::ModelSettingsShape);
+                }
+            }
             Self::TranscriptEntry {
                 entry:
                     TranscriptEntry::AssistantToolUse {
@@ -11930,6 +11947,7 @@ mod tests {
             turn_id: uuid(3),
             acceptance_position: CanonicalU64::new(1),
             model_settings: Some(TurnModelSettingsSnapshot {
+                turn_id: uuid(3),
                 accepted_input_id: uuid(2),
                 defaults_version: CanonicalU64::new(7),
                 requested_model: ModelSelection::Direct {
@@ -11951,6 +11969,75 @@ mod tests {
 
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    /// INV-033: queued turn settings evidence belongs to the accepted input
+    /// named by the authoritative queued state.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_queued_input() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    turn_id: uuid(3),
+                    accepted_input_id: uuid(5),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: InputContent::new("settings-aware turn".to_owned()),
+                },
+            },
+        )
+        .expect_err("queued settings must name the queued accepted input");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
+    }
+
+    /// INV-033: terminal turn settings evidence belongs to the turn named by
+    /// the authoritative transcript projection.
+    #[test]
+    fn inv033_transcript_turn_rejects_settings_for_another_terminal_turn() {
+        let settings = settings_snapshot_fixture();
+        let error = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: Some(TurnModelSettingsSnapshot {
+                    turn_id: uuid(5),
+                    accepted_input_id: uuid(2),
+                    defaults_version: CanonicalU64::new(7),
+                    requested_model: ModelSelection::Direct {
+                        selection_id: uuid(4),
+                    },
+                    selected_direct_id: uuid(4),
+                    per_call_override: settings.precedence.per_call,
+                    settings,
+                    adjusted_from_selection_id: None,
+                    adjustments: Vec::new(),
+                }),
+                state: TurnState::Completed {
+                    terminal_frontier_id: uuid(6),
+                    terminal_attempt_id: uuid(7),
+                    terminal_model_call_id: uuid(8),
+                },
+            },
+        )
+        .expect_err("terminal settings must name the projected turn");
+
+        assert_eq!(error, FrameValidationError::ModelSettingsShape);
     }
 
     /// INV-033: required-nullable turn settings cannot be omitted.
