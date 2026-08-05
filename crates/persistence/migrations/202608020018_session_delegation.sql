@@ -3049,10 +3049,11 @@ BEGIN
 END;
 $$;
 
--- A delegated child turn cannot terminalize without atomically materializing
--- its typed relationship outcome. The event-side validator above proves the
--- forward correlation; this reverse deferred check prevents a terminal child
--- transition from omitting the event, immutable result, deliveries, and wakes.
+-- A delegated child turn cannot reach a deliverable terminal disposition
+-- without atomically materializing its typed relationship outcome. A
+-- reconciliation-required turn remains unresolved relationship work and must
+-- not publish a result. The event-side validator above proves the forward
+-- correlation; this reverse deferred check enforces both cardinalities.
 CREATE FUNCTION require_terminal_delegated_turn_result()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -3082,9 +3083,21 @@ BEGIN
          WHERE lifecycle.turn_id = checked_turn
            AND lifecycle.session_id = checked_session
            AND lifecycle.state_kind = 'terminal'
+           AND lifecycle.terminal_disposition_kind = 'reconciliation_required'
+    ) AND (SELECT count(*) FROM session_child_result AS result
+            WHERE result.spawning_tool_request_id = spawning_request) <> 0 THEN
+        RAISE EXCEPTION 'reconciliation-required delegated child turn cannot publish a result'
+            USING ERRCODE = '23503',
+                CONSTRAINT = 'reconciling_delegated_turn_result_forbidden';
+    ELSIF EXISTS (
+        SELECT 1 FROM turn_lifecycle AS lifecycle
+         WHERE lifecycle.turn_id = checked_turn
+           AND lifecycle.session_id = checked_session
+           AND lifecycle.state_kind = 'terminal'
+           AND lifecycle.terminal_disposition_kind <> 'reconciliation_required'
     ) AND (SELECT count(*) FROM session_child_result AS result
             WHERE result.spawning_tool_request_id = spawning_request) <> 1 THEN
-        RAISE EXCEPTION 'terminal delegated child turn requires exactly one typed result'
+        RAISE EXCEPTION 'deliverably terminal delegated child turn requires exactly one typed result'
             USING ERRCODE = '23503',
                 CONSTRAINT = 'terminal_delegated_turn_result_required';
     END IF;

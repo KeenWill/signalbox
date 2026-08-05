@@ -4211,6 +4211,8 @@ async fn persist_terminal_outcome_with_usage(
 ) -> Result<(), ModelCallRepositoryError> {
     match outcome {
         ModelCallTerminalOutcome::Completed(completed) => {
+            lock_delegated_child_result_frontier(connection, completed.session(), completed.turn())
+                .await?;
             persist_completed(connection, completed, usage).await?;
             persist_delegated_child_result(
                 connection,
@@ -4222,6 +4224,8 @@ async fn persist_terminal_outcome_with_usage(
             persist_tool_round(connection, round, usage).await
         }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
+            lock_delegated_child_result_frontier(connection, cancelled.session(), cancelled.turn())
+                .await?;
             persist_cancelled_tool_round(connection, cancelled, usage).await?;
             persist_delegated_child_result(
                 connection,
@@ -4230,6 +4234,8 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
+            lock_delegated_child_result_frontier(connection, failed.session(), failed.turn())
+                .await?;
             persist_failed(connection, failed, usage, provider_failure_cause).await?;
             persist_delegated_child_result(
                 connection,
@@ -4238,6 +4244,8 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
+            lock_delegated_child_result_frontier(connection, cancelled.session(), cancelled.turn())
+                .await?;
             persist_cancelled(connection, cancelled, usage).await?;
             persist_delegated_child_result(
                 connection,
@@ -4246,6 +4254,8 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Refused(refused) => {
+            lock_delegated_child_result_frontier(connection, refused.session(), refused.turn())
+                .await?;
             persist_refused(connection, refused, usage).await?;
             persist_delegated_child_result(
                 connection,
@@ -4254,17 +4264,46 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) => {
-            persist_reconciliation_required(connection, reconciliation, usage).await?;
-            persist_delegated_child_result(
-                connection,
-                &DelegationOutcome::from_model_reconciliation_child(reconciliation),
-            )
-            .await
+            persist_reconciliation_required(connection, reconciliation, usage).await
         }
         ModelCallTerminalOutcome::AwaitingRecovery(ambiguous) => {
             persist_ambiguous(connection, ambiguous, usage).await
         }
     }
+}
+
+async fn lock_delegated_child_result_frontier(
+    connection: &mut PgConnection,
+    child: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
+    )
+    .bind(session_id_to_uuid(child))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some((spawning_request, parent)) = relation else {
+        return Ok(());
+    };
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_PARENT_SESSION)
+        .bind(parent)
+        .execute(&mut *connection)
+        .await?;
+    let locked =
+        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
+            .bind(session_id_to_uuid(child))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_optional(&mut *connection)
+            .await?;
+    if locked != Some((spawning_request, parent)) {
+        return Err(ModelCallCorruption::Inconsistent(
+            "delegated terminal relationship changed while locking",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn persist_delegated_child_result(
@@ -4319,10 +4358,6 @@ async fn persist_delegated_child_result(
     {
         return Ok(());
     }
-    sqlx::query("SELECT 1 FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
-        .bind(parent)
-        .execute(&mut *connection)
-        .await?;
     let event_ordinal = sqlx::query_scalar::<_, Decimal>(
         "SELECT COALESCE(max(event_ordinal), 0) + 1
            FROM session_delegation_event
@@ -4603,11 +4638,6 @@ pub(crate) async fn persist_tool_reconciliation_required(
             attempt: reconciliation.tool_attempt().attempt(),
             terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
         },
-    )
-    .await?;
-    persist_delegated_child_result(
-        connection,
-        &DelegationOutcome::from_tool_reconciliation_child(reconciliation),
     )
     .await?;
     Ok(())
