@@ -3527,6 +3527,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-sessions"
+version = "0.0.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-tool-contract",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-tools-web"
 version = "0.0.0"
 dependencies = [
