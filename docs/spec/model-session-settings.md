@@ -218,12 +218,12 @@ Protocol version one adds a capability-catalog list request and ordered item
 stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
 unsupported-setting results, and the two durable settings events above. A
-transcript turn committed with settings evidence carries that complete frozen
-fact in every later authoritative snapshot, so a follower that attaches after
-the outbox event remains settings-complete. Only configuration roots marked by
-the settings migration as predating evidence carry explicit null; absence on a
-settings-aware root is corruption. The protocol freeze condition has not
-occurred, so the same-tree protocol changes in place.
+transcript snapshot completeness is owned by
+[process-protocol](process-protocol.md#transcript-snapshots), and the
+legacy-null cutover is owned by
+[persistence-protocol](persistence-protocol.md#relational-representation). The
+protocol freeze condition has not occurred, so the same-tree protocol changes in
+place.
 
 The capability projection never exposes a mapped fast serving identity. Client
 choices name only the durable direct selection and supported setting values.

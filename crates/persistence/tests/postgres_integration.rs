@@ -21108,13 +21108,14 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e41));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xae41));
+    let defaults_version = SessionConfigurationDefaultsVersion::first();
     SubmitInputRepository::new(pool.clone())
         .handle(
             start_input(
                 0x4e42,
                 0x8e41,
                 "projected user request",
-                1,
+                defaults_version.as_u64(),
                 ModelSelectionOverride::UseSessionDefault,
             ),
             accepted_input,
@@ -21143,7 +21144,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         .expect("the settings-aware turn retains its frozen settings evidence");
     assert_eq!(queued_settings.accepted_input(), accepted_input);
     assert_eq!(queued_settings.turn(), turn);
-    assert_eq!(queued_settings.defaults_version().as_u64(), 1);
+    assert_eq!(queued_settings.defaults_version(), defaults_version);
     assert_eq!(
         queued_settings.selection(),
         &FrozenModelSelection::Direct(selection)
