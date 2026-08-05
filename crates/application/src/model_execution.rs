@@ -2343,6 +2343,8 @@ mod tests {
                 defaults,
                 stored_requested_model: ModelSelectionRequest::Direct(direct),
                 stored_frozen_model: FrozenModelSelection::Direct(direct),
+                stored_model_settings: None,
+                stored_model_settings_adjustments: Vec::new(),
             },
         )
         .reconstitute()
