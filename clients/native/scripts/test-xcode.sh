@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/scripts/lib/simulator.sh"
 
+python3 "$ROOT/scripts/generate-plan-contract.py" --check
+
 MIN_IOS_VERSION="$SIMULATOR_DEFAULT_MIN_IOS_VERSION"
 DERIVED_DATA_PATH="${SIGNALBOX_NATIVE_DERIVED_DATA_PATH:-$ROOT/.derivedData}"
 RESULT_BUNDLE_PATH="${SIGNALBOX_NATIVE_TEST_RESULT_BUNDLE_PATH:-$DERIVED_DATA_PATH/Logs/Test/SignalboxNative-Test.xcresult}"

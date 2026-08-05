@@ -25,12 +25,13 @@ against this PR (`agent/repo-watch-dispatch`).
 section containing a list of repositories and a list of signal-reviewer logins.
 Each repository entry names exactly one `namespace/name` repository, a positive
 polling interval, and its own credential file reference. Duplicate repositories,
-shared or missing credential-file references, unknown keys, unsupported
+watch credentials shared between repositories or with the daemon's session
+GitHub tools, missing credential-file references, unknown keys, unsupported
 versions, zero intervals, malformed values, and invalid entries fail
-configuration before any watch task starts. Other daemon GitHub credentials do
+configuration before either runtime starts. Other daemon GitHub credentials do
 not substitute for a missing repository-watch credential reference. Credential
-paths are absolute and cannot contain parent-directory components, so a lexical
-alias cannot bypass duplicate-reference validation.
+paths are absolute and cannot contain parent-directory components, so lexical
+and filesystem aliases cannot bypass duplicate-reference validation.
 
 **Implemented behavior.** The section also accepts versioned structured rules.
 Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
@@ -78,9 +79,12 @@ candidate. The next poll occurs after the per-repository interval; version one
 has no webhook fallback and no speculative second polling transport.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
-all attempts and follow bounded result pages. Every completed provider identity
-returned by that projection enters the comparison baseline; the provider's
-latest-attempt default cannot silently discard a completion between polls.
+all attempts and follow bounded result pages. Check runs are enumerated through
+each suite returned by the paginated commit suite inventory rather than the
+provider's commit check-run search, whose 1,000-suite cap cannot represent a
+complete baseline. Every completed provider identity returned by that projection
+enters the comparison baseline; the provider's latest-attempt default cannot
+silently discard a completion between polls.
 
 **Implemented behavior.** Daemon shutdown wins a race with a repository task's
 clean exit. Once shutdown is observable, the supervisor drains every watch task
@@ -197,8 +201,10 @@ provider review identity; a new identity-less review is omitted.
 **Implemented behavior.** Reaction ingestion includes only reactions by a login
 in the configured signal-reviewer list. Reactions from every other actor are
 excluded while normalizing state, and a reaction whose deleted actor has no
-current login identity is omitted, so neither can create durable
-`ReactionChanged` events. Why: reviewer signals are actionable facts; the full
+current login identity is never added. When any current reaction for one subject
+lacks actor identity, normalization conservatively carries forward the prior
+retained signal-reviewer reactions for that subject so identity loss cannot
+manufacture removals. Why: reviewer signals are actionable facts; the full
 ambient emoji stream is neither a rule input nor retained noise.
 
 **Implemented behavior.** The cursor binds its filtered reaction projection to

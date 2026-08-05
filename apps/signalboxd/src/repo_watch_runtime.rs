@@ -857,8 +857,8 @@ impl GitHubRepositoryPoller {
             head_sha.clone(),
             previous_pull_request.map(RepoWatchPullRequestState::context),
         )?;
-        let completed_check_suites = self.fetch_check_suites(&head_sha).await?;
-        let completed_check_runs = self.fetch_check_runs(&head_sha).await?;
+        let (completed_check_suites, check_suite_ids) = self.fetch_check_suites(&head_sha).await?;
+        let completed_check_runs = self.fetch_check_runs(&check_suite_ids).await?;
         let reviews = self
             .fetch_reviews(
                 number,
@@ -866,7 +866,12 @@ impl GitHubRepositoryPoller {
             )
             .await?;
         let threads = self.fetch_threads(number).await?;
-        let reactions = self.fetch_reactions(number).await?;
+        let reactions = self
+            .fetch_reactions(
+                number,
+                previous_pull_request.map(RepoWatchPullRequestState::reactions),
+            )
+            .await?;
         RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
             context,
             lifecycle: normalize_lifecycle(&detail)?,
@@ -887,8 +892,12 @@ impl GitHubRepositoryPoller {
     async fn fetch_check_suites(
         &mut self,
         head: &CommitSha,
-    ) -> Result<Vec<RepoWatchCheckSuiteObservation>, RepositoryWatchAttemptError> {
+    ) -> Result<
+        (Vec<RepoWatchCheckSuiteObservation>, Vec<GitHubObjectId>),
+        RepositoryWatchAttemptError,
+    > {
         let mut observations = Vec::new();
+        let mut suite_ids = Vec::new();
         let mut page = 1_u16;
         loop {
             let response: CheckSuitesResponse = self
@@ -908,9 +917,11 @@ impl GitHubRepositoryPoller {
                 .await?;
             let has_next = response.check_suites.len() == PAGE_SIZE;
             for suite in response.check_suites {
+                let suite_id = object_id(suite.id)?;
+                suite_ids.push(suite_id);
                 if suite.status == "completed" {
                     observations.push(RepoWatchCheckSuiteObservation::new(
-                        object_id(suite.id)?,
+                        suite_id,
                         RepoWatchCheckCompletionGeneration::try_new(suite.updated_at)
                             .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                         normalize_checks_outcome(suite.conclusion.as_deref())?,
@@ -918,7 +929,7 @@ impl GitHubRepositoryPoller {
                 }
             }
             if !has_next {
-                return Ok(observations);
+                return Ok((observations, suite_ids));
             }
             page = next_page(page)?;
         }
@@ -926,47 +937,51 @@ impl GitHubRepositoryPoller {
 
     async fn fetch_check_runs(
         &mut self,
-        head: &CommitSha,
+        suite_ids: &[GitHubObjectId],
     ) -> Result<Vec<RepoWatchCheckRunObservation>, RepositoryWatchAttemptError> {
         let mut observations = Vec::new();
-        let mut page = 1_u16;
-        loop {
-            let response: CheckRunsResponse = self
-                .conditional_json(
-                    "check-runs",
-                    Method::GET,
-                    self.repository_url(
-                        &["commits", head.as_str(), "check-runs"],
-                        &[
-                            ("filter", "all".to_owned()),
-                            ("per_page", PAGE_SIZE.to_string()),
-                            ("page", page.to_string()),
-                        ],
-                    )?,
-                    None,
-                )
-                .await?;
-            let has_next = response.check_runs.len() == PAGE_SIZE;
-            for run in response.check_runs {
-                if run.status == "completed" {
-                    observations.push(RepoWatchCheckRunObservation::new(
-                        object_id(run.id)?,
-                        RepoWatchCheckCompletionGeneration::try_new(
-                            run.completed_at
-                                .ok_or(RepositoryWatchAttemptError::Normalization)?,
-                        )
-                        .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
-                        CheckRunName::try_new(run.name)
+        for suite_id in suite_ids {
+            let suite_id = suite_id.get().to_string();
+            let mut page = 1_u16;
+            loop {
+                let response: CheckRunsResponse = self
+                    .conditional_json(
+                        "check-runs",
+                        Method::GET,
+                        self.repository_url(
+                            &["check-suites", &suite_id, "check-runs"],
+                            &[
+                                ("filter", "all".to_owned()),
+                                ("per_page", PAGE_SIZE.to_string()),
+                                ("page", page.to_string()),
+                            ],
+                        )?,
+                        None,
+                    )
+                    .await?;
+                let has_next = response.check_runs.len() == PAGE_SIZE;
+                for run in response.check_runs {
+                    if run.status == "completed" {
+                        observations.push(RepoWatchCheckRunObservation::new(
+                            object_id(run.id)?,
+                            RepoWatchCheckCompletionGeneration::try_new(
+                                run.completed_at
+                                    .ok_or(RepositoryWatchAttemptError::Normalization)?,
+                            )
                             .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
-                        normalize_conclusion(run.conclusion.as_deref())?,
-                    ));
+                            CheckRunName::try_new(run.name)
+                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                            normalize_conclusion(run.conclusion.as_deref())?,
+                        ));
+                    }
                 }
+                if !has_next {
+                    break;
+                }
+                page = next_page(page)?;
             }
-            if !has_next {
-                return Ok(observations);
-            }
-            page = next_page(page)?;
         }
+        Ok(observations)
     }
 
     async fn fetch_reviews(
@@ -1096,6 +1111,7 @@ impl GitHubRepositoryPoller {
     async fn fetch_reactions(
         &mut self,
         number: u64,
+        previous: Option<&[RepoWatchReactionObservation]>,
     ) -> Result<Vec<RepoWatchReactionObservation>, RepositoryWatchAttemptError> {
         if self.signal_reviewers.is_empty() {
             return Ok(Vec::new());
@@ -1105,6 +1121,7 @@ impl GitHubRepositoryPoller {
             .fetch_reaction_pages(
                 &["issues", &number_text, "reactions"],
                 ReactionSubject::PullRequestBody,
+                previous,
             )
             .await?;
         let issue_comments = self
@@ -1116,6 +1133,7 @@ impl GitHubRepositoryPoller {
                 self.fetch_reaction_pages(
                     &["issues", "comments", &id_text, "reactions"],
                     ReactionSubject::IssueComment { id },
+                    previous,
                 )
                 .await?,
             );
@@ -1129,6 +1147,7 @@ impl GitHubRepositoryPoller {
                 self.fetch_reaction_pages(
                     &["pulls", "comments", &id_text, "reactions"],
                     ReactionSubject::ReviewComment { id },
+                    previous,
                 )
                 .await?,
             );
@@ -1173,8 +1192,10 @@ impl GitHubRepositoryPoller {
         &mut self,
         suffix: &[&str],
         subject: ReactionSubject,
+        previous: Option<&[RepoWatchReactionObservation]>,
     ) -> Result<Vec<RepoWatchReactionObservation>, RepositoryWatchAttemptError> {
         let mut observations = Vec::new();
+        let mut identity_incomplete = false;
         let mut page = 1_u16;
         loop {
             let response: Vec<ReactionResponse> = self
@@ -1193,6 +1214,10 @@ impl GitHubRepositoryPoller {
                 .await?;
             let has_next = response.len() == PAGE_SIZE;
             for reaction in response {
+                if reaction.user.is_none() {
+                    identity_incomplete = true;
+                    continue;
+                }
                 if let Some(reactor) = reaction
                     .user
                     .as_ref()
@@ -1207,6 +1232,15 @@ impl GitHubRepositoryPoller {
                 }
             }
             if !has_next {
+                if identity_incomplete {
+                    observations.extend(
+                        previous
+                            .into_iter()
+                            .flatten()
+                            .filter(|reaction| reaction.subject() == subject)
+                            .cloned(),
+                    );
+                }
                 return Ok(observations);
             }
             page = next_page(page)?;
@@ -1308,8 +1342,6 @@ impl GitHubRepositoryPoller {
                     self.repository_url(
                         &["actions", "workflows", &workflow_id, "runs"],
                         &[
-                            ("branch", branch.branch().as_str().to_owned()),
-                            ("status", "completed".to_owned()),
                             ("per_page", PAGE_SIZE.to_string()),
                             ("page", page.to_string()),
                         ],
@@ -1319,6 +1351,11 @@ impl GitHubRepositoryPoller {
                 .await?;
             let has_next = response.workflow_runs.len() == PAGE_SIZE;
             for run in response.workflow_runs {
+                if run.head_branch.as_deref() != Some(branch.branch().as_str())
+                    || run.status != "completed"
+                {
+                    continue;
+                }
                 let run_id = object_id(run.id)?;
                 let run_attempt = RepoWatchWorkflowRunAttempt::new(
                     NonZeroU64::new(run.run_attempt)
@@ -1940,6 +1977,8 @@ struct WorkflowRunsResponse {
 struct WorkflowRunResponse {
     id: u64,
     run_attempt: u64,
+    head_branch: Option<String>,
+    status: String,
     conclusion: Option<String>,
     head_repository: Option<RepositoryResponse>,
 }
@@ -2022,11 +2061,11 @@ mod tests {
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         MAX_AGGREGATE_WIRE_BYTES, MergeableState, PAGE_SIZE, PollCache, PullResponse,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReviewObservation, RepoWatchThreadState,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowResponse, dispatch_context_json,
-        normalize_pull_request_context, object_id, rule_activation_error,
+        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
+        RepoWatchThreadState, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchRuntimeConstructionError, ResourceKey, ReviewState, Url, WorkflowResponse,
+        dispatch_context_json, normalize_pull_request_context, object_id, rule_activation_error,
         supervise_repository_tasks,
     };
     use signalbox_domain::{
@@ -2050,7 +2089,10 @@ mod tests {
         "/repos/namespace/project/actions/workflows?per_page=100&page=2";
     const PULL_DETAIL_TARGET: &str = "/repos/namespace/project/pulls/7";
     const CHECK_SUITES_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-suites?filter=all&per_page=100&page=1";
-    const CHECK_RUNS_TARGET: &str = "/repos/namespace/project/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&per_page=100&page=1";
+    const COMPLETED_SUITE_CHECK_RUNS_TARGET: &str =
+        "/repos/namespace/project/check-suites/11/check-runs?filter=all&per_page=100&page=1";
+    const QUEUED_SUITE_CHECK_RUNS_TARGET: &str =
+        "/repos/namespace/project/check-suites/12/check-runs?filter=all&per_page=100&page=1";
     const REVIEWS_TARGET: &str = "/repos/namespace/project/pulls/7/reviews?per_page=100&page=1";
     const THREADS_TARGET: &str = "/graphql";
     const PULL_REACTIONS_TARGET: &str =
@@ -2063,9 +2105,12 @@ mod tests {
         "/repos/namespace/project/pulls/7/comments?per_page=100&page=1";
     const REVIEW_COMMENT_REACTIONS_TARGET: &str =
         "/repos/namespace/project/pulls/comments/51/reactions?per_page=100&page=1";
-    const MAIN_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=100&page=1";
-    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=main&status=completed&per_page=100&page=2";
-    const FEATURE_WORKFLOW_TARGET: &str = "/repos/namespace/project/actions/workflows/61/runs?branch=feature%2Fwatch&status=completed&per_page=100&page=1";
+    const MAIN_WORKFLOW_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
+    const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2";
+    const FEATURE_WORKFLOW_TARGET: &str =
+        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
     const EMPTY_LIST: &str = "[]";
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
@@ -2210,6 +2255,10 @@ mod tests {
         .to_string()
     }
 
+    fn empty_check_runs() -> &'static str {
+        "{\"check_runs\":[]}"
+    }
+
     fn reviews() -> String {
         serde_json::json!([
             {
@@ -2326,24 +2375,56 @@ mod tests {
 
     fn main_workflow_run() -> String {
         serde_json::json!({
-            "workflow_runs": [{
-                "id": WORKFLOW_RUN_IDS[0],
-                "run_attempt": WORKFLOW_RUN_ATTEMPT,
-                "conclusion": "success",
-                "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
-            }]
+            "workflow_runs": [
+                {
+                    "id": WORKFLOW_RUN_IDS[0],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                },
+                {
+                    "id": WORKFLOW_RUN_IDS[1],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": HEAD_BRANCH,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                }
+            ]
         })
         .to_string()
     }
 
-    fn feature_workflow_run() -> String {
+    fn irrelevant_then_watched_workflow_runs() -> String {
         serde_json::json!({
-            "workflow_runs": [{
-                "id": WORKFLOW_RUN_IDS[1],
-                "run_attempt": WORKFLOW_RUN_ATTEMPT,
-                "conclusion": "failure",
-                "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
-            }]
+            "workflow_runs": [
+                {
+                    "id": FOREIGN_WORKFLOW_RUN_ID,
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": HEAD_BRANCH,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                },
+                {
+                    "id": FOREIGN_WORKFLOW_RUN_ID + 1,
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "in_progress",
+                    "conclusion": null,
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                },
+                {
+                    "id": WORKFLOW_RUN_IDS[0],
+                    "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
+                }
+            ]
         })
         .to_string()
     }
@@ -2354,12 +2435,16 @@ mod tests {
                 {
                     "id": FOREIGN_WORKFLOW_RUN_ID,
                     "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
                     "conclusion": "failure",
                     "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
                 },
                 {
                     "id": WORKFLOW_RUN_IDS[0],
                     "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
                     "conclusion": "success",
                     "head_repository": { "full_name": PROVIDER_BASE_REPOSITORY }
                 }
@@ -2375,6 +2460,8 @@ mod tests {
                     "id": FOREIGN_WORKFLOW_RUN_ID + u64::try_from(offset)
                         .expect("fixture page offset fits u64"),
                     "run_attempt": WORKFLOW_RUN_ATTEMPT,
+                    "head_branch": BASE_BRANCH,
+                    "status": "completed",
                     "conclusion": "failure",
                     "head_repository": { "full_name": PROVIDER_HEAD_REPOSITORY }
                 })
@@ -2626,7 +2713,8 @@ mod tests {
             ScriptedResponse::ok(PULLS_TARGET, pulls_with_one()),
             ScriptedResponse::ok(PULL_DETAIL_TARGET, pull_detail()),
             ScriptedResponse::ok(CHECK_SUITES_TARGET, check_suites()),
-            ScriptedResponse::ok(CHECK_RUNS_TARGET, check_runs()),
+            ScriptedResponse::ok(COMPLETED_SUITE_CHECK_RUNS_TARGET, check_runs()),
+            ScriptedResponse::ok(QUEUED_SUITE_CHECK_RUNS_TARGET, empty_check_runs()),
             ScriptedResponse::ok(REVIEWS_TARGET, reviews()),
             ScriptedResponse::post(THREADS_TARGET, threads()),
             ScriptedResponse::ok(PULL_REACTIONS_TARGET, pull_reactions()),
@@ -2637,7 +2725,7 @@ mod tests {
             ScriptedResponse::ok(BRANCHES_TARGET, branches()),
             ScriptedResponse::ok(WORKFLOWS_TARGET, workflows()),
             ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
-            ScriptedResponse::ok(FEATURE_WORKFLOW_TARGET, feature_workflow_run()),
+            ScriptedResponse::not_modified(FEATURE_WORKFLOW_TARGET),
         ]
     }
 
@@ -2770,6 +2858,28 @@ mod tests {
             .await
             .expect("workflow-run response is valid")
             .expect("watched-repository run remains in the response");
+        server.finish().await;
+
+        assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
+    }
+
+    #[tokio::test]
+    async fn workflow_listing_avoids_capped_filters_and_skips_irrelevant_runs() {
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            MAIN_WORKFLOW_TARGET,
+            irrelevant_then_watched_workflow_runs(),
+        )])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let branch = base_branch_head();
+        let workflow = workflow_response();
+
+        let run = fixture
+            .poller
+            .fetch_workflow_run(&branch, &workflow)
+            .await
+            .expect("unfiltered workflow-run response is valid")
+            .expect("latest completed run for the watched branch remains visible");
         server.finish().await;
 
         assert_eq!(run.id().get(), WORKFLOW_RUN_IDS[0]);
@@ -2922,7 +3032,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_complete_poll_normalizes_completed_check_runs() {
+    async fn a_complete_poll_enumerates_completed_check_runs_through_suites() {
         let observation = complete_typed_observation().await;
         let pull = &observation.state().pull_requests()[0];
 
@@ -3046,7 +3156,7 @@ mod tests {
 
         let reactions = fixture
             .poller
-            .fetch_reactions(PULL_NUMBER)
+            .fetch_reactions(PULL_NUMBER, None)
             .await
             .expect("empty signal-reviewer policy needs no reaction request");
         server.finish().await;
@@ -3066,12 +3176,39 @@ mod tests {
 
         let reactions = fixture
             .poller
-            .fetch_reactions(PULL_NUMBER)
+            .fetch_reactions(PULL_NUMBER, None)
             .await
             .expect("identity-less reaction is safely omitted");
         server.finish().await;
 
         assert!(reactions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reaction_without_an_actor_identity_retains_prior_subject_reactions() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
+            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+        ])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let previous = RepoWatchReactionObservation::new(
+            ReactionSubject::PullRequestBody,
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+                .expect("reviewer fixture is valid"),
+            ReactionContent::try_new(String::from(SIGNAL_REACTION_CONTENTS[0]))
+                .expect("reaction fixture is valid"),
+        );
+
+        let reactions = fixture
+            .poller
+            .fetch_reactions(PULL_NUMBER, Some(std::slice::from_ref(&previous)))
+            .await
+            .expect("identity-less reaction preserves the prior subject baseline");
+        server.finish().await;
+
+        assert_eq!(reactions, [previous]);
     }
 
     #[tokio::test]
