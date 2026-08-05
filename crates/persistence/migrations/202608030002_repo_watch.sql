@@ -19,6 +19,7 @@ CREATE TABLE repo_watch_cursor (
     generation bigint NOT NULL,
     storage_version smallint NOT NULL,
     cursor_payload jsonb NOT NULL,
+    recording_transaction_id xid8 NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
 
     PRIMARY KEY (repository, generation),
@@ -296,6 +297,50 @@ BEGIN
         USING ERRCODE = '23514';
 END;
 $$;
+
+CREATE FUNCTION stamp_repo_watch_cursor_transaction()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.recording_transaction_id := pg_current_xact_id();
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION require_repo_watch_event_cursor_commit()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM repo_watch_cursor
+         WHERE repository = NEW.repository
+           AND generation = NEW.cursor_generation
+           AND recording_transaction_id = pg_current_xact_id()
+    ) THEN
+        RAISE EXCEPTION
+            'repository-watch event requires its cursor commit transaction'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'repo_watch_event_requires_current_cursor_transaction';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER repo_watch_cursor_records_transaction
+BEFORE INSERT ON repo_watch_cursor
+FOR EACH ROW
+EXECUTE FUNCTION stamp_repo_watch_cursor_transaction();
+
+CREATE CONSTRAINT TRIGGER repo_watch_event_requires_cursor_commit
+AFTER INSERT ON repo_watch_event
+DEFERRABLE INITIALLY IMMEDIATE
+FOR EACH ROW
+EXECUTE FUNCTION require_repo_watch_event_cursor_commit();
 
 CREATE TRIGGER repo_watch_cursor_is_append_only
 BEFORE UPDATE OR DELETE ON repo_watch_cursor

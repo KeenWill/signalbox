@@ -113,7 +113,9 @@ It serializes competing commits, appends the cursor and every event together,
 rolls back the whole batch on failure, reports a stale generation as conflict,
 and recognizes only an exact candidate-and-event replay. An unchanged candidate
 with no events does not advance the cursor; an unchanged candidate carrying
-events is rejected.
+events is rejected. The relational event table admits an event row only in the
+database transaction that inserts its referenced cursor generation, preventing
+later maintenance or future writers from changing an already-committed batch.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
