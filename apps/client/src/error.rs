@@ -5,9 +5,10 @@ use std::{
 };
 
 use signalbox_process_protocol::{
-    AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
-    ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
-    OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
+    AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass,
+    DelegationToolRequestState, ErrorCode, ErrorDetail, FailedModelCallCause, FrameDecodeError,
+    FrameEncodeError, GoalCommandRejection, OpenAiServiceTier, ReasoningLevel, RejectionDetail,
+    ServiceTier,
 };
 
 #[derive(Debug)]
@@ -413,6 +414,54 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "tool_request_not_in_session session={session_id} request={tool_request_id}"
             ),
+            RejectionDetail::DelegationRequestNotInTurn {
+                session_id,
+                turn_id,
+                tool_request_id,
+            } => write!(
+                formatter,
+                "delegation_request_not_in_turn session={session_id} turn={turn_id} \
+                 request={tool_request_id}"
+            ),
+            RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id,
+                state,
+            } => write!(
+                formatter,
+                "delegation_tool_request_not_executable request={tool_request_id} state={}",
+                delegation_tool_request_state_name(state)
+            ),
+            RejectionDetail::DelegationSpawnConflict { tool_request_id } => write!(
+                formatter,
+                "delegation_spawn_conflict request={tool_request_id}"
+            ),
+            RejectionDetail::DelegatedChildIdentityCollision { child_session_id } => write!(
+                formatter,
+                "delegated_child_identity_collision child_session={child_session_id}"
+            ),
+            RejectionDetail::DelegationRelationNotFound {
+                session_id,
+                peer_session_id,
+            } => write!(
+                formatter,
+                "delegation_relation_not_found session={session_id} peer_session={peer_session_id}"
+            ),
+            RejectionDetail::DelegationAwaitConflict { tool_request_id } => write!(
+                formatter,
+                "delegation_await_conflict request={tool_request_id}"
+            ),
+            RejectionDetail::DelegationMessageConflict { tool_request_id } => write!(
+                formatter,
+                "delegation_message_conflict request={tool_request_id}"
+            ),
+            RejectionDetail::DelegationEventOrdinalExhausted {
+                spawning_request_id,
+                last,
+            } => write!(
+                formatter,
+                "delegation_event_ordinal_exhausted spawning_request={spawning_request_id} last={}",
+                last.value()
+            ),
             RejectionDetail::DefaultsVersionMismatch {
                 session_id,
                 expected,
@@ -518,6 +567,15 @@ impl fmt::Display for RejectionDisplay {
                 record_ordinal.value()
             ),
         }
+    }
+}
+
+const fn delegation_tool_request_state_name(value: DelegationToolRequestState) -> &'static str {
+    match value {
+        DelegationToolRequestState::AwaitingApproval => "awaiting_approval",
+        DelegationToolRequestState::Denied => "denied",
+        DelegationToolRequestState::Closed => "closed",
+        DelegationToolRequestState::AttemptEnded => "attempt_ended",
     }
 }
 

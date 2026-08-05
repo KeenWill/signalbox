@@ -2987,6 +2987,45 @@ pub enum ClientRequest {
         /// Target session.
         session_id: CanonicalUuid,
     },
+    /// Execute one exact already-issued delegated-session spawn request.
+    SpawnSession {
+        /// Invoking parent session.
+        session_id: CanonicalUuid,
+        /// Turn that issued the tool request.
+        turn_id: CanonicalUuid,
+        /// Exact logical spawn tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact bounded child task.
+        task: String,
+        /// Parent-chosen lifecycle relationship.
+        relationship: DelegationPolicy,
+    },
+    /// Register delivery for one related child.
+    AwaitSession {
+        /// Invoking parent session.
+        session_id: CanonicalUuid,
+        /// Turn that issued the tool request.
+        turn_id: CanonicalUuid,
+        /// Exact logical await tool request.
+        tool_request_id: CanonicalUuid,
+        /// Related child whose result is awaited.
+        child_session_id: CanonicalUuid,
+        /// Foreground or background delivery mode.
+        mode: DelegationWaitMode,
+    },
+    /// Send one bounded message across an existing delegation relationship.
+    SendSessionMessage {
+        /// Invoking session.
+        session_id: CanonicalUuid,
+        /// Turn that issued the tool request.
+        turn_id: CanonicalUuid,
+        /// Exact logical message tool request.
+        tool_request_id: CanonicalUuid,
+        /// Related peer receiving the message.
+        peer_session_id: CanonicalUuid,
+        /// Exact bounded message content.
+        content: String,
+    },
     /// Read one filtered bounded metadata-summary page.
     ListSessionMetadata {
         /// Exact tags every result must carry.
@@ -3358,6 +3397,7 @@ impl ClientRequest {
             | Self::CompactSession { .. }
             | Self::ReadTranscript { .. }
             | Self::FollowSession { .. }
+            | Self::AwaitSession { .. }
             | Self::ListSessionMetadata { .. }
             | Self::ListConversations { .. }
             | Self::ListModelAliases {}
@@ -3396,6 +3436,16 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. } => {}
+            Self::SpawnSession { task, .. } => {
+                if !delegation_content_is_valid(task) {
+                    return Err(FrameValidationError::DelegationShape);
+                }
+            }
+            Self::SendSessionMessage { content, .. } => {
+                if !delegation_content_is_valid(content) {
+                    return Err(FrameValidationError::DelegationShape);
+                }
+            }
         }
         match self {
             Self::CreateSession { placement, .. }
@@ -3929,6 +3979,56 @@ pub enum RejectionDetail {
         /// Tool request the caller named.
         tool_request_id: CanonicalUuid,
     },
+    /// The named delegation request belongs to another turn.
+    DelegationRequestNotInTurn {
+        /// Session the caller named.
+        session_id: CanonicalUuid,
+        /// Turn the caller named.
+        turn_id: CanonicalUuid,
+        /// Delegation request owned by another turn.
+        tool_request_id: CanonicalUuid,
+    },
+    /// A first execution named a request without executable attempt authority.
+    DelegationToolRequestNotExecutable {
+        /// Logical delegation tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact durable state that prevented first execution.
+        state: DelegationToolRequestState,
+    },
+    /// A spawn request replay changed its immutable arguments.
+    DelegationSpawnConflict {
+        /// Conflicting logical spawn request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// A generated child identity was already occupied.
+    DelegatedChildIdentityCollision {
+        /// Colliding child identity.
+        child_session_id: CanonicalUuid,
+    },
+    /// No delegation relationship joined the named session and peer.
+    DelegationRelationNotFound {
+        /// Invoking session.
+        session_id: CanonicalUuid,
+        /// Named related peer.
+        peer_session_id: CanonicalUuid,
+    },
+    /// An await request replay changed its immutable arguments.
+    DelegationAwaitConflict {
+        /// Conflicting logical await request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// A message request replay changed its immutable arguments.
+    DelegationMessageConflict {
+        /// Conflicting logical message request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// A relationship cannot allocate another positive event ordinal.
+    DelegationEventOrdinalExhausted {
+        /// Relationship's spawning request identity.
+        spawning_request_id: CanonicalUuid,
+        /// Last representable event ordinal.
+        last: CanonicalU64,
+    },
     /// The caller observed stale defaults.
     DefaultsVersionMismatch {
         /// Target session.
@@ -4037,6 +4137,14 @@ impl RejectionDetail {
             | Self::ToolRequestAlreadyResolved { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. }
+            | Self::DelegationRequestNotInTurn { .. }
+            | Self::DelegationToolRequestNotExecutable { .. }
+            | Self::DelegationSpawnConflict { .. }
+            | Self::DelegatedChildIdentityCollision { .. }
+            | Self::DelegationRelationNotFound { .. }
+            | Self::DelegationAwaitConflict { .. }
+            | Self::DelegationMessageConflict { .. }
+            | Self::DelegationEventOrdinalExhausted { .. }
             | Self::DefaultsVersionMismatch { .. }
             | Self::UnknownModelAlias { .. }
             | Self::AcceptancePositionExhausted { .. }
@@ -5084,6 +5192,30 @@ pub enum DelegationWaitMode {
     Background,
 }
 
+/// Direction of one message within its parent-child relationship.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationMessageDirection {
+    /// The relationship parent sent to its child.
+    ParentToChild,
+    /// The relationship child sent to its parent.
+    ChildToParent,
+}
+
+/// Closed non-executable state of one delegation tool request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationToolRequestState {
+    /// The request still requires an approval decision.
+    AwaitingApproval,
+    /// Approval was denied.
+    Denied,
+    /// The logical request already closed without executable work.
+    Closed,
+    /// Its current physical attempt already ended.
+    AttemptEnded,
+}
+
 /// Closed relationship outcome carried by delegation updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5540,6 +5672,41 @@ fn child_result_shape_is_valid(
     }
 }
 
+fn direct_child_result_shape_is_valid(
+    child_session_id: CanonicalUuid,
+    outcome: DelegationOutcome,
+    content: &Option<String>,
+    reason: DelegationReason,
+    provenance: &DelegationProvenance,
+) -> bool {
+    match provenance {
+        DelegationProvenance::ChildTurn { .. } => child_result_shape_is_valid(
+            child_session_id,
+            child_session_id,
+            outcome,
+            content,
+            reason,
+            provenance,
+        ),
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        } => {
+            *parent_session_id != child_session_id
+                && child_result_shape_is_valid(
+                    *parent_session_id,
+                    child_session_id,
+                    outcome,
+                    content,
+                    reason,
+                    provenance,
+                )
+        }
+    }
+}
+
 fn parent_delegation_provenance_is_cascade(
     parent_session_id: CanonicalUuid,
     provenance: &DelegationProvenance,
@@ -5822,6 +5989,55 @@ pub enum ServerMessage {
         session_id: CanonicalUuid,
         /// Complete settings snapshot installed as defaults version one.
         model_settings: ModelSettingsSnapshot,
+    },
+    /// One delegated child spawn was recorded or equally replayed.
+    SessionSpawned {
+        /// Exact logical spawn tool request.
+        tool_request_id: CanonicalUuid,
+        /// Created child identity.
+        child_session_id: CanonicalUuid,
+        /// Exact immutable relationship policy.
+        relationship: DelegationPolicy,
+    },
+    /// One child-delivery registration was recorded or equally replayed.
+    SessionAwaitRegistered {
+        /// Exact logical await tool request.
+        tool_request_id: CanonicalUuid,
+        /// Related child identity.
+        child_session_id: CanonicalUuid,
+        /// Exact registered delivery mode.
+        mode: DelegationWaitMode,
+    },
+    /// One child outcome was delivered directly to a foreground await.
+    ChildResult {
+        /// Exact logical await tool request receiving the result.
+        await_request_id: CanonicalUuid,
+        /// Logical tool request that created the relationship.
+        spawning_request_id: CanonicalUuid,
+        /// Child whose terminal result was delivered.
+        child_session_id: CanonicalUuid,
+        /// Closed result outcome.
+        outcome: DelegationOutcome,
+        /// Exact returned content only for `returned`.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        content: Option<String>,
+        /// Closed reason correlated with the outcome.
+        reason: DelegationReason,
+        /// Exact child-turn or parent-command authority.
+        provenance: DelegationProvenance,
+    },
+    /// One relationship message was recorded or equally replayed.
+    SessionMessageSent {
+        /// Exact logical message tool request.
+        tool_request_id: CanonicalUuid,
+        /// Immutable message identity.
+        message_id: CanonicalUuid,
+        /// Exact relationship direction.
+        direction: DelegationMessageDirection,
+        /// Positive contiguous relationship event ordinal.
+        ordinal: CanonicalU64,
+        /// Positive recipient-wide delivery sequence.
+        delivery_sequence: CanonicalU64,
     },
     /// One immutable placement update was appended or equally replayed.
     SessionPlacementUpdated {
@@ -6339,6 +6555,32 @@ impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
+            Self::ChildResult {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+                outcome,
+                content,
+                reason,
+                provenance,
+            } if await_request_id == spawning_request_id
+                || !direct_child_result_shape_is_valid(
+                    *child_session_id,
+                    *outcome,
+                    content,
+                    *reason,
+                    provenance,
+                ) =>
+            {
+                return Err(FrameValidationError::DelegationShape);
+            }
+            Self::SessionMessageSent {
+                ordinal,
+                delivery_sequence,
+                ..
+            } if ordinal.value() == 0 || delivery_sequence.value() == 0 => {
+                return Err(FrameValidationError::DelegationShape);
+            }
             Self::InputSubmitted { model_settings, .. } => model_settings.validate()?,
             Self::SessionDefaultsReplaced {
                 model_selection,
@@ -6705,6 +6947,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             current_placement_version,
             ..
         } => current_placement_version.value() == u64::MAX,
+        RejectionDetail::DelegationEventOrdinalExhausted { last, .. } => last.value() == u64::MAX,
         RejectionDetail::SessionNotFound { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
@@ -6721,6 +6964,13 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DelegationRequestNotInTurn { .. }
+        | RejectionDetail::DelegationToolRequestNotExecutable { .. }
+        | RejectionDetail::DelegationSpawnConflict { .. }
+        | RejectionDetail::DelegatedChildIdentityCollision { .. }
+        | RejectionDetail::DelegationRelationNotFound { .. }
+        | RejectionDetail::DelegationAwaitConflict { .. }
+        | RejectionDetail::DelegationMessageConflict { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
@@ -6807,6 +7057,14 @@ fn validate_conversation_import_detail(
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::DelegationRequestNotInTurn { .. }
+        | RejectionDetail::DelegationToolRequestNotExecutable { .. }
+        | RejectionDetail::DelegationSpawnConflict { .. }
+        | RejectionDetail::DelegatedChildIdentityCollision { .. }
+        | RejectionDetail::DelegationRelationNotFound { .. }
+        | RejectionDetail::DelegationAwaitConflict { .. }
+        | RejectionDetail::DelegationMessageConflict { .. }
+        | RejectionDetail::DelegationEventOrdinalExhausted { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
         | RejectionDetail::AcceptancePositionExhausted { .. }
@@ -7315,26 +7573,26 @@ mod tests {
         ClientFrame, ClientRequest, CommandId, ContentFragment, ConversationCursor,
         ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
         ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
-        CurrentModelCallState, DelegationOutcome, DelegationPolicy, DelegationProvenance,
-        DelegationReason, DelegationWaitMode, DescendantTerminationScope, EffectiveModelSettings,
-        ErrorCode, ErrorDetail, FailedModelCallCause, FailedModelCallDisposition,
-        FailedTerminalModelCall, FastMode, FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError,
-        FrameValidationError, GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection,
-        GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
-        ImportedConversationSourceFormat, ImportedSessionRelationship, ImportedSourceSpeaker,
-        ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
-        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
-        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
-        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
-        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, ProtocolVersion,
-        ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
-        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
-        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        CurrentModelCallState, DelegationMessageDirection, DelegationOutcome, DelegationPolicy,
+        DelegationProvenance, DelegationReason, DelegationToolRequestState, DelegationWaitMode,
+        DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail,
+        FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
+        FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
+        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+        ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
+        PROTOCOL_VERSION, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -11896,6 +12154,179 @@ mod tests {
             )
         );
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_client_requests_round_trip_their_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(34)?,
+            ClientRequest::SpawnSession {
+                session_id: uuid(1),
+                turn_id: uuid(2),
+                tool_request_id: uuid(3),
+                task: String::from("inspect the failure"),
+                relationship: DelegationPolicy::Bound {
+                    on_parent_stopped: super::BoundChildAction::Stop,
+                    on_parent_cancelled: super::BoundChildAction::Cancel,
+                },
+            },
+            r#"{"type":"spawn_session","session_id":"00000000-0000-0000-0000-000000000001","turn_id":"00000000-0000-0000-0000-000000000002","tool_request_id":"00000000-0000-0000-0000-000000000003","task":"inspect the failure","relationship":{"type":"bound","on_parent_stopped":"stop","on_parent_cancelled":"cancel"}}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(35)?,
+            ClientRequest::AwaitSession {
+                session_id: uuid(1),
+                turn_id: uuid(2),
+                tool_request_id: uuid(4),
+                child_session_id: uuid(5),
+                mode: DelegationWaitMode::Foreground,
+            },
+            r#"{"type":"await_session","session_id":"00000000-0000-0000-0000-000000000001","turn_id":"00000000-0000-0000-0000-000000000002","tool_request_id":"00000000-0000-0000-0000-000000000004","child_session_id":"00000000-0000-0000-0000-000000000005","mode":"foreground"}"#,
+        )?;
+        assert_client_request_round_trip(
+            request(36)?,
+            ClientRequest::SendSessionMessage {
+                session_id: uuid(5),
+                turn_id: uuid(6),
+                tool_request_id: uuid(7),
+                peer_session_id: uuid(1),
+                content: String::from("status update"),
+            },
+            r#"{"type":"send_session_message","session_id":"00000000-0000-0000-0000-000000000005","turn_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","peer_session_id":"00000000-0000-0000-0000-000000000001","content":"status update"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_receipts_round_trip_result_and_delivery_correlation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(37)?,
+            ServerMessage::SessionSpawned {
+                tool_request_id: uuid(3),
+                child_session_id: uuid(5),
+                relationship: DelegationPolicy::Background {},
+            },
+            r#"{"type":"session_spawned","tool_request_id":"00000000-0000-0000-0000-000000000003","child_session_id":"00000000-0000-0000-0000-000000000005","relationship":{"type":"background"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(38)?,
+            ServerMessage::SessionAwaitRegistered {
+                tool_request_id: uuid(4),
+                child_session_id: uuid(5),
+                mode: DelegationWaitMode::Background,
+            },
+            r#"{"type":"session_await_registered","tool_request_id":"00000000-0000-0000-0000-000000000004","child_session_id":"00000000-0000-0000-0000-000000000005","mode":"background"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(39)?,
+            ServerMessage::ChildResult {
+                await_request_id: uuid(4),
+                spawning_request_id: uuid(3),
+                child_session_id: uuid(5),
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("done")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: uuid(5),
+                    child_turn_id: uuid(8),
+                },
+            },
+            r#"{"type":"child_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000003","child_session_id":"00000000-0000-0000-0000-000000000005","outcome":"returned","content":"done","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000005","child_turn_id":"00000000-0000-0000-0000-000000000008"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(40)?,
+            ServerMessage::SessionMessageSent {
+                tool_request_id: uuid(7),
+                message_id: uuid(9),
+                direction: DelegationMessageDirection::ChildToParent,
+                ordinal: CanonicalU64::new(2),
+                delivery_sequence: CanonicalU64::new(7),
+            },
+            r#"{"type":"session_message_sent","tool_request_id":"00000000-0000-0000-0000-000000000007","message_id":"00000000-0000-0000-0000-000000000009","direction":"child_to_parent","ordinal":"2","delivery_sequence":"7"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_request_rejections_round_trip_closed_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(41)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("delegation request is not executable"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::DelegationToolRequestNotExecutable {
+                        tool_request_id: uuid(3),
+                        state: DelegationToolRequestState::AttemptEnded,
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"rejected","message":"delegation request is not executable","detail":{"type":"delegation_tool_request_not_executable","tool_request_id":"00000000-0000-0000-0000-000000000003","state":"attempt_ended"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(42)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("delegation event ordinal exhausted"),
+                detail: ErrorDetail::rejected(RejectionDetail::DelegationEventOrdinalExhausted {
+                    spawning_request_id: uuid(3),
+                    last: CanonicalU64::new(u64::MAX),
+                }),
+            },
+            &format!(
+                "{{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"delegation event ordinal exhausted\",\"detail\":{{\"type\":\"delegation_event_ordinal_exhausted\",\"spawning_request_id\":\"00000000-0000-0000-0000-000000000003\",\"last\":\"{}\"}}}}",
+                u64::MAX
+            ),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_invalid_content_and_receipt_shapes_fail_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let empty_task = ClientFrame::try_new(
+            request(43)?,
+            ClientRequest::SpawnSession {
+                session_id: uuid(1),
+                turn_id: uuid(2),
+                tool_request_id: uuid(3),
+                task: String::new(),
+                relationship: DelegationPolicy::Background {},
+            },
+        );
+        let repeated_request = ServerFrame::try_new(
+            request(44)?,
+            ServerMessage::ChildResult {
+                await_request_id: uuid(3),
+                spawning_request_id: uuid(3),
+                child_session_id: uuid(5),
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("done")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: uuid(5),
+                    child_turn_id: uuid(8),
+                },
+            },
+        );
+        let zero_delivery = ServerFrame::try_new(
+            request(45)?,
+            ServerMessage::SessionMessageSent {
+                tool_request_id: uuid(7),
+                message_id: uuid(9),
+                direction: DelegationMessageDirection::ParentToChild,
+                ordinal: CanonicalU64::new(1),
+                delivery_sequence: CanonicalU64::new(0),
+            },
+        );
+
+        assert_eq!(empty_task, Err(FrameValidationError::DelegationShape));
+        assert_eq!(repeated_request, Err(FrameValidationError::DelegationShape));
+        assert_eq!(zero_delivery, Err(FrameValidationError::DelegationShape));
         Ok(())
     }
 
