@@ -3,7 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, CodexCliServiceTier, DangerousToolAutoApproval,
@@ -704,9 +704,13 @@ impl Error for StoredModelSettingsError {
 struct StoredModelSettings {
     precedence: StoredModelSettingsPrecedence,
     effective: StoredEffectiveModelSettings,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     reasoning_source: Option<StoredModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     fast_mode_source: Option<StoredModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     service_tier_source: Option<StoredModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     validated_for_selection_id: Option<String>,
 }
 
@@ -814,9 +818,21 @@ enum StoredCodexCliServiceTier {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredEffectiveModelSettings {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     reasoning_level: Option<StoredReasoningLevel>,
     fast_mode: StoredFastMode,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     service_tier: Option<StoredServiceTier>,
+}
+
+fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
+    deserializer: DeserializerT,
+) -> Result<Option<ValueT>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+    ValueT: Deserialize<'de>,
+{
+    Option::<ValueT>::deserialize(deserializer)
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1252,6 +1268,37 @@ mod tests {
             .expect_err("an unknown nested service-tier member must fail closed");
 
         assert!(matches!(nested_error, StoredModelSettingsError::Json(_)));
+    }
+
+    /// INV-003: every nullable member remains required durable evidence, so
+    /// omission cannot normalize a truncated document into provider defaults.
+    #[test]
+    fn inv003_model_settings_json_rejects_missing_nullable_members() {
+        let mut missing_source =
+            model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
+        missing_source
+            .as_object_mut()
+            .expect("the fixture encoder produces an object")
+            .remove("reasoning_source");
+
+        let source_error = model_settings_from_json(missing_source)
+            .expect_err("an omitted nullable source must fail closed");
+
+        assert!(matches!(source_error, StoredModelSettingsError::Json(_)));
+
+        let mut missing_effective =
+            model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
+        missing_effective
+            .get_mut("effective")
+            .expect("the fixture contains effective settings")
+            .as_object_mut()
+            .expect("effective settings are an object")
+            .remove("service_tier");
+
+        let effective_error = model_settings_from_json(missing_effective)
+            .expect_err("an omitted nullable effective value must fail closed");
+
+        assert!(matches!(effective_error, StoredModelSettingsError::Json(_)));
     }
 
     /// INV-003: fast mode has no provider-default state in the domain, so a

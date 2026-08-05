@@ -574,6 +574,7 @@ async fn load_event(
                         prior.model_settings AS prior_defaults_model_settings,
                         installed.model_settings AS installed_defaults_model_settings,
                         changed.caller_model_settings,
+                        command.caller_model_settings AS command_caller_model_settings,
                         changed.adjustments
                    FROM session_model_settings_changed_outbox_event AS event
                    JOIN session_model_settings_changed AS changed
@@ -584,8 +585,14 @@ async fn load_event(
                      ON prior.session_id = changed.session_id
                     AND prior.version = changed.prior_defaults_version
                    JOIN session_defaults_version AS installed
-                     ON installed.session_id = changed.session_id
+                    ON installed.session_id = changed.session_id
                     AND installed.version = changed.installed_defaults_version
+                   JOIN replace_session_defaults_command AS command
+                     ON command.command_id = changed.command_id
+                    AND command.result_session_id = changed.session_id
+                    AND command.result_installed_version =
+                        changed.installed_defaults_version
+                    AND command.result_kind = 'applied'
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
@@ -605,6 +612,8 @@ async fn load_event(
             if prior_model_settings != row.try_get::<Value, _>("prior_defaults_model_settings")?
                 || installed_model_settings
                     != row.try_get::<Value, _>("installed_defaults_model_settings")?
+                || row.try_get::<Value, _>("caller_model_settings")?
+                    != row.try_get::<Value, _>("command_caller_model_settings")?
             {
                 return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
             }
@@ -672,7 +681,9 @@ async fn load_event(
                         queued.frozen_model_alias_id,
                         queued.frozen_alias_selected_direct_id,
                         queued.defaults_version AS origin_defaults_version,
-                        accepted.model_settings_override AS origin_per_call_model_settings
+                        origin_accepted.model_settings_override
+                            AS origin_per_call_model_settings,
+                        defaults.model_settings AS origin_defaults_model_settings
                    FROM turn_model_settings_resolved_outbox_event AS event
                    JOIN turn_model_settings_resolved AS settings
                      ON settings.accepted_input_id = event.accepted_input_id
@@ -680,10 +691,13 @@ async fn load_event(
                    JOIN configuration_origin AS queued
                      ON queued.session_id = settings.session_id
                     AND queued.source_configuration_turn_id IS NULL
-                   JOIN accepted_input AS accepted
-                     ON accepted.accepted_input_id = settings.accepted_input_id
-                    AND accepted.session_id = settings.session_id
-                    AND accepted.origin_turn_id = settings.turn_id
+                   JOIN accepted_input AS origin_accepted
+                     ON origin_accepted.accepted_input_id = queued.accepted_input_id
+                    AND origin_accepted.session_id = queued.session_id
+                    AND origin_accepted.origin_turn_id = queued.turn_id
+                   JOIN session_defaults_version AS defaults
+                     ON defaults.session_id = queued.session_id
+                    AND defaults.version = queued.defaults_version
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
@@ -736,8 +750,13 @@ async fn load_event(
                 row.try_get::<Value, _>("origin_per_call_model_settings")?,
             )
             .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
+            let origin_defaults = model_settings_from_json(
+                row.try_get::<Value, _>("origin_defaults_model_settings")?,
+            )
+            .map_err(|_| OutboxCorruption::InvalidModelSettingsEvent)?;
             if event.defaults_version() != origin_defaults_version
                 || event.per_call_override() != origin_per_call
+                || !crate::model_settings_resolution::matches_defaults(&event, origin_defaults)
             {
                 return Err(OutboxCorruption::InvalidModelSettingsEvent.into());
             }

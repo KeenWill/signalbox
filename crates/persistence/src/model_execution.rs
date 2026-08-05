@@ -4685,15 +4685,21 @@ async fn persist_reclassified_pending_steering(
         .execute(&mut *connection)
         .await?
         .rows_affected();
-        require_single(settings_rows, "reclassified successor model settings")?;
-        outbox::append(
-            connection,
-            OutboxEvent::TurnModelSettingsResolved {
-                session,
-                accepted_input: successor.accepted_input().id(),
-            },
-        )
-        .await?;
+        if settings_rows > 1 {
+            return Err(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Inconsistent("reclassified successor model settings"),
+            ));
+        }
+        if settings_rows == 1 {
+            outbox::append(
+                connection,
+                OutboxEvent::TurnModelSettingsResolved {
+                    session,
+                    accepted_input: successor.accepted_input().id(),
+                },
+            )
+            .await?;
+        }
 
         outbox::append(
             connection,
