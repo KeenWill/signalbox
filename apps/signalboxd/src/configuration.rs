@@ -3831,16 +3831,44 @@ extra = true"#,
         );
     }
 
+    /// S37 / INV-051: every explicit lower layer is validated even when a
+    /// higher-precedence layer masks it in the effective configuration.
     #[test]
-    fn configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
-        let configuration = CONFIGURATION
+    fn s37_inv051_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+        let profile_configuration = CONFIGURATION
             .replace(
                 "version = 1",
-                "version = 1\n\n[model_settings]\nreasoning_level = \"low\"\n\n[[model_settings_profiles]]\nname = \"provider-defaults\"\nreasoning_level = \"provider_default\"",
+                "version = 1\n\n[[model_settings_profiles]]\nname = \"provider-defaults\"\nreasoning_level = \"provider_default\"",
             )
             .replace(
                 "context_window_tokens = 200000",
                 "context_window_tokens = 200000\nsettings_profile = \"provider-defaults\"",
+            );
+        HubModelConfiguration::parse(&profile_configuration)
+            .expect("the selected profile is supported without the masked global layer");
+        let configuration = profile_configuration.replace(
+            "version = 1",
+            "version = 1\n\n[model_settings]\nreasoning_level = \"low\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: an explicit unsupported selected-profile value is
+    /// rejected even when the global layer is valid.
+    #[test]
+    fn s37_inv051_configuration_rejects_an_unsupported_selected_profile_value() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[[model_settings_profiles]]\nname = \"unsupported\"\nreasoning_level = \"low\"",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nsettings_profile = \"unsupported\"",
             );
 
         assert_eq!(
