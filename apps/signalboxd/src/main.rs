@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
@@ -54,10 +54,10 @@ use signalboxd::{
     HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     MappedDaemonCredentialInputs, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
-    usage_limits::UsageLimitedModelCallProvider,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -290,6 +290,14 @@ impl HubConfiguration {
         self.github_token_file.clone()
     }
 
+    fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
+        configuration.repository_watch().is_some_and(|watch| {
+            watch.repositories().iter().any(|repository| {
+                credential_files_conflict(&self.github_token_file, repository.credential_file())
+            })
+        })
+    }
+
     fn brave_api_key_file(&self) -> PathBuf {
         self.brave_api_key_file.clone()
     }
@@ -329,6 +337,88 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
     process_artifacts
         .iter()
         .any(|process| runner_artifacts.iter().any(|runner| runner == process))
+}
+
+fn credential_files_conflict(left: &Path, right: &Path) -> bool {
+    let left = resolved_file_reference(left);
+    let right = resolved_file_reference(right);
+    left == right || same_file_identity(&left, &right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+fn resolved_file_reference(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut resolved = normalize_file_reference(&absolute);
+    for _ in 0..40 {
+        let mut prefix = PathBuf::new();
+        let mut components = resolved.components();
+        let mut replacement = None;
+        while let Some(component) = components.next() {
+            prefix.push(component.as_os_str());
+            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
+                return resolved;
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = fs::read_link(&prefix) else {
+                return resolved;
+            };
+            let mut target = if target.is_absolute() {
+                target
+            } else {
+                prefix
+                    .parent()
+                    .map_or(target.clone(), |parent| parent.join(target))
+            };
+            target.extend(components.map(|remaining| remaining.as_os_str()));
+            replacement = Some(normalize_file_reference(&target));
+            break;
+        }
+        let Some(replacement) = replacement else {
+            return fs::canonicalize(&resolved).unwrap_or(resolved);
+        };
+        resolved = replacement;
+    }
+    resolved
+}
+
+fn normalize_file_reference(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -483,6 +573,7 @@ enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
+    RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -522,6 +613,7 @@ enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
+    RepositoryWatchCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -534,6 +626,9 @@ impl RuntimeTaskDefect {
             Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
+            Self::RepositoryWatchCompletedBeforeShutdown => {
+                "repository_watch_completed_before_shutdown"
+            }
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -742,6 +837,15 @@ fn report_runner_runtime_failure(error: &RunnerProtocolRuntimeError) {
     );
 }
 
+fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::CallerOrHubBug,
+        cause = %error,
+        "repository-watch runtime violated its lifecycle contract"
+    );
+}
+
 /// Records an unexpected top-level task state using closed evidence only.
 ///
 /// The cause names the task-control condition without formatting `JoinError`,
@@ -769,7 +873,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::Process(Ok(())))
-        | Ok(RuntimeTaskExit::Runner(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::Runner(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(()))) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -777,6 +882,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::Runner(Err(error))) => {
             report_runner_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
+        }
+        Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
+            report_repository_watch_runtime_defect(&error);
+            RuntimeTaskCompletion::Defect
         }
         Err(error) => {
             report_runtime_task_defect(joined_task_defect(&error));
@@ -919,6 +1028,16 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    if configuration.repository_watch_credential_conflicts(&model_configuration) {
+        let error = HubConfigurationError::new(
+            GITHUB_TOKEN_FILE_ENVIRONMENT,
+            RequiredSettingFailure::Conflicts,
+        );
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Configuration(&error),
+        ));
+    }
     let daemon_tool_configuration = model_configuration.daemon_tools();
     let tool_composition = match daemon_tool_configuration {
         Some(_) => DaemonToolComposition::WithMappedFamilies,
@@ -1146,6 +1265,21 @@ async fn run_hub(
         return Err(error);
     }
 
+    let repository_watch_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match RepositoryWatchRuntime::try_new(pool.clone(), configuration) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("repository_watch_transport_construction_failed"),
+                );
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
+
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1259,6 +1393,7 @@ async fn run_hub(
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
+    let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -1275,6 +1410,15 @@ async fn run_hub(
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
     });
+    if let Some(repository_watch_runtime) = repository_watch_runtime {
+        runtime_tasks.spawn(async move {
+            RuntimeTaskExit::RepositoryWatch(
+                repository_watch_runtime
+                    .run(repository_watch_shutdown_receiver)
+                    .await,
+            )
+        });
+    }
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let mut outcome = {
@@ -1312,6 +1456,16 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Err(error)))) => {
+                        report_repository_watch_runtime_defect(&error);
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -1338,6 +1492,7 @@ async fn run_hub(
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
+            let _ = repository_watch_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
@@ -1658,10 +1813,11 @@ mod tests {
         HubConfiguration, HubConfigurationError, HubConfigurationValues, HubRuntimeError,
         MODEL_CONFIGURATION_FILE_ENVIRONMENT, OperatorFilterDisposition,
         PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
-        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
+        RepositoryWatchRuntimeError, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
+        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
+        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
         database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
         migrate_scan_then_schedule, operator_filter, process_runtime_failure_class,
         report_database_close_failure, run_scheduler_until_shutdown,
@@ -2081,6 +2237,68 @@ mod tests {
     }
 
     #[test]
+    fn repository_watch_credential_cannot_equal_the_github_tool_credential() {
+        let credential = std::path::Path::new("/tmp/signalbox-github-token");
+
+        assert!(credential_files_conflict(credential, credential));
+    }
+
+    #[test]
+    fn repository_watch_credential_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let alias = directory.path().join("watch-token");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_watch_hard_link_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let hard_link = directory.path().join("watch-token");
+        std::fs::hard_link(&credential, &hard_link).expect("the credential hard link exists");
+
+        assert!(credential_files_conflict(&credential, &hard_link));
+    }
+
+    #[test]
+    fn dangling_repository_watch_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        let alias = directory.path().join("watch-token");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
+    fn unresolved_lexical_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        let alias = directory.path().join("pending/../github-token");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
+    fn dangling_intermediate_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let target_directory = directory.path().join("pending-target");
+        let alias_directory = directory.path().join("pending-alias");
+        std::os::unix::fs::symlink(&target_directory, &alias_directory)
+            .expect("the intermediate credential alias exists");
+        let credential = target_directory.join("github-token");
+        let alias = alias_directory.join("github-token");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
     fn runner_socket_cannot_collide_with_a_process_socket_sidecar() {
         let process_socket = std::path::PathBuf::from("/tmp/signalbox.sock");
         let mut runner_socket = process_socket.as_os_str().to_owned();
@@ -2491,6 +2709,15 @@ mod tests {
             completed_runtime_outcome(cause, drain),
             ShutdownOutcome::RuntimeFailedAfterGraceWindow
         );
+    }
+
+    #[test]
+    fn repository_watch_supervisor_failure_is_a_runtime_lifecycle_defect() {
+        let completion = super::runtime_task_completion(Ok(RuntimeTaskExit::RepositoryWatch(Err(
+            RepositoryWatchRuntimeError::RepositoryTaskExited,
+        ))));
+
+        assert_eq!(completion, RuntimeTaskCompletion::Defect);
     }
 
     #[test]

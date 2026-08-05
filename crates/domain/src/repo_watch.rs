@@ -347,6 +347,20 @@ impl GitHubObjectId {
     }
 }
 
+/// One positive GitHub Actions attempt number within a workflow run.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchWorkflowRunAttempt(NonZeroU64);
+
+impl RepoWatchWorkflowRunAttempt {
+    pub const fn new(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// One bounded, anchored, linear-time regular expression.
 #[derive(Clone)]
 pub struct RepoWatchPattern {
@@ -440,23 +454,6 @@ pub enum RepoWatchEventKindNameV1 {
     BaseAdvanced,
     ReactionChanged,
 }
-
-const PULL_REQUEST_EVENT_KINDS_V1: [RepoWatchEventKindNameV1; 14] = [
-    RepoWatchEventKindNameV1::PullRequestOpened,
-    RepoWatchEventKindNameV1::PullRequestClosed,
-    RepoWatchEventKindNameV1::PullRequestMerged,
-    RepoWatchEventKindNameV1::HeadChanged,
-    RepoWatchEventKindNameV1::MergeableStateChanged,
-    RepoWatchEventKindNameV1::ChecksCompleted,
-    RepoWatchEventKindNameV1::CheckRunCompleted,
-    RepoWatchEventKindNameV1::ReviewSubmitted,
-    RepoWatchEventKindNameV1::ThreadOpened,
-    RepoWatchEventKindNameV1::ThreadResolved,
-    RepoWatchEventKindNameV1::Labeled,
-    RepoWatchEventKindNameV1::Unlabeled,
-    RepoWatchEventKindNameV1::BaseAdvanced,
-    RepoWatchEventKindNameV1::ReactionChanged,
-];
 
 /// Aggregate check-suite result used by the closed version-one vocabulary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -906,13 +903,26 @@ impl RepoWatchMatcherV1 {
             && self.labels.none_of.is_empty()
             && self.draft.is_none()
             && self.author.is_none()
-            && self.kind_can_match(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+            && self.produces_context_shape(RepoWatchDispatchContextShape::Branch)
     }
 
     fn produces_pull_request_context(&self) -> bool {
-        PULL_REQUEST_EVENT_KINDS_V1
-            .into_iter()
-            .any(|kind| self.kind_can_match(kind))
+        self.produces_context_shape(RepoWatchDispatchContextShape::PullRequest)
+    }
+
+    fn produces_context_shape(&self, shape: RepoWatchDispatchContextShape) -> bool {
+        if self.event_kinds.is_empty() {
+            return match shape {
+                RepoWatchDispatchContextShape::PullRequest => {
+                    self.mergeable_state.is_empty() || self.conclusion.is_empty()
+                }
+                RepoWatchDispatchContextShape::Branch => self.mergeable_state.is_empty(),
+            };
+        }
+        self.event_kinds
+            .iter()
+            .copied()
+            .any(|kind| kind.dispatch_context_shape() == shape && self.kind_can_match(kind))
     }
 
     fn kind_can_match(&self, kind: RepoWatchEventKindNameV1) -> bool {
@@ -1003,6 +1013,28 @@ impl RepoWatchSingletonScope {
 pub enum RepoWatchDispatchContextShape {
     PullRequest,
     Branch,
+}
+
+impl RepoWatchEventKindNameV1 {
+    const fn dispatch_context_shape(self) -> RepoWatchDispatchContextShape {
+        match self {
+            Self::PullRequestOpened
+            | Self::PullRequestClosed
+            | Self::PullRequestMerged
+            | Self::HeadChanged
+            | Self::MergeableStateChanged
+            | Self::ChecksCompleted
+            | Self::CheckRunCompleted
+            | Self::ReviewSubmitted
+            | Self::ThreadOpened
+            | Self::ThreadResolved
+            | Self::Labeled
+            | Self::Unlabeled
+            | Self::BaseAdvanced
+            | Self::ReactionChanged => RepoWatchDispatchContextShape::PullRequest,
+            Self::BranchWorkflowRunCompleted => RepoWatchDispatchContextShape::Branch,
+        }
+    }
 }
 
 impl fmt::Display for RepoWatchDispatchContextShape {
