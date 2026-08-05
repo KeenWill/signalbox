@@ -1392,6 +1392,7 @@ pub struct RepoWatchRule {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchRuleValidationError {
     NoActions,
+    SubsecondCooldown,
     BranchEventWithPullRequestSingleton {
         scope: RepoWatchSingletonScope,
     },
@@ -1408,6 +1409,9 @@ impl fmt::Display for RepoWatchRuleValidationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoActions => formatter.write_str("repository-watch rule has no actions"),
+            Self::SubsecondCooldown => {
+                formatter.write_str("repository-watch cooldown must use whole seconds")
+            }
             Self::BranchEventWithPullRequestSingleton { scope } => write!(
                 formatter,
                 "repository-watch branch event cannot use `{}` singleton scope",
@@ -1439,6 +1443,9 @@ impl RepoWatchRule {
     ) -> Result<Self, RepoWatchRuleValidationError> {
         if actions.is_empty() {
             return Err(RepoWatchRuleValidationError::NoActions);
+        }
+        if cooldown.subsec_nanos() != 0 {
+            return Err(RepoWatchRuleValidationError::SubsecondCooldown);
         }
         if matcher.produces_branch_context() {
             match singleton_per {
@@ -2206,6 +2213,20 @@ mod tests {
         );
 
         assert_eq!(result, Err(RepoWatchRuleValidationError::NoActions));
+        Ok(())
+    }
+
+    #[test]
+    fn rule_rejects_a_subsecond_cooldown() -> Result<(), Box<dyn Error>> {
+        let result = RepoWatchRule::try_new(
+            RepoWatchRuleId::try_new(String::from("subsecond-cooldown"))?,
+            RepoWatchMatcherV1::default(),
+            vec![dispatch_rule_action("handler")?],
+            RepoWatchSingletonScope::PullRequest,
+            Duration::from_nanos(1),
+        );
+
+        assert_eq!(result, Err(RepoWatchRuleValidationError::SubsecondCooldown));
         Ok(())
     }
 

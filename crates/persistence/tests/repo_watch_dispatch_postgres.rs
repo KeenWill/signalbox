@@ -513,9 +513,10 @@ async fn dispatch_batch_creates_every_session_and_audit_row_atomically()
     .bind(fixture.dispatch_id.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
+    let expected_action_count = fixture.rule.actions().len();
 
-    assert_eq!(fixture.sessions.len(), 2);
-    assert_eq!(action_count, 2);
+    assert_eq!(fixture.sessions.len(), expected_action_count);
+    assert_eq!(usize::try_from(action_count)?, expected_action_count);
     Ok(())
 }
 
@@ -569,9 +570,13 @@ async fn dispatched_sessions_commit_their_initial_context_and_queued_turn_atomic
     .bind(DISPATCH_CONTEXT)
     .fetch_one(&fixture.pool)
     .await?;
+    let expected_action_count = fixture.rule.actions().len();
 
-    assert_eq!(delivery_count, 2);
-    assert_eq!(queued_context_count, 2);
+    assert_eq!(usize::try_from(delivery_count)?, expected_action_count);
+    assert_eq!(
+        usize::try_from(queued_context_count)?,
+        expected_action_count
+    );
     Ok(())
 }
 

@@ -8539,6 +8539,7 @@ pub enum RepoWatchActionV1 {
 
 pub enum RepoWatchRuleValidationError {
     NoActions,
+    SubsecondCooldown,
     BranchEventWithPullRequestSingleton { scope: RepoWatchSingletonScope },
     TemplateNotDeclared { template: SessionTemplateName },
     TemplateRejectsContext {

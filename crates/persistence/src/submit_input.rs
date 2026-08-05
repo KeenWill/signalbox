@@ -968,6 +968,10 @@ where
 /// transaction. Repository-watch dispatch uses this narrow bridge so the
 /// session, its first queued turn, and the dispatch audit become visible at
 /// one commit boundary.
+///
+/// A freshly inserted session has no active turn, so submit preparation cannot
+/// apply an interrupt. The reclassification and tool-cancellation callbacks
+/// are therefore unreachable and use the reserved identities as placeholders.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn insert_fresh_initial_input(
     connection: &mut PgConnection,

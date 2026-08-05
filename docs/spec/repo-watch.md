@@ -42,8 +42,9 @@ exist.
 
 **Implemented behavior.** The section also accepts versioned structured rules.
 Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
-more than 128 rules, more than 32 actions per rule, or cooldowns beyond signed
-64-bit seconds fail startup configuration before polling begins.
+more than 128 rules, more than 32 actions per rule, non-whole-second cooldowns,
+or cooldowns beyond signed 64-bit seconds fail startup configuration before
+polling begins.
 
 **Implemented behavior.** Repository identities normalize to ASCII lowercase at
 construction. Both slug segments are nonempty ASCII letters, digits, dots,
