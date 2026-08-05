@@ -390,6 +390,18 @@ pub enum ProcessTurnState {
         /// Last recipient-wide delivery sequence included by the wake.
         through_delivery_sequence: u64,
     },
+    /// Parent policy logically terminalized the delegated root while any
+    /// retained physical execution evidence remains inert.
+    DelegationTerminated {
+        /// Tool request that spawned the terminalized child.
+        spawning_request: ToolRequestId,
+        /// Typed stopped or cancelled outcome.
+        outcome: DispatchedDelegationOutcome,
+        /// Exact parent terminal reason.
+        reason: DispatchedDelegationReason,
+        /// Exact parent-command provenance.
+        provenance: DispatchedDelegationProvenance,
+    },
     /// The current attempt is running.
     ActiveRunning {
         /// Current live attempt.
@@ -2214,7 +2226,15 @@ async fn load_transcript_turn_count(
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM turn_lifecycle AS turn
           WHERE turn.session_id = $1
-            AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)",
+            AND (
+                goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+                OR EXISTS (
+                    SELECT 1
+                      FROM session_delegation_logical_terminal AS logical_terminal
+                     WHERE logical_terminal.child_session_id = turn.session_id
+                       AND logical_terminal.child_turn_id = turn.turn_id
+                )
+            )",
     )
     .bind(session_id_to_uuid(session))
     .fetch_one(&mut **transaction)
@@ -2406,7 +2426,19 @@ async fn load_next_transcript_turn(
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
             recovery_call.context_frontier_id AS recovery_model_call_frontier_id,
-            active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id
+            active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
+            logical_terminal.spawning_tool_request_id
+                AS logical_terminal_spawning_request_id,
+            logical_terminal_event.outcome_kind
+                AS logical_terminal_outcome_kind,
+            logical_terminal_event.reason_kind
+                AS logical_terminal_reason_kind,
+            logical_terminal_event.provenance_kind AS provenance_kind,
+            logical_terminal_event.provenance_session_id AS provenance_session_id,
+            logical_terminal_event.provenance_turn_id AS provenance_turn_id,
+            logical_terminal_event.provenance_goal_generation
+                AS provenance_goal_generation,
+            logical_terminal_event.provenance_command_id AS provenance_command_id
            FROM turn_lifecycle AS turn
            LEFT JOIN accepted_input AS accepted
              ON accepted.accepted_input_id = turn.origin_accepted_input_id
@@ -2448,8 +2480,25 @@ async fn load_next_transcript_turn(
                 turn.active_tool_round_call_id
             AND active_tool_round.turn_id = turn.turn_id
             AND active_tool_round.session_id = turn.session_id
+           LEFT JOIN session_delegation_logical_terminal AS logical_terminal
+             ON logical_terminal.child_session_id = turn.session_id
+            AND logical_terminal.child_turn_id = turn.turn_id
+           LEFT JOIN session_delegation_event AS logical_terminal_event
+             ON logical_terminal_event.spawning_tool_request_id =
+                    logical_terminal.spawning_tool_request_id
+            AND logical_terminal_event.event_kind = 'outcome_recorded'
+            AND logical_terminal_event.provenance_command_id =
+                    logical_terminal.root_command_id
+            AND logical_terminal_event.outcome_kind = CASE
+                    logical_terminal.disposition_kind
+                    WHEN 'stopped' THEN 'child_stopped'
+                    WHEN 'cancelled' THEN 'child_cancelled'
+                END
           WHERE turn.session_id = $1
-            AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+            AND (
+                goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+                OR logical_terminal.child_turn_id IS NOT NULL
+            )
             AND ($2::numeric IS NULL OR turn.acceptance_position > $2)
           ORDER BY turn.acceptance_position
           LIMIT 1",
@@ -2631,6 +2680,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         turn,
         acceptance_position,
     )?;
+    let logical_terminal = decode_logical_delegation_terminal(row)?;
     let state_kind: String = required(row, "state_kind")?;
     let start_lineage_kind: Option<String> = row.try_get("start_lineage_kind")?;
     let immediate_predecessor: Option<Uuid> = row.try_get("immediate_predecessor_turn_id")?;
@@ -2812,19 +2862,22 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("child wait frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveAwaitingChild {
-                    awaiting_request: ToolRequestId::from_uuid(awaiting_request),
-                    spawning_request: ToolRequestId::from_uuid(spawning_request),
-                    child: SessionId::from_uuid(child),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    state: ProcessTurnState::ActiveAwaitingChild {
+                        awaiting_request: ToolRequestId::from_uuid(awaiting_request),
+                        spawning_request: ToolRequestId::from_uuid(spawning_request),
+                        child: SessionId::from_uuid(child),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if matches!(active_phase.as_deref(), Some("awaiting_tool_approval")) {
@@ -2855,17 +2908,20 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("tool approval frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveAwaitingToolApproval {
-                    request: ToolRequestId::from_uuid(request),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    state: ProcessTurnState::ActiveAwaitingToolApproval {
+                        request: ToolRequestId::from_uuid(request),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if matches!(active_phase.as_deref(), Some("awaiting_tool_recovery")) {
@@ -2903,18 +2959,21 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("tool recovery frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveAwaitingToolRecovery {
-                    ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
-                    recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    state: ProcessTurnState::ActiveAwaitingToolRecovery {
+                        ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
+                        recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if matches!(active_phase.as_deref(), Some("running")) && active_tool_round_call.is_some() {
@@ -2944,18 +3003,21 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("running tool frontier").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ActiveRunning {
-                    current_attempt: TurnAttemptId::from_uuid(attempt),
-                    current_model_call: None,
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    state: ProcessTurnState::ActiveRunning {
+                        current_attempt: TurnAttemptId::from_uuid(attempt),
+                        current_model_call: None,
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(latest_frontier),
             },
-            start_lineage,
-            latest_frontier: Some(latest_frontier),
-        });
+            logical_terminal,
+        );
     }
 
     if state_kind == "terminal"
@@ -2981,21 +3043,24 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         {
             return Err(ProcessReadCorruption::Inconsistent("tool reconciliation shape").into());
         }
-        return Ok(DecodedTurn {
-            turn: ProcessTranscriptTurn {
-                turn,
-                acceptance_position,
-                state: ProcessTurnState::ReconciliationRequired {
-                    terminal_frontier: ContextFrontierId::from_uuid(frontier),
-                    terminal_attempt: TurnAttemptId::from_uuid(attempt),
-                    operation: ProcessReconciliationOperation::ToolAttempt(
-                        ToolAttemptId::from_uuid(tool_attempt),
-                    ),
+        return project_logical_delegation_terminal(
+            DecodedTurn {
+                turn: ProcessTranscriptTurn {
+                    turn,
+                    acceptance_position,
+                    state: ProcessTurnState::ReconciliationRequired {
+                        terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                        terminal_attempt: TurnAttemptId::from_uuid(attempt),
+                        operation: ProcessReconciliationOperation::ToolAttempt(
+                            ToolAttemptId::from_uuid(tool_attempt),
+                        ),
+                    },
                 },
+                start_lineage,
+                latest_frontier: Some(ContextFrontierId::from_uuid(frontier)),
             },
-            start_lineage,
-            latest_frontier: Some(ContextFrontierId::from_uuid(frontier)),
-        });
+            logical_terminal,
+        );
     }
 
     if active_tool_round_call.is_some()
@@ -3277,15 +3342,91 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         }
     };
 
-    Ok(DecodedTurn {
-        turn: ProcessTranscriptTurn {
-            turn,
-            acceptance_position,
-            state,
+    project_logical_delegation_terminal(
+        DecodedTurn {
+            turn: ProcessTranscriptTurn {
+                turn,
+                acceptance_position,
+                state,
+            },
+            start_lineage,
+            latest_frontier,
         },
-        start_lineage,
-        latest_frontier,
-    })
+        logical_terminal,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct LogicalDelegationTerminalProjection {
+    spawning_request: ToolRequestId,
+    outcome: DispatchedDelegationOutcome,
+    reason: DispatchedDelegationReason,
+    provenance: DispatchedDelegationProvenance,
+}
+
+fn decode_logical_delegation_terminal(
+    row: &PgRow,
+) -> Result<Option<LogicalDelegationTerminalProjection>, ProcessReadError> {
+    let spawning_request: Option<Uuid> = row.try_get("logical_terminal_spawning_request_id")?;
+    let outcome: Option<String> = row.try_get("logical_terminal_outcome_kind")?;
+    let reason: Option<String> = row.try_get("logical_terminal_reason_kind")?;
+    match (spawning_request, outcome.as_deref(), reason.as_deref()) {
+        (None, None, None) => Ok(None),
+        (Some(spawning_request), Some(outcome), Some(reason)) => {
+            let outcome = decode_delegation_outcome(outcome).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("logical delegation terminal outcome")
+            })?;
+            let reason = decode_delegation_reason(reason).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("logical delegation terminal reason")
+            })?;
+            let provenance = decode_delegation_provenance(row).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("logical delegation terminal provenance")
+            })?;
+            if !matches!(
+                (outcome, reason),
+                (
+                    DispatchedDelegationOutcome::ChildStopped,
+                    DispatchedDelegationReason::ParentStoppedWithDescendants
+                ) | (
+                    DispatchedDelegationOutcome::ChildCancelled,
+                    DispatchedDelegationReason::ParentCancelledWithDescendants
+                )
+            ) || !matches!(
+                provenance,
+                DispatchedDelegationProvenance::ParentTurnCommand { .. }
+                    | DispatchedDelegationProvenance::ParentGoalCommand { .. }
+            ) {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "logical delegation terminal shape",
+                )
+                .into());
+            }
+            Ok(Some(LogicalDelegationTerminalProjection {
+                spawning_request: ToolRequestId::from_uuid(spawning_request),
+                outcome,
+                reason,
+                provenance,
+            }))
+        }
+        _ => Err(
+            ProcessReadCorruption::Inconsistent("logical delegation terminal correlation").into(),
+        ),
+    }
+}
+
+fn project_logical_delegation_terminal(
+    mut decoded: DecodedTurn,
+    logical_terminal: Option<LogicalDelegationTerminalProjection>,
+) -> Result<DecodedTurn, ProcessReadError> {
+    if let Some(logical_terminal) = logical_terminal {
+        decoded.turn.state = ProcessTurnState::DelegationTerminated {
+            spawning_request: logical_terminal.spawning_request,
+            outcome: logical_terminal.outcome,
+            reason: logical_terminal.reason,
+            provenance: logical_terminal.provenance,
+        };
+    }
+    Ok(decoded)
 }
 
 async fn open_transcript_entry_cursor(

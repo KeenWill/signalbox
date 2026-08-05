@@ -427,6 +427,16 @@ signal as `Cancelled`, and the application returns `NoWork`; it never converts
 authoritative cancellation into the guarded known-failure closure for a call
 that may already be terminal (INV-037).
 
+**SPEC PROPOSAL — parent-cascade cancellation.** The same poll treats an exact
+delegation logical-terminal proof as authoritative cancellation even though the
+retained model-call row may still say `Prepared` or `InFlight`. Capability work
+then returns `NoWork`; invocation cancellation reaches the provider. If a
+provider response wins physically but its observation transaction reloads after
+the parent cascade committed, the transaction discards that response and the
+application returns `NoWork`. It never derives a second turn outcome, overwrites
+the delivered child result, or substitutes provider provenance for the parent
+command. This proposal is accepted with the implementing stack's merge.
+
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
    call with its pinned non-secret credential reference

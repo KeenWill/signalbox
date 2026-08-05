@@ -278,6 +278,7 @@ impl PostgresToolLoopRepository {
               WHERE session_id = $1
                 AND state_kind = 'active'
                 AND active_tool_round_call_id IS NOT NULL
+                AND goal_turn_is_runtime_relevant(session_id, turn_id)
                 AND (
                     active_phase_kind = 'running'
                     OR (
@@ -1241,7 +1242,8 @@ pub(crate) async fn load_active_batch_from_connection(
           WHERE session_id = $1
             AND turn_id = $2
             AND state_kind = 'active'
-            AND active_tool_round_call_id IS NOT NULL",
+            AND active_tool_round_call_id IS NOT NULL
+            AND goal_turn_is_runtime_relevant(session_id, turn_id)",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))

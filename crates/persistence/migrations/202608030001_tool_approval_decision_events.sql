@@ -7,8 +7,7 @@ ALTER TABLE outbox_event
                 'turn_activated', 'turn_failed', 'model_call_transition',
                 'tool_batch_transition', 'tool_approval_decided',
                 'context_compacted', 'turn_completed', 'turn_refused',
-                'turn_cancelled', 'turn_reconciliation_required',
-                'delegation_update', 'delegation_wake'
+                'turn_cancelled', 'turn_reconciliation_required'
             )
         );
 
@@ -212,8 +211,6 @@ BEGIN
         WHEN 'model_call_transition' THEN SELECT count(*) INTO matching_records FROM model_call_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'tool_batch_transition' THEN SELECT count(*) INTO matching_records FROM tool_batch_transition_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'tool_approval_decided' THEN SELECT count(*) INTO matching_records FROM tool_approval_decided_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'delegation_update' THEN SELECT count(*) INTO matching_records FROM delegation_update_outbox_event WHERE event_sequence = NEW.event_sequence;
-        WHEN 'delegation_wake' THEN SELECT count(*) INTO matching_records FROM delegation_wake_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'context_compacted' THEN SELECT count(*) INTO matching_records FROM context_compacted_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'turn_completed' THEN SELECT count(*) INTO matching_records FROM turn_completed_outbox_event WHERE event_sequence = NEW.event_sequence;
         WHEN 'turn_refused' THEN SELECT count(*) INTO matching_records FROM turn_refused_outbox_event WHERE event_sequence = NEW.event_sequence;
