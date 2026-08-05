@@ -591,7 +591,7 @@ async fn append_raw_delegation_update(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
             VALUES ('delegation_update', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
@@ -691,7 +691,7 @@ async fn append_raw_parent_lifecycle_update(
                       provenance_kind, provenance_session_id,
                       provenance_turn_id, provenance_command_id
          ), header AS (
-            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
             VALUES ('delegation_update', 1, $2)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
@@ -771,7 +771,7 @@ async fn append_raw_result_wake(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
             VALUES ('delegation_wake', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
@@ -796,7 +796,7 @@ async fn append_raw_message_wake(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
             VALUES ('delegation_wake', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
@@ -936,7 +936,7 @@ async fn append_raw_message_update(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
             VALUES ('delegation_update', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
@@ -1636,7 +1636,7 @@ async fn inv032_delegation_result_wake_requires_its_subject_shape() -> Result<()
         prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let wake_error = sqlx::query(
         "WITH header AS (
-            INSERT INTO outbox_event(event_kind, storage_version, session_id)
+            INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
             VALUES ('delegation_wake', 1, $1)
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
