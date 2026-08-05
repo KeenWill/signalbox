@@ -3397,7 +3397,9 @@ impl ClientRequest {
             | Self::CompactSession { .. }
             | Self::ReadTranscript { .. }
             | Self::FollowSession { .. }
+            | Self::SpawnSession { .. }
             | Self::AwaitSession { .. }
+            | Self::SendSessionMessage { .. }
             | Self::ListSessionMetadata { .. }
             | Self::ListConversations { .. }
             | Self::ListModelAliases {}
@@ -3436,16 +3438,6 @@ impl ClientRequest {
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
             | Self::DecideToolRequest { .. } => {}
-            Self::SpawnSession { task, .. } => {
-                if !delegation_content_is_valid(task) {
-                    return Err(FrameValidationError::DelegationShape);
-                }
-            }
-            Self::SendSessionMessage { content, .. } => {
-                if !delegation_content_is_valid(content) {
-                    return Err(FrameValidationError::DelegationShape);
-                }
-            }
         }
         match self {
             Self::CreateSession { placement, .. }
@@ -7617,6 +7609,36 @@ mod tests {
 
     fn uuid(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// Arbitrary distinct identities whose field names preserve delegation wire roles.
+    #[derive(Clone, Copy)]
+    struct DelegationWireIdentities {
+        parent_session: CanonicalUuid,
+        parent_turn: CanonicalUuid,
+        spawning_request: CanonicalUuid,
+        await_request: CanonicalUuid,
+        child_session: CanonicalUuid,
+        child_message_turn: CanonicalUuid,
+        message_request: CanonicalUuid,
+        terminal_child_turn: CanonicalUuid,
+        message: CanonicalUuid,
+        parent_command: CanonicalUuid,
+    }
+
+    fn delegation_wire_identities() -> DelegationWireIdentities {
+        DelegationWireIdentities {
+            parent_session: uuid(1),
+            parent_turn: uuid(2),
+            spawning_request: uuid(3),
+            await_request: uuid(4),
+            child_session: uuid(5),
+            child_message_turn: uuid(6),
+            message_request: uuid(7),
+            terminal_child_turn: uuid(8),
+            message: uuid(9),
+            parent_command: uuid(10),
+        }
     }
 
     fn settings_snapshot_fixture() -> ModelSettingsSnapshot {
@@ -12160,12 +12182,17 @@ mod tests {
     #[test]
     fn inv033_delegation_client_requests_round_trip_their_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
+        const SPAWN_FRAME_REQUEST: u64 = 34;
+        const AWAIT_FRAME_REQUEST: u64 = 35;
+        const MESSAGE_FRAME_REQUEST: u64 = 36;
+        let ids = delegation_wire_identities();
+
         assert_client_request_round_trip(
-            request(34)?,
+            request(SPAWN_FRAME_REQUEST)?,
             ClientRequest::SpawnSession {
-                session_id: uuid(1),
-                turn_id: uuid(2),
-                tool_request_id: uuid(3),
+                session_id: ids.parent_session,
+                turn_id: ids.parent_turn,
+                tool_request_id: ids.spawning_request,
                 task: String::from("inspect the failure"),
                 relationship: DelegationPolicy::Bound {
                     on_parent_stopped: super::BoundChildAction::Stop,
@@ -12175,23 +12202,23 @@ mod tests {
             r#"{"type":"spawn_session","session_id":"00000000-0000-0000-0000-000000000001","turn_id":"00000000-0000-0000-0000-000000000002","tool_request_id":"00000000-0000-0000-0000-000000000003","task":"inspect the failure","relationship":{"type":"bound","on_parent_stopped":"stop","on_parent_cancelled":"cancel"}}"#,
         )?;
         assert_client_request_round_trip(
-            request(35)?,
+            request(AWAIT_FRAME_REQUEST)?,
             ClientRequest::AwaitSession {
-                session_id: uuid(1),
-                turn_id: uuid(2),
-                tool_request_id: uuid(4),
-                child_session_id: uuid(5),
+                session_id: ids.parent_session,
+                turn_id: ids.parent_turn,
+                tool_request_id: ids.await_request,
+                child_session_id: ids.child_session,
                 mode: DelegationWaitMode::Foreground,
             },
             r#"{"type":"await_session","session_id":"00000000-0000-0000-0000-000000000001","turn_id":"00000000-0000-0000-0000-000000000002","tool_request_id":"00000000-0000-0000-0000-000000000004","child_session_id":"00000000-0000-0000-0000-000000000005","mode":"foreground"}"#,
         )?;
         assert_client_request_round_trip(
-            request(36)?,
+            request(MESSAGE_FRAME_REQUEST)?,
             ClientRequest::SendSessionMessage {
-                session_id: uuid(5),
-                turn_id: uuid(6),
-                tool_request_id: uuid(7),
-                peer_session_id: uuid(1),
+                session_id: ids.child_session,
+                turn_id: ids.child_message_turn,
+                tool_request_id: ids.message_request,
+                peer_session_id: ids.parent_session,
                 content: String::from("status update"),
             },
             r#"{"type":"send_session_message","session_id":"00000000-0000-0000-0000-000000000005","turn_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","peer_session_id":"00000000-0000-0000-0000-000000000001","content":"status update"}"#,
@@ -12202,45 +12229,51 @@ mod tests {
     #[test]
     fn inv033_delegation_receipts_round_trip_result_and_delivery_correlation()
     -> Result<(), Box<dyn std::error::Error>> {
+        const SPAWN_RECEIPT_REQUEST: u64 = 37;
+        const AWAIT_RECEIPT_REQUEST: u64 = 38;
+        const RESULT_RECEIPT_REQUEST: u64 = 39;
+        const MESSAGE_RECEIPT_REQUEST: u64 = 40;
+        let ids = delegation_wire_identities();
+
         assert_server_message_round_trip(
-            request(37)?,
+            request(SPAWN_RECEIPT_REQUEST)?,
             ServerMessage::SessionSpawned {
-                tool_request_id: uuid(3),
-                child_session_id: uuid(5),
+                tool_request_id: ids.spawning_request,
+                child_session_id: ids.child_session,
                 relationship: DelegationPolicy::Background {},
             },
             r#"{"type":"session_spawned","tool_request_id":"00000000-0000-0000-0000-000000000003","child_session_id":"00000000-0000-0000-0000-000000000005","relationship":{"type":"background"}}"#,
         )?;
         assert_server_message_round_trip(
-            request(38)?,
+            request(AWAIT_RECEIPT_REQUEST)?,
             ServerMessage::SessionAwaitRegistered {
-                tool_request_id: uuid(4),
-                child_session_id: uuid(5),
+                tool_request_id: ids.await_request,
+                child_session_id: ids.child_session,
                 mode: DelegationWaitMode::Background,
             },
             r#"{"type":"session_await_registered","tool_request_id":"00000000-0000-0000-0000-000000000004","child_session_id":"00000000-0000-0000-0000-000000000005","mode":"background"}"#,
         )?;
         assert_server_message_round_trip(
-            request(39)?,
+            request(RESULT_RECEIPT_REQUEST)?,
             ServerMessage::ChildResult {
-                await_request_id: uuid(4),
-                spawning_request_id: uuid(3),
-                child_session_id: uuid(5),
+                await_request_id: ids.await_request,
+                spawning_request_id: ids.spawning_request,
+                child_session_id: ids.child_session,
                 outcome: DelegationOutcome::Returned,
                 content: Some(String::from("done")),
                 reason: DelegationReason::ChildCompleted,
                 provenance: DelegationProvenance::ChildTurn {
-                    child_session_id: uuid(5),
-                    child_turn_id: uuid(8),
+                    child_session_id: ids.child_session,
+                    child_turn_id: ids.terminal_child_turn,
                 },
             },
             r#"{"type":"child_result","await_request_id":"00000000-0000-0000-0000-000000000004","spawning_request_id":"00000000-0000-0000-0000-000000000003","child_session_id":"00000000-0000-0000-0000-000000000005","outcome":"returned","content":"done","reason":"child_completed","provenance":{"type":"child_turn","child_session_id":"00000000-0000-0000-0000-000000000005","child_turn_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
-            request(40)?,
+            request(MESSAGE_RECEIPT_REQUEST)?,
             ServerMessage::SessionMessageSent {
-                tool_request_id: uuid(7),
-                message_id: uuid(9),
+                tool_request_id: ids.message_request,
+                message_id: ids.message,
                 direction: DelegationMessageDirection::ChildToParent,
                 ordinal: CanonicalU64::new(2),
                 delivery_sequence: CanonicalU64::new(7),
@@ -12253,14 +12286,18 @@ mod tests {
     #[test]
     fn inv033_delegation_request_rejections_round_trip_closed_evidence()
     -> Result<(), Box<dyn std::error::Error>> {
+        const NOT_EXECUTABLE_FRAME_REQUEST: u64 = 41;
+        const ORDINAL_EXHAUSTED_FRAME_REQUEST: u64 = 42;
+        let ids = delegation_wire_identities();
+
         assert_server_message_round_trip(
-            request(41)?,
+            request(NOT_EXECUTABLE_FRAME_REQUEST)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
                 message: String::from("delegation request is not executable"),
                 detail: ErrorDetail::rejected(
                     RejectionDetail::DelegationToolRequestNotExecutable {
-                        tool_request_id: uuid(3),
+                        tool_request_id: ids.spawning_request,
                         state: DelegationToolRequestState::AttemptEnded,
                     },
                 ),
@@ -12268,12 +12305,12 @@ mod tests {
             r#"{"type":"error","code":"rejected","message":"delegation request is not executable","detail":{"type":"delegation_tool_request_not_executable","tool_request_id":"00000000-0000-0000-0000-000000000003","state":"attempt_ended"}}"#,
         )?;
         assert_server_message_round_trip(
-            request(42)?,
+            request(ORDINAL_EXHAUSTED_FRAME_REQUEST)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
                 message: String::from("delegation event ordinal exhausted"),
                 detail: ErrorDetail::rejected(RejectionDetail::DelegationEventOrdinalExhausted {
-                    spawning_request_id: uuid(3),
+                    spawning_request_id: ids.spawning_request,
                     last: CanonicalU64::new(u64::MAX),
                 }),
             },
@@ -12286,45 +12323,141 @@ mod tests {
     }
 
     #[test]
-    fn inv033_delegation_invalid_content_and_receipt_shapes_fail_closed()
+    fn inv033_delegation_request_content_validation_is_left_to_application_input()
     -> Result<(), Box<dyn std::error::Error>> {
+        const EMPTY_TASK_FRAME_REQUEST: u64 = 43;
+        const NUL_MESSAGE_FRAME_REQUEST: u64 = 44;
+        const OVERSIZED_TASK_FRAME_REQUEST: u64 = 45;
+        let ids = delegation_wire_identities();
         let empty_task = ClientFrame::try_new(
-            request(43)?,
+            request(EMPTY_TASK_FRAME_REQUEST)?,
             ClientRequest::SpawnSession {
-                session_id: uuid(1),
-                turn_id: uuid(2),
-                tool_request_id: uuid(3),
+                session_id: ids.parent_session,
+                turn_id: ids.parent_turn,
+                tool_request_id: ids.spawning_request,
                 task: String::new(),
                 relationship: DelegationPolicy::Background {},
             },
+        )?;
+        let nul_message = ClientFrame::try_new(
+            request(NUL_MESSAGE_FRAME_REQUEST)?,
+            ClientRequest::SendSessionMessage {
+                session_id: ids.child_session,
+                turn_id: ids.child_message_turn,
+                tool_request_id: ids.message_request,
+                peer_session_id: ids.parent_session,
+                content: String::from("status\0update"),
+            },
+        )?;
+        let oversized_task = ClientFrame::try_new(
+            request(OVERSIZED_TASK_FRAME_REQUEST)?,
+            ClientRequest::SpawnSession {
+                session_id: ids.parent_session,
+                turn_id: ids.parent_turn,
+                tool_request_id: ids.spawning_request,
+                task: "x".repeat(MAX_CONTENT_FRAGMENT_BYTES + 1),
+                relationship: DelegationPolicy::Background {},
+            },
+        )?;
+
+        assert_eq!(
+            decode_client_line(&encode_client_line(&empty_task)?)?,
+            empty_task
         );
-        let repeated_request = ServerFrame::try_new(
-            request(44)?,
+        assert_eq!(
+            decode_client_line(&encode_client_line(&nul_message)?)?,
+            nul_message
+        );
+        assert_eq!(
+            decode_client_line(&encode_client_line(&oversized_task)?)?,
+            oversized_task
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_parent_caused_child_results_keep_policy_action_separate_from_parent_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const STOPPED_BY_CANCEL_FRAME_REQUEST: u64 = 46;
+        const CANCELLED_BY_STOP_FRAME_REQUEST: u64 = 47;
+        let ids = delegation_wire_identities();
+        let stopped_by_parent_cancel = ServerFrame::try_new(
+            request(STOPPED_BY_CANCEL_FRAME_REQUEST)?,
             ServerMessage::ChildResult {
-                await_request_id: uuid(3),
-                spawning_request_id: uuid(3),
-                child_session_id: uuid(5),
+                await_request_id: ids.await_request,
+                spawning_request_id: ids.spawning_request,
+                child_session_id: ids.child_session,
+                outcome: DelegationOutcome::Stopped,
+                content: None,
+                reason: DelegationReason::ParentCancelled,
+                provenance: DelegationProvenance::ParentTurnCommand {
+                    parent_session_id: ids.parent_session,
+                    parent_turn_id: ids.parent_turn,
+                    command_id: ids.parent_command,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            },
+        )?;
+        let cancelled_by_parent_stop = ServerFrame::try_new(
+            request(CANCELLED_BY_STOP_FRAME_REQUEST)?,
+            ServerMessage::ChildResult {
+                await_request_id: ids.await_request,
+                spawning_request_id: ids.spawning_request,
+                child_session_id: ids.child_session,
+                outcome: DelegationOutcome::Cancelled,
+                content: None,
+                reason: DelegationReason::ParentStopped,
+                provenance: DelegationProvenance::ParentTurnCommand {
+                    parent_session_id: ids.parent_session,
+                    parent_turn_id: ids.parent_turn,
+                    command_id: ids.parent_command,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            },
+        )?;
+
+        assert_eq!(
+            decode_server_line(&encode_server_line(&stopped_by_parent_cancel)?)?,
+            stopped_by_parent_cancel
+        );
+        assert_eq!(
+            decode_server_line(&encode_server_line(&cancelled_by_parent_stop)?)?,
+            cancelled_by_parent_stop
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_receipt_shapes_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        const REPEATED_REQUEST_FRAME_REQUEST: u64 = 48;
+        const ZERO_DELIVERY_FRAME_REQUEST: u64 = 49;
+        let ids = delegation_wire_identities();
+        let repeated_request = ServerFrame::try_new(
+            request(REPEATED_REQUEST_FRAME_REQUEST)?,
+            ServerMessage::ChildResult {
+                await_request_id: ids.spawning_request,
+                spawning_request_id: ids.spawning_request,
+                child_session_id: ids.child_session,
                 outcome: DelegationOutcome::Returned,
                 content: Some(String::from("done")),
                 reason: DelegationReason::ChildCompleted,
                 provenance: DelegationProvenance::ChildTurn {
-                    child_session_id: uuid(5),
-                    child_turn_id: uuid(8),
+                    child_session_id: ids.child_session,
+                    child_turn_id: ids.terminal_child_turn,
                 },
             },
         );
         let zero_delivery = ServerFrame::try_new(
-            request(45)?,
+            request(ZERO_DELIVERY_FRAME_REQUEST)?,
             ServerMessage::SessionMessageSent {
-                tool_request_id: uuid(7),
-                message_id: uuid(9),
+                tool_request_id: ids.message_request,
+                message_id: ids.message,
                 direction: DelegationMessageDirection::ParentToChild,
                 ordinal: CanonicalU64::new(1),
                 delivery_sequence: CanonicalU64::new(0),
             },
         );
 
-        assert_eq!(empty_task, Err(FrameValidationError::DelegationShape));
         assert_eq!(repeated_request, Err(FrameValidationError::DelegationShape));
         assert_eq!(zero_delivery, Err(FrameValidationError::DelegationShape));
         Ok(())
