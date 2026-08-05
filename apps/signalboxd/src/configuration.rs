@@ -24,12 +24,13 @@ use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefiniti
 use signalbox_model_runtime::{
     AnthropicServiceTier as RuntimeAnthropicServiceTier,
     CodexCliServiceTier as RuntimeCodexCliServiceTier, CredentialAccess, CredentialAccessError,
-    CredentialAccessFailure, CredentialReference, CredentialValue,
+    CredentialAccessFailure, CredentialReference, CredentialValue, FastMode as RuntimeFastMode,
     FastModeTarget as RuntimeFastModeTarget, ModelCapabilities as RuntimeModelCapabilities,
     ModelCapabilityCatalog as RuntimeModelCapabilityCatalog,
     ModelCapabilityDefinition as RuntimeModelCapabilityDefinition,
-    OpenAiServiceTier as RuntimeOpenAiServiceTier, ReasoningLevel as RuntimeReasoningLevel,
-    ResolvedTarget as RuntimeResolvedTarget, ServiceTier as RuntimeServiceTier,
+    ModelSettings as RuntimeModelSettings, OpenAiServiceTier as RuntimeOpenAiServiceTier,
+    ReasoningLevel as RuntimeReasoningLevel, ResolvedTarget as RuntimeResolvedTarget,
+    ServiceTier as RuntimeServiceTier,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -654,7 +655,19 @@ impl HubModelConfiguration {
             capabilities
                 .validate_explicit(selection, profile)
                 .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
-            capabilities
+            let global_settings = capabilities
+                .validate_precedence(
+                    selection,
+                    ModelSettingsPrecedence::new(
+                        ModelSettingsOverlay::inherit_all(),
+                        ModelSettingsOverlay::inherit_all(),
+                        ModelSettingsOverlay::inherit_all(),
+                        global_model_settings,
+                    ),
+                )
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            validate_adapter_model_settings(mapping.adapter, max_output_tokens, global_settings)?;
+            let configured_settings = capabilities
                 .validate_precedence(
                     selection,
                     ModelSettingsPrecedence::new(
@@ -665,6 +678,11 @@ impl HubModelConfiguration {
                     ),
                 )
                 .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            validate_adapter_model_settings(
+                mapping.adapter,
+                max_output_tokens,
+                configured_settings,
+            )?;
             model_settings_lower_layers.insert(
                 selection,
                 ModelSettingsLowerLayers {
@@ -1841,6 +1859,30 @@ const fn runtime_service_tier(value: ServiceTier) -> RuntimeServiceTier {
             CodexCliServiceTier::Flex => RuntimeCodexCliServiceTier::Flex,
         }),
     }
+}
+
+fn validate_adapter_model_settings(
+    adapter: ModelAdapter,
+    max_output_tokens: u32,
+    settings: ValidatedModelSettings,
+) -> Result<(), HubModelConfigurationError> {
+    let effective = settings.effective();
+    let mut runtime = RuntimeModelSettings::new(max_output_tokens);
+    runtime.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
+    runtime.fast_mode = match effective.fast_mode() {
+        FastMode::Disabled => RuntimeFastMode::Disabled,
+        FastMode::Enabled => RuntimeFastMode::Enabled,
+    };
+    runtime.service_tier = effective.service_tier().map(runtime_service_tier);
+    let supported = match adapter {
+        ModelAdapter::Anthropic => {
+            signalbox_model_runtime_anthropic::validate_model_settings(&runtime)
+        }
+        ModelAdapter::CodexCli => {
+            signalbox_model_runtime_codex_cli::validate_model_settings(&runtime)
+        }
+    };
+    supported.map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)
 }
 
 fn parse_model_capabilities(
@@ -3869,6 +3911,46 @@ extra = true"#,
             .replace(
                 "context_window_tokens = 200000",
                 "context_window_tokens = 200000\nsettings_profile = \"unsupported\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: a selected profile cannot combine individually
+    /// supported controls that its adapter cannot enforce together.
+    #[test]
+    fn s37_inv051_configuration_rejects_an_adapter_incompatible_selected_profile() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[[model_settings_profiles]]\nname = \"incompatible\"\nfast_mode = \"enabled\"\nservice_tier = { provider = \"anthropic\", value = \"auto\" }",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"request_control\"\nservice_tiers = [\"auto\"]\nsettings_profile = \"incompatible\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: an adapter-incompatible global combination remains
+    /// invalid when a selected profile masks it with a supported combination.
+    #[test]
+    fn s37_inv051_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[model_settings]\nfast_mode = \"enabled\"\nservice_tier = { provider = \"anthropic\", value = \"auto\" }\n\n[[model_settings_profiles]]\nname = \"standard-tier\"\nservice_tier = { provider = \"anthropic\", value = \"standard_only\" }",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"request_control\"\nservice_tiers = [\"auto\", \"standard_only\"]\nsettings_profile = \"standard-tier\"",
             );
 
         assert_eq!(

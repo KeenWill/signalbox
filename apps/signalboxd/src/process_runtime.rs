@@ -8000,13 +8000,11 @@ where
         }
         Ok(ProcessSessionDefaultsRead::Read(read)) if read.version() > expected_version => None,
         Ok(ProcessSessionDefaultsRead::Read(_)) => {
-            let placeholder = SessionConfigurationDefaults::complete_with_model_settings(
+            let placeholder = SessionConfigurationDefaults::complete(
                 replacement_model,
                 dangerous_tool_auto_approval,
                 system_prompt.clone(),
-                ValidatedModelSettings::provider_defaults(),
-            )
-            .ok_or(ProcessConnectionError::EncodeInvariant)?;
+            );
             let command = DomainReplaceSessionDefaults::with_model_settings_adjustments(
                 durable_command_id,
                 session,
@@ -8015,35 +8013,14 @@ where
                 caller_model_settings,
                 Vec::new(),
             );
-            match repository
-                .handle_rejection_only_where_prompt_member(command, prompt_member)
-                .await
-            {
-                Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome)) => {
-                    let outcome = match outcome {
-                        ReplaceSessionDefaultsHandlingOutcome::Applied(result) => {
-                            ReplaceSessionDefaultsOutcome::Recorded(
-                                ReplaceSessionDefaultsResult::Applied(result),
-                            )
-                        }
-                        ReplaceSessionDefaultsHandlingOutcome::Rejected(result) => {
-                            ReplaceSessionDefaultsOutcome::Recorded(
-                                ReplaceSessionDefaultsResult::Rejected(result),
-                            )
-                        }
-                        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id } => {
-                            ReplaceSessionDefaultsOutcome::ConflictingReuse { command_id }
-                        }
-                        ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember => {
-                            ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember
-                        }
-                    };
+            match handle_defaults_rejection_only(&repository, command, prompt_member).await {
+                Ok(Some(outcome)) => {
                     return write_replace_session_defaults_outcome(
                         writer, version, request_id, session_id, outcome,
                     )
                     .await;
                 }
-                Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched) => {
+                Ok(None) => {
                     match ProcessReadRepository::new(pool.clone())
                         .read_session_defaults(session, Some(expected_version))
                         .await
@@ -8147,13 +8124,62 @@ where
         ) {
             Ok(settings) => settings,
             Err(error) => {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    model_settings_protocol_error(error),
-                )
-                .await;
+                // Validation used an unlocked defaults snapshot. Re-enter the
+                // pointer-locked rejection boundary before surfacing the
+                // caller error, so a racing advance records and replays its
+                // authoritative mismatch instead.
+                let placeholder = SessionConfigurationDefaults::complete(
+                    replacement_model,
+                    dangerous_tool_auto_approval,
+                    system_prompt.clone(),
+                );
+                let command = DomainReplaceSessionDefaults::with_model_settings_adjustments(
+                    durable_command_id,
+                    session,
+                    expected_version,
+                    placeholder,
+                    caller_model_settings,
+                    Vec::new(),
+                );
+                match handle_defaults_rejection_only(&repository, command, prompt_member).await {
+                    Ok(Some(outcome)) => {
+                        return write_replace_session_defaults_outcome(
+                            writer, version, request_id, session_id, outcome,
+                        )
+                        .await;
+                    }
+                    Ok(None) => {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            model_settings_protocol_error(error),
+                        )
+                        .await;
+                    }
+                    Err(ReplaceSessionDefaultsRepositoryError::Database {
+                        commit_ambiguous,
+                        ..
+                    }) => {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::mutation_unavailable(commit_ambiguous),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let diagnostic = session_defaults_internal_diagnostic(&error);
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            internal_protocol_error(Some(session_id.into_uuid()), diagnostic),
+                        )
+                        .await;
+                    }
+                }
             }
         },
         // A stale epoch can never move backward, and an absent session must be
@@ -8245,6 +8271,37 @@ where
             .await
         }
     }
+}
+
+async fn handle_defaults_rejection_only(
+    repository: &ReplaceSessionDefaultsRepository,
+    command: DomainReplaceSessionDefaults,
+    prompt_member: PromptMemberStatement,
+) -> Result<Option<ReplaceSessionDefaultsOutcome>, ReplaceSessionDefaultsRepositoryError> {
+    let outcome = repository
+        .handle_rejection_only_where_prompt_member(command, prompt_member)
+        .await?;
+    Ok(match outcome {
+        ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched => None,
+        ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome) => Some(match outcome {
+            ReplaceSessionDefaultsHandlingOutcome::Applied(result) => {
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
+                    result,
+                ))
+            }
+            ReplaceSessionDefaultsHandlingOutcome::Rejected(result) => {
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
+                    result,
+                ))
+            }
+            ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id } => {
+                ReplaceSessionDefaultsOutcome::ConflictingReuse { command_id }
+            }
+            ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember => {
+                ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember
+            }
+        }),
+    })
 }
 
 async fn write_replace_session_defaults_outcome<Writer>(

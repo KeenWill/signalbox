@@ -428,7 +428,11 @@ boundary that must defer settings validation may ask this same transaction to
 admit rejection only: a mismatch is recorded, while an expected version that is
 current under the lock rolls back the command claim and applies nothing. Equal
 replay and cross-kind identifier reuse resolve through the same fail-closed
-reconstitute-and-compare path as `CreateSession` (INV-012).
+reconstitute-and-compare path as `CreateSession` (INV-012). Before returning a
+settings-validation error after an unlocked read, the adapter repeats this
+rejection-only admission: a concurrent pointer advance records its authoritative
+mismatch, while a current expected version under the lock linearizes the caller
+error before any later advance.
 
 Why (compare-and-set): the caller names the version its intent was formed
 against, so a racing replacement surfaces as a typed rejection instead of a

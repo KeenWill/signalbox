@@ -440,7 +440,9 @@ Omission means inherit; reasoning and service tier also accept
 `provider_default`, while fast mode accepts `enabled` or `disabled`. A service
 tier is a provider-tagged inline table. Duplicate profile names, unknown profile
 references, malformed values, or a configured lower-layer value outside the
-selected model's capabilities fail startup. The precedence and durable
+selected model's capabilities fail startup. A lower-layer combination that the
+selected adapter cannot enforce also fails startup, including a global
+combination masked by the selected profile. The precedence and durable
 provenance of these layers are owned by
 [Model and session settings](model-session-settings.md).
 
