@@ -703,33 +703,50 @@ bound is rejected before its contents are read. There is no newline trimming or
 interpolation.
 
 One valid table becomes an immutable resolved bundle containing the exact model
-request, system prompt, and dangerous-tool blanket. Its content digest is
-domain-separated SHA-256 over length-framed canonical values. Each frame is an
-unsigned 64-bit big-endian byte length followed by that many exact bytes. The
-frames, in order, are: ASCII `signalbox/session-template/content-digest/v1`; the
-template version as eight unsigned big-endian bytes; ASCII `direct` or `alias`;
-the selected UUID as its 16 network-order bytes; ASCII `disabled` or
-`approve_all`; and the exact UTF-8 prompt bytes. The name and source form are
-excluded: an inline and file-backed prompt with the same version and bundle have
-the same digest, while changing any copied value or the template version changes
-it. The stable vector for version 7, alias
+request, copied model-settings snapshot, system prompt, and dangerous-tool
+blanket. Its content digest is domain-separated SHA-256 over length-framed
+canonical values. Each frame is an unsigned 64-bit big-endian byte length
+followed by that many exact bytes. The frames, in order, are: ASCII
+`signalbox/session-template/content-digest/v2`; the template version as eight
+unsigned big-endian bytes; ASCII `direct` or `alias`; the selected UUID as its
+16 network-order bytes; ASCII `disabled` or `approve_all`; the exact UTF-8
+prompt bytes; and the 32-byte canonical model-settings digest described below.
+The name and source form are excluded: an inline and file-backed prompt with the
+same version and bundle have the same digest, while changing any copied value or
+the template version changes it. The stable vector for version 7, alias
 `30000000-0000-4000-8000-000000000003`, `ApproveAll`, and prompt
-`Review the change and report concrete findings.` is hexadecimal
-`00c08275577e73f1565716b5c886861a0f19ea4f2c9cb9e8f93034d030b9796d`. The daemon
+`Review the change and report concrete findings.`, with provider-default model
+settings is hexadecimal
+`88de5be79c6130058e68541d508a2ceabe99e25331bd24a9fdc4a9e34d34d8ba`. The daemon
 exposes only sorted name/version summaries to clients; clients never receive
 prompt text or parse this file.
 
+The canonical model-settings digest uses the same framing. Its first frame is
+ASCII `signalbox/model-settings/snapshot-digest/v1`. For each precedence layer
+in `per_call`, `session`, `profile`, `global_default` order, it then frames that
+layer name followed by its reasoning, fast-mode, and service-tier contribution.
+Reasoning uses `inherit`, `provider_default`, or the lowercase domain level;
+fast mode uses `inherit`, `disabled`, or `enabled`; and service tier uses
+`inherit`, `provider_default`, or its lowercase provider and value separated by
+`:` (the Codex CLI provider tag is `codex_cli`). The final frame is
+`unbound_provider_defaults`, or `validated_selection` followed by the validating
+direct selection's 16 network-order UUID bytes. Resolved values and source
+labels are not repeated because the admitted snapshot derives them uniquely from
+this complete precedence chain.
+
 Review orchestration retains a second digest for each generated template. It is
 domain-separated SHA-256 over the same unsigned-64-bit length framing. Its
-frames, in order, are ASCII `signalbox/review-template/orchestration-digest/v1`;
+frames, in order, are ASCII `signalbox/review-template/orchestration-digest/v2`;
 the exact stage or concern key; the source version as eight unsigned big-endian
 bytes; ASCII `direct` or `alias`; the selected UUID's 16 network-order bytes;
 ASCII `disabled` or `approve_all`; SHA-256 of the exact shared-header bytes; and
-SHA-256 of the exact body bytes. The key frame makes equal prompt bytes used for
-different stages or concerns distinct orchestration inputs. This orchestration
-digest does not replace the ordinary content digest: template provenance uses
-the complete assembled prompt digest above, while the immutable orchestration
-attempt uses the header/body/key-aware digest.
+SHA-256 of the exact body bytes; and the generated template's 32-byte ordinary
+content digest. The key frame makes equal prompt bytes used for different stages
+or concerns distinct orchestration inputs. The content-digest frame binds the
+copied model-settings snapshot as well as the assembled prompt. This
+orchestration digest does not replace the ordinary content digest: template
+provenance uses the complete assembled bundle digest above, while the immutable
+orchestration attempt uses the header/body/key-aware digest.
 
 Creation by template name first consults the user-global durable-command
 registry by command identity. An existing create-session claim is reconstituted

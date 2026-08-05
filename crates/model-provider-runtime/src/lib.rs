@@ -1028,11 +1028,16 @@ impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
 fn runtime_model_settings(
     max_output_tokens: u32,
     validated: ValidatedModelSettings,
+    fast_mode_encoded_by_target: bool,
 ) -> ModelSettings {
     let effective = validated.effective();
     let mut settings = ModelSettings::new(max_output_tokens);
     settings.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
-    settings.fast_mode = runtime_fast_mode(effective.fast_mode());
+    settings.fast_mode = if fast_mode_encoded_by_target {
+        RuntimeFastMode::Disabled
+    } else {
+        runtime_fast_mode(effective.fast_mode())
+    };
     settings.service_tier = effective.service_tier().map(runtime_service_tier);
     settings
 }
@@ -1127,6 +1132,7 @@ where
             runtime_model_settings(
                 effective_definition.max_output_tokens(),
                 request.model_settings(),
+                effective_definition.target() != definition.target(),
             ),
         );
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
@@ -1239,6 +1245,7 @@ where
             runtime_model_settings(
                 effective_definition.max_output_tokens(),
                 request.model_settings(),
+                effective_definition.target() != definition.target(),
             ),
         );
         // The session system prompt frozen through the calling turn's
@@ -3205,7 +3212,7 @@ mod tests {
             .validate_precedence(selection, precedence)
             .expect("fixture settings are declared by the capability record");
 
-        let mapped = runtime_model_settings(512, validated);
+        let mapped = runtime_model_settings(512, validated, false);
 
         assert_eq!(mapped.max_output_tokens, 512);
         assert_eq!(mapped.reasoning_level, Some(RuntimeReasoningLevel::Max));
@@ -3215,6 +3222,36 @@ mod tests {
             Some(RuntimeServiceTier::OpenAi(
                 signalbox_model_runtime::OpenAiServiceTier::Priority
             ))
+        );
+    }
+
+    #[test]
+    fn mapped_fast_target_consumes_the_request_toggle() {
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(1));
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::new(),
+            FastModeSupport::AlternateTarget(target(2)),
+            BTreeSet::new(),
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::new(
+                SettingOverlay::Inherit,
+                FastModeOverlay::Value(FastMode::Enabled),
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let validated = capabilities
+            .validate_precedence(selection, precedence)
+            .expect("mapped fast serving is declared by the capability record");
+
+        let mapped = runtime_model_settings(512, validated, true);
+
+        assert_eq!(
+            mapped.fast_mode,
+            signalbox_model_runtime::FastMode::Disabled
         );
     }
 

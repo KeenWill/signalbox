@@ -448,20 +448,23 @@ fn insert_review_template(
             defaults,
         },
     );
-    Ok(derive_review_template_digest(review_key, body, source))
+    Ok(derive_review_template_digest(
+        review_key, body, source, digest,
+    ))
 }
 
 fn derive_review_template_digest(
     review_key: &str,
     body: &str,
     source: &ReviewTemplateSource<'_>,
+    content_digest: SessionTemplateContentDigest,
 ) -> ReviewTemplateDigest {
     let shared_header_digest = Sha256::digest(source.shared_header.as_bytes());
     let body_digest = Sha256::digest(body.as_bytes());
     let mut digest = Sha256::new();
     update_digest_frame(
         &mut digest,
-        b"signalbox/review-template/orchestration-digest/v1",
+        b"signalbox/review-template/orchestration-digest/v2",
     );
     update_digest_frame(&mut digest, review_key.as_bytes());
     update_digest_frame(&mut digest, &source.version.as_u64().to_be_bytes());
@@ -482,6 +485,7 @@ fn derive_review_template_digest(
     update_digest_frame(&mut digest, approval);
     update_digest_frame(&mut digest, &shared_header_digest);
     update_digest_frame(&mut digest, &body_digest);
+    update_digest_frame(&mut digest, content_digest.as_bytes());
     ReviewTemplateDigest::new(digest.finalize().into())
 }
 
@@ -865,9 +869,9 @@ mod tests {
     const REVIEW_CONCERN_SET_VERSION: &str = "initial-v1";
     const INLINE_PROMPT: &str = "Review the change and report concrete findings.";
     const EXPECTED_TEMPLATE_DIGEST: [u8; 32] = [
-        0x00, 0xc0, 0x82, 0x75, 0x57, 0x7e, 0x73, 0xf1, 0x56, 0x57, 0x16, 0xb5, 0xc8, 0x86, 0x86,
-        0x1a, 0x0f, 0x19, 0xea, 0x4f, 0x2c, 0x9c, 0xb9, 0xe8, 0xf9, 0x30, 0x34, 0xd0, 0x30, 0xb9,
-        0x79, 0x6d,
+        0x88, 0xde, 0x5b, 0xe7, 0x9c, 0x61, 0x30, 0x05, 0x8e, 0x68, 0x54, 0x1d, 0x50, 0x8a, 0x2c,
+        0xea, 0xbe, 0x99, 0xe2, 0x53, 0x31, 0xbd, 0x24, 0xa9, 0xfd, 0xc4, 0xa9, 0xe3, 0x4d, 0x34,
+        0xd8, 0xba,
     ];
 
     fn models() -> HubModelConfiguration {
@@ -1049,6 +1053,40 @@ documentation-code-drift = "Find documentation drift."
             settings.resolved().reasoning_source(),
             Some(ModelSettingSource::GlobalDefault)
         );
+    }
+
+    /// INV-047: immutable template provenance binds the copied settings
+    /// snapshot as well as the model, approval posture, and prompt.
+    #[test]
+    fn inv047_template_content_digest_commits_copied_model_settings() {
+        let provider_defaults = SessionTemplateConfiguration::parse_at(
+            &inline_catalog(""),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("provider-default template catalog loads");
+        let configured_reasoning = SessionTemplateConfiguration::parse_at(
+            &inline_catalog(""),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models_with_global_reasoning(),
+        )
+        .expect("settings-aware template catalog loads");
+        let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())
+            .expect("fixture template name is admitted");
+        let provider_default_digest = provider_defaults
+            .resolve(&name)
+            .expect("provider-default template resolves")
+            .provenance()
+            .content_digest();
+        let configured_digest = configured_reasoning
+            .resolve(&name)
+            .expect("settings-aware template resolves")
+            .provenance()
+            .content_digest();
+
+        assert_ne!(provider_default_digest, configured_digest);
     }
 
     #[test]
@@ -1461,6 +1499,51 @@ dangerous_tool_auto_approval = false
         let security = attempt.concerns()[3].template_digest();
 
         assert_ne!(correctness, security);
+    }
+
+    #[test]
+    fn review_digest_commits_copied_model_settings() {
+        let provider_defaults = SessionTemplateConfiguration::parse_at(
+            &review_catalog(""),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models(),
+        )
+        .expect("provider-default review library loads");
+        let configured_reasoning = SessionTemplateConfiguration::parse_at(
+            &review_catalog(""),
+            Path::new("deployment/session-templates.toml"),
+            None,
+            &models_with_global_reasoning(),
+        )
+        .expect("settings-aware review library loads");
+        let provider_default_selection = provider_defaults
+            .configured_review_selection()
+            .expect("provider-default review library has a selection")
+            .clone();
+        let configured_selection = configured_reasoning
+            .configured_review_selection()
+            .expect("settings-aware review library has a selection")
+            .clone();
+        let provider_default_attempt = provider_defaults
+            .resolve_review_attempt(
+                ReviewOrchestrationAttemptId::from_uuid(uuid::Uuid::from_u128(45)),
+                ReviewTargetId::from_uuid(uuid::Uuid::from_u128(46)),
+                &provider_default_selection,
+            )
+            .expect("provider-default review attempt resolves");
+        let configured_attempt = configured_reasoning
+            .resolve_review_attempt(
+                ReviewOrchestrationAttemptId::from_uuid(uuid::Uuid::from_u128(47)),
+                ReviewTargetId::from_uuid(uuid::Uuid::from_u128(48)),
+                &configured_selection,
+            )
+            .expect("settings-aware review attempt resolves");
+
+        assert_ne!(
+            provider_default_attempt.stage_templates().import(),
+            configured_attempt.stage_templates().import()
+        );
     }
 
     #[test]

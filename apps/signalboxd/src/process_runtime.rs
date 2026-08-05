@@ -7986,14 +7986,20 @@ where
         }
     }
     let prior_model_settings = match ProcessReadRepository::new(pool.clone())
-        .read_session_defaults(session, Some(expected_version))
+        .read_session_defaults(session, None)
         .await
     {
-        Ok(ProcessSessionDefaultsRead::Read(read)) => read.defaults().model_settings(),
+        Ok(ProcessSessionDefaultsRead::Read(read)) if read.version() == expected_version => {
+            Some(read.defaults().model_settings())
+        }
+        Ok(ProcessSessionDefaultsRead::Read(read)) if read.version() > expected_version => None,
+        Ok(ProcessSessionDefaultsRead::Read(_)) => {
+            Some(ValidatedModelSettings::provider_defaults())
+        }
         Ok(
             ProcessSessionDefaultsRead::SessionNotFound
             | ProcessSessionDefaultsRead::VersionNotFound,
-        ) => ValidatedModelSettings::provider_defaults(),
+        ) => Some(ValidatedModelSettings::provider_defaults()),
         Err(ProcessReadError::Database(_)) => {
             return write_error(
                 writer,
@@ -8016,21 +8022,45 @@ where
             .await;
         }
     };
-    let (model_settings, model_settings_adjustments) = match validate_replacement_model_settings(
-        model_configuration,
-        replacement_model,
-        caller_model_settings,
-        prior_model_settings,
-    ) {
-        Ok(settings) => settings,
-        Err(error) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                model_settings_protocol_error(error),
+    let (model_settings, model_settings_adjustments) = match prior_model_settings {
+        Some(prior_model_settings) => match validate_replacement_model_settings(
+            model_configuration,
+            replacement_model,
+            caller_model_settings,
+            prior_model_settings,
+        ) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    model_settings_protocol_error(error),
+                )
+                .await;
+            }
+        },
+        // A current epoch later than the caller's expectation can never move
+        // backward. Preserve the canonical caller overlay while supplying an
+        // inert replacement snapshot so the atomic command boundary records
+        // and replays its authoritative version-mismatch result first.
+        None => {
+            if model_configuration
+                .resolve_direct_selection(replacement_model)
+                .is_none()
+            {
+                return write_error(
+                    writer,
+                    version,
+                    request_id,
+                    model_settings_protocol_error(ModelSettingsAdmissionError::UnknownModel),
+                )
+                .await;
+            }
+            (
+                ValidatedModelSettings::provider_defaults(),
+                Vec::<DomainModelChangeAdjustment>::new().into_boxed_slice(),
             )
-            .await;
         }
     };
     let Some(replacement) = SessionConfigurationDefaults::complete_with_model_settings(

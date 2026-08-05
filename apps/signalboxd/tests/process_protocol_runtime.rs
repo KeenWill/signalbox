@@ -5797,6 +5797,74 @@ async fn s37_inv012_defaults_replacement_replays_after_capability_removal()
     runtime.stop().await
 }
 
+/// S37 / INV-012: a stale replacement records and replays its authoritative
+/// version mismatch before current capability validation can reject settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_stale_defaults_replacement_precedes_settings_validation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let expected_version = CanonicalU64::new(1);
+    let current_version = CanonicalU64::new(2);
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: expected_version,
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let applied =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+    let stale = ClientRequest::ReplaceSessionDefaults {
+        command_id: command()?,
+        session_id,
+        expected_defaults_version: expected_version,
+        model_selection: ModelSelection::Direct {
+            selection_id: next_direct_selection_id(),
+        },
+        model_settings: ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+            fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        },
+        dangerous_tool_auto_approval: false,
+        system_prompt: SystemPromptMember::present(None),
+    };
+    let expected_rejection = RejectionDetail::DefaultsVersionMismatch {
+        session_id,
+        expected: expected_version,
+        current: current_version,
+    };
+
+    connection.request(3, stale.clone()).await?;
+    let first = rejected_detail(response_within(&mut connection).await?.message());
+    connection.request(4, stale).await?;
+    let replayed = rejected_detail(response_within(&mut connection).await?.message());
+
+    assert_eq!(applied.defaults_version, current_version);
+    assert_eq!(first, expected_rejection);
+    assert_eq!(replayed, expected_rejection);
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S01 / S03 / INV-005 / INV-014 / INV-015: explicit compaction uses a
 /// dedicated scripted call, retains the complete transcript and exact usage /
 /// range provenance, survives startup scan, and projects summary plus suffix
