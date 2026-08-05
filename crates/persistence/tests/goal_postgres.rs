@@ -3024,13 +3024,19 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             ),
         ]
     );
-    let delivered: (i64, i64, i64, i64) = sqlx::query_as(
+    let delivered: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*)::bigint FROM session_child_result
               WHERE spawning_tool_request_id = $1),
             (SELECT count(*)::bigint FROM delegation_update_outbox_event
               WHERE provenance_command_id = $2
-                AND update_kind = 'child_lifecycle_disposition'),
+                AND update_kind = 'child_lifecycle_disposition'
+                AND session_id = $3),
+            (SELECT count(*)::bigint FROM delegation_update_outbox_event
+                AS addressed
+              WHERE addressed.provenance_command_id = $2
+                AND addressed.update_kind = 'child_lifecycle_disposition'
+                AND addressed.session_id = addressed.child_session_id),
             (SELECT count(*)::bigint FROM delegation_update_outbox_event
               WHERE provenance_command_id = $2
                 AND update_kind = 'child_result'),
@@ -3039,9 +3045,37 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     )
     .bind(Uuid::from_u128(bound_request))
     .bind(Uuid::from_u128(stop_command))
+    .bind(Uuid::from_u128(parent))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(delivered, (1, 3, 2, 1));
+    assert_eq!(delivered, (1, 3, 2, 2, 1));
+    let terminalized_children: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT session_id, child_session_id, outcome_kind
+           FROM delegation_update_outbox_event
+          WHERE provenance_command_id = $1
+            AND update_kind = 'child_lifecycle_disposition'
+            AND session_id <> $2
+          ORDER BY child_session_id",
+    )
+    .bind(Uuid::from_u128(stop_command))
+    .bind(Uuid::from_u128(parent))
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        terminalized_children,
+        [
+            (
+                Uuid::from_u128(bound_child),
+                Uuid::from_u128(bound_child),
+                "child_stopped".into(),
+            ),
+            (
+                Uuid::from_u128(queued_bound_child),
+                Uuid::from_u128(queued_bound_child),
+                "child_cancelled".into(),
+            ),
+        ]
+    );
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         model_calls.cancellation_signal(session(bound_child), call),
