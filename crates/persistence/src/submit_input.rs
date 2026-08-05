@@ -1049,6 +1049,7 @@ pub(crate) async fn insert_fresh_initial_input(
         |_| turn,
         |_| (Vec::new(), cancellation_frontier),
         select_definition,
+        None,
     )
     .await?;
     match outcome {
