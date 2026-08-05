@@ -515,10 +515,19 @@ pub struct RepoWatchObservation {
 impl RepoWatchObservation {
     pub fn new(
         mut signal_reviewers: Vec<RepoWatchAuthorLogin>,
-        state: RepoWatchRepositoryState,
+        mut state: RepoWatchRepositoryState,
     ) -> Self {
         signal_reviewers.sort();
         signal_reviewers.dedup();
+        for pull_request in &mut state.pull_requests {
+            pull_request.reactions = pull_request
+                .reactions
+                .iter()
+                .filter(|reaction| signal_reviewers.binary_search(reaction.reactor()).is_ok())
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+        }
         Self {
             signal_reviewers: signal_reviewers.into_boxed_slice(),
             state,
@@ -2891,6 +2900,26 @@ mod tests {
         assert_eq!(
             observation.signal_reviewers(),
             [second, reviewer("z-reviewer")?]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn observation_excludes_reactions_from_non_signal_reviewers() -> Result<(), Box<dyn Error>> {
+        let observation = observation(
+            vec![pull_request(PullRequestFacts {
+                reactions: vec![reaction()?],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+
+        assert!(
+            observation.state().pull_requests()[0]
+                .reactions()
+                .is_empty()
         );
         Ok(())
     }
