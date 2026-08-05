@@ -55,6 +55,7 @@ owned by a sibling page is linked, never restated.
 - [Persistence protocol](persistence-protocol.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Model-runtime substrate](runtime-substrate.md)
+- [Model and session settings](model-session-settings.md)
 - [Configuration and credentials](configuration-and-credentials.md)
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)

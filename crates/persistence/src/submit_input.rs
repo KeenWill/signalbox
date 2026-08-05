@@ -949,6 +949,7 @@ where
                     }
                     signalbox_domain::ActiveTurnPhase::Running { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
+                    | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. }
                     | signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. } => None,
                 });
             if let Some(IssuedOperationRef::ToolAttempt(recovery_attempt)) = recovery_operation {
@@ -1362,6 +1363,9 @@ async fn prepare_against_locked_state(
             SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
                 SubmitInputCorruption::Inconsistent("interrupt queue order").into()
             }
+            SubmitInputPreparationFailure::ModelSettingsResolution(_) => {
+                SubmitInputCorruption::Inconsistent("model settings resolution").into()
+            }
         })
 }
 
@@ -1471,6 +1475,7 @@ pub(crate) async fn load_scheduling_projection(
             turn.active_tool_round_call_id,
             turn.approval_tool_request_id,
             turn.recovery_tool_attempt_id,
+            turn.child_wait_request_id,
             turn.model_identity_boundary_required,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
@@ -1722,6 +1727,7 @@ pub(crate) async fn load_scheduling_projection(
         let active_tool_round: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
         let approval_tool_request: Option<Uuid> = row.try_get("approval_tool_request_id")?;
         let recovery_tool_attempt: Option<Uuid> = row.try_get("recovery_tool_attempt_id")?;
+        let child_wait_request: Option<Uuid> = row.try_get("child_wait_request_id")?;
         let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
         let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
         let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
@@ -1738,6 +1744,7 @@ pub(crate) async fn load_scheduling_projection(
                     || active_tool_round.is_some()
                     || approval_tool_request.is_some()
                     || recovery_tool_attempt.is_some()
+                    || child_wait_request.is_some()
                     || terminal_attempt.is_some()
                     || terminal_model_call.is_some()
                     || terminal_tool_attempt.is_some()
@@ -2056,6 +2063,47 @@ pub(crate) async fn load_scheduling_projection(
                             }
                         }
                     }
+                    Some("awaiting_child")
+                        if current_attempt.is_none()
+                            && recovery_model_call.is_none()
+                            && approval_tool_request.is_none()
+                            && recovery_tool_attempt.is_none() =>
+                    {
+                        let round_call = active_tool_round
+                            .ok_or(SubmitInputCorruption::Missing("active_tool_round_call_id"))?;
+                        let awaiting_request = child_wait_request
+                            .ok_or(SubmitInputCorruption::Missing("child_wait_request_id"))?;
+                        let batch = load_active_batch_from_connection(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Missing("active tool batch"))?;
+                        if batch.producing_call().into_uuid() != round_call
+                            || !matches!(
+                                batch.phase(),
+                                signalbox_domain::ToolBatchPhase::AwaitingChild { request, .. }
+                                    if request.into_uuid() == awaiting_request
+                            )
+                        {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "foreground child wait evidence",
+                            )
+                            .into());
+                        }
+                        required_frontiers
+                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
+                        required_model_calls.insert(round_call);
+                        ActiveTurnSchedulingReconstitutionInput::awaiting_child(
+                            lifecycle_turn,
+                            &batch,
+                        )
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "foreground child wait batch evidence",
+                        ))?
+                    }
                     Some(value) => {
                         return Err(SubmitInputCorruption::Unsupported {
                             field: "active phase kind",
@@ -2083,6 +2131,7 @@ pub(crate) async fn load_scheduling_projection(
                     || active_tool_round.is_some()
                     || approval_tool_request.is_some()
                     || recovery_tool_attempt.is_some()
+                    || child_wait_request.is_some()
                 {
                     return Err(SubmitInputCorruption::Inconsistent(
                         "terminal scheduling lifecycle",
@@ -6344,6 +6393,8 @@ fn decode_applied_turn_origin(
             defaults,
             stored_requested_model,
             stored_frozen_model,
+            stored_model_settings: None,
+            stored_model_settings_adjustments: Vec::new(),
         },
     ))
 }

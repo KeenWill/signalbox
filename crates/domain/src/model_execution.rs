@@ -28,7 +28,7 @@ use crate::{
     SubmitInputResult, SubmitInputTurnOriginReconstitutionInput, ToolApprovalDecision,
     ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
     ToolUsingAssistantResponse, TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    UnstoppedAttemptDisposition, UserContent, ValidatedModelSettings,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -536,6 +536,7 @@ impl ModelCallExecution {
                 .configuration
                 .effective()
                 .dangerous_tool_auto_approval(),
+            model_settings: self.configuration.effective().model_settings(),
             call: prepared.call().clone(),
             frontier_entries: self.frontier_entries.clone(),
             origin_contents: self.origin_contents.clone(),
@@ -733,6 +734,7 @@ impl ModelCallExecution {
                 .configuration
                 .effective()
                 .dangerous_tool_auto_approval(),
+            model_settings: self.configuration.effective().model_settings(),
             call: call.clone(),
             frontier_entries: self.frontier_entries.clone(),
             origin_contents,
@@ -1410,6 +1412,7 @@ pub struct PreparedModelCallRequest {
     turn: TurnId,
     attempt: TurnAttemptId,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    model_settings: ValidatedModelSettings,
     call: CurrentModelCall,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
@@ -1434,6 +1437,11 @@ impl PreparedModelCallRequest {
     /// Returns the dangerous blanket-auto posture frozen into this call's turn.
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
+    }
+
+    /// Returns the complete validated settings frozen for this turn.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
     }
 
     /// Borrows the exact prepared call.
@@ -6297,6 +6305,20 @@ mod tests {
                 .as_str(),
             "hello"
         );
+    }
+
+    /// S37: a resumed prepared request carries the turn's exact frozen
+    /// validated model settings.
+    #[test]
+    fn prepared_request_carries_the_turns_exact_validated_model_settings() {
+        let execution = prepared_execution();
+        let expected = execution.configuration().effective().model_settings();
+
+        let request = execution
+            .resume_prepared_call()
+            .expect("a committed prepared call yields its frozen settings");
+
+        assert_eq!(request.model_settings(), expected);
     }
 
     /// S02 / INV-005: resuming a prepared call renders only content named by
