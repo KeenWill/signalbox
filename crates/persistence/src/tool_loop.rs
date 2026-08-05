@@ -3190,7 +3190,7 @@ async fn inspect_registry(
         })
 }
 
-async fn lock_tool_session(
+pub(crate) async fn lock_tool_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), ToolLoopRepositoryError> {
