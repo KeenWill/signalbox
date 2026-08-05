@@ -350,33 +350,39 @@ pub struct DeliveredChildResult {
 }
 
 impl DeliveredChildResult {
-    /// Admits only terminal outcomes with provenance valid for this child.
+    /// Admits only a deliverable outcome event from the exact validated relation.
     pub fn try_new(
-        child: SessionId,
-        outcome: DelegationOutcome,
+        relation: &SessionDelegation,
+        event: &DelegationEvent,
     ) -> Result<Self, DeliveredChildResultError> {
-        let provenance = outcome.provenance();
-        let valid = match outcome.kind() {
-            DelegationOutcomeKind::ResultReturned | DelegationOutcomeKind::ChildFailed => {
-                provenance
-                    .child_turn()
-                    .is_some_and(|(source, _)| source == child)
-            }
-            DelegationOutcomeKind::ChildStopped => provenance.parent_command().is_some(),
-            DelegationOutcomeKind::ChildCancelled => {
-                provenance
-                    .child_turn()
-                    .is_some_and(|(source, _)| source == child)
-                    || provenance.parent_command().is_some()
-            }
+        let Some(outcome) = event.outcome() else {
+            return Err(DeliveredChildResultError {
+                spawning_request: relation.spawning_request(),
+                event: Box::new(event.clone()),
+            });
+        };
+        let valid_kind = match outcome.kind() {
+            DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled => true,
             DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
                 false
             }
         };
-        if !valid {
-            return Err(DeliveredChildResultError { child, outcome });
+        if relation.lifecycle() != signalbox_domain::DelegationLifecycle::Terminal
+            || !valid_kind
+            || !relation.events().iter().any(|candidate| candidate == event)
+        {
+            return Err(DeliveredChildResultError {
+                spawning_request: relation.spawning_request(),
+                event: Box::new(event.clone()),
+            });
         }
-        Ok(Self { child, outcome })
+        Ok(Self {
+            child: relation.child(),
+            outcome: outcome.clone(),
+        })
     }
 
     /// Returns the child whose terminal result is delivered.
@@ -405,23 +411,23 @@ impl DeliveredChildResult {
     }
 }
 
-/// A nonterminal or cross-wired outcome was offered for result delivery.
+/// A nonterminal or cross-wired relationship event was offered for delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResultError {
-    child: SessionId,
-    outcome: DelegationOutcome,
+    spawning_request: ToolRequestId,
+    event: Box<DelegationEvent>,
 }
 
 impl DeliveredChildResultError {
     /// Returns the unchanged rejected input.
-    pub fn into_parts(self) -> (SessionId, DelegationOutcome) {
-        (self.child, self.outcome)
+    pub fn into_parts(self) -> (ToolRequestId, DelegationEvent) {
+        (self.spawning_request, *self.event)
     }
 }
 
 impl fmt::Display for DeliveredChildResultError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("delegation outcome is not deliverable for the selected child")
+        formatter.write_str("delegation event is not deliverable for the selected relationship")
     }
 }
 
@@ -443,7 +449,7 @@ pub enum AwaitSessionPortOutcome {
     BackgroundRegistered(AwaitSessionReceipt),
     /// A foreground result already existed and is deliverable immediately.
     Delivered(DeliveredChildResult),
-    /// The foreground wait was durably registered and requires scheduler parking.
+    /// The foreground wait and physical-attempt closure were atomically parked.
     ForegroundPending(DelegationWait),
     /// Domain or durable admission definitively refused the request.
     Rejected,
@@ -464,8 +470,10 @@ pub trait SessionDelegationPort: Send {
 
     /// Registers or observes one wait without waiting for child completion.
     ///
-    /// A pending foreground result returns [`AwaitSessionPortOutcome::ForegroundPending`]
-    /// immediately after its durable registration; it never retains this future.
+    /// Before returning [`AwaitSessionPortOutcome::ForegroundPending`], the port
+    /// commits the wait registration, physical-attempt closure, and turn
+    /// `AwaitingChild` state in one durable transaction. The returned handoff
+    /// stops local execution; it does not authorize a later parking write.
     fn await_session(
         &mut self,
         request: DelegationAwaitRequest,

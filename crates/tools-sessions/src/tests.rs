@@ -10,10 +10,11 @@ use serde_json::{Value, json};
 use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
 use signalbox_domain::{
     ContextFrontierId, DescendantTerminationScope, DurableCommandId, GoalGeneration, ModelCallId,
-    ResolvedContextFrontierReconstitutionInput, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
-    ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
+    ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptId, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolName, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, TurnAttemptId, TurnId,
 };
 use signalbox_tool_contract::rendered_contract_schema;
 
@@ -330,7 +331,59 @@ fn assert_definition(catalog: &CompiledToolCatalog, name: &str, effect: ToolEffe
     assert_eq!(definition.effect_class(), effect);
 }
 
+#[track_caller]
+fn single_spawn_request(port: &FakePort) -> &DelegatedSpawnRequest {
+    assert_eq!(port.spawn_requests.len(), 1);
+    &port.spawn_requests[0]
+}
+
+#[track_caller]
+fn single_message_request(port: &FakePort) -> &DelegationMessageRequest {
+    assert_eq!(port.message_requests.len(), 1);
+    &port.message_requests[0]
+}
+
+fn terminal_relation(
+    spawning_request: ToolRequest,
+    child: SessionId,
+    child_turn: TurnId,
+    outcome: DelegationOutcome,
+) -> (SessionDelegation, DelegationEvent) {
+    let spawning_request = decoded_spawn(&spawning_request);
+    let spawned = DelegationEvent::Spawned {
+        ordinal: DelegationEventOrdinal::new(NonZeroU64::MIN),
+        provenance: DelegationProvenance::from_spawn(&spawning_request),
+    };
+    let outcome_event = DelegationEvent::OutcomeRecorded {
+        ordinal: DelegationEventOrdinal::new(
+            NonZeroU64::new(2).expect("fixture outcome ordinal is positive"),
+        ),
+        outcome,
+    };
+    let relation = SessionDelegationReconstitutionInput::new(
+        spawning_request,
+        child,
+        child_turn,
+        vec![spawned, outcome_event.clone()],
+    )
+    .reconstitute()
+    .expect("fixture terminal relationship reconstitutes");
+    (relation, outcome_event)
+}
+
+fn delivered_result(
+    spawning_request: ToolRequest,
+    child: SessionId,
+    child_turn: TurnId,
+    outcome: DelegationOutcome,
+) -> DeliveredChildResult {
+    let (relation, event) = terminal_relation(spawning_request, child, child_turn, outcome);
+    DeliveredChildResult::try_new(&relation, &event)
+        .expect("fixture relationship result is deliverable")
+}
+
 fn returned_result(child: SessionId) -> DeliveredChildResult {
+    let child_turn = turn(900);
     let content = DelegationContent::try_new(RETURNED_CONTENT.to_owned())
         .expect("fixture returned content is bounded");
     let outcome = DelegationOutcome::reconstitute(
@@ -339,11 +392,24 @@ fn returned_result(child: SessionId) -> DeliveredChildResult {
         DelegationOutcomeReason::ChildCompleted,
         signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
             session: child,
-            turn: turn(900),
+            turn: child_turn,
         },
     )
     .expect("fixture child result is sealed");
-    DeliveredChildResult::try_new(child, outcome).expect("fixture child result is deliverable")
+    delivered_result(background_spawn(901), child, child_turn, outcome)
+}
+
+fn failed_outcome(child: SessionId, child_turn: TurnId) -> DelegationOutcome {
+    DelegationOutcome::reconstitute(
+        DelegationOutcomeKind::ChildFailed,
+        None,
+        DelegationOutcomeReason::ChildResultUnavailable,
+        signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
+            session: child,
+            turn: child_turn,
+        },
+    )
+    .expect("fixture child failure is sealed")
 }
 
 #[test]
@@ -500,9 +566,7 @@ fn spawn_executor_returns_child_receipt_and_forwards_sealed_request() {
     let output: Value =
         serde_json::from_str(&completed_text(disposition)).expect("spawn receipt is compact JSON");
     let port = executor.into_port();
-    let [observed] = port.spawn_requests.as_slice() else {
-        panic!("one spawn request is observed")
-    };
+    let observed = single_spawn_request(&port);
 
     assert_eq!(observed.request(), &raw);
     assert_eq!(output["result"], json!("session_spawned"));
@@ -565,18 +629,8 @@ fn already_delivered_foreground_result_returns_exact_child_content() {
 #[test]
 fn failed_child_result_retains_reason_and_turn_provenance() {
     let child = session(17);
-    let outcome = DelegationOutcome::reconstitute(
-        DelegationOutcomeKind::ChildFailed,
-        None,
-        DelegationOutcomeReason::ChildResultUnavailable,
-        signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
-            session: child,
-            turn: turn(900),
-        },
-    )
-    .expect("fixture child failure is sealed");
-    let result = DeliveredChildResult::try_new(child, outcome)
-        .expect("fixture child failure is deliverable");
+    let outcome = failed_outcome(child, turn(900));
+    let result = delivered_result(background_spawn(902), child, turn(900), outcome);
     let terminal_turn = result
         .provenance()
         .child_turn()
@@ -601,9 +655,37 @@ fn failed_child_result_retains_reason_and_turn_provenance() {
 }
 
 #[test]
+fn delivered_result_rejects_another_relationships_terminal_turn() {
+    let child = session(170);
+    let local_turn = turn(900);
+    let foreign_turn = turn(901);
+    let (relation, _) = terminal_relation(
+        background_spawn(904),
+        child,
+        local_turn,
+        failed_outcome(child, local_turn),
+    );
+    let (_, foreign_event) = terminal_relation(
+        background_spawn(905),
+        child,
+        foreign_turn,
+        failed_outcome(child, foreign_turn),
+    );
+
+    let error = DeliveredChildResult::try_new(&relation, &foreign_event)
+        .expect_err("another relationship event is rejected");
+
+    assert_eq!(
+        error.into_parts(),
+        (relation.spawning_request(), foreign_event)
+    );
+}
+
+#[test]
 fn stopped_child_result_retains_goal_command_provenance() {
     let child = session(18);
-    let parent = session(19);
+    let spawning_request = bound_spawn(903);
+    let parent = spawning_request.session();
     let command = DurableCommandId::from_uuid(uuid::Uuid::from_u128(20));
     let generation =
         GoalGeneration::new(NonZeroU64::new(2).expect("fixture generation is positive"));
@@ -620,8 +702,7 @@ fn stopped_child_result_retains_goal_command_provenance() {
         },
     )
     .expect("fixture parent goal command is sealed");
-    let result = DeliveredChildResult::try_new(child, outcome)
-        .expect("parent-command outcome is deliverable");
+    let result = delivered_result(spawning_request, child, turn(901), outcome);
 
     let output: Value = serde_json::from_str(
         &render_delivered_child_result(result).expect("typed child stop renders"),
@@ -673,9 +754,7 @@ fn message_executor_returns_identity_direction_ordinal_and_delivery_sequence() {
     let output: Value = serde_json::from_str(&completed_text(disposition))
         .expect("message receipt is compact JSON");
     let port = executor.into_port();
-    let [observed] = port.message_requests.as_slice() else {
-        panic!("one message request is observed")
-    };
+    let observed = single_message_request(&port);
 
     assert_eq!(observed.request(), &raw);
     assert_eq!(output["result"], json!("session_message_sent"));
