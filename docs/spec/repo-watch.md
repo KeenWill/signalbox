@@ -33,7 +33,10 @@ versions, zero intervals, malformed values, and invalid entries fail
 configuration before either runtime starts. Other daemon GitHub credentials do
 not substitute for a missing repository-watch credential reference. Credential
 paths are absolute and cannot contain parent-directory components, so lexical
-and filesystem aliases cannot bypass duplicate-reference validation.
+and filesystem aliases cannot bypass duplicate-reference validation. A final
+symlink component is resolved even while its target file is absent; later
+creation of that target therefore cannot turn two admitted references into one
+shared credential.
 
 **Committed unimplemented functionality.** Slice 4 adds versioned structured
 rules to this same section and makes invalid rules a startup configuration
@@ -78,10 +81,13 @@ resource at the cache's entry bound, admission evicts an untouched stale entry
 before enforcing that bound; replacement within the bound cannot wedge later
 polls. REST continuation follows GitHub's `Link` relation for the next page, not
 response cardinality: a full terminal page at the 100-page bound completes the
-projection, while a next relation beyond that bound fails the poll. A failed,
-rejected, partial, or unparseable poll submits no persistence candidate. The
-next poll occurs after the per-repository interval; version one has no webhook
-fallback and no speculative second polling transport.
+projection, while a next relation beyond that bound fails the poll. Because a
+`304` can omit changed pagination metadata, a cached full terminal page
+conservatively probes one bounded successor; the cap page is reread
+unconditionally so that probe never manufactures page 101. A failed, rejected,
+partial, or unparseable poll submits no persistence candidate. The next poll
+occurs after the per-repository interval; version one has no webhook fallback
+and no speculative second polling transport.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
@@ -134,12 +140,12 @@ authenticated webhook receiver to feed the same durable facts.
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
-the transport follows every result page needed to build that finite projection
-and retains its per-page validator only in the repository task's process-local
-cache. A same-named branch on a fork does not enter this projection: the poller
-accepts a run only when its provider head-repository identity equals the
-configured watched repository and continues through bounded result pages past
-foreign or absent head repositories.
+the transport scans each workflow's result pages once and collects every branch
+match from that scan, then retains each per-page validator only in the
+repository task's process-local cache. A same-named branch on a fork does not
+enter this projection: the poller accepts a run only when its provider
+head-repository identity equals the configured watched repository and continues
+through bounded result pages past foreign or absent head repositories.
 
 ## Durable event vocabulary
 
