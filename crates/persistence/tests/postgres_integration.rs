@@ -13525,28 +13525,39 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
-    for statement in [
+    let delegated_without_spawn = sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000011',
              'delegated', 'none')",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("delegated provenance without a spawn must be rejected");
+    assert_eq!(
+        delegated_without_spawn
+            .as_database_error()
+            .and_then(|database_error| database_error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let sourced_user_session = sqlx::query(
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
          VALUES
             ('70000000-0000-7000-8000-000000000012',
              'owner_initiated', 'single_source')",
-    ] {
-        let error = sqlx::query(statement)
-            .execute(&pool)
-            .await
-            .expect_err("unsupported provenance must be rejected");
-        assert_eq!(
-            error
-                .as_database_error()
-                .and_then(|database_error| database_error.code())
-                .as_deref(),
-            Some("23514")
-        );
-    }
+    )
+    .execute(&pool)
+    .await
+    .expect_err("user-initiated provenance with sourced ancestry must be rejected");
+    assert_eq!(
+        sourced_user_session
+            .as_database_error()
+            .and_then(|database_error| database_error.code())
+            .as_deref(),
+        Some("23514")
+    );
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
