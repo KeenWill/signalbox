@@ -53,13 +53,13 @@ use signalbox_domain::{
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, PerInputConfigurationChoices,
-    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
-    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
-    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
-    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
+    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
+    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
+    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -113,6 +113,7 @@ use signalbox_persistence::{
         ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
+        ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRejectionOnlyOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
@@ -7985,6 +7986,11 @@ where
             .await;
         }
     }
+    let prompt_member = if prompt_member_is_absent {
+        PromptMemberStatement::Unstated
+    } else {
+        PromptMemberStatement::Stated
+    };
     let prior_model_settings = match ProcessReadRepository::new(pool.clone())
         .read_session_defaults(session, None)
         .await
@@ -7994,7 +8000,117 @@ where
         }
         Ok(ProcessSessionDefaultsRead::Read(read)) if read.version() > expected_version => None,
         Ok(ProcessSessionDefaultsRead::Read(_)) => {
-            Some(ValidatedModelSettings::provider_defaults())
+            let placeholder = SessionConfigurationDefaults::complete_with_model_settings(
+                replacement_model,
+                dangerous_tool_auto_approval,
+                system_prompt.clone(),
+                ValidatedModelSettings::provider_defaults(),
+            )
+            .ok_or(ProcessConnectionError::EncodeInvariant)?;
+            let command = DomainReplaceSessionDefaults::with_model_settings_adjustments(
+                durable_command_id,
+                session,
+                expected_version,
+                placeholder,
+                caller_model_settings,
+                Vec::new(),
+            );
+            match repository
+                .handle_rejection_only_where_prompt_member(command, prompt_member)
+                .await
+            {
+                Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome)) => {
+                    let outcome = match outcome {
+                        ReplaceSessionDefaultsHandlingOutcome::Applied(result) => {
+                            ReplaceSessionDefaultsOutcome::Recorded(
+                                ReplaceSessionDefaultsResult::Applied(result),
+                            )
+                        }
+                        ReplaceSessionDefaultsHandlingOutcome::Rejected(result) => {
+                            ReplaceSessionDefaultsOutcome::Recorded(
+                                ReplaceSessionDefaultsResult::Rejected(result),
+                            )
+                        }
+                        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id } => {
+                            ReplaceSessionDefaultsOutcome::ConflictingReuse { command_id }
+                        }
+                        ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember => {
+                            ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember
+                        }
+                    };
+                    return write_replace_session_defaults_outcome(
+                        writer, version, request_id, session_id, outcome,
+                    )
+                    .await;
+                }
+                Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched) => {
+                    match ProcessReadRepository::new(pool.clone())
+                        .read_session_defaults(session, Some(expected_version))
+                        .await
+                    {
+                        Ok(ProcessSessionDefaultsRead::Read(read)) => {
+                            Some(read.defaults().model_settings())
+                        }
+                        Ok(
+                            ProcessSessionDefaultsRead::SessionNotFound
+                            | ProcessSessionDefaultsRead::VersionNotFound,
+                        ) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                internal_protocol_error(
+                                    Some(session_id.into_uuid()),
+                                    InternalDiagnostic::SessionDefaultsCorruption,
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(ProcessReadError::Database(_)) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                ProtocolError::mutation_unavailable(false),
+                            )
+                            .await;
+                        }
+                        Err(ProcessReadError::Corruption(_)) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                internal_protocol_error(
+                                    Some(session_id.into_uuid()),
+                                    InternalDiagnostic::SessionDefaultsCorruption,
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(ReplaceSessionDefaultsRepositoryError::Database {
+                    commit_ambiguous, ..
+                }) => {
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        ProtocolError::mutation_unavailable(commit_ambiguous),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    let diagnostic = session_defaults_internal_diagnostic(&error);
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        internal_protocol_error(Some(session_id.into_uuid()), diagnostic),
+                    )
+                    .await;
+                }
+            }
         }
         Ok(
             ProcessSessionDefaultsRead::SessionNotFound
@@ -8080,11 +8196,6 @@ where
     // A member the frame could not state must not silently clear a prompt
     // the current epoch carries; the transaction refuses that atomically
     // under the compare-and-set lock, recording nothing.
-    let prompt_member = if prompt_member_is_absent {
-        PromptMemberStatement::Unstated
-    } else {
-        PromptMemberStatement::Stated
-    };
     let request = ReplaceSessionDefaultsRequest::try_new_with_model_settings_adjustments(
         durable_command_id,
         session,
@@ -8105,32 +8216,9 @@ where
     };
     let mut service = ReplaceSessionDefaultsService::new(repository);
     match service.execute(request).await {
-        Ok(ReplaceSessionDefaultsOutcome::Recorded(result)) => {
-            write_replace_session_defaults_result(writer, version, request_id, session_id, &result)
+        Ok(outcome) => {
+            write_replace_session_defaults_outcome(writer, version, request_id, session_id, outcome)
                 .await
-        }
-        // Frame validation rejects an absent system-prompt member, so this
-        // repository outcome cannot be client-triggered.
-        Ok(ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(
-                    Some(session_id.into_uuid()),
-                    InternalDiagnostic::SystemPromptMemberMissing,
-                ),
-            )
-            .await
-        }
-        Ok(ReplaceSessionDefaultsOutcome::ConflictingReuse { .. }) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
-            )
-            .await
         }
         Err(ReplaceSessionDefaultsRepositoryError::Database {
             commit_ambiguous, ..
@@ -8153,6 +8241,47 @@ where
                 version,
                 request_id,
                 internal_protocol_error(Some(session_id.into_uuid()), diagnostic),
+            )
+            .await
+        }
+    }
+}
+
+async fn write_replace_session_defaults_outcome<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    outcome: ReplaceSessionDefaultsOutcome,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match outcome {
+        ReplaceSessionDefaultsOutcome::Recorded(result) => {
+            write_replace_session_defaults_result(writer, version, request_id, session_id, &result)
+                .await
+        }
+        // Frame validation rejects an absent system-prompt member, so this
+        // repository outcome cannot be client-triggered.
+        ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SystemPromptMemberMissing,
+                ),
+            )
+            .await
+        }
+        ReplaceSessionDefaultsOutcome::ConflictingReuse { .. } => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
             )
             .await
         }

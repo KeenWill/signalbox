@@ -32,6 +32,8 @@ verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
 current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
+Defaults-replacement settings admission and its locked expected-epoch handoff
+are verified against this PR (`agent/model-settings-execution`).
 
 ## Session identity and creation provenance
 
@@ -413,15 +415,19 @@ and compare-and-sets the expected version:
 - otherwise the applied result carries the complete installed version.
 
 The expected-version check is enforced twice inside the one transaction
-(`crates/persistence/src/replace_session_defaults.rs`). Domain preparation runs
-against a load of the authoritative session; when it yields the applied result,
-the adapter moves the pointer with a SQL compare-and-set conditioned on the
+(`crates/persistence/src/replace_session_defaults.rs`). For an unseen command,
+the adapter locks the current-defaults pointer before domain preparation loads
+the authoritative session. When preparation yields the applied result, the
+adapter moves that locked pointer with a SQL compare-and-set conditioned on the
 expected version. Zero affected rows re-derives the result against current state
 in the same transaction and records the typed rejection; a re-derivation that
 still reports applied — a CAS loss without a version change — fails closed as
-corruption, as does an update affecting more than one row. Equal replay and
-cross-kind identifier reuse resolve through the same fail-closed
-reconstitute-and-compare path as `CreateSession` (INV-012).
+corruption, as does an update affecting more than one row. A boundary that must
+defer settings validation may ask this same transaction to admit rejection only:
+a mismatch is recorded, while an expected version that is current under the lock
+rolls back the command claim and applies nothing. Equal replay and cross-kind
+identifier reuse resolve through the same fail-closed reconstitute-and-compare
+path as `CreateSession` (INV-012).
 
 Why (compare-and-set): the caller names the version its intent was formed
 against, so a racing replacement surfaces as a typed rejection instead of a

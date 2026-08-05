@@ -273,7 +273,8 @@ impl RuntimeModelCatalog {
         self.definitions.get(&target)
     }
 
-    fn effective_definition<'catalog>(
+    /// Resolves the exact serving definition selected by validated fast mode.
+    pub fn effective_definition<'catalog>(
         &'catalog self,
         definition: &'catalog RuntimeModelDefinition,
         fast_mode: DomainFastMode,
@@ -314,6 +315,16 @@ impl fmt::Display for RuntimeModelCatalogError {
 }
 
 impl Error for RuntimeModelCatalogError {}
+
+fn runtime_delivery_definitions(
+    models: &RuntimeModelCatalog,
+    target: ResolvedProviderTarget,
+    fast_mode: DomainFastMode,
+) -> Option<(&RuntimeModelDefinition, &RuntimeModelDefinition)> {
+    let selected = models.resolve(target)?;
+    let serving = models.effective_definition(selected, fast_mode)?;
+    Some((selected, serving))
+}
 
 /// How one provider-reported model identity relates to the configured exact
 /// provider-model spelling for the call's resolved target.
@@ -1028,16 +1039,11 @@ impl ClassifyOperatorFailure for RuntimeInputTokenCountError {
 fn runtime_model_settings(
     max_output_tokens: u32,
     validated: ValidatedModelSettings,
-    fast_mode_encoded_by_target: bool,
 ) -> ModelSettings {
     let effective = validated.effective();
     let mut settings = ModelSettings::new(max_output_tokens);
     settings.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
-    settings.fast_mode = if fast_mode_encoded_by_target {
-        RuntimeFastMode::Disabled
-    } else {
-        runtime_fast_mode(effective.fast_mode())
-    };
+    settings.fast_mode = runtime_fast_mode(effective.fast_mode());
     settings.service_tier = effective.service_tier().map(runtime_service_tier);
     settings
 }
@@ -1101,14 +1107,12 @@ where
         let request = operation.request();
         let call = request.call();
         let correlation = call.id();
-        let definition = self
-            .models
-            .resolve(call.target())
-            .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
-        let effective_definition = self
-            .models
-            .effective_definition(definition, request.model_settings().effective().fast_mode())
-            .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
+        let (definition, effective_definition) = runtime_delivery_definitions(
+            &self.models,
+            call.target(),
+            request.model_settings().effective().fast_mode(),
+        )
+        .ok_or(RuntimeInputTokenCountError::UnconfiguredTarget)?;
         let messages = render_runtime_messages(operation.messages());
         let tools = operation
             .tools()
@@ -1127,12 +1131,11 @@ where
             correlation,
             CredentialReference::new(operation.credential_reference().as_str().to_owned()),
             RequestedTarget::new(render_requested_target(call.selection())),
-            ResolvedTarget::new(effective_definition.provider_model().to_owned()),
+            ResolvedTarget::new(definition.provider_model().to_owned()),
             messages,
             runtime_model_settings(
                 effective_definition.max_output_tokens(),
                 request.model_settings(),
-                effective_definition.target() != definition.target(),
             ),
         );
         runtime_operation.system = operation.system_prompt().map(str::to_owned);
@@ -1188,7 +1191,12 @@ where
             attempt: request.attempt(),
             call: correlation,
         };
-        let definition = self.models.resolve(call.target()).ok_or_else(|| {
+        let (definition, effective_definition) = runtime_delivery_definitions(
+            &self.models,
+            call.target(),
+            request.model_settings().effective().fast_mode(),
+        )
+        .ok_or_else(|| {
             fail_closed(
                 telemetry,
                 RuntimeModelCallProviderError::UnconfiguredTarget,
@@ -1224,28 +1232,17 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let effective_settings = request.model_settings().effective();
-        let effective_definition = self
-            .models
-            .effective_definition(definition, effective_settings.fast_mode())
-            .ok_or_else(|| {
-                fail_closed(
-                    telemetry,
-                    RuntimeModelCallProviderError::UnconfiguredTarget,
-                    None,
-                )
-            })?;
+        let selected_target = ResolvedTarget::new(definition.provider_model().to_owned());
         let resolved_target = ResolvedTarget::new(effective_definition.provider_model().to_owned());
         let mut runtime_operation = ModelOperation::new(
             correlation,
             credential,
             RequestedTarget::new(render_requested_target(call.selection())),
-            resolved_target.clone(),
+            selected_target,
             messages,
             runtime_model_settings(
                 effective_definition.max_output_tokens(),
                 request.model_settings(),
-                effective_definition.target() != definition.target(),
             ),
         );
         // The session system prompt frozen through the calling turn's
@@ -1969,7 +1966,8 @@ mod tests {
         ProviderTextDeltaSink, RuntimeInputTokenCountError, RuntimeModelCallProviderError,
         RuntimeModelCatalog, RuntimeModelCatalogError, RuntimeModelDefinition,
         RuntimeModelDefinitionError, classify_terminal, decode_checked_raw_json,
-        provider_reported_token_usage, render_runtime_messages, runtime_model_settings,
+        provider_reported_token_usage, render_runtime_messages, runtime_delivery_definitions,
+        runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -3212,7 +3210,7 @@ mod tests {
             .validate_precedence(selection, precedence)
             .expect("fixture settings are declared by the capability record");
 
-        let mapped = runtime_model_settings(512, validated, false);
+        let mapped = runtime_model_settings(512, validated);
 
         assert_eq!(mapped.max_output_tokens, 512);
         assert_eq!(mapped.reasoning_level, Some(RuntimeReasoningLevel::Max));
@@ -3226,7 +3224,7 @@ mod tests {
     }
 
     #[test]
-    fn mapped_fast_target_consumes_the_request_toggle() {
+    fn mapped_fast_target_preserves_the_toggle_for_adapter_mapping() {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(1));
         let capabilities = ModelCapabilities::new(
             BTreeSet::new(),
@@ -3247,32 +3245,33 @@ mod tests {
             .validate_precedence(selection, precedence)
             .expect("mapped fast serving is declared by the capability record");
 
-        let mapped = runtime_model_settings(512, validated, true);
+        let mapped = runtime_model_settings(512, validated);
 
-        assert_eq!(
-            mapped.fast_mode,
-            signalbox_model_runtime::FastMode::Disabled
-        );
+        assert_eq!(mapped.fast_mode, signalbox_model_runtime::FastMode::Enabled);
     }
 
     #[test]
     fn mapped_fast_target_supplies_the_authorized_delivery_identity_and_limit() {
-        let ordinary = RuntimeModelDefinition::try_new(
-            target(1),
-            String::from("fixture-standard"),
-            64,
-            200_000,
-        )
-        .expect("ordinary fixture definition is valid")
-        .with_fast_target(target(2));
+        let selected_model = "fixture-standard";
+        let serving_model = "fixture-fast";
+        let ordinary =
+            RuntimeModelDefinition::try_new(target(1), String::from(selected_model), 64, 200_000)
+                .expect("ordinary fixture definition is valid")
+                .with_fast_target(target(2));
         let fast =
-            RuntimeModelDefinition::try_new(target(2), String::from("fixture-fast"), 32, 200_000)
+            RuntimeModelDefinition::try_new(target(2), String::from(serving_model), 32, 200_000)
                 .expect("fast fixture definition is valid");
         let catalog = RuntimeModelCatalog::try_from_definitions([ordinary, fast])
             .expect("mapped target is present");
         let source = catalog
             .resolve(target(1))
             .expect("source target is present");
+        let (selected, serving) =
+            runtime_delivery_definitions(&catalog, target(1), FastMode::Enabled)
+                .expect("mapped delivery resolves");
+
+        assert_eq!(selected.provider_model(), selected_model);
+        assert_eq!(serving.provider_model(), serving_model);
 
         assert_eq!(
             catalog

@@ -455,7 +455,9 @@ or otherwise conflicting alternate target. An enabled call uses that serving
 record's provider identity and output-token request limit, while the client's
 durable selection remains unchanged. Capability values are validated against the
 selected adapter's explicit mapping table during startup, so an adapter cannot
-silently drop a configured setting.
+silently drop a configured setting. Input guarding, output reservation, and
+post-response usage enforcement use the effective serving record's limits for
+that enabled call rather than the selectable source record's limits.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has

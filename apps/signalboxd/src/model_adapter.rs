@@ -176,11 +176,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use signalbox_model_runtime::{
-        AssistantPart, CancellationSignal, CodexCliServiceTier, CompletionEvidence,
-        CompletionFinish, ConversationMessage, CredentialReference, ExchangeFacts, FastMode,
-        ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationSink,
-        PreparationOutcome, ProviderReportedModel, ReasoningLevel, RequestedTarget, ResolvedTarget,
-        Script, ScriptedModel, ServiceTier, TerminalEvidence, TokenUsage,
+        AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
+        CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
+        ExchangeFacts, FastMode, ModelOperation, ModelRuntime, ModelSettings, Observation,
+        ObservationSink, PreparationOutcome, ProviderReportedModel, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier, TerminalEvidence,
+        TokenUsage,
     };
 
     use crate::configuration::HubModelConfiguration;
@@ -262,6 +263,8 @@ max_output_tokens = 256
 context_window_tokens = 200000
 fast_mode = "alternate_target"
 fast_target_id = "20000000-0000-4000-8000-000000000002"
+reasoning_levels = ["high"]
+service_tiers = ["standard_only"]
 
 [[serving_targets]]
 target_id = "20000000-0000-4000-8000-000000000002"
@@ -277,7 +280,9 @@ context_window_tokens = 200000
         let selected = ResolvedTarget::new(standard_model);
         let expected = ResolvedTarget::new(fast_model);
         let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::High);
         settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly));
         let capabilities = catalog
             .validate(&selected, &settings)
             .expect("the selected target declares fast mode");
