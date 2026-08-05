@@ -587,7 +587,7 @@ async fn load_relation(
             "spawning tool request",
         ))?;
     if request.session() != parent || request.turn() != parent_turn {
-        return Err(SessionDelegationCorruption::Inconsistent("spawning request owner").into());
+        return Err(SessionDelegationCorruption::Inconsistent("spawning request session").into());
     }
     let task: String = required(&row, "task_content")?;
     let spawn = DelegatedSpawnRequest::parse(request, task, policy)
@@ -656,7 +656,7 @@ async fn load_events(
                 let stored_source = session_id_from_uuid(required(&row, "provenance_session_id")?);
                 if logical.request().session() != stored_source {
                     return Err(SessionDelegationCorruption::Inconsistent(
-                        "message provenance owner",
+                        "message provenance session",
                     )
                     .into());
                 }
