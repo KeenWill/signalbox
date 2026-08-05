@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use signalbox_model_runtime::{
-    CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal, CliEnvironmentOverride,
-    CliEnvironmentVariable, CliProcessRequest, DeliveryMode, FastMode, ModelCapabilityCatalog,
-    ModelOperation, ModelRuntime, ModelSettings, ObservationSink, PreparationDefect,
-    PreparationFailure, PreparationOutcome, ProvenUnsentEvidence, ReasoningLevel, ServiceTier,
-    TerminalEvidence, TerminalReport, UnsentCause, execute_cli_process,
+    AnthropicServiceTier, CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal,
+    CliEnvironmentOverride, CliEnvironmentVariable, CliProcessRequest, CodexCliServiceTier,
+    DeliveryMode, FastMode, ModelCapabilityCatalog, ModelOperation, ModelRuntime, ModelSettings,
+    ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationFailure, PreparationOutcome,
+    ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence, TerminalReport,
+    UnsentCause, execute_cli_process,
 };
 use tempfile::TempDir;
 
@@ -357,9 +358,22 @@ fn claude_reasoning_effort(
 ) -> Result<Option<&'static str>, PreparationFailure> {
     match settings.service_tier {
         None => {}
-        Some(ServiceTier::Anthropic(_))
-        | Some(ServiceTier::OpenAi(_))
-        | Some(ServiceTier::CodexCli(_)) => {
+        Some(ServiceTier::Anthropic(
+            AnthropicServiceTier::Auto | AnthropicServiceTier::StandardOnly,
+        ))
+        | Some(ServiceTier::OpenAi(
+            OpenAiServiceTier::Auto
+            | OpenAiServiceTier::Default
+            | OpenAiServiceTier::Flex
+            | OpenAiServiceTier::Scale
+            | OpenAiServiceTier::Priority
+            | OpenAiServiceTier::Fast,
+        ))
+        | Some(ServiceTier::CodexCli(
+            CodexCliServiceTier::Default
+            | CodexCliServiceTier::Priority
+            | CodexCliServiceTier::Flex,
+        )) => {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: "Claude CLI cannot enforce an explicit service tier".to_string(),
             });
