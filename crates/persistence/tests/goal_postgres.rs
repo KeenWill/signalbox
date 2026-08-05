@@ -24,7 +24,7 @@ use signalbox_domain::{
     ReplaceSessionDefaults, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionInputPosition, SubmitInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
-    TurnId, UserContent,
+    TurnId, TurnModelSettingsResolved, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -35,7 +35,8 @@ use signalbox_persistence::{
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
     outbox::{
-        DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEvent, DispatchedOutboxEventKind, OutboxDeliveryDecision,
+        OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::ProcessReadRepository,
     replace_session_defaults::{
@@ -96,6 +97,14 @@ fn command(value: u128) -> DurableCommandId {
 
 fn tool_request(value: u128) -> ToolRequestId {
     ToolRequestId::from_uuid(Uuid::from_u128(value))
+}
+
+#[track_caller]
+fn turn_model_settings_event(event: &DispatchedOutboxEvent) -> &TurnModelSettingsResolved {
+    match event.kind() {
+        DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) => settings,
+        _ => panic!("the event has a turn-settings payload"),
+    }
 }
 
 fn credential_pin() -> SessionCredentialPin {
@@ -632,9 +641,7 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     );
     let settings = settings.expect("the goal settings event was offered");
     assert_eq!(settings.session(), session(SESSION));
-    let DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) = settings.kind() else {
-        panic!("the goal settings event has its typed payload")
-    };
+    let settings = turn_model_settings_event(&settings);
     assert_eq!(settings.accepted_input(), candidates.accepted_input());
     assert_eq!(settings.turn(), candidates.turn());
 

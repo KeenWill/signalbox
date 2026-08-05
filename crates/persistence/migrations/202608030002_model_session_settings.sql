@@ -70,6 +70,36 @@ ALTER TABLE submit_input_command
     ADD CONSTRAINT submit_input_command_model_settings_override_object
         CHECK (jsonb_typeof(model_settings_override) = 'object');
 
+ALTER TABLE accepted_input
+    DROP CONSTRAINT accepted_input_command_result_fk;
+
+ALTER TABLE submit_input_command
+    ADD CONSTRAINT submit_input_command_settings_result_key
+        UNIQUE (
+            command_id,
+            result_accepted_input_id,
+            result_session_id,
+            model_settings_override
+        );
+
+ALTER TABLE accepted_input
+    ADD CONSTRAINT accepted_input_command_settings_result_fk
+        FOREIGN KEY (
+            accepting_command_id,
+            accepted_input_id,
+            session_id,
+            model_settings_override
+        )
+        REFERENCES submit_input_command (
+            command_id,
+            result_accepted_input_id,
+            result_session_id,
+            model_settings_override
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
 ALTER TABLE replace_session_defaults_command
     ADD COLUMN replacement_model_settings jsonb NOT NULL DEFAULT
         '{"precedence":{"per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}},"effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},"reasoning_source":null,"fast_mode_source":null,"service_tier_source":null,"validated_for_selection_id":null}'::jsonb,
@@ -227,6 +257,8 @@ CREATE TABLE session_model_settings_changed_outbox_event (
         CHECK (event_kind = 'session_model_settings_changed'),
     CONSTRAINT session_model_settings_changed_outbox_version_supported
         CHECK (storage_version = 1),
+    CONSTRAINT session_model_settings_changed_outbox_source_key
+        UNIQUE (session_id, installed_defaults_version),
     CONSTRAINT session_model_settings_changed_outbox_header_fk
         FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
         REFERENCES outbox_event (

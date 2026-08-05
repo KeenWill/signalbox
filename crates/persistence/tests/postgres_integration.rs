@@ -23084,6 +23084,44 @@ async fn s24_inv012_inv053_replacement_replay_rejects_cross_wired_settings_chang
     Ok(())
 }
 
+/// S24 / INV-032 / INV-053: one defaults epoch can source exactly one durable
+/// settings-change outbox event.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_inv053_settings_change_outbox_is_unique_per_epoch() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let replacement = record_settings_replacement_fixture(&pool, 0x3770).await?;
+
+    let duplicate = sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ('session_model_settings_changed', 1, $1)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO session_model_settings_changed_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             installed_defaults_version)
+         SELECT event_sequence, event_kind, storage_version, session_id, 2
+           FROM header",
+    )
+    .bind(replacement.session.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("one defaults epoch cannot produce two settings-change events");
+    assert_eq!(
+        duplicate
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("session_model_settings_changed_outbox_source_key")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-012 / INV-053: legacy command versions accept only the provider-default
 /// settings documents that the migration backfills.
 #[tokio::test]
@@ -23238,7 +23276,7 @@ async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
 
 /// S01 / INV-008 / INV-012 / INV-053: native session creation retains the
 /// caller's settings independently from its effect row, so a cross-wired
-/// defaults snapshot cannot authenticate command replay.
+/// defaults snapshot cannot authenticate command replay or current reads.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv008_inv012_inv053_native_creation_authenticates_command_settings()
@@ -23277,6 +23315,70 @@ async fn s01_inv008_inv012_inv053_native_creation_authenticates_command_settings
             CreateSessionCorruption::Domain(_)
         ))
     ));
+    assert!(matches!(
+        SessionRepository::new(pool.clone())
+            .load_session(command.applied_result().session())
+            .await,
+        Err(SessionRepositoryError::Corruption(
+            SessionCorruption::Inconsistent("defaults model settings disagree with command")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 / INV-053: the accepted-input settings copy must equal the
+/// independently retained submit-command payload.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_inv053_accepted_settings_match_submit_command() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x3767));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x3768, 0x3769, direct(0x376a)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x376b,
+                0x3769,
+                "settings correlation request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(TurnId::from_uuid(Uuid::from_u128(0x376c))),
+        )
+        .await?;
+
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let mismatch = sqlx::query(
+        "UPDATE accepted_input
+            SET model_settings_override = $1
+          WHERE accepted_input_id = $2",
+    )
+    .bind(serde_json::json!({
+        "reasoning_level": { "kind": "provider_default" },
+        "fast_mode": { "kind": "inherit" },
+        "service_tier": { "kind": "inherit" }
+    }))
+    .bind(accepted_input.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("accepted settings must remain command-correlated");
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        mismatch
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("accepted_input_command_settings_result_fk")
+    );
 
     pool.close().await;
     drop(container);
@@ -23317,7 +23419,7 @@ async fn s24_inv032_inv053_dispatcher_rejects_crosswired_turn_settings_origin()
         OutboxDispatchOutcome::Delivered { sequence: 1 }
     );
 
-    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
     sqlx::query(
@@ -23333,7 +23435,7 @@ async fn s24_inv032_inv053_dispatcher_rejects_crosswired_turn_settings_origin()
     .bind(accepted_input.into_uuid())
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER USER")
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER ALL")
         .execute(&pool)
         .await?;
 
