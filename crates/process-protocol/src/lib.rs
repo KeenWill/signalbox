@@ -3755,6 +3755,18 @@ pub enum TurnState {
         /// Last recipient-wide delivery sequence included by the wake.
         through_delivery_sequence: CanonicalU64,
     },
+    /// A parent command logically terminalized delegated work while retained
+    /// physical execution evidence remains inert.
+    DelegationTerminated {
+        /// Tool request that spawned the child.
+        spawning_request_id: CanonicalUuid,
+        /// Typed stopped or cancelled outcome.
+        outcome: DelegationOutcome,
+        /// Exact parent terminal reason.
+        reason: DelegationReason,
+        /// Exact parent-command provenance.
+        provenance: DelegationProvenance,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
@@ -3865,6 +3877,12 @@ enum RawTurnState {
         first_delivery_sequence: CanonicalU64,
         through_delivery_sequence: CanonicalU64,
     },
+    DelegationTerminated {
+        spawning_request_id: CanonicalUuid,
+        outcome: DelegationOutcome,
+        reason: DelegationReason,
+        provenance: DelegationProvenance,
+    },
     ActiveRunning {
         current_attempt_id: CanonicalUuid,
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3959,6 +3977,26 @@ impl<'de> Deserialize<'de> for TurnState {
                 Self::QueuedDelegationWake {
                     first_delivery_sequence,
                     through_delivery_sequence,
+                }
+            }
+            RawTurnState::DelegationTerminated {
+                spawning_request_id,
+                outcome,
+                reason,
+                provenance,
+            } => {
+                if !delegation_terminal_outcome_reason_matches(outcome, reason)
+                    || !parent_delegation_provenance_has_cascade(&provenance)
+                {
+                    return Err(serde::de::Error::custom(
+                        "delegation terminal requires parent cascade authority",
+                    ));
+                }
+                Self::DelegationTerminated {
+                    spawning_request_id,
+                    outcome,
+                    reason,
+                    provenance,
                 }
             }
             RawTurnState::ActiveRunning {
@@ -4076,6 +4114,17 @@ impl TurnState {
             terminal_model_call: Some(_),
             ..
         } = self
+        {
+            return Err(FrameValidationError::TurnStateShape);
+        }
+        if let Self::DelegationTerminated {
+            outcome,
+            reason,
+            provenance,
+            ..
+        } = self
+            && (!delegation_terminal_outcome_reason_matches(*outcome, *reason)
+                || !parent_delegation_provenance_has_cascade(provenance))
         {
             return Err(FrameValidationError::TurnStateShape);
         }
@@ -4927,15 +4976,51 @@ fn parent_delegation_provenance_is_cascade(
             parent_session_id: provenance_parent,
             descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             ..
-        } => *provenance_parent == parent_session_id,
+        } => {
+            *provenance_parent == parent_session_id
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
         DelegationProvenance::ParentGoalCommand {
             parent_session_id: provenance_parent,
             goal_generation,
             descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             ..
-        } => *provenance_parent == parent_session_id && goal_generation.value() > 0,
+        } => {
+            *provenance_parent == parent_session_id
+                && goal_generation.value() > 0
+                && parent_delegation_provenance_has_cascade(provenance)
+        }
         _ => false,
     }
+}
+
+fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -> bool {
+    match provenance {
+        DelegationProvenance::ParentTurnCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            ..
+        } => true,
+        DelegationProvenance::ParentGoalCommand {
+            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            goal_generation,
+            ..
+        } => goal_generation.value() > 0,
+        _ => false,
+    }
+}
+
+fn delegation_terminal_outcome_reason_matches(
+    outcome: DelegationOutcome,
+    reason: DelegationReason,
+) -> bool {
+    matches!(
+        (outcome, reason),
+        (DelegationOutcome::Stopped, DelegationReason::ParentStopped)
+            | (
+                DelegationOutcome::Cancelled,
+                DelegationReason::ParentCancelled
+            )
+    )
 }
 
 fn delegation_content_is_valid(content: &str) -> bool {
@@ -7087,6 +7172,59 @@ mod tests {
                 "await_request_id": "00000000-0000-0000-0000-000000000004",
                 "spawning_request_id": "00000000-0000-0000-0000-000000000005",
                 "child_session_id": "00000000-0000-0000-0000-000000000002"
+            })
+        );
+        assert!(
+            serde_json::from_value::<TurnState>(serde_json::json!({
+                "type": "delegation_terminated",
+                "spawning_request_id": "00000000-0000-0000-0000-000000000004",
+                "outcome": "stopped",
+                "reason": "parent_cancelled",
+                "provenance": {
+                    "type": "parent_goal_command",
+                    "parent_session_id": "00000000-0000-0000-0000-000000000001",
+                    "goal_generation": "2",
+                    "command_id": "00000000-0000-0000-0000-000000000007",
+                    "descendant_scope": "parent_and_descendants"
+                }
+            }))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_terminal_turn_state_round_trips_parent_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = TurnState::DelegationTerminated {
+            spawning_request_id: uuid(4),
+            outcome: DelegationOutcome::Stopped,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: uuid(1),
+                goal_generation: CanonicalU64::new(2),
+                command_id: uuid(7),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+        let encoded = serde_json::to_value(&state)?;
+        let decoded = serde_json::from_value::<TurnState>(encoded.clone())?;
+
+        assert_eq!(decoded, state);
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "delegation_terminated",
+                "spawning_request_id": "00000000-0000-0000-0000-000000000004",
+                "outcome": "stopped",
+                "reason": "parent_stopped",
+                "provenance": {
+                    "type": "parent_goal_command",
+                    "parent_session_id": "00000000-0000-0000-0000-000000000001",
+                    "goal_generation": "2",
+                    "command_id": "00000000-0000-0000-0000-000000000007",
+                    "descendant_scope": "parent_and_descendants"
+                }
             })
         );
         Ok(())

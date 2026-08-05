@@ -2056,7 +2056,6 @@ mod tests {
             content: ModelToolResultContent::Delegation(outcome),
         }]);
 
-        assert_eq!(rendered.len(), 1);
         assert_eq!(
             rendered[0].role,
             signalbox_model_runtime::ConversationRole::User

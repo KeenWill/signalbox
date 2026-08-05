@@ -21,12 +21,13 @@ the closed provider-failure/native transcript projections in PR #330
 surface in PR #349 (`agent/review-orchestrator-wiring`), and the conversation
 import transport in PR #401 (`agent/import-chunks-protocol`), and the typed
 delegation session-follow events, queued task-origin projection, recipient
-routing, wake exclusion, and delivered delegation transcript entries against
-this PR (`agent/delegation-persistence-schema`). This page is the normative
-boundary between a local client process and `signalboxd`; domain values,
-PostgreSQL records, and wire messages remain distinct representations. The
-path-scoped session-placement wire and terminal-client surface were verified
-through PR #400 (`agent/scoped-visibility-wiring`).
+routing, wake exclusion, delivered delegation transcript entries, and typed
+parent-terminated turn projection against this PR
+(`agent/delegation-persistence-schema`). This page is the normative boundary
+between a local client process and `signalboxd`; domain values, PostgreSQL
+records, and wire messages remain distinct representations. The path-scoped
+session-placement wire and terminal-client surface were verified through PR #400
+(`agent/scoped-visibility-wiring`).
 
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
@@ -1355,6 +1356,12 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 - `queued_delegation_wake { first_delivery_sequence, through_delivery_sequence }`,
   whose positive ordered recipient-wide range identifies the delivered
   delegation content that will wake an otherwise idle session;
+- `delegation_terminated { spawning_request_id, outcome, reason, provenance }`,
+  whose outcome is exactly `stopped` or `cancelled`, whose reason is the
+  matching `parent_stopped` or `parent_cancelled`, and whose parent turn- or
+  goal-command provenance carries `parent_and_descendants`; this delivered
+  logical state exposes no child transcript and does not erase retained physical
+  execution evidence;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;

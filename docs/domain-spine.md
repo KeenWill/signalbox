@@ -2577,6 +2577,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
+    pub fn with_delegated_consumed_steering_facts(
+        self,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self;
     pub fn with_steering_continuation_rounds(
         self,
         steering_continuation_rounds: Vec<SteeringContinuationRoundReconstitutionInput>,
@@ -2589,9 +2593,16 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         imported_session: ReconstitutedImportedSession,
     ) -> Self;
+    pub fn with_preceding_non_accepted_terminal(
+        self,
+        session: SessionId,
+        turn: TurnId,
+        terminal_frontier: ContextFrontierId,
+        selected: DirectModelSelection,
+    ) -> Self;
     // accessors: session(), imported_session(), turns(), semantic_entries(),
     // snapshots(), pinned_targets(), model_calls(), compaction_calls(),
-    // compactions(), consumed_steering(),
+    // compactions(), consumed_steering(), delegated_consumed_steering(),
     // steering_continuation_rounds(), continuation_rounds(),
     // active_acceptance_tail()
 }
@@ -2807,8 +2818,12 @@ impl ActivatedDelegatedTurn {
         self,
         pending_steering: Vec<PendingSteeringInput>,
     ) -> Option<Self>;
+    pub fn with_consumed_steering(
+        self,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Option<Self>;
     // accessors: session(), turn(), spawning_request(), task(), configuration(),
-    // delivery_range(), start(), phase(), pending_steering()
+    // delivery_range(), start(), phase(), pending_steering(), consumed_steering()
 }
 
 pub enum ActivatedTurn {
@@ -3185,6 +3200,10 @@ pub struct ModelCallOriginContent { /* private */ }
 impl ModelCallOriginContent {
     pub fn from_pending_steering(
         pending: &PendingSteeringInput,
+        content: UserContent,
+    ) -> Self;
+    pub fn from_consumed_steering(
+        consumed: &ConsumedSteeringInput,
         content: UserContent,
     ) -> Self;
     pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self>;
@@ -5459,7 +5478,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
     fn reread_observation(
@@ -5472,6 +5491,7 @@ pub trait CommitModelCallObservationTransaction {
 pub enum RetainedModelCallObservationStatus {
     Pending,
     AlreadyCommitted,
+    DiscardedByLogicalTerminal,
 }
 
 pub struct RetainedModelCallExecutionState { /* private */ }

@@ -688,13 +688,23 @@ async fn load_event(
                 SELECT 1
                   FROM outbox_event AS unallocated
                  WHERE unallocated.event_sequence > allocator.last_sequence
+                UNION ALL
+                SELECT 1
+                  FROM delegation_outbox_event AS unallocated
+                 WHERE unallocated.event_sequence > allocator.last_sequence
             ),
             event.event_sequence,
             event.event_kind,
             event.storage_version,
             event.session_id
            FROM outbox_sequence_state AS allocator
-           LEFT JOIN outbox_event AS event
+           LEFT JOIN (
+                SELECT event_sequence, event_kind, storage_version, session_id
+                  FROM outbox_event
+                UNION ALL
+                SELECT event_sequence, event_kind, storage_version, session_id
+                  FROM delegation_outbox_event
+           ) AS event
              ON event.event_sequence = $1
           WHERE allocator.singleton",
     )
