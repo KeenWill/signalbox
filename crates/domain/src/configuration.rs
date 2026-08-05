@@ -2,10 +2,10 @@
 //!
 //! The normative specification is
 //! `docs/spec/configuration-and-credentials.md`. The first implementable
-//! effective configuration is deliberately model-selection-only: one frozen
-//! direct or alias model selection, provider-default parameters, and
-//! disabled known-provider-failure retry and model fallback. Custom
-//! parameters, instructions, tool enablement, placement constraints,
+//! effective configuration includes one frozen direct or alias model
+//! selection, validated model/session settings, provider-default legacy
+//! parameters, and disabled known-provider-failure retry and model fallback.
+//! Custom instructions, tool enablement, placement constraints,
 //! per-turn resources, and interpreting-policy selections are unavailable
 //! baseline capabilities, not latent optional fields. The `Scope` section
 //! on [`EffectiveConfiguration`] lists what these pure values deliberately
@@ -16,7 +16,11 @@
 
 use core::fmt;
 
-use crate::DangerousToolAutoApproval;
+use crate::model_settings::apply_recorded_model_change_adjustments;
+use crate::{
+    AdjustedModelSettings, DangerousToolAutoApproval, ModelCapabilityCatalog,
+    ModelChangeAdjustment, ModelSettingsOverlay, UnsupportedModelSetting, ValidatedModelSettings,
+};
 
 crate::define_identity!(
     /// Names exactly one configured provider/model selection as a canonical
@@ -142,6 +146,7 @@ pub struct EffectiveConfiguration {
     known_provider_failure_retry: KnownProviderFailureRetry,
     model_fallback: ModelFallback,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    model_settings: ValidatedModelSettings,
 }
 
 impl EffectiveConfiguration {
@@ -153,6 +158,7 @@ impl EffectiveConfiguration {
             known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
             model_fallback: ModelFallback::Disabled,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
     }
 
@@ -167,6 +173,35 @@ impl EffectiveConfiguration {
             known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
             model_fallback: ModelFallback::Disabled,
             dangerous_tool_auto_approval,
+            model_settings: ValidatedModelSettings::provider_defaults(),
+        }
+    }
+
+    /// Constructs the complete value with model settings validated for its
+    /// frozen direct selection.
+    pub fn with_model_settings(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
+    ) -> Option<Self> {
+        let validated_for = model_settings.validated_for();
+        (validated_for.is_none() || validated_for == Some(model.selected_direct())).then(|| {
+            Self::from_validated_model_settings(model, dangerous_tool_auto_approval, model_settings)
+        })
+    }
+
+    const fn from_validated_model_settings(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
+    ) -> Self {
+        Self {
+            model,
+            parameters: ModelParameters::ProviderDefaults,
+            known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
+            model_fallback: ModelFallback::Disabled,
+            dangerous_tool_auto_approval,
+            model_settings,
         }
     }
 
@@ -193,6 +228,11 @@ impl EffectiveConfiguration {
     /// Returns the dangerous blanket-auto posture frozen for this turn.
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
+    }
+
+    /// Returns the complete validated model settings frozen for this turn.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
     }
 }
 
@@ -366,6 +406,7 @@ pub struct SessionConfigurationDefaults {
     model: ModelSelectionRequest,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
     system_prompt: Option<SessionSystemPrompt>,
+    model_settings: ValidatedModelSettings,
 }
 
 impl SessionConfigurationDefaults {
@@ -375,6 +416,7 @@ impl SessionConfigurationDefaults {
             model,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
             system_prompt: None,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
     }
 
@@ -387,6 +429,7 @@ impl SessionConfigurationDefaults {
             model,
             dangerous_tool_auto_approval,
             system_prompt: None,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
     }
 
@@ -400,7 +443,38 @@ impl SessionConfigurationDefaults {
             model,
             dangerous_tool_auto_approval,
             system_prompt,
+            model_settings: ValidatedModelSettings::provider_defaults(),
         }
+    }
+
+    /// Creates complete defaults including validated model settings.
+    ///
+    /// A direct model can carry only settings validated for that same direct
+    /// selection. Provider defaults remain model-independent, while an alias
+    /// retains the direct validation identity needed to detect a later
+    /// retarget. A defaults epoch cannot carry a per-call contribution.
+    pub fn complete_with_model_settings(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+        model_settings: ValidatedModelSettings,
+    ) -> Option<Self> {
+        let selection_matches = match (model, model_settings.validated_for()) {
+            (ModelSelectionRequest::Direct(expected), Some(validated)) => expected == validated,
+            (ModelSelectionRequest::Direct(_), None)
+            | (ModelSelectionRequest::Alias(_), Some(_) | None) => true,
+        };
+        let per_call_inherits =
+            model_settings.precedence().per_call() == ModelSettingsOverlay::inherit_all();
+        if !selection_matches || !per_call_inherits {
+            return None;
+        }
+        Some(Self {
+            model,
+            dangerous_tool_auto_approval,
+            system_prompt,
+            model_settings,
+        })
     }
 
     /// Returns the default model-selection request.
@@ -416,6 +490,11 @@ impl SessionConfigurationDefaults {
     /// Borrows the optional session system prompt.
     pub const fn system_prompt(&self) -> Option<&SessionSystemPrompt> {
         self.system_prompt.as_ref()
+    }
+
+    /// Returns the complete settings snapshot installed in this defaults epoch.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
     }
 }
 
@@ -483,6 +562,21 @@ impl VersionedSessionConfigurationDefaults {
         expected: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
     ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch> {
+        self.derive_request_with_model_settings(
+            expected,
+            model,
+            ModelSettingsOverlay::inherit_all(),
+        )
+    }
+
+    /// Derives one request while preserving the caller's per-call settings
+    /// contribution for capability resolution after alias freezing.
+    pub fn derive_request_with_model_settings(
+        &self,
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        per_call_model_settings: ModelSettingsOverlay,
+    ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch> {
         if expected != self.version {
             return Err(SessionDefaultsVersionMismatch {
                 expected,
@@ -499,6 +593,8 @@ impl VersionedSessionConfigurationDefaults {
             request: ConfigurationRequest {
                 model,
                 dangerous_tool_auto_approval: self.defaults.dangerous_tool_auto_approval(),
+                model_settings: self.defaults.model_settings(),
+                per_call_model_settings,
             },
             session_defaults_version: self.version,
         })
@@ -523,6 +619,8 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest {
     model: ModelSelectionRequest,
     dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    model_settings: ValidatedModelSettings,
+    per_call_model_settings: ModelSettingsOverlay,
 }
 
 impl ConfigurationRequest {
@@ -534,6 +632,16 @@ impl ConfigurationRequest {
     /// Returns the dangerous blanket-auto posture derived with this request.
     pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
         self.dangerous_tool_auto_approval
+    }
+
+    /// Returns the complete model settings derived with this request.
+    pub const fn model_settings(&self) -> ValidatedModelSettings {
+        self.model_settings
+    }
+
+    /// Returns the caller's provenance-preserving per-call contribution.
+    pub const fn per_call_model_settings(&self) -> ModelSettingsOverlay {
+        self.per_call_model_settings
     }
 }
 
@@ -593,6 +701,8 @@ pub struct OriginConfiguration {
     requested: ConfigurationRequest,
     session_defaults_version: SessionConfigurationDefaultsVersion,
     effective: EffectiveConfiguration,
+    model_settings_adjusted_from: Option<DirectModelSelection>,
+    model_settings_adjustments: Box<[ModelChangeAdjustment]>,
 }
 
 impl OriginConfiguration {
@@ -600,11 +710,13 @@ impl OriginConfiguration {
     ///
     /// `select_definition` supplies the current immutable definition when the
     /// request names an alias; returning `None` reports the alias as unknown
-    /// and freezes nothing. A direct request never invokes it.
+    /// and freezes nothing. A direct request never invokes it. Settings that
+    /// require validation for a different selected model need the
+    /// settings-aware path and fail as missing capability evidence here.
     pub fn freeze(
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    ) -> Result<Self, UnknownModelAlias> {
+    ) -> Result<Self, OriginModelSettingsError> {
         let VersionCheckedConfigurationRequest {
             request: requested,
             session_defaults_version,
@@ -614,17 +726,157 @@ impl OriginConfiguration {
             ModelSelectionRequest::Direct(selection) => FrozenModelSelection::Direct(selection),
             ModelSelectionRequest::Alias(alias) => match select_definition(alias) {
                 Some(definition) => FrozenModelSelection::FrozenAlias { alias, definition },
-                None => return Err(UnknownModelAlias { alias }),
+                None => {
+                    return Err(OriginModelSettingsError::UnknownAlias(UnknownModelAlias {
+                        alias,
+                    }));
+                }
             },
         };
+        let selection = model.selected_direct();
+        let needs_capabilities = requested.per_call_model_settings()
+            != ModelSettingsOverlay::inherit_all()
+            || requested
+                .model_settings()
+                .validated_for()
+                .is_some_and(|validated| validated != selection);
+        if needs_capabilities {
+            return Err(OriginModelSettingsError::MissingCapabilities { selection });
+        }
 
         Ok(Self {
             requested,
             session_defaults_version,
-            effective: EffectiveConfiguration::with_dangerous_tool_auto_approval(
+            effective: EffectiveConfiguration::from_validated_model_settings(
                 model,
                 requested.dangerous_tool_auto_approval(),
+                requested.model_settings(),
             ),
+            model_settings_adjusted_from: None,
+            model_settings_adjustments: Box::new([]),
+        })
+    }
+
+    /// Freezes selection and resolves per-call settings against the exact
+    /// direct model capability record selected for this origin.
+    pub fn freeze_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<Self, OriginModelSettingsError> {
+        let VersionCheckedConfigurationRequest {
+            mut request,
+            session_defaults_version,
+        } = checked;
+        let model = match request.model() {
+            ModelSelectionRequest::Direct(selection) => FrozenModelSelection::Direct(selection),
+            ModelSelectionRequest::Alias(alias) => match select_definition(alias) {
+                Some(definition) => FrozenModelSelection::FrozenAlias { alias, definition },
+                None => {
+                    return Err(OriginModelSettingsError::UnknownAlias(UnknownModelAlias {
+                        alias,
+                    }));
+                }
+            },
+        };
+        let selection = model.selected_direct();
+        let Some(model_capabilities) = capabilities.resolve(selection) else {
+            return Err(OriginModelSettingsError::MissingCapabilities { selection });
+        };
+        let caller_overlay = request.per_call_model_settings;
+        let precedence = request
+            .model_settings
+            .precedence()
+            .with_per_call(caller_overlay);
+        let prior_validation = request.model_settings.validated_for();
+        let model_changed = prior_validation.is_some_and(|validated| validated != selection);
+        let (model_settings, adjustments) = if model_changed {
+            model_capabilities
+                .validate_model_change(selection, precedence, caller_overlay)
+                .map(AdjustedModelSettings::into_parts)
+                .map_err(OriginModelSettingsError::Unsupported)?
+        } else {
+            (
+                model_capabilities
+                    .validate_precedence(selection, precedence)
+                    .map_err(OriginModelSettingsError::Unsupported)?,
+                Vec::new().into_boxed_slice(),
+            )
+        };
+        let model_settings_adjusted_from = (!adjustments.is_empty())
+            .then_some(prior_validation)
+            .flatten();
+        request.model_settings = model_settings;
+        Ok(Self {
+            requested: request,
+            session_defaults_version,
+            effective: EffectiveConfiguration::from_validated_model_settings(
+                model,
+                request.dangerous_tool_auto_approval(),
+                model_settings,
+            ),
+            model_settings_adjusted_from,
+            model_settings_adjustments: adjustments,
+        })
+    }
+
+    /// Reconstitutes stored settings-aware provenance without consulting a
+    /// deployment capability catalog that may have changed since acceptance.
+    ///
+    /// The stored adjustment sequence is accepted only when it rewrites an
+    /// inherited value, preserves the fixed knob order, and reproduces the
+    /// complete stored precedence and source evidence exactly.
+    pub fn reconstitute_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        frozen_model: FrozenModelSelection,
+        stored_settings: ValidatedModelSettings,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self> {
+        let VersionCheckedConfigurationRequest {
+            mut request,
+            session_defaults_version,
+        } = checked;
+        if !frozen_selection_matches_request(frozen_model, request.model()) {
+            return None;
+        }
+        let selected = frozen_model.selected_direct();
+        if stored_settings
+            .validated_for()
+            .is_some_and(|validated| validated != selected)
+        {
+            return None;
+        }
+        let prior_validation = request.model_settings.validated_for();
+        let model_changed = prior_validation.is_some_and(|validated| validated != selected);
+        if !adjustments.is_empty() && !model_changed {
+            return None;
+        }
+        let precedence = request
+            .model_settings
+            .precedence()
+            .with_per_call(request.per_call_model_settings);
+        let prior = precedence.resolve();
+        let adjusted = apply_recorded_model_change_adjustments(prior, &adjustments)?;
+        let expected_precedence = precedence.with_effective_adjustment(prior, adjusted);
+        if stored_settings.precedence() != expected_precedence
+            || stored_settings.resolved() != expected_precedence.resolve()
+        {
+            return None;
+        }
+        request.model_settings = stored_settings;
+        let model_settings_adjusted_from = (!adjustments.is_empty())
+            .then_some(prior_validation)
+            .flatten();
+        Some(Self {
+            requested: request,
+            session_defaults_version,
+            effective: EffectiveConfiguration::from_validated_model_settings(
+                frozen_model,
+                request.dangerous_tool_auto_approval(),
+                stored_settings,
+            ),
+            model_settings_adjusted_from,
+            model_settings_adjustments: adjustments.into_boxed_slice(),
         })
     }
 
@@ -641,6 +893,73 @@ impl OriginConfiguration {
     /// Borrows the complete frozen effective value.
     pub const fn effective(&self) -> &EffectiveConfiguration {
         &self.effective
+    }
+
+    /// Returns the prior direct validation identity that caused adjustments.
+    pub const fn model_settings_adjusted_from(&self) -> Option<DirectModelSelection> {
+        self.model_settings_adjusted_from
+    }
+
+    /// Borrows ordered automatic model-change adjustments.
+    pub fn model_settings_adjustments(&self) -> &[ModelChangeAdjustment] {
+        &self.model_settings_adjustments
+    }
+}
+
+fn frozen_selection_matches_request(
+    frozen: FrozenModelSelection,
+    requested: ModelSelectionRequest,
+) -> bool {
+    match (frozen, requested) {
+        (FrozenModelSelection::Direct(stored), ModelSelectionRequest::Direct(requested)) => {
+            stored == requested
+        }
+        (
+            FrozenModelSelection::FrozenAlias { alias: stored, .. },
+            ModelSelectionRequest::Alias(requested),
+        ) => stored == requested,
+        (FrozenModelSelection::Direct(_) | FrozenModelSelection::FrozenAlias { .. }, _) => false,
+    }
+}
+
+/// Why settings-aware origin freezing could not produce durable provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OriginModelSettingsError {
+    /// The requested alias has no current immutable definition.
+    UnknownAlias(UnknownModelAlias),
+    /// The selected direct model has no capability record.
+    MissingCapabilities {
+        /// Selected direct model.
+        selection: DirectModelSelection,
+    },
+    /// A caller-owned setting is unsupported by the selected model.
+    Unsupported(UnsupportedModelSetting),
+}
+
+impl fmt::Display for OriginModelSettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownAlias(error) => write!(
+                formatter,
+                "model alias {} has no current definition",
+                error.alias().into_uuid()
+            ),
+            Self::MissingCapabilities { selection } => write!(
+                formatter,
+                "model selection {} has no capability record",
+                selection.into_uuid()
+            ),
+            Self::Unsupported(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for OriginModelSettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unsupported(error) => Some(error),
+            Self::UnknownAlias(_) | Self::MissingCapabilities { .. } => None,
+        }
     }
 }
 
@@ -731,17 +1050,25 @@ pub enum TurnConfigurationProvenance {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
         FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
         ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
-        OriginConfigurationReconstitutionInput, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionDefaultsVersionMismatch, SessionSystemPrompt,
-        SessionSystemPromptFailure, TurnConfigurationProvenance,
-        VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+        OriginConfigurationReconstitutionInput, OriginModelSettingsError,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+        SessionDefaultsVersionMismatch, SessionSystemPrompt, SessionSystemPromptFailure,
+        TurnConfigurationProvenance, UnknownModelAlias, VersionCheckedConfigurationRequest,
+        VersionedSessionConfigurationDefaults,
     };
     use crate::test_support::{alias, direct, turn_id};
-    use crate::{DangerousToolAutoApproval, SteeringBinding};
+    use crate::{
+        DangerousToolAutoApproval, FastModeOverlay, FastModeSupport, ModelCapabilities,
+        ModelCapabilityCatalog, ModelCapabilityDefinition, ModelChangeAdjustment,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ReasoningLevel, SettingOverlay,
+        SteeringBinding, ValidatedModelSettings,
+    };
     use uuid::Uuid;
 
     /// S34 / INV-046: the session system prompt admits exactly the
@@ -809,6 +1136,77 @@ mod tests {
         assert_eq!(prompted.model(), model);
     }
 
+    /// INV-003 / INV-051: a direct default cannot carry settings admitted for
+    /// a different direct selection.
+    #[test]
+    fn inv003_inv051_defaults_reject_crosswired_direct_settings() {
+        let validated_selection = direct(1);
+        let configured_selection = direct(2);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            validated_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture level is supported");
+
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(configured_selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        );
+
+        assert_eq!(defaults, None);
+    }
+
+    /// INV-003 / INV-051: a durable defaults epoch cannot retain a per-call
+    /// contribution that belongs only to one origin request.
+    #[test]
+    fn inv003_inv051_defaults_reject_per_call_settings_provenance() {
+        let selection = direct(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture level is supported");
+
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        );
+
+        assert_eq!(defaults, None);
+    }
+
     #[test]
     fn selection_keys_expose_their_uuid_values() {
         let selection_uuid = Uuid::from_u128(1);
@@ -835,6 +1233,189 @@ mod tests {
 
         assert_eq!(definition.selected(), selected);
         assert_ne!(definition, other_definition);
+    }
+
+    /// S37 / INV-052 / INV-053: alias retargeting resolves the caller overlay
+    /// against the new direct capability and retains its automatic adjustment.
+    #[test]
+    fn s37_inv052_inv053_alias_retarget_freezes_adjusted_origin_settings() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let prior_capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Minimal]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        );
+        let prior_settings = prior_capabilities
+            .validate_precedence(
+                prior_selection,
+                ModelSettingsPrecedence::new(
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::new(
+                        SettingOverlay::Value(ReasoningLevel::Minimal),
+                        FastModeOverlay::Inherit,
+                        SettingOverlay::Inherit,
+                    ),
+                    ModelSettingsOverlay::inherit_all(),
+                    ModelSettingsOverlay::inherit_all(),
+                ),
+            )
+            .expect("the prior model supports the stored level");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(alias(1)),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            prior_settings,
+        )
+        .expect("an alias retains its prior direct validation identity");
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+        let installed_capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Medium]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        );
+        let catalog =
+            ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
+                installed_selection,
+                installed_capabilities,
+            )])
+            .expect("the fixture catalog has one selection");
+
+        let origin = OriginConfiguration::freeze_with_model_settings(
+            checked,
+            |_| Some(FrozenAliasDefinition::selecting(installed_selection)),
+            &catalog,
+        )
+        .expect("inherited incompatibility adjusts during alias freezing");
+
+        assert_eq!(
+            origin
+                .effective()
+                .model_settings()
+                .effective()
+                .reasoning_level(),
+            Some(ReasoningLevel::Medium)
+        );
+        assert_eq!(
+            origin.model_settings_adjustments(),
+            [ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::Minimal,
+                to: ReasoningLevel::Medium,
+            }]
+        );
+        assert_eq!(origin.model_settings_adjusted_from(), Some(prior_selection));
+        assert_eq!(
+            origin.requested().per_call_model_settings(),
+            ModelSettingsOverlay::inherit_all()
+        );
+        let reconstituted = OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            FrozenModelSelection::FrozenAlias {
+                alias: alias(1),
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+            origin.effective().model_settings(),
+            origin.model_settings_adjustments().to_vec(),
+        )
+        .expect("stored resolution evidence reconstructs without the live catalog");
+        assert_eq!(reconstituted, origin);
+    }
+
+    /// INV-003 / INV-053: adjustment evidence is impossible when the stored
+    /// settings were already validated for the unchanged direct selection.
+    #[test]
+    fn inv003_inv053_origin_rejects_adjustment_without_a_model_change() {
+        let selection = direct(1);
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low, ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        );
+        let high_precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::High),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let high = capabilities
+            .validate_precedence(selection, high_precedence)
+            .expect("the fixture level is supported");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Direct(selection),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            high,
+        )
+        .expect("the settings were validated for the direct default");
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+        let low_precedence = high_precedence.with_effective_adjustment(
+            high_precedence.resolve(),
+            crate::EffectiveModelSettings::new(
+                Some(ReasoningLevel::Low),
+                crate::FastMode::Disabled,
+                None,
+            ),
+        );
+        let low = capabilities
+            .validate_precedence(selection, low_precedence)
+            .expect("the fixture level is supported");
+
+        let reconstituted = OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            FrozenModelSelection::Direct(selection),
+            low,
+            vec![ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            }],
+        );
+
+        assert_eq!(reconstituted, None);
+    }
+
+    /// INV-003 / INV-053: model-independent provider defaults remain valid
+    /// durable evidence when an origin is reconstituted.
+    #[test]
+    fn inv003_inv053_origin_reconstitutes_provider_default_settings() {
+        let selection = direct(1);
+        let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection));
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request_with_model_settings(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the fixture names the current defaults epoch");
+        let expected = OriginConfiguration::freeze(checked, |_| None)
+            .expect("a direct model does not require alias resolution");
+
+        let reconstituted = OriginConfiguration::reconstitute_with_model_settings(
+            checked,
+            FrozenModelSelection::Direct(selection),
+            ValidatedModelSettings::provider_defaults(),
+            Vec::new(),
+        );
+
+        assert_eq!(reconstituted, Some(expected));
     }
 
     /// INV-008: comparison uses constructible semantic values; a direct
@@ -892,6 +1473,52 @@ mod tests {
             KnownProviderFailureRetry::Disabled
         );
         assert_eq!(configuration.model_fallback(), ModelFallback::Disabled);
+    }
+
+    /// INV-003 / INV-051: a complete effective configuration rejects settings
+    /// validated for another frozen direct model while retaining canonical,
+    /// model-independent provider defaults.
+    #[test]
+    fn inv003_inv051_effective_configuration_rejects_crosswired_model_settings() {
+        let validated_selection = direct(1);
+        let frozen_selection = FrozenModelSelection::Direct(direct(2));
+        let level = ReasoningLevel::High;
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([level]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            validated_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(level),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the fixture setting is supported by its validating model");
+
+        let crosswired = EffectiveConfiguration::with_model_settings(
+            frozen_selection,
+            DangerousToolAutoApproval::Disabled,
+            settings,
+        );
+        let provider_defaults = EffectiveConfiguration::with_model_settings(
+            frozen_selection,
+            DangerousToolAutoApproval::Disabled,
+            ValidatedModelSettings::provider_defaults(),
+        );
+
+        assert_eq!(crosswired, None);
+        assert_eq!(
+            provider_defaults,
+            Some(EffectiveConfiguration::baseline(frozen_selection))
+        );
     }
 
     /// INV-008: configuration equality is structural semantic value equality
@@ -1200,7 +1827,116 @@ mod tests {
         let error = OriginConfiguration::freeze(checked, |_| None)
             .expect_err("an unknown alias cannot freeze provenance");
 
-        assert_eq!(error.alias(), requested_alias);
+        assert_eq!(
+            error,
+            OriginModelSettingsError::UnknownAlias(UnknownModelAlias {
+                alias: requested_alias,
+            })
+        );
+    }
+
+    /// S37 / INV-003 / INV-051: the catalog-free origin path cannot preserve
+    /// settings admitted for an alias's prior direct target after retargeting.
+    #[test]
+    fn s37_inv003_inv051_legacy_freeze_rejects_alias_retarget_settings() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let requested_alias = alias(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior direct target supports the fixture setting");
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            ModelSelectionRequest::Alias(requested_alias),
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        )
+        .expect("alias defaults retain their validation identity");
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+        let checked = versioned
+            .derive_request(
+                versioned.version(),
+                ModelSelectionOverride::UseSessionDefault,
+            )
+            .expect("the fixture names the current defaults epoch");
+
+        let error = OriginConfiguration::freeze(checked, |_| {
+            Some(FrozenAliasDefinition::selecting(installed_selection))
+        })
+        .expect_err("retargeted settings require exact capability evidence");
+
+        assert_eq!(
+            error,
+            OriginModelSettingsError::MissingCapabilities {
+                selection: installed_selection,
+            }
+        );
+    }
+
+    /// S37 / INV-003 / INV-051: legacy reconstitution rejects an alias whose
+    /// frozen target differs from the stored settings validation identity.
+    #[test]
+    fn s37_inv003_inv051_legacy_reconstitution_rejects_alias_retarget_settings() {
+        let prior_selection = direct(1);
+        let installed_selection = direct(2);
+        let requested_alias = alias(1);
+        let settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(
+            prior_selection,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::new(
+                    SettingOverlay::Value(ReasoningLevel::High),
+                    FastModeOverlay::Inherit,
+                    SettingOverlay::Inherit,
+                ),
+                ModelSettingsOverlay::inherit_all(),
+                ModelSettingsOverlay::inherit_all(),
+            ),
+        )
+        .expect("the prior direct target supports the fixture setting");
+        let requested_model = ModelSelectionRequest::Alias(requested_alias);
+        let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+            requested_model,
+            DangerousToolAutoApproval::Disabled,
+            None,
+            settings,
+        )
+        .expect("alias defaults retain their validation identity");
+        let versioned = VersionedSessionConfigurationDefaults::establish(defaults);
+
+        let reconstituted = OriginConfigurationReconstitutionInput::new(
+            versioned.version(),
+            versioned.defaults().clone(),
+            requested_model,
+            FrozenModelSelection::FrozenAlias {
+                alias: requested_alias,
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+        )
+        .reconstitute();
+
+        assert_eq!(reconstituted, None);
     }
 
     /// INV-008: the defaults version belongs to provenance, not
@@ -1254,6 +1990,8 @@ mod tests {
         let request = ConfigurationRequest {
             model,
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            model_settings: ValidatedModelSettings::provider_defaults(),
+            per_call_model_settings: ModelSettingsOverlay::inherit_all(),
         };
 
         assert_eq!(request.model(), model);
