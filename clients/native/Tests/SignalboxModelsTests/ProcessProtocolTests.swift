@@ -646,6 +646,15 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testDelegatedTaskEntryRejectsEmptyContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegatedTaskEntryFrame(sessionID: sessionID, content: "")
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
   func testDelegationMessageEntryDecodesExactDelivery() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.delegationMessageEntryFrame(sessionID: sessionID)
@@ -668,6 +677,18 @@ final class ProcessProtocolTests: XCTestCase {
         content: ProcessProtocolFixture.delegationMessageContent
       )
     )
+  }
+
+  func testDelegationMessageEntryRejectsNULContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationMessageEntryFrame(
+        sessionID: sessionID,
+        content: #"invalid\u0000message"#
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
   }
 
   func testForegroundDelegationResultEntryDecodesExactLifecycleProof() throws {
@@ -745,6 +766,24 @@ final class ProcessProtocolTests: XCTestCase {
         mode: "foreground",
         deliverySequence: "null",
         reason: "child_cancelled"
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
+  func testDelegationResultRejectsOversizedContent() throws {
+    let oversized = String(
+      repeating: "x",
+      count: SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes + 1
+    )
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null",
+        content: oversized
       )
     )
     let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
@@ -1250,7 +1289,10 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func delegatedTaskEntryFrame(sessionID: String) -> Data {
+  static func delegatedTaskEntryFrame(
+    sessionID: String,
+    content: String = delegatedTaskContent
+  ) -> Data {
     Data(
       """
       {
@@ -1266,7 +1308,7 @@ private enum ProcessProtocolFixture {
             "spawning_request_id":"\(spawningRequestID)",
             "parent_session_id":"\(parentSessionID)",
             "parent_turn_id":"\(parentTurnID)",
-            "content":"\(delegatedTaskContent)"
+            "content":"\(content)"
           }
         }
       }
@@ -1274,7 +1316,10 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func delegationMessageEntryFrame(sessionID: String) -> Data {
+  static func delegationMessageEntryFrame(
+    sessionID: String,
+    content: String = delegationMessageContent
+  ) -> Data {
     Data(
       """
       {
@@ -1293,7 +1338,7 @@ private enum ProcessProtocolFixture {
             "recipient_session_id":"\(sessionID)",
             "ordinal":"\(delegationMessageOrdinal)",
             "delivery_sequence":"\(delegationMessageDeliverySequence)",
-            "content":"\(delegationMessageContent)"
+            "content":"\(content)"
           }
         }
       }
@@ -1305,7 +1350,8 @@ private enum ProcessProtocolFixture {
     sessionID: String,
     mode: String,
     deliverySequence: String,
-    reason: String = "child_completed"
+    reason: String = "child_completed",
+    content: String = delegationResultContent
   ) -> Data {
     Data(
       """
@@ -1325,7 +1371,7 @@ private enum ProcessProtocolFixture {
             "mode":"\(mode)",
             "delivery_sequence":\(deliverySequence),
             "outcome":"returned",
-            "content":"\(delegationResultContent)",
+            "content":"\(content)",
             "reason":"\(reason)",
             "provenance":{
               "type":"child_turn",

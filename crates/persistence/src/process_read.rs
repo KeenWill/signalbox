@@ -3388,6 +3388,12 @@ fn decode_logical_delegation_terminal(
                     DispatchedDelegationOutcome::ChildStopped,
                     DispatchedDelegationReason::ParentStoppedWithDescendants
                 ) | (
+                    DispatchedDelegationOutcome::ChildStopped,
+                    DispatchedDelegationReason::ParentCancelledWithDescendants
+                ) | (
+                    DispatchedDelegationOutcome::ChildCancelled,
+                    DispatchedDelegationReason::ParentStoppedWithDescendants
+                ) | (
                     DispatchedDelegationOutcome::ChildCancelled,
                     DispatchedDelegationReason::ParentCancelledWithDescendants
                 )

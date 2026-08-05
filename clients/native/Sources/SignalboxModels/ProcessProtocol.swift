@@ -2186,17 +2186,35 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
         try tagged.rejectUnadmittedFields(
           ["type", "spawning_request_id", "parent_session_id", "parent_turn_id", "content"],
           decoder: decoder)
+        let content: String = try decoder.decode("content")
+        guard Self.delegationContentIsValid(content) else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("content")],
+              debugDescription: "Delegated-task content is invalid."
+            )
+          )
+        }
         self = .delegatedTask(
           spawningRequestID: try decoder.decode("spawning_request_id"),
           parentSessionID: try decoder.decode("parent_session_id"),
           parentTurnID: try decoder.decode("parent_turn_id"),
-          content: try decoder.decode("content"))
+          content: content)
       case "delegation_message":
         try tagged.rejectUnadmittedFields(
           [
             "type", "spawning_request_id", "message_id", "sender_session_id",
             "recipient_session_id", "ordinal", "delivery_sequence", "content",
           ], decoder: decoder)
+        let content: String = try decoder.decode("content")
+        guard Self.delegationContentIsValid(content) else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("content")],
+              debugDescription: "Delegation-message content is invalid."
+            )
+          )
+        }
         self = .delegationMessage(
           spawningRequestID: try decoder.decode("spawning_request_id"),
           messageID: try decoder.decode("message_id"),
@@ -2204,7 +2222,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           recipientSessionID: try decoder.decode("recipient_session_id"),
           ordinal: try decoder.decode("ordinal"),
           deliverySequence: try decoder.decode("delivery_sequence"),
-          content: try decoder.decode("content"))
+          content: content)
       case "delegation_result":
         try tagged.rejectUnadmittedFields(
           [
@@ -2225,6 +2243,7 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
             || (mode == .background && (deliverySequence?.rawValue ?? 0) > 0),
           (outcome == .returned && content != nil)
             || ([.failed, .stopped, .cancelled].contains(outcome) && content == nil),
+          content.map(Self.delegationContentIsValid) ?? true,
           Self.delegationResultShapeIsValid(
             childSessionID: childSessionID,
             outcome: outcome,
@@ -2382,6 +2401,12 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     default:
       return false
     }
+  }
+
+  private static func delegationContentIsValid(_ content: String) -> Bool {
+    !content.isEmpty
+      && content.utf8.count <= SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes
+      && !content.contains("\0")
   }
 }
 
