@@ -33,10 +33,9 @@ const PROFILE_COMMON_FIELDS: [&str; 4] = ["name", "adapter", "billing_kind", "de
 /// How one credential profile's secret reaches its provider.
 ///
 /// The variants below are the deliveries this build supplies. The grammar also
-/// recognizes `codex_home` and `oauth`; [`CredentialDelivery::parse`] rejects
-/// them as undelivered so a deployment learns at startup that no surface
-/// honors them, rather than from a call that silently authenticated as some
-/// other account.
+/// recognizes `codex_home` and `oauth`; parsing rejects those as undelivered so
+/// a deployment learns at startup that no surface honors them, rather than from
+/// a call that silently authenticated as some other account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CredentialDelivery {
     /// The adapter's own client resolves its login and the daemon supplies no
