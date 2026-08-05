@@ -476,29 +476,6 @@ impl TerminalChildTurn {
         }
     }
 
-    /// Seals a reconciliation-required model-call turn as a failed child
-    /// result: the turn is terminal but has no deliverable return content.
-    const fn from_model_reconciliation(value: &crate::ReconciliationRequiredModelCallTurn) -> Self {
-        Self {
-            session: value.session(),
-            turn: value.turn(),
-            kind: TerminalChildTurnKind::Failed,
-            reason: DelegationOutcomeReason::ChildExecutionFailed,
-            result_digest: None,
-        }
-    }
-
-    /// Seals a reconciliation-required tool turn as a failed child result.
-    const fn from_tool_reconciliation(value: &crate::ReconciliationRequiredToolTurn) -> Self {
-        Self {
-            session: value.session(),
-            turn: value.turn(),
-            kind: TerminalChildTurnKind::Failed,
-            reason: DelegationOutcomeReason::ChildExecutionFailed,
-            result_digest: None,
-        }
-    }
-
     pub const fn session(self) -> SessionId {
         self.session
     }
@@ -862,18 +839,6 @@ impl DelegationOutcome {
     /// Derives a cancelled delivered outcome from a cancelled tool-round child.
     pub fn from_cancelled_tool_round_child(value: &crate::CancelledToolRoundModelCallTurn) -> Self {
         Self::cancelled_child(TerminalChildTurn::from_cancelled_tool_round(value))
-    }
-
-    /// Derives a failed delivered outcome from terminal model-call ambiguity.
-    pub fn from_model_reconciliation_child(
-        value: &crate::ReconciliationRequiredModelCallTurn,
-    ) -> Self {
-        Self::failed_child(TerminalChildTurn::from_model_reconciliation(value))
-    }
-
-    /// Derives a failed delivered outcome from terminal tool ambiguity.
-    pub fn from_tool_reconciliation_child(value: &crate::ReconciliationRequiredToolTurn) -> Self {
-        Self::failed_child(TerminalChildTurn::from_tool_reconciliation(value))
     }
 
     fn failed_child(terminal: TerminalChildTurn) -> Self {
