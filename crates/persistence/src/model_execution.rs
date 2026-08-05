@@ -4298,20 +4298,12 @@ async fn persist_delegated_child_result(
         }
     };
     let content = outcome.content().map(DelegationContent::as_str);
-    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
-        "SELECT task.spawning_tool_request_id, relation.parent_session_id
-           FROM session_delegation_initial_task AS task
-           JOIN session_delegation AS relation
-             ON relation.spawning_tool_request_id = task.spawning_tool_request_id
-            AND relation.child_session_id = task.child_session_id
-          WHERE task.child_session_id = $1
-            AND task.turn_id = $2
-          FOR UPDATE OF relation",
-    )
-    .bind(session_id_to_uuid(child))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_optional(&mut *connection)
-    .await?;
+    let relation =
+        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
+            .bind(session_id_to_uuid(child))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_optional(&mut *connection)
+            .await?;
     let Some((spawning_request, parent)) = relation else {
         return Ok(());
     };
