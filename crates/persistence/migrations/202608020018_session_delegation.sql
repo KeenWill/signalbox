@@ -1046,6 +1046,190 @@ ALTER TABLE session_delegation_wait
             parent_session_id
         );
 
+-- An interrupt may terminalize a foreground child wait after the model-call
+-- attempt has already yielded to that durable wait. Correlate that no-live-
+-- attempt cancellation through the exact await request and producing call;
+-- the accepted successor remains the typed command provenance.
+CREATE OR REPLACE FUNCTION require_interrupt_submit_input_effect_correlation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    matching_records bigint;
+BEGIN
+    IF NEW.result_kind = 'applied' THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM accepted_input AS accepted
+          JOIN queued_input_origin AS successor
+            ON successor.accepted_input_id = accepted.accepted_input_id
+           AND successor.turn_id = accepted.origin_turn_id
+           AND successor.session_id = accepted.session_id
+           AND successor.acceptance_position = accepted.acceptance_position
+          JOIN turn_attempt AS stopped_attempt
+            ON stopped_attempt.turn_id = NEW.expected_active_turn_id
+           AND stopped_attempt.session_id = NEW.session_id
+           AND (
+                (
+                    stopped_attempt.interrupt_command_id = NEW.command_id
+                    AND stopped_attempt.interrupt_predecessor_turn_id
+                        = NEW.expected_active_turn_id
+                    AND (
+                        stopped_attempt.state_kind = 'stop_requested'
+                        OR (
+                            stopped_attempt.state_kind = 'ended'
+                            AND stopped_attempt.end_variant = 'after_cancellation'
+                        )
+                    )
+                )
+                OR (
+                    stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'without_stop'
+                    AND stopped_attempt.end_disposition IN ('ambiguous', 'lost')
+                    AND stopped_attempt.interrupt_command_id IS NULL
+                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS reconciled
+                         WHERE reconciled.turn_id = stopped_attempt.turn_id
+                           AND reconciled.session_id = stopped_attempt.session_id
+                           AND reconciled.state_kind = 'terminal'
+                           AND reconciled.terminal_disposition_kind
+                               = 'reconciliation_required'
+                           AND reconciled.terminal_attempt_id
+                               = stopped_attempt.turn_attempt_id
+                    )
+                )
+                OR (
+                    stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'without_stop'
+                    AND stopped_attempt.end_disposition = 'yielded_to_durable_wait'
+                    AND stopped_attempt.interrupt_command_id IS NULL
+                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM session_delegation_wait AS waiting
+                          JOIN tool_request AS awaiting
+                            ON awaiting.request_id = waiting.awaiting_tool_request_id
+                           AND awaiting.turn_id = waiting.parent_turn_id
+                           AND awaiting.session_id = waiting.parent_session_id
+                          JOIN model_call AS producing_call
+                            ON producing_call.model_call_id
+                                = awaiting.producing_model_call_id
+                           AND producing_call.turn_id = awaiting.turn_id
+                           AND producing_call.session_id = awaiting.session_id
+                          JOIN turn_lifecycle AS cancelled
+                            ON cancelled.turn_id = waiting.parent_turn_id
+                           AND cancelled.session_id = waiting.parent_session_id
+                         WHERE waiting.parent_turn_id = NEW.expected_active_turn_id
+                           AND waiting.parent_session_id = NEW.session_id
+                           AND waiting.wait_mode = 'foreground'
+                           AND producing_call.turn_attempt_id
+                               = stopped_attempt.turn_attempt_id
+                           AND cancelled.state_kind = 'terminal'
+                           AND cancelled.terminal_disposition_kind = 'cancelled'
+                           AND cancelled.terminal_attempt_id IS NULL
+                           AND cancelled.terminal_model_call_id IS NULL
+                    )
+                )
+           )
+         WHERE accepted.accepting_command_id = NEW.command_id
+           AND accepted.accepted_input_id = NEW.result_accepted_input_id
+           AND accepted.session_id = NEW.result_session_id
+           AND accepted.content_kind = NEW.content_kind
+           AND accepted.content_text = NEW.content_text
+           AND accepted.delivery_kind = 'interrupt'
+           AND accepted.expected_active_turn_id = NEW.expected_active_turn_id
+           AND accepted.expected_defaults_version = NEW.expected_defaults_version
+           AND accepted.model_override_kind = NEW.model_override_kind
+           AND accepted.replacement_model_kind
+               IS NOT DISTINCT FROM NEW.replacement_model_kind
+           AND accepted.replacement_direct_model_selection_id
+               IS NOT DISTINCT FROM NEW.replacement_direct_model_selection_id
+           AND accepted.replacement_model_alias_id
+               IS NOT DISTINCT FROM NEW.replacement_model_alias_id
+           AND accepted.disposition_kind = 'origin_of'
+           AND accepted.origin_turn_id = NEW.result_turn_id
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id
+               = NEW.expected_active_turn_id
+           AND successor.defaults_version = NEW.expected_defaults_version;
+    ELSIF NEW.rejection_kind
+        = 'interrupt_unavailable_while_awaiting_approval'
+    THEN
+        SELECT count(*)
+          INTO matching_records
+          FROM turn_lifecycle AS parked
+         WHERE parked.turn_id = NEW.result_actual_active_turn_id
+           AND parked.session_id = NEW.result_session_id
+           AND parked.state_kind = 'active'
+           AND parked.active_phase_kind = 'awaiting_tool_approval'
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM accepted_input
+                 WHERE accepting_command_id = NEW.command_id
+           );
+    ELSE
+        SELECT count(*)
+          INTO matching_records
+          FROM submit_input_command AS existing
+          JOIN accepted_input AS accepted
+            ON accepted.accepting_command_id = existing.command_id
+           AND accepted.accepted_input_id = existing.result_accepted_input_id
+           AND accepted.session_id = existing.result_session_id
+           AND accepted.origin_turn_id = existing.result_turn_id
+          JOIN queued_input_origin AS successor
+            ON successor.accepted_input_id = accepted.accepted_input_id
+           AND successor.turn_id = accepted.origin_turn_id
+           AND successor.session_id = accepted.session_id
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id
+               = NEW.result_actual_active_turn_id
+          JOIN turn_lifecycle AS active
+            ON active.turn_id = NEW.result_actual_active_turn_id
+           AND active.session_id = NEW.result_session_id
+           AND active.state_kind = 'active'
+          JOIN turn_attempt AS stopped_attempt
+            ON stopped_attempt.turn_attempt_id = active.current_attempt_id
+           AND stopped_attempt.turn_id = active.turn_id
+           AND stopped_attempt.session_id = active.session_id
+           AND stopped_attempt.interrupt_command_id = existing.command_id
+           AND stopped_attempt.interrupt_predecessor_turn_id = active.turn_id
+           AND (
+                (
+                    active.active_phase_kind = 'running'
+                    AND stopped_attempt.state_kind = 'stop_requested'
+                )
+                OR (
+                    active.active_phase_kind = 'awaiting_model_call_recovery'
+                    AND stopped_attempt.state_kind = 'ended'
+                    AND stopped_attempt.end_variant = 'after_cancellation'
+                    AND stopped_attempt.end_disposition IN ('ambiguous', 'lost')
+                )
+           )
+         WHERE existing.command_id = NEW.result_existing_interrupt_command_id
+           AND existing.result_kind = 'applied'
+           AND existing.rejection_kind IS NULL
+           AND existing.delivery_kind = 'interrupt'
+           AND existing.expected_active_turn_id
+               = NEW.result_actual_active_turn_id
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM accepted_input
+                 WHERE accepting_command_id = NEW.command_id
+           );
+    END IF;
+
+    IF matching_records <> 1 THEN
+        RAISE EXCEPTION
+            'interrupt submit-input command % has an incomplete or cross-wired effect',
+            NEW.command_id
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
 ALTER TABLE tool_attempt
     ADD COLUMN wait_spawning_request_id uuid,
     ADD COLUMN wait_child_session_id uuid,
@@ -1169,6 +1353,21 @@ BEGIN
                 AND terminal_disposition_kind IS NULL
                 AND recovery_model_call_id IS NULL
                 AND active_tool_round_call_id IS NOT NULL
+                AND approval_tool_request_id IS NULL
+                AND recovery_tool_attempt_id IS NULL
+                AND terminal_attempt_id IS NULL
+                AND terminal_model_call_id IS NULL
+                AND terminal_tool_attempt_id IS NULL
+            ) OR (
+                state_kind = ''terminal''
+                AND start_lineage_kind IS NOT NULL
+                AND starting_frontier_id IS NOT NULL
+                AND terminal_frontier_id IS NOT NULL
+                AND active_phase_kind IS NULL
+                AND current_attempt_id IS NULL
+                AND terminal_disposition_kind = ''cancelled''
+                AND recovery_model_call_id IS NULL
+                AND active_tool_round_call_id IS NULL
                 AND approval_tool_request_id IS NULL
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NULL

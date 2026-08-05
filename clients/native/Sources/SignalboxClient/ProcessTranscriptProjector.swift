@@ -205,10 +205,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         SignalboxProcessPresentation.retainedLabel(kind),
         diagnostic?.message ?? "The daemon reported an unrecognized session event."
       )
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed,
-      .turnRefused, .turnCancelled, .turnReconciliationRequired,
-      .turnToolReconciliationRequired:
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
+      .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnFailed, .turnRefused,
+      .turnCancelled, .turnReconciliationRequired, .turnToolReconciliationRequired:
       content = nil
     }
     guard let content else {
@@ -1201,8 +1201,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         }
       case .contextCompacted(_, let modelCallID, _, _, _):
         return modelCallID == evidence.modelCallID
-      case .sessionCreated, .inputAccepted, .turnActivated, .turnFailed, .turnRefused,
-        .turnCancelled, .toolApprovalDecided, .turnReconciliationRequired,
+      case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+        .inputAccepted, .turnActivated, .turnFailed, .turnRefused, .turnCancelled,
+        .toolApprovalDecided, .turnReconciliationRequired,
         .turnToolReconciliationRequired, .unknown:
         return false
       }
@@ -1333,7 +1334,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return entryTurnID == turnID && requestID.rawValue == awaitingToolDecisionRequestID
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .turnActivated, .modelCallTransition,
       .contextCompacted, .turnRefused, .turnReconciliationRequired, .unknown:
       return false
     }
@@ -1393,8 +1395,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         requiredAttemptID: toolAttemptID,
         terminalFrontierID: terminalFrontierID
       )
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnRefused,
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
+      .toolApprovalDecided, .contextCompacted, .turnCompleted, .turnRefused,
       .turnReconciliationRequired, .unknown:
       return []
     }
@@ -1637,9 +1640,10 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       return message.entryID == cancellationEntryID && entryTurnID == turnID
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolBatchTransition, .toolApprovalDecided, .contextCompacted, .turnRefused,
-      .turnReconciliationRequired, .turnToolReconciliationRequired, .unknown:
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .turnActivated, .modelCallTransition, .toolBatchTransition,
+      .toolApprovalDecided, .contextCompacted, .turnRefused, .turnReconciliationRequired,
+      .turnToolReconciliationRequired, .unknown:
       return false
     }
   }
@@ -1785,8 +1789,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
     case .turnToolReconciliationRequired:
       return !terminalResultEntryIDs.isEmpty
-    case .sessionCreated, .inputAccepted, .turnActivated, .modelCallTransition,
-      .toolApprovalDecided, .unknown:
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .inputAccepted, .turnActivated, .modelCallTransition, .toolApprovalDecided, .unknown:
       return true
     }
   }

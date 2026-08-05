@@ -2966,6 +2966,24 @@ pub(crate) async fn load_foreground_delegation_outcome(
     spawning_request: ToolRequestId,
     child: SessionId,
 ) -> Result<DelegationOutcome, ToolLoopRepositoryError> {
+    load_optional_foreground_delegation_outcome(
+        connection,
+        parent,
+        awaiting_request,
+        spawning_request,
+        child,
+    )
+    .await?
+    .ok_or_else(|| ToolLoopCorruption::Missing("foreground child result").into())
+}
+
+pub(crate) async fn load_optional_foreground_delegation_outcome(
+    connection: &mut PgConnection,
+    parent: SessionId,
+    awaiting_request: ToolRequestId,
+    spawning_request: ToolRequestId,
+    child: SessionId,
+) -> Result<Option<DelegationOutcome>, ToolLoopRepositoryError> {
     let row = sqlx::query(
         "SELECT result.outcome_kind, result.content_text,
                 event.reason_kind, event.provenance_kind,
@@ -2994,8 +3012,10 @@ pub(crate) async fn load_foreground_delegation_outcome(
     .bind(session_id_to_uuid(parent))
     .bind(session_id_to_uuid(child))
     .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(ToolLoopCorruption::Missing("foreground child result"))?;
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
     let kind = match required::<String>(&row, "outcome_kind")?.as_str() {
         "result_returned" => DelegationOutcomeKind::ResultReturned,
         "child_failed" => DelegationOutcomeKind::ChildFailed,
@@ -3075,6 +3095,7 @@ pub(crate) async fn load_foreground_delegation_outcome(
         }
     };
     DelegationOutcome::reconstitute(kind, content, reason, provenance)
+        .map(Some)
         .ok_or_else(|| ToolLoopCorruption::Inconsistent("delegation result outcome").into())
 }
 

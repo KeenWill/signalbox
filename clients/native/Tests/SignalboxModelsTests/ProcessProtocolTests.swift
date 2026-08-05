@@ -54,6 +54,232 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(frame.message, .sessionsStart)
   }
 
+  func testSessionDefaultsRequireTheModelSettingsSnapshot() {
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
+  func testSessionDefaultsRejectMalformedModelSettings() {
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "model_settings":{},
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
+  func testSessionDefaultsRejectSettingsValidatedForAnotherDirectModel() {
+    let modelSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        validatedForSelectionID: "\"\(sessionID)\""
+      ),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "model_settings":\(modelSettings),
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
+  func testSessionDefaultsRejectPerCallModelSettings() {
+    let modelSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        perCallReasoning: #"{"kind":"value","value":"high"}"#,
+        effectiveReasoning: "\"high\"",
+        reasoningSource: "\"per_call\"",
+        validatedForSelectionID: "\"\(turnID)\""
+      ),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "type":"session_defaults",
+        "session_id":"\(sessionID)",
+        "defaults_version":"1",
+        "model_selection":{"kind":"direct","selection_id":"\(turnID)"},
+        "model_settings":\(modelSettings),
+        "dangerous_tool_auto_approval":false,
+        "system_prompt":null
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxSessionDefaultsRead.self, from: encoded)
+    )
+  }
+
+  func testSessionCreatedRequiresTheModelSettingsSnapshot() throws {
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)"
+      }
+      """.utf8
+    )
+
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: encoded
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: message))
+  }
+
+  func testSessionCreatedRejectsMalformedModelSettings() throws {
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)",
+        "model_settings":{}
+      }
+      """.utf8
+    )
+
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: encoded
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: message))
+  }
+
+  func testSessionCreatedRejectsPerCallModelSettings() throws {
+    let modelSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        perCallReasoning: #"{"kind":"provider_default"}"#,
+        reasoningSource: "\"per_call\"",
+        validatedForSelectionID: "\"\(turnID)\""
+      ),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "type":"session_created",
+        "session_id":"\(sessionID)",
+        "model_settings":\(modelSettings)
+      }
+      """.utf8
+    )
+
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: encoded
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: message))
+  }
+
+  func testModelSettingsSnapshotRejectsContradictoryEffectiveValue() {
+    let encoded = ProcessProtocolFixture.modelSettingsSnapshot(
+      effectiveReasoning: "\"high\"",
+      reasoningSource: "null",
+      validatedForSelectionID: "null"
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxModelSettingsSnapshot.self,
+        from: encoded
+      )
+    )
+  }
+
+  func testModelSettingsSnapshotRequiresValidationForNondefaultValue() {
+    let encoded = ProcessProtocolFixture.modelSettingsSnapshot(
+      sessionReasoning: #"{"kind":"value","value":"high"}"#,
+      effectiveReasoning: "\"high\"",
+      reasoningSource: "\"session\"",
+      validatedForSelectionID: "null"
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(
+        SignalboxModelSettingsSnapshot.self,
+        from: encoded
+      )
+    )
+  }
+
+  func testInputSubmittedRequiresTheModelSettingsSnapshot() {
+    let encoded = Data(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(sessionID)",
+        "accepted_input_id":"\(turnID)",
+        "acceptance_position":"1",
+        "turn_id":"\(turnID)"
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxInputSubmitted.self, from: encoded)
+    )
+  }
+
+  func testInputSubmittedRejectsMalformedModelSettings() {
+    let encoded = Data(
+      """
+      {
+        "type":"input_submitted",
+        "session_id":"\(sessionID)",
+        "accepted_input_id":"\(turnID)",
+        "acceptance_position":"1",
+        "turn_id":"\(turnID)",
+        "model_settings":{}
+      }
+      """.utf8
+    )
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxInputSubmitted.self, from: encoded)
+    )
+  }
+
   /// INV-033: imported continuation requests retain their closed version-one shape.
   func testImportedContinuationRequestUsesTheVersionOneFrontierShape() throws {
     let importedConversationID = "33333333-3333-4333-8333-333333333333"
@@ -77,7 +303,7 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"command_id":"\#(turnID)","imported_conversation_id":"\#(importedConversationID)","initial_model_selection":{"alias_id":"\#(aliasID)","kind":"alias"},"relationship":"resume","through_position":"2","type":"create_session_from_imported_frontier"},"request_id":"10","version":1}"#
+      #"{"request":{"command_id":"\#(turnID)","imported_conversation_id":"\#(importedConversationID)","initial_model_selection":{"alias_id":"\#(aliasID)","kind":"alias"},"model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"relationship":"resume","through_position":"2","type":"create_session_from_imported_frontier"},"request_id":"10","version":1}"#
     )
   }
 
@@ -285,6 +511,285 @@ final class ProcessProtocolTests: XCTestCase {
         )
       )
     )
+  }
+
+  func testSettingsChangeSessionEventDecodesAsKnown() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"session_model_settings_changed",
+            "command_id":"33333333-3333-4333-8333-333333333333",
+            "prior_defaults_version":"1",
+            "installed_defaults_version":"2",
+            "prior_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "installed_model":{"kind":"alias","alias_id":"\(sessionID)"},
+            "prior_settings":\(settings),
+            "installed_settings":\(settings),
+            "caller_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "adjustments":[]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 12),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .sessionModelSettingsChanged
+        )
+      )
+    )
+  }
+
+  func testSettingsChangeSessionEventRejectsUnrelatedInstalledSessionLayer() throws {
+    let priorSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        sessionReasoning: #"{"kind":"value","value":"high"}"#,
+        effectiveReasoning: "\"high\"",
+        reasoningSource: "\"session\"",
+        validatedForSelectionID: "\"(turnID)\""
+      ),
+      as: UTF8.self
+    )
+    let installedSettings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(
+        sessionReasoning: #"{"kind":"value","value":"low"}"#,
+        effectiveReasoning: "\"low\"",
+        reasoningSource: "\"session\"",
+        validatedForSelectionID: "\"(turnID)\""
+      ),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"session_model_settings_changed",
+            "command_id":"33333333-3333-4333-8333-333333333333",
+            "prior_defaults_version":"1",
+            "installed_defaults_version":"2",
+            "prior_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "installed_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "prior_settings":\(priorSettings),
+            "installed_settings":\(installedSettings),
+            "caller_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "adjustments":[]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventDecodesAsKnown() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"turn_model_settings_resolved",
+            "accepted_input_id":"33333333-3333-4333-8333-333333333333",
+            "turn_id":"\(turnID)",
+            "defaults_version":"1",
+            "requested_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "selected_direct_id":"\(turnID)",
+            "per_call_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "settings":\(settings),
+            "adjusted_from_selection_id":null,
+            "adjustments":[]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertEqual(
+      frame.message,
+      .sessionEvent(
+        SignalboxFollowedSessionEvent(
+          cursor: SignalboxCanonicalUInt64(rawValue: 12),
+          sessionID: try SignalboxCanonicalUUID(validating: sessionID),
+          event: .turnModelSettingsResolved
+        )
+      )
+    )
+  }
+
+  func testTurnSettingsSessionEventRejectsDirectSelectionMismatch() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.turnModelSettingsEventFrame(
+        sessionID: sessionID,
+        turnID: turnID,
+        requestedModel: #"{"kind":"direct","selection_id":"\#(sessionID)"}"#,
+        selectedDirectID: turnID
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventRejectsPerCallProvenanceMismatch() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.turnModelSettingsEventFrame(
+        sessionID: sessionID,
+        turnID: turnID,
+        requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
+        selectedDirectID: turnID,
+        perCallOverride:
+          #"{"reasoning_level":{"kind":"provider_default"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}"#
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventRejectsUnchangedAdjustmentSource() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.turnModelSettingsEventFrame(
+        sessionID: sessionID,
+        turnID: turnID,
+        requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
+        selectedDirectID: turnID,
+        adjustedFromSelectionID: "\"\(turnID)\"",
+        adjustments: #"[{"type":"reasoning_level_cleared","from":"high"}]"#
+      )
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventAcceptsDistinctAdjustmentSource() throws {
+    let settings = ProcessProtocolFixture.modelSettingsSnapshot(
+      sessionReasoning: #"{"kind":"value","value":"low"}"#,
+      effectiveReasoning: "\"low\"",
+      reasoningSource: "\"session\"",
+      validatedForSelectionID: "\"\(turnID)\""
+    )
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.turnModelSettingsEventFrame(
+        sessionID: sessionID,
+        turnID: turnID,
+        requestedModel: #"{"kind":"direct","selection_id":"\#(turnID)"}"#,
+        selectedDirectID: turnID,
+        settings: settings,
+        adjustedFromSelectionID: "\"\(sessionID)\"",
+        adjustments:
+          #"[{"type":"reasoning_level_clamped","from":"high","to":"low"}]"#
+      )
+    )
+
+    XCTAssertNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testSettingsChangeSessionEventRejectsUnknownMembers() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"session_model_settings_changed",
+            "command_id":"33333333-3333-4333-8333-333333333333",
+            "prior_defaults_version":"1",
+            "installed_defaults_version":"2",
+            "prior_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "installed_model":{"kind":"alias","alias_id":"\(sessionID)"},
+            "prior_settings":\(settings),
+            "installed_settings":\(settings),
+            "caller_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "adjustments":[],
+            "unexpected":true
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
+  }
+
+  func testTurnSettingsSessionEventRejectsMalformedAdjustments() throws {
+    let settings = String(
+      decoding: ProcessProtocolFixture.modelSettingsSnapshot(),
+      as: UTF8.self
+    )
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"turn_model_settings_resolved",
+            "accepted_input_id":"33333333-3333-4333-8333-333333333333",
+            "turn_id":"\(turnID)",
+            "defaults_version":"1",
+            "requested_model":{"kind":"direct","selection_id":"\(turnID)"},
+            "selected_direct_id":"\(turnID)",
+            "per_call_override":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+            "settings":\(settings),
+            "adjusted_from_selection_id":"\(sessionID)",
+            "adjustments":[{"type":"reasoning_level_clamped","from":"high"}]
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.sessionEventDecodingDiagnostic(in: frame))
   }
 
   func testToolApprovalDecisionDecodesTypedDelegateProvenance() throws {
@@ -646,6 +1151,15 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testDelegatedTaskEntryRejectsEmptyContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegatedTaskEntryFrame(sessionID: sessionID, content: "")
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
   func testDelegationMessageEntryDecodesExactDelivery() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.delegationMessageEntryFrame(sessionID: sessionID)
@@ -668,6 +1182,18 @@ final class ProcessProtocolTests: XCTestCase {
         content: ProcessProtocolFixture.delegationMessageContent
       )
     )
+  }
+
+  func testDelegationMessageEntryRejectsNULContent() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationMessageEntryFrame(
+        sessionID: sessionID,
+        content: #"invalid\u0000message"#
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
   }
 
   func testForegroundDelegationResultEntryDecodesExactLifecycleProof() throws {
@@ -745,6 +1271,24 @@ final class ProcessProtocolTests: XCTestCase {
         mode: "foreground",
         deliverySequence: "null",
         reason: "child_cancelled"
+      )
+    )
+    let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
+
+    XCTAssertFalse(diagnostic.message.isEmpty)
+  }
+
+  func testDelegationResultRejectsOversizedContent() throws {
+    let oversized = String(
+      repeating: "x",
+      count: SignalboxProcessProtocol.maximumContentFragmentUTF8Bytes + 1
+    )
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.delegationResultEntryFrame(
+        sessionID: sessionID,
+        mode: "foreground",
+        deliverySequence: "null",
+        content: oversized
       )
     )
     let diagnostic = try ProcessProtocolFixture.transcriptEntryDiagnostic(in: frame.message)
@@ -920,7 +1464,7 @@ final class ProcessProtocolTests: XCTestCase {
           "session_id": .number(17),
         ],
         decodingDiagnostic: SignalboxDecodingDiagnostic(
-          message: "Unexpected field type at message.session_id."
+          message: "Missing required field at message.model_settings."
         )
       )
     )
@@ -1097,6 +1641,39 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  func testModelSettingRejectionsDecodeTypedDetails() throws {
+    let reasoning = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.unsupportedReasoningLevelFrame(
+        selectionID: sessionID,
+        requested: "xhigh"
+      )
+    )
+    let fastMode = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.unsupportedFastModeFrame(selectionID: sessionID)
+    )
+    let serviceTier = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.unsupportedServiceTierFrame(selectionID: sessionID)
+    )
+    let selection = try SignalboxCanonicalUUID(validating: sessionID)
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: reasoning.message),
+      .unsupportedReasoningLevel(selectionID: selection, requested: "xhigh")
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: fastMode.message),
+      .unsupportedFastMode(selectionID: selection)
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: serviceTier.message),
+      .unsupportedServiceTier(
+        selectionID: selection,
+        provider: "open_ai",
+        requested: "priority"
+      )
+    )
+  }
+
   func testConversationSummaryRequiresNullableTitleMember() throws {
     let native = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.nativeConversationWithoutTitleFrame(sessionID: sessionID)
@@ -1250,7 +1827,10 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func delegatedTaskEntryFrame(sessionID: String) -> Data {
+  static func delegatedTaskEntryFrame(
+    sessionID: String,
+    content: String = delegatedTaskContent
+  ) -> Data {
     Data(
       """
       {
@@ -1266,7 +1846,7 @@ private enum ProcessProtocolFixture {
             "spawning_request_id":"\(spawningRequestID)",
             "parent_session_id":"\(parentSessionID)",
             "parent_turn_id":"\(parentTurnID)",
-            "content":"\(delegatedTaskContent)"
+            "content":"\(content)"
           }
         }
       }
@@ -1274,7 +1854,10 @@ private enum ProcessProtocolFixture {
     )
   }
 
-  static func delegationMessageEntryFrame(sessionID: String) -> Data {
+  static func delegationMessageEntryFrame(
+    sessionID: String,
+    content: String = delegationMessageContent
+  ) -> Data {
     Data(
       """
       {
@@ -1293,7 +1876,7 @@ private enum ProcessProtocolFixture {
             "recipient_session_id":"\(sessionID)",
             "ordinal":"\(delegationMessageOrdinal)",
             "delivery_sequence":"\(delegationMessageDeliverySequence)",
-            "content":"\(delegationMessageContent)"
+            "content":"\(content)"
           }
         }
       }
@@ -1305,7 +1888,8 @@ private enum ProcessProtocolFixture {
     sessionID: String,
     mode: String,
     deliverySequence: String,
-    reason: String = "child_completed"
+    reason: String = "child_completed",
+    content: String = delegationResultContent
   ) -> Data {
     Data(
       """
@@ -1325,7 +1909,7 @@ private enum ProcessProtocolFixture {
             "mode":"\(mode)",
             "delivery_sequence":\(deliverySequence),
             "outcome":"returned",
-            "content":"\(delegationResultContent)",
+            "content":"\(content)",
             "reason":"\(reason)",
             "provenance":{
               "type":"child_turn",
@@ -1485,6 +2069,47 @@ private enum ProcessProtocolFixture {
         }
       }
       """.utf8
+    )
+  }
+
+  static func unsupportedReasoningLevelFrame(
+    selectionID: String,
+    requested: String
+  ) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"unsupported_reasoning_level",
+          "selection_id":"\(selectionID)",
+          "requested":"\(requested)"
+        }
+        """
+    )
+  }
+
+  static func unsupportedFastModeFrame(selectionID: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"unsupported_fast_mode",
+          "selection_id":"\(selectionID)"
+        }
+        """
+    )
+  }
+
+  static func unsupportedServiceTierFrame(selectionID: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"unsupported_service_tier",
+          "selection_id":"\(selectionID)",
+          "requested":{"provider":"open_ai","value":"priority"}
+        }
+        """
     )
   }
 
@@ -2012,12 +2637,89 @@ private enum ProcessProtocolFixture {
     )
   }
 
+  static func modelSettingsSnapshot(
+    perCallReasoning: String = #"{"kind":"inherit"}"#,
+    sessionReasoning: String = #"{"kind":"inherit"}"#,
+    effectiveReasoning: String = "null",
+    reasoningSource: String = "null",
+    validatedForSelectionID: String = "null"
+  ) -> Data {
+    Data(
+      """
+      {
+        "precedence":{
+          "per_call":{"reasoning_level":\(perCallReasoning),"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+          "session":{"reasoning_level":\(sessionReasoning),"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+          "profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},
+          "global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}
+        },
+        "effective":{"reasoning_level":\(effectiveReasoning),"fast_mode":"disabled","service_tier":null},
+        "reasoning_source":\(reasoningSource),
+        "fast_mode_source":null,
+        "service_tier_source":null,
+        "validated_for_selection_id":\(validatedForSelectionID)
+      }
+      """.utf8
+    )
+  }
+
+  static func turnModelSettingsEventFrame(
+    sessionID: String,
+    turnID: String,
+    requestedModel: String,
+    selectedDirectID: String,
+    settings: Data? = nil,
+    perCallOverride: String =
+      #"{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}"#,
+    adjustedFromSelectionID: String = "null",
+    adjustments: String = "[]"
+  ) -> Data {
+    let settings = String(decoding: settings ?? modelSettingsSnapshot(), as: UTF8.self)
+    return Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"session_event",
+          "cursor":"12",
+          "session_id":"\(sessionID)",
+          "event":{
+            "type":"turn_model_settings_resolved",
+            "accepted_input_id":"33333333-3333-4333-8333-333333333333",
+            "turn_id":"\(turnID)",
+            "defaults_version":"1",
+            "requested_model":\(requestedModel),
+            "selected_direct_id":"\(selectedDirectID)",
+            "per_call_override":\(perCallOverride),
+            "settings":\(settings),
+            "adjusted_from_selection_id":\(adjustedFromSelectionID),
+            "adjustments":\(adjustments)
+          }
+        }
+      }
+      """.utf8
+    )
+  }
+
   static func turnStateDecodingDiagnostic(
     in message: SignalboxProcessServerMessage
   ) -> SignalboxDecodingDiagnostic? {
     guard
       case .transcriptTurn(let turn) = message,
       case .unknown(_, _, let diagnostic) = turn.state
+    else {
+      return nil
+    }
+    return diagnostic
+  }
+
+  static func sessionEventDecodingDiagnostic(
+    in frame: SignalboxProcessServerFrame
+  ) -> SignalboxDecodingDiagnostic? {
+    guard
+      case .sessionEvent(let followed) = frame.message,
+      case .unknown(_, _, let diagnostic) = followed.event
     else {
       return nil
     }

@@ -50,18 +50,25 @@ impl ModelCapabilities {
         &self.service_tiers
     }
 
-    /// Returns the declared effective provider target for these settings.
+    /// Returns the declared effective provider target and the fast-mode value
+    /// that remains to be emitted as a request control.
+    ///
+    /// A mapped target implements fast mode by serving identity, so its
+    /// request-control value is disabled after the target is selected.
     pub fn effective_target<'a>(
         &'a self,
         selected: &'a ResolvedTarget,
         fast_mode: FastMode,
-    ) -> Option<&'a ResolvedTarget> {
+    ) -> Result<(&'a ResolvedTarget, FastMode), ModelCapabilityError> {
         match (fast_mode, &self.fast_mode) {
-            (FastMode::Disabled, _) | (FastMode::Enabled, Some(FastModeTarget::SameTarget)) => {
-                Some(selected)
+            (FastMode::Disabled, _) => Ok((selected, FastMode::Disabled)),
+            (FastMode::Enabled, Some(FastModeTarget::SameTarget)) => {
+                Ok((selected, FastMode::Enabled))
             }
-            (FastMode::Enabled, Some(FastModeTarget::Mapped(target))) => Some(target),
-            (FastMode::Enabled, None) => None,
+            (FastMode::Enabled, Some(FastModeTarget::Mapped(target))) => {
+                Ok((target, FastMode::Disabled))
+            }
+            (FastMode::Enabled, None) => Err(ModelCapabilityError::UnsupportedFastMode),
         }
     }
 }
@@ -100,6 +107,13 @@ pub struct ModelCapabilityCatalog {
 }
 
 impl ModelCapabilityCatalog {
+    /// Constructs an empty catalog for callers that use provider defaults.
+    pub fn empty() -> Self {
+        Self {
+            definitions: Box::new([]),
+        }
+    }
+
     /// Constructs a catalog and rejects a repeated exact target.
     pub fn try_from_definitions(
         definitions: impl IntoIterator<Item = ModelCapabilityDefinition>,
@@ -163,9 +177,31 @@ impl ModelCapabilityCatalog {
         Ok(capabilities)
     }
 
+    /// Validates catalog-governed controls when the operation sets one.
+    ///
+    /// Operations carrying only provider defaults need no catalog entry;
+    /// every explicit provider control requires the exact target record.
+    pub fn validate_explicit(
+        &self,
+        target: &ResolvedTarget,
+        settings: &ModelSettings,
+    ) -> Result<Option<&ModelCapabilities>, ModelCapabilityError> {
+        if settings.has_explicit_provider_controls() {
+            self.validate(target, settings).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Iterates in canonical target-spelling order.
     pub fn iter(&self) -> impl Iterator<Item = &ModelCapabilityDefinition> {
         self.definitions.iter()
+    }
+}
+
+impl Default for ModelCapabilityCatalog {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -193,7 +229,57 @@ pub enum ModelCapabilityError {
 
 impl std::fmt::Display for ModelCapabilityError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("model settings are incompatible with the exact runtime target")
+        match self {
+            Self::UnknownTarget { target } => write!(
+                formatter,
+                "exact runtime target {:?} has no model-capability record",
+                target.as_str()
+            ),
+            Self::UnsupportedReasoningLevel { reasoning_level } => write!(
+                formatter,
+                "explicit reasoning level {} is unsupported by the exact runtime target",
+                reasoning_level_label(*reasoning_level)
+            ),
+            Self::UnsupportedFastMode => {
+                formatter.write_str("fast mode is unsupported by the exact runtime target")
+            }
+            Self::UnsupportedServiceTier { service_tier } => write!(
+                formatter,
+                "explicit service tier {} is unsupported by the exact runtime target",
+                service_tier_label(*service_tier)
+            ),
+        }
+    }
+}
+
+fn reasoning_level_label(level: ReasoningLevel) -> &'static str {
+    match level {
+        ReasoningLevel::None => "none",
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh => "xhigh",
+        ReasoningLevel::Max => "max",
+        ReasoningLevel::Ultra => "ultra",
+    }
+}
+
+fn service_tier_label(tier: ServiceTier) -> &'static str {
+    match tier {
+        ServiceTier::Anthropic(crate::AnthropicServiceTier::Auto) => "anthropic:auto",
+        ServiceTier::Anthropic(crate::AnthropicServiceTier::StandardOnly) => {
+            "anthropic:standard_only"
+        }
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Auto) => "openai:auto",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Default) => "openai:default",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Flex) => "openai:flex",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Scale) => "openai:scale",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Priority) => "openai:priority",
+        ServiceTier::OpenAi(crate::OpenAiServiceTier::Fast) => "openai:fast",
+        ServiceTier::CodexCli(crate::CodexCliServiceTier::Default) => "codex_cli:default",
+        ServiceTier::CodexCli(crate::CodexCliServiceTier::Priority) => "codex_cli:priority",
+        ServiceTier::CodexCli(crate::CodexCliServiceTier::Flex) => "codex_cli:flex",
     }
 }
 
@@ -233,11 +319,15 @@ impl std::error::Error for ModelCapabilityCatalogError {}
 mod tests {
     use std::collections::BTreeSet;
 
+    use expect_test::expect;
+
     use super::{
         FastModeTarget, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
         ModelCapabilityError,
     };
-    use crate::{FastMode, ModelSettings, ReasoningLevel, ResolvedTarget};
+    use crate::{
+        FastMode, ModelSettings, OpenAiServiceTier, ReasoningLevel, ResolvedTarget, ServiceTier,
+    };
 
     fn catalog() -> ModelCapabilityCatalog {
         ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
@@ -281,15 +371,44 @@ mod tests {
             Some(FastModeTarget::Mapped(mapped.clone())),
             BTreeSet::new(),
         );
+        let same_target_capabilities = ModelCapabilities::new(
+            BTreeSet::new(),
+            Some(FastModeTarget::SameTarget),
+            BTreeSet::new(),
+        );
 
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Enabled),
-            Some(&mapped)
+            Ok((&mapped, FastMode::Disabled))
         );
         assert_eq!(
             capabilities.effective_target(&selected, FastMode::Disabled),
-            Some(&selected)
+            Ok((&selected, FastMode::Disabled))
         );
+        assert_eq!(
+            same_target_capabilities.effective_target(&selected, FastMode::Enabled),
+            Ok((&selected, FastMode::Enabled))
+        );
+    }
+
+    #[test]
+    fn capability_errors_name_the_safe_offending_value() {
+        let unknown = ModelCapabilityError::UnknownTarget {
+            target: ResolvedTarget::new("fixture-unknown"),
+        };
+        let reasoning = ModelCapabilityError::UnsupportedReasoningLevel {
+            reasoning_level: ReasoningLevel::Ultra,
+        };
+        let tier = ModelCapabilityError::UnsupportedServiceTier {
+            service_tier: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
+        };
+
+        expect!["exact runtime target \"fixture-unknown\" has no model-capability record"]
+            .assert_eq(&unknown.to_string());
+        expect!["explicit reasoning level ultra is unsupported by the exact runtime target"]
+            .assert_eq(&reasoning.to_string());
+        expect!["explicit service tier openai:priority is unsupported by the exact runtime target"]
+            .assert_eq(&tier.to_string());
     }
 
     /// S37 / INV-054: a same-target request control cannot masquerade as a
