@@ -23,6 +23,7 @@ use crate::{
         self, CommandKind, REPLACE_SESSION_DEFAULTS_KIND, RegistryCorruption,
         RegistryInspectionError,
     },
+    lock_inventory,
     mapping::{
         PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
         dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
@@ -58,6 +59,16 @@ pub enum ReplaceSessionDefaultsHandlingOutcome {
     /// lock; the whole transaction rolled back and nothing — not even the
     /// command identity — was recorded.
     PromptRequiresStatedMember,
+}
+
+/// Result of admitting a replacement only when its expected version is stale.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReplaceSessionDefaultsRejectionOnlyOutcome {
+    /// The atomic boundary recorded or replayed the command's terminal result.
+    Handled(ReplaceSessionDefaultsHandlingOutcome),
+    /// The expected version was current under the session pointer lock, so
+    /// the command claim was rolled back without applying the placeholder.
+    CurrentVersionMatched,
 }
 
 /// A durable shape that cannot reconstruct one recorded replacement.
@@ -237,6 +248,39 @@ impl ReplaceSessionDefaultsRepository {
         command: ReplaceSessionDefaults,
         prompt_member: PromptMemberStatement,
     ) -> Result<ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepositoryError> {
+        match self
+            .handle_conditionally(command, prompt_member, false)
+            .await?
+        {
+            ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome) => Ok(outcome),
+            ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched => {
+                Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "unconditional replacement was not handled",
+                )
+                .into())
+            }
+        }
+    }
+
+    /// Records a stale-version result atomically but never applies the supplied
+    /// replacement if its expected version has become current.
+    pub async fn handle_rejection_only_where_prompt_member(
+        &self,
+        command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<ReplaceSessionDefaultsRejectionOnlyOutcome, ReplaceSessionDefaultsRepositoryError>
+    {
+        self.handle_conditionally(command, prompt_member, true)
+            .await
+    }
+
+    async fn handle_conditionally(
+        &self,
+        command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
+        rejection_only: bool,
+    ) -> Result<ReplaceSessionDefaultsRejectionOnlyOutcome, ReplaceSessionDefaultsRepositoryError>
+    {
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
 
@@ -249,11 +293,13 @@ impl ReplaceSessionDefaultsRepository {
                     ))?;
                 let outcome = existing_outcome(&command, &recorded);
                 transaction.rollback().await?;
-                return Ok(outcome);
+                return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome));
             }
             Some(CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier) => {
                 transaction.rollback().await?;
-                return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
+                return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
+                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
+                ));
             }
             Some(
                 CommandKind::ReplaceSessionMetadata
@@ -266,7 +312,9 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::UpdateSessionPlacement,
             ) => {
                 transaction.rollback().await?;
-                return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
+                return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
+                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
+                ));
             }
             None => {}
         }
@@ -315,11 +363,16 @@ impl ReplaceSessionDefaultsRepository {
                 }
             };
             transaction.rollback().await?;
-            return Ok(outcome);
+            return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome));
         }
 
+        lock_current_defaults_pointer(&mut transaction, command.session()).await?;
         let (prepared, mut prior_defaults) =
             prepare_against_current(&mut transaction, command.clone()).await?;
+        if rejection_only && matches!(prepared.result(), ReplaceSessionDefaultsResult::Applied(_)) {
+            transaction.rollback().await?;
+            return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched);
+        }
         let prepared = match prepared.result() {
             ReplaceSessionDefaultsResult::Applied(applied) => {
                 let updated = sqlx::query(
@@ -347,9 +400,9 @@ impl ReplaceSessionDefaultsRepository {
                         .await?
                     {
                         transaction.rollback().await?;
-                        return Ok(
+                        return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
                             ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember,
-                        );
+                        ));
                     }
                     insert_defaults_version(&mut transaction, applied).await?;
                     prepared.clone()
@@ -382,7 +435,7 @@ impl ReplaceSessionDefaultsRepository {
             .commit()
             .await
             .map_err(ReplaceSessionDefaultsRepositoryError::from_commit_failure)?;
-        Ok(outcome)
+        Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome))
     }
 
     /// Loads one complete replacement receipt, or `None` only for an unseen ID.
@@ -448,6 +501,20 @@ impl ReplaceSessionDefaultsTransaction for ReplaceSessionDefaultsRepository {
             }
         })
     }
+}
+
+/// Serializes preparation with every replacement that can move this session's
+/// current-defaults pointer. An absent row is left for domain preparation to
+/// classify as session-not-found or durable corruption.
+async fn lock_current_defaults_pointer(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
+    let _: Option<Decimal> = sqlx::query_scalar(lock_inventory::REPLACE_SESSION_DEFAULTS_CURRENT)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&mut *connection)
+        .await?;
+    Ok(())
 }
 
 /// Reads whether the immutable expected epoch carries a prompt.

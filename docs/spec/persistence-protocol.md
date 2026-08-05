@@ -36,15 +36,17 @@ verified against this implementing change; and the session-placement event,
 current head, and creation transaction were verified through PR #415
 (`agent/scoped-visibility-creation`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
-through this PR (`agent/model-settings-persistence`). This page covers the
-Postgres representation in `crates/persistence` (source and migrations),
-migration discipline, durable command storage and replay equality, the
-fail-closed reconstitution boundary, the lock protocol, pending-steering durable
-state, the corruption taxonomy, commit-ambiguity handling, and the transactional
-outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+through this PR (`agent/model-settings-persistence`); the defaults-replacement
+pointer-lock admission is verified through this PR
+(`agent/model-settings-execution`). This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -640,9 +642,13 @@ Locks per transaction, in acquisition order:
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
 
-- **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
-  on the `session_current_defaults` pointer row is the serialization point, and
-  its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
+- **ReplaceSessionDefaults**: an unseen command locks its
+  `session_current_defaults` pointer row `FOR UPDATE` before loading and
+  preparing against the current epoch. The compare-and-set `UPDATE` on that
+  already-locked row remains the applying check. Rejection-only admission uses
+  the same lock: a current expected version rolls back the command claim and
+  applies nothing, while a mismatch records the typed rejection. The
+  `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
 
 - **ReplaceSessionMetadata**: the target session row is locked
