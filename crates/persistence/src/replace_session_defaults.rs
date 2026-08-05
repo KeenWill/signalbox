@@ -23,6 +23,7 @@ use crate::{
         self, CommandKind, REPLACE_SESSION_DEFAULTS_KIND, RegistryCorruption,
         RegistryInspectionError,
     },
+    lock_inventory,
     mapping::{
         PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
         dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
@@ -509,15 +510,10 @@ async fn lock_current_defaults_pointer(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
-    let _: Option<Decimal> = sqlx::query_scalar(
-        "SELECT current_version
-           FROM session_current_defaults
-          WHERE session_id = $1
-          FOR UPDATE",
-    )
-    .bind(session_id_to_uuid(session))
-    .fetch_optional(&mut *connection)
-    .await?;
+    let _: Option<Decimal> = sqlx::query_scalar(lock_inventory::REPLACE_SESSION_DEFAULTS_CURRENT)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&mut *connection)
+        .await?;
     Ok(())
 }
 
