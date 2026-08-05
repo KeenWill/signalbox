@@ -794,6 +794,9 @@ async fn load_from_connection(
             prior.system_prompt AS prior_system_prompt,
             prior.model_settings AS prior_model_settings,
             settings_event.command_id AS settings_event_command_id,
+            settings_event.prior_model_settings AS settings_event_prior_model_settings,
+            settings_event.installed_model_settings AS settings_event_installed_model_settings,
+            settings_event.caller_model_settings AS settings_event_caller_model_settings,
             settings_event.adjustments AS model_settings_adjustments
          FROM durable_command AS command
          LEFT JOIN replace_session_defaults_command AS typed
@@ -831,27 +834,37 @@ fn decode_complete(
     }
 
     let settings_event_command: Option<Uuid> = row.try_get("settings_event_command_id")?;
+    let settings_event_prior: Option<Value> = row.try_get("settings_event_prior_model_settings")?;
+    let settings_event_installed: Option<Value> =
+        row.try_get("settings_event_installed_model_settings")?;
+    let settings_event_caller: Option<Value> =
+        row.try_get("settings_event_caller_model_settings")?;
     let settings_event_adjustments: Option<Value> = row.try_get("model_settings_adjustments")?;
-    let (settings_event_present, adjustments) =
-        match (settings_event_command, settings_event_adjustments) {
-            (None, None) => (false, Vec::new()),
-            (Some(event_command), Some(adjustments))
-                if event_command == durable_command_id_to_uuid(command_id) =>
-            {
-                let adjustments =
-                    model_change_adjustments_from_json(adjustments).map_err(|_| {
-                        ReplaceSessionDefaultsCorruption::Inconsistent("settings adjustments")
-                    })?;
-                (true, adjustments)
-            }
-            _ => {
-                return Err(
-                    ReplaceSessionDefaultsCorruption::Inconsistent("settings event shape").into(),
-                );
-            }
-        };
+    let (settings_event_values, adjustments) = match (
+        settings_event_command,
+        settings_event_prior,
+        settings_event_installed,
+        settings_event_caller,
+        settings_event_adjustments,
+    ) {
+        (None, None, None, None, None) => (None, Vec::new()),
+        (Some(event_command), Some(prior), Some(installed), Some(caller), Some(adjustments))
+            if event_command == durable_command_id_to_uuid(command_id) =>
+        {
+            let adjustments = model_change_adjustments_from_json(adjustments).map_err(|_| {
+                ReplaceSessionDefaultsCorruption::Inconsistent("settings adjustments")
+            })?;
+            (Some((prior, installed, caller)), adjustments)
+        }
+        _ => {
+            return Err(
+                ReplaceSessionDefaultsCorruption::Inconsistent("settings event shape").into(),
+            );
+        }
+    };
+    let command_caller_model_settings: Value = required(&row, "caller_model_settings")?;
     let caller_model_settings =
-        model_settings_overlay_from_json(required(&row, "caller_model_settings")?)
+        model_settings_overlay_from_json(command_caller_model_settings.clone())
             .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("caller model settings"))?;
     if typed_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
         && caller_model_settings != signalbox_domain::ModelSettingsOverlay::inherit_all()
@@ -901,6 +914,7 @@ fn decode_complete(
                 ))?;
             let installed_session = session_id_from_uuid(required(&row, "installed_session_id")?);
             let installed_version = decode_ordinal(&row, "installed_version")?;
+            let installed_model_settings: Value = required(&row, "installed_model_settings")?;
             let installed_defaults = decode_selection(
                 required(&row, "installed_model_kind")?,
                 row.try_get("installed_direct_id")?,
@@ -908,7 +922,7 @@ fn decode_complete(
                 StoredConfigurationFields {
                     dangerous_tool_auto_approval: required(&row, "installed_tool_auto_approval")?,
                     system_prompt: row.try_get("installed_system_prompt")?,
-                    model_settings: required(&row, "installed_model_settings")?,
+                    model_settings: installed_model_settings.clone(),
                     storage_version: typed_version,
                 },
                 "installed model selection",
@@ -923,6 +937,7 @@ fn decode_complete(
                 )
                 .into());
             }
+            let prior_model_settings: Value = required(&row, "prior_model_settings")?;
             let prior_defaults = decode_selection(
                 required(&row, "prior_model_kind")?,
                 row.try_get("prior_direct_id")?,
@@ -930,16 +945,26 @@ fn decode_complete(
                 StoredConfigurationFields {
                     dangerous_tool_auto_approval: required(&row, "prior_tool_auto_approval")?,
                     system_prompt: row.try_get("prior_system_prompt")?,
-                    model_settings: required(&row, "prior_model_settings")?,
+                    model_settings: prior_model_settings.clone(),
                     storage_version: typed_version,
                 },
                 "prior model selection",
             )?;
+            if let Some((event_prior, event_installed, event_caller)) = &settings_event_values
+                && (event_prior != &prior_model_settings
+                    || event_installed != &installed_model_settings
+                    || event_caller != &command_caller_model_settings)
+            {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings event evidence",
+                )
+                .into());
+            }
             let records_settings_change = prior_defaults.model() != installed_defaults.model()
                 || prior_defaults.model_settings() != installed_defaults.model_settings();
             let requires_settings_event =
                 typed_version >= MODEL_SETTINGS_FROM_STORAGE_VERSION && records_settings_change;
-            if settings_event_present != requires_settings_event {
+            if settings_event_values.is_some() != requires_settings_event {
                 return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
                     "settings change evidence",
                 )

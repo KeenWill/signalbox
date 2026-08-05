@@ -23045,6 +23045,45 @@ async fn s24_inv012_inv053_replacement_replay_requires_settings_change_evidence(
     Ok(())
 }
 
+/// S24 / INV-012 / INV-053: replay authenticates settings-change evidence
+/// against the immutable command and defaults records.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv012_inv053_replacement_replay_rejects_cross_wired_settings_change_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let replacement = record_settings_replacement_fixture(&pool, 0x3760).await?;
+
+    sqlx::query("ALTER TABLE session_model_settings_changed DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE session_model_settings_changed
+            SET prior_model_settings = installed_model_settings
+          WHERE command_id = $1",
+    )
+    .bind(replacement.command.into_uuid())
+    .execute(&pool)
+    .await?;
+    assert_eq!(update.rows_affected(), 1);
+    sqlx::query("ALTER TABLE session_model_settings_changed ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        ReplaceSessionDefaultsRepository::new(pool.clone())
+            .load(replacement.command)
+            .await,
+        Err(ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Inconsistent("settings event evidence")
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-012 / INV-053: legacy command versions accept only the provider-default
 /// settings documents that the migration backfills.
 #[tokio::test]
