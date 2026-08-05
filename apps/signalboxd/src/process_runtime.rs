@@ -115,6 +115,9 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
+    session_delegation::{
+        DelegationOperationRejection, ProcessDelegationOutcome, ProcessDelegationRequestRejection,
+    },
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     session_placement::{SessionPlacementRepository, SessionPlacementRepositoryError},
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
@@ -129,6 +132,7 @@ use signalbox_process_protocol::{
     ConversationSummary as WireConversationSummary, CurrentModelCall, CurrentModelCallState,
     DelegationOutcome as WireDelegationOutcome, DelegationPolicy as WireDelegationPolicy,
     DelegationProvenance as WireDelegationProvenance, DelegationReason as WireDelegationReason,
+    DelegationToolRequestState as WireDelegationToolRequestState,
     DelegationWaitMode as WireDelegationWaitMode,
     DescendantTerminationScope as WireDescendantTerminationScope,
     EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
@@ -159,9 +163,7 @@ use signalbox_process_protocol::{
     content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
-use signalbox_tools_sessions::{
-    AwaitSessionPortOutcome, DeliveredChildResult, SessionDelegationPortOutcome,
-};
+use signalbox_tools_sessions::{AwaitSessionPortOutcome, DeliveredChildResult};
 use sqlx::{PgPool, Row};
 use tokio::{
     io::{
@@ -490,6 +492,10 @@ fn nudge_delegation_wake(
     }
 }
 
+fn nudge_delegation_issuer(eligibility_nudge: &impl EligibilityNudge, session: SessionId) {
+    let _ = eligibility_nudge.nudge(session);
+}
+
 fn observe_outbox_metrics_once(
     metrics: Option<&TelemetryMetrics>,
     last_sequence: &mut Option<u64>,
@@ -774,6 +780,7 @@ async fn serve_connection(
         };
         drop(frame_buffer_permit);
         handle_request(
+            &mut reader,
             &mut writer,
             version,
             request_id,
@@ -1116,7 +1123,12 @@ impl ConversationImportState {
     }
 }
 
-async fn handle_request<Writer>(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "request execution keeps connection I/O and durable correlation explicit"
+)]
+async fn handle_request<Reader, Writer>(
+    reader: &mut Reader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -1126,6 +1138,7 @@ async fn handle_request<Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
+    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     let review_request = is_review_mutation(&request);
@@ -2054,6 +2067,7 @@ where
             mode,
         } => {
             handle_await_session(
+                reader,
                 writer,
                 version,
                 request_id,
@@ -2084,6 +2098,7 @@ where
                 peer_session_id,
                 content,
                 &services.pool,
+                &services.eligibility_nudge,
             )
             .await
         }
@@ -2132,7 +2147,8 @@ where
     clippy::too_many_arguments,
     reason = "the closed await request keeps every durable correlation explicit"
 )]
-async fn handle_await_session<Writer>(
+async fn handle_await_session<Reader, Writer>(
+    reader: &mut Reader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -2145,6 +2161,7 @@ async fn handle_await_session<Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
+    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     let session = SessionId::from_uuid(session_id.into_uuid());
@@ -2166,7 +2183,10 @@ where
         return Ok(());
     };
     match outcome {
-        Ok(AwaitSessionPortOutcome::BackgroundRegistered(receipt)) => {
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::BackgroundRegistered(
+            receipt,
+        ))) => {
+            nudge_delegation_issuer(&services.eligibility_nudge, session);
             write_message(
                 writer,
                 version,
@@ -2179,11 +2199,12 @@ where
             )
             .await
         }
-        Ok(AwaitSessionPortOutcome::Delivered(result)) => {
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::Delivered(result))) => {
             write_message(writer, version, request_id, wire_child_result(&result)?).await
         }
-        Ok(AwaitSessionPortOutcome::ForegroundPending(wait)) => {
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::ForegroundPending(wait))) => {
             wait_for_foreground_child_result(
+                reader,
                 writer,
                 version,
                 request_id,
@@ -2194,12 +2215,39 @@ where
             )
             .await
         }
-        Ok(AwaitSessionPortOutcome::Rejected) => {
+        Ok(ProcessDelegationOutcome::InvalidRequest) => {
             write_error(
                 writer,
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Rejected(rejection)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                process_delegation_rejection(
+                    rejection,
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    child_session_id,
+                ),
+            )
+            .await
+        }
+        Ok(ProcessDelegationOutcome::Applied(AwaitSessionPortOutcome::Rejected)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SessionDelegationContract,
+                ),
             )
             .await
         }
@@ -2209,7 +2257,12 @@ where
     }
 }
 
-async fn wait_for_foreground_child_result<Writer>(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "foreground delivery keeps socket cancellation and durable correlation explicit"
+)]
+async fn wait_for_foreground_child_result<Reader, Writer>(
+    reader: &mut Reader,
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
@@ -2219,6 +2272,7 @@ async fn wait_for_foreground_child_result<Writer>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
+    Reader: AsyncBufRead + Unpin,
     Writer: AsyncWrite + Unpin,
 {
     loop {
@@ -2247,6 +2301,7 @@ where
         loop {
             let update = tokio::select! {
                 () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                peer = foreground_peer_activity(reader) => return peer,
                 update = subscription.recv() => update,
             };
             match update {
@@ -2257,6 +2312,20 @@ where
             }
         }
     }
+}
+
+async fn foreground_peer_activity<Reader>(reader: &mut Reader) -> Result<(), ProcessConnectionError>
+where
+    Reader: AsyncBufRead + Unpin,
+{
+    reader
+        .fill_buf()
+        .await
+        .map_err(ProcessConnectionError::PeerIo)?;
+    Err(ProcessConnectionError::PeerIo(io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "foreground delegation peer ended or sent another request",
+    )))
 }
 
 fn update_signals_child_result(update: &ProcessUpdate, wait: DelegationWait) -> bool {
@@ -2291,6 +2360,7 @@ async fn handle_send_session_message<Writer>(
     peer_session_id: CanonicalUuid,
     content: String,
     pool: &PgPool,
+    eligibility_nudge: &InProcessEligibilityNudge,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -2306,7 +2376,11 @@ where
         )
         .await;
     match result {
-        Ok(SessionDelegationPortOutcome::Applied(receipt)) => {
+        Ok(ProcessDelegationOutcome::Applied(receipt)) => {
+            nudge_delegation_issuer(
+                eligibility_nudge,
+                SessionId::from_uuid(session_id.into_uuid()),
+            );
             let direction = match receipt.direction() {
                 DomainDelegationMessageDirection::ParentToChild => {
                     signalbox_process_protocol::DelegationMessageDirection::ParentToChild
@@ -2329,7 +2403,7 @@ where
             )
             .await
         }
-        Ok(SessionDelegationPortOutcome::Rejected) => {
+        Ok(ProcessDelegationOutcome::InvalidRequest) => {
             write_error(
                 writer,
                 version,
@@ -2338,10 +2412,94 @@ where
             )
             .await
         }
+        Ok(ProcessDelegationOutcome::Rejected(rejection)) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                process_delegation_rejection(
+                    rejection,
+                    session_id,
+                    turn_id,
+                    tool_request_id,
+                    peer_session_id,
+                ),
+            )
+            .await
+        }
         Err(error) => {
             write_delegation_port_error(writer, version, request_id, session_id, error).await
         }
     }
+}
+
+fn process_delegation_rejection(
+    rejection: ProcessDelegationRequestRejection,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    peer_session_id: CanonicalUuid,
+) -> ProtocolError {
+    let detail = match rejection {
+        ProcessDelegationRequestRejection::ToolRequestNotFound => {
+            RejectionDetail::ToolRequestNotFound { tool_request_id }
+        }
+        ProcessDelegationRequestRejection::ToolRequestNotInSession => {
+            RejectionDetail::ToolRequestNotInSession {
+                session_id,
+                tool_request_id,
+            }
+        }
+        ProcessDelegationRequestRejection::RequestNotInTurn => {
+            RejectionDetail::DelegationRequestNotInTurn {
+                session_id,
+                turn_id,
+                tool_request_id,
+            }
+        }
+        ProcessDelegationRequestRejection::AwaitConflict => {
+            RejectionDetail::DelegationAwaitConflict { tool_request_id }
+        }
+        ProcessDelegationRequestRejection::MessageConflict
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::Transition {
+                failure: signalbox_domain::DelegationTransitionFailure::ConflictingMessageReplay,
+                ..
+            },
+        ) => RejectionDetail::DelegationMessageConflict { tool_request_id },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::RelationshipNotFound,
+        ) => RejectionDetail::DelegationRelationNotFound {
+            session_id,
+            peer_session_id,
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch,
+        ) => RejectionDetail::DelegationToolRequestNotExecutable {
+            tool_request_id,
+            state: WireDelegationToolRequestState::AttemptEnded,
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::Transition {
+                spawning_request,
+                failure: signalbox_domain::DelegationTransitionFailure::EventOrdinalExhausted,
+            },
+        ) => RejectionDetail::DelegationEventOrdinalExhausted {
+            spawning_request_id: wire_uuid(spawning_request.into_uuid()),
+            last: CanonicalU64::new(u64::MAX),
+        },
+        ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::MessageIdentityCollision
+            | DelegationOperationRejection::DeliverySequenceExhausted
+            | DelegationOperationRejection::Transition { .. },
+        ) => {
+            return internal_protocol_error(
+                Some(session_id.into_uuid()),
+                InternalDiagnostic::SessionDelegationContract,
+            );
+        }
+    };
+    ProtocolError::rejected(detail)
 }
 
 fn wire_child_result(
@@ -12505,11 +12663,12 @@ mod tests {
         acquire_snapshot_reader_permit, admitted_user_content, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        handle_append_conversation_import, handle_begin_conversation_import,
-        handle_commit_conversation_import, import_evidence,
+        foreground_peer_activity, handle_append_conversation_import,
+        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, nudge_delegation_wake, observe_outbox_metrics_once,
-        operational_import_error, read_frame_line, replacement_model_is_admitted,
+        internal_protocol_error, map_rejection, nudge_delegation_issuer, nudge_delegation_wake,
+        observe_outbox_metrics_once, operational_import_error, process_delegation_rejection,
+        read_frame_line, replacement_model_is_admitted,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
@@ -12575,6 +12734,7 @@ mod tests {
             ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
             ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
+        session_delegation::{DelegationOperationRejection, ProcessDelegationRequestRejection},
     };
 
     #[derive(Clone, Debug, Default)]
@@ -14893,6 +15053,92 @@ context_window_tokens = 200000
                 .expect("recorded nudge lock remains available")
                 .as_slice(),
             &[recipient]
+        );
+    }
+
+    #[test]
+    fn completed_process_delegation_nudges_exact_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(12));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_delegation_issuer(&nudge, issuer);
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[issuer]
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_delegation_peer_disconnect_abandons_socket_wait() {
+        let (peer, daemon) = duplex(64);
+        let mut reader = BufReader::new(daemon);
+        drop(peer);
+
+        let error = foreground_peer_activity(&mut reader)
+            .await
+            .expect_err("a disconnected foreground peer ends its socket wait");
+        let source = error
+            .source()
+            .expect("peer failure retains its I/O source")
+            .downcast_ref::<io::Error>()
+            .expect("peer failure source is I/O");
+
+        assert_eq!(source.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[test]
+    fn delegated_process_rejections_use_closed_wire_details() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+        let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
+        let peer_id = CanonicalUuid::from_uuid(Uuid::from_u128(16));
+        let relationship = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::RelationshipNotFound,
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let await_conflict = process_delegation_rejection(
+            ProcessDelegationRequestRejection::AwaitConflict,
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let message_conflict = process_delegation_rejection(
+            ProcessDelegationRequestRejection::MessageConflict,
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+
+        assert_eq!(
+            relationship.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationRelationNotFound {
+                session_id,
+                peer_session_id: peer_id,
+            })
+        );
+        assert_eq!(
+            await_conflict.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationAwaitConflict {
+                tool_request_id: request_id,
+            })
+        );
+        assert_eq!(
+            message_conflict.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationMessageConflict {
+                tool_request_id: request_id,
+            })
         );
     }
 

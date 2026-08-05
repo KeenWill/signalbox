@@ -110,8 +110,8 @@ use signalbox_persistence::{
         SessionCredentialPin, SessionModelCredential, current_session_credential,
     },
     session_delegation::{
-        RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, RecordedDelegationMessage,
-        RecordedDelegationWait, SessionDelegationRepository,
+        ProcessDelegationOutcome, ProcessDelegationRequestRejection, RecordDelegationWaitOutcome,
+        RecordedDelegationMessage, RecordedDelegationWait, SessionDelegationRepository,
     },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
@@ -985,26 +985,25 @@ fn recorded_wait(outcome: RecordDelegationWaitOutcome) -> RecordedDelegationWait
 }
 
 fn process_wait(
-    outcome: Option<(DelegationAwaitRequest, RecordDelegationWaitOutcome)>,
+    outcome: ProcessDelegationOutcome<(DelegationAwaitRequest, RecordedDelegationWait)>,
 ) -> (DelegationAwaitRequest, RecordedDelegationWait) {
-    let (request, outcome) = outcome.expect("the exact stored await request reconstitutes");
-    (request, recorded_wait(outcome))
-}
-
-fn recorded_message(outcome: RecordDelegationMessageOutcome) -> Box<RecordedDelegationMessage> {
     match outcome {
-        RecordDelegationMessageOutcome::Recorded(recorded) => recorded,
-        RecordDelegationMessageOutcome::Rejected(rejection) => {
-            panic!("fixture message was rejected: {rejection:?}")
+        ProcessDelegationOutcome::Applied(recorded) => recorded,
+        ProcessDelegationOutcome::InvalidRequest | ProcessDelegationOutcome::Rejected(_) => {
+            panic!("the exact stored await request reconstitutes")
         }
     }
 }
 
 fn process_message(
-    outcome: Option<(DelegationMessageRequest, RecordDelegationMessageOutcome)>,
+    outcome: ProcessDelegationOutcome<(DelegationMessageRequest, Box<RecordedDelegationMessage>)>,
 ) -> (DelegationMessageRequest, Box<RecordedDelegationMessage>) {
-    let (request, outcome) = outcome.expect("the exact stored message request reconstitutes");
-    (request, recorded_message(outcome))
+    match outcome {
+        ProcessDelegationOutcome::Applied(recorded) => recorded,
+        ProcessDelegationOutcome::InvalidRequest | ProcessDelegationOutcome::Rejected(_) => {
+            panic!("the exact stored message request reconstitutes")
+        }
+    }
 }
 
 /// S17 / INV-032: a background wait, its completed receipt, and its update are
@@ -1040,6 +1039,15 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
             )
             .await?,
     );
+    let conflict = repository
+        .record_process_wait(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.awaiting_request,
+            fixture.child,
+            DelegationWaitMode::Foreground,
+        )
+        .await?;
     let evidence: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_wait
@@ -1057,6 +1065,10 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
 
     assert_eq!(recorded, replayed);
     assert_eq!(request, replayed_request);
+    assert_eq!(
+        conflict,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::AwaitConflict)
+    );
     assert_eq!(recorded.wait().mode(), DelegationWaitMode::Background);
     assert_eq!((evidence.0, evidence.1, evidence.2), (1, 1, 1));
     assert_eq!(
@@ -1168,6 +1180,16 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
             )
             .await?,
     );
+    let conflict = repository
+        .record_process_message(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.message_request,
+            fixture.child,
+            RAW_DELEGATED_MESSAGE.to_uppercase(),
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x402)),
+        )
+        .await?;
     let evidence: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_event
@@ -1187,6 +1209,10 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
 
     assert_eq!(recorded, replayed);
     assert_eq!(request, replayed_request);
+    assert_eq!(
+        conflict,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::MessageConflict)
+    );
     assert_eq!(recorded.message(), message);
     assert_eq!(
         recorded.direction(),

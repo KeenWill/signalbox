@@ -109,7 +109,29 @@ pub enum DelegationOperationRejection {
     StaleDispatch,
     MessageIdentityCollision,
     DeliverySequenceExhausted,
-    Transition(DelegationTransitionFailure),
+    Transition {
+        spawning_request: ToolRequestId,
+        failure: DelegationTransitionFailure,
+    },
+}
+
+/// Typed precondition or durable-state rejection for one process request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessDelegationRequestRejection {
+    ToolRequestNotFound,
+    ToolRequestNotInSession,
+    RequestNotInTurn,
+    AwaitConflict,
+    MessageConflict,
+    Operation(DelegationOperationRejection),
+}
+
+/// Process adapter outcome before projection into the versioned wire surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessDelegationOutcome<T> {
+    Applied(T),
+    InvalidRequest,
+    Rejected(ProcessDelegationRequestRejection),
 }
 
 #[derive(Clone, Copy)]
@@ -259,7 +281,10 @@ impl SessionDelegationRepository {
                 Ok(wait) => wait,
                 Err(error) => {
                     return Ok(RecordDelegationWaitOutcome::Rejected(
-                        DelegationOperationRejection::Transition(error.failure()),
+                        DelegationOperationRejection::Transition {
+                            spawning_request: error.spawning_request(),
+                            failure: error.failure(),
+                        },
                     ));
                 }
             };
@@ -386,7 +411,10 @@ impl SessionDelegationRepository {
                 Ok(recorded) => recorded,
                 Err(error) => {
                     return Ok(RecordDelegationMessageOutcome::Rejected(
-                        DelegationOperationRejection::Transition(error.failure()),
+                        DelegationOperationRejection::Transition {
+                            spawning_request: error.spawning_request(),
+                            failure: error.failure(),
+                        },
                     ));
                 }
             };
@@ -457,24 +485,50 @@ impl SessionDelegationRepository {
         child: SessionId,
         mode: DelegationWaitMode,
     ) -> Result<
-        Option<(DelegationAwaitRequest, RecordDelegationWaitOutcome)>,
+        ProcessDelegationOutcome<(DelegationAwaitRequest, RecordedDelegationWait)>,
         SessionDelegationRepositoryError,
     > {
         let mut connection = self.pool.acquire().await?;
         let Some(stored) = load_request_by_id(&mut connection, request).await? else {
-            return Ok(None);
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::ToolRequestNotFound,
+            ));
         };
-        if stored.session() != session || stored.turn() != turn {
-            return Ok(None);
+        if stored.session() != session {
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::ToolRequestNotInSession,
+            ));
         }
-        let Ok(logical) = DelegationAwaitRequest::parse(stored, child, mode) else {
-            return Ok(None);
+        if stored.turn() != turn {
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::RequestNotInTurn,
+            ));
+        }
+        let logical = match DelegationAwaitRequest::parse(stored, child, mode) {
+            Ok(logical) => logical,
+            Err(_)
+                if load_wait_replay_subject(&mut connection, request)
+                    .await?
+                    .is_some() =>
+            {
+                return Ok(ProcessDelegationOutcome::Rejected(
+                    ProcessDelegationRequestRejection::AwaitConflict,
+                ));
+            }
+            Err(_) => return Ok(ProcessDelegationOutcome::InvalidRequest),
         };
         drop(connection);
         let outcome = self
             .record_wait_with_source(logical.clone(), DispatchSource::Reconstitute)
             .await?;
-        Ok(Some((logical, outcome)))
+        Ok(match outcome {
+            RecordDelegationWaitOutcome::Recorded(recorded) => {
+                ProcessDelegationOutcome::Applied((logical, recorded))
+            }
+            RecordDelegationWaitOutcome::Rejected(rejection) => ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::Operation(rejection),
+            ),
+        })
     }
 
     /// Executes one exact process-protocol message from its stored tool request.
@@ -487,24 +541,48 @@ impl SessionDelegationRepository {
         content: String,
         message: DelegationMessageId,
     ) -> Result<
-        Option<(DelegationMessageRequest, RecordDelegationMessageOutcome)>,
+        ProcessDelegationOutcome<(DelegationMessageRequest, Box<RecordedDelegationMessage>)>,
         SessionDelegationRepositoryError,
     > {
         let mut connection = self.pool.acquire().await?;
         let Some(stored) = load_request_by_id(&mut connection, request).await? else {
-            return Ok(None);
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::ToolRequestNotFound,
+            ));
         };
-        if stored.session() != session || stored.turn() != turn {
-            return Ok(None);
+        if stored.session() != session {
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::ToolRequestNotInSession,
+            ));
         }
-        let Ok(logical) = DelegationMessageRequest::parse(stored, peer, content) else {
-            return Ok(None);
+        if stored.turn() != turn {
+            return Ok(ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::RequestNotInTurn,
+            ));
+        }
+        let logical = match DelegationMessageRequest::parse(stored, peer, content) {
+            Ok(logical) => logical,
+            Err(_) if message_replay_exists(&mut connection, request).await? => {
+                return Ok(ProcessDelegationOutcome::Rejected(
+                    ProcessDelegationRequestRejection::MessageConflict,
+                ));
+            }
+            Err(_) => return Ok(ProcessDelegationOutcome::InvalidRequest),
         };
         drop(connection);
         let outcome = self
             .record_message_with_source(logical.clone(), message, DispatchSource::Reconstitute)
             .await?;
-        Ok(Some((logical, outcome)))
+        Ok(match outcome {
+            RecordDelegationMessageOutcome::Recorded(recorded) => {
+                ProcessDelegationOutcome::Applied((logical, recorded))
+            }
+            RecordDelegationMessageOutcome::Rejected(rejection) => {
+                ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
+                    rejection,
+                ))
+            }
+        })
     }
 
     /// Reads the immutable result selected by one exact foreground delivery.
@@ -1475,6 +1553,24 @@ async fn load_message_replay(
             "delivery_sequence",
         )?,
     }))
+}
+
+async fn message_replay_exists(
+    connection: &mut PgConnection,
+    request: ToolRequestId,
+) -> Result<bool, SessionDelegationRepositoryError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM session_delegation_event
+              WHERE event_kind = 'message_delivered'
+                AND provenance_tool_request_id = $1
+         )",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .fetch_one(connection)
+    .await
+    .map_err(Into::into)
 }
 
 const fn message_recipient(

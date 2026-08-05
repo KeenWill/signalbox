@@ -8,8 +8,9 @@ use signalbox_domain::{
     DelegationWait, DelegationWaitMode, SessionId, ToolDispatchAuthority, ToolRequestId, TurnId,
 };
 use signalbox_persistence::session_delegation::{
-    DelegationOperationRejection, RecordDelegationMessageOutcome, RecordDelegationWaitOutcome,
-    SessionDelegationRepository, SessionDelegationRepositoryError,
+    DelegationOperationRejection, ProcessDelegationOutcome, ProcessDelegationRequestRejection,
+    RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, SessionDelegationRepository,
+    SessionDelegationRepositoryError,
 };
 use signalbox_tools_sessions::{
     AwaitSessionPortOutcome, AwaitSessionReceipt, DeliveredChildResult, SessionDelegationPort,
@@ -78,15 +79,24 @@ impl PostgresSessionDelegationPort {
         request: ToolRequestId,
         child: SessionId,
         mode: DelegationWaitMode,
-    ) -> Result<AwaitSessionPortOutcome, PostgresSessionDelegationPortError> {
-        let Some((logical, outcome)) = self
+    ) -> Result<ProcessDelegationOutcome<AwaitSessionPortOutcome>, PostgresSessionDelegationPortError>
+    {
+        match self
             .repository
             .record_process_wait(session, turn, request, child, mode)
             .await?
-        else {
-            return Ok(AwaitSessionPortOutcome::Rejected);
-        };
-        self.project_wait(&logical, outcome).await
+        {
+            ProcessDelegationOutcome::Applied((logical, recorded)) => self
+                .project_wait(&logical, RecordDelegationWaitOutcome::Recorded(recorded))
+                .await
+                .map(ProcessDelegationOutcome::Applied),
+            ProcessDelegationOutcome::InvalidRequest => {
+                Ok(ProcessDelegationOutcome::InvalidRequest)
+            }
+            ProcessDelegationOutcome::Rejected(rejection) => {
+                Ok(ProcessDelegationOutcome::Rejected(rejection))
+            }
+        }
     }
 
     pub(crate) async fn send_process_message(
@@ -96,21 +106,16 @@ impl PostgresSessionDelegationPort {
         request: ToolRequestId,
         peer: SessionId,
         content: String,
-    ) -> Result<
-        SessionDelegationPortOutcome<SessionMessageReceipt>,
-        PostgresSessionDelegationPortError,
-    > {
+    ) -> Result<ProcessDelegationOutcome<SessionMessageReceipt>, PostgresSessionDelegationPortError>
+    {
         loop {
             let message = DelegationMessageId::from_uuid(uuid::Uuid::now_v7());
-            let Some((logical, outcome)) = self
+            let outcome = self
                 .repository
                 .record_process_message(session, turn, request, peer, content.clone(), message)
-                .await?
-            else {
-                return Ok(SessionDelegationPortOutcome::Rejected);
-            };
+                .await?;
             match outcome {
-                RecordDelegationMessageOutcome::Recorded(recorded) => {
+                ProcessDelegationOutcome::Applied((logical, recorded)) => {
                     let receipt = SessionMessageReceipt::from_relation_event(
                         &logical,
                         recorded.relation(),
@@ -118,13 +123,18 @@ impl PostgresSessionDelegationPort {
                         recorded.delivery_sequence(),
                     )
                     .ok_or(PostgresSessionDelegationPortError::Contract)?;
-                    return Ok(SessionDelegationPortOutcome::Applied(receipt));
+                    return Ok(ProcessDelegationOutcome::Applied(receipt));
                 }
-                RecordDelegationMessageOutcome::Rejected(
-                    DelegationOperationRejection::MessageIdentityCollision,
+                ProcessDelegationOutcome::Rejected(
+                    ProcessDelegationRequestRejection::Operation(
+                        DelegationOperationRejection::MessageIdentityCollision,
+                    ),
                 ) => {}
-                RecordDelegationMessageOutcome::Rejected(_) => {
-                    return Ok(SessionDelegationPortOutcome::Rejected);
+                ProcessDelegationOutcome::InvalidRequest => {
+                    return Ok(ProcessDelegationOutcome::InvalidRequest);
+                }
+                ProcessDelegationOutcome::Rejected(rejection) => {
+                    return Ok(ProcessDelegationOutcome::Rejected(rejection));
                 }
             }
         }
