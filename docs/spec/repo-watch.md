@@ -76,9 +76,12 @@ empty on every daemon start, so the first poll and the first poll after restart
 perform one complete unconditional fetch. When a current poll replaces a
 resource at the cache's entry bound, admission evicts an untouched stale entry
 before enforcing that bound; replacement within the bound cannot wedge later
-polls. A failed, rejected, partial, or unparseable poll submits no persistence
-candidate. The next poll occurs after the per-repository interval; version one
-has no webhook fallback and no speculative second polling transport.
+polls. REST continuation follows GitHub's `Link` relation for the next page, not
+response cardinality: a full terminal page at the 100-page bound completes the
+projection, while a next relation beyond that bound fails the poll. A failed,
+rejected, partial, or unparseable poll submits no persistence candidate. The
+next poll occurs after the per-repository interval; version one has no webhook
+fallback and no speculative second polling transport.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
@@ -205,9 +208,11 @@ in the configured signal-reviewer list. Reactions from every other actor are
 excluded while normalizing state, and a reaction whose deleted actor has no
 current login identity is never added. When any current reaction for one subject
 lacks actor identity, normalization conservatively carries forward the prior
-retained signal-reviewer reactions for that subject so identity loss cannot
-manufacture removals. Why: reviewer signals are actionable facts; the full
-ambient emoji stream is neither a rule input nor retained noise.
+retained reactions for that subject only when their reactors remain in the
+current signal-reviewer set, so identity loss cannot manufacture removals and a
+filter change cannot preserve an excluded reactor. Why: reviewer signals are
+actionable facts; the full ambient emoji stream is neither a rule input nor
+retained noise.
 
 **Implemented behavior.** The cursor binds its filtered reaction projection to
 the exact canonical signal-reviewer login set. When that set changes, the next

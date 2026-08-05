@@ -994,7 +994,7 @@ fn parse_repository_watch_configuration(
         {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
-        if !credential_file_set.insert(credential_file.clone()) {
+        if !credential_file_set.insert(resolved_credential_file_reference(&credential_file)) {
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
         repositories.push(WatchedRepositoryConfiguration {
@@ -1007,6 +1007,20 @@ fn parse_repository_watch_configuration(
     Ok(RepositoryWatchConfiguration {
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
+    })
+}
+
+fn resolved_credential_file_reference(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        let Some(file_name) = path.file_name().filter(|name| !name.is_empty()) else {
+            return path.to_path_buf();
+        };
+        let Some(parent) = path.parent() else {
+            return path.to_path_buf();
+        };
+        fs::canonicalize(parent)
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(file_name)
     })
 }
 
@@ -2067,6 +2081,23 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     fn repository_watch_rejects_a_shared_credential_file_reference() {
         let configured = configuration_with_repository_watch()
             .replace(SECOND_WATCH_CREDENTIAL_FILE, WATCH_CREDENTIAL_FILE);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_shared_credential_file_alias() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let alias = directory.path().join("watch-token-alias");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
 
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
