@@ -19,6 +19,10 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     commit_failure_is_ambiguous,
+    lock_inventory::{
+        DELEGATION_FIND_RELATION_FOR_MESSAGE, DELEGATION_FIND_RELATION_FOR_WAIT,
+        DELEGATION_LOAD_RELATION,
+    },
     mapping::{
         durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid,
         tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -519,37 +523,26 @@ async fn find_relation_for_wait(
     connection: &mut PgConnection,
     request: &DelegationAwaitRequest,
 ) -> Result<Option<ToolRequestId>, SessionDelegationRepositoryError> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT spawning_tool_request_id
-           FROM session_delegation
-          WHERE parent_session_id = $1 AND child_session_id = $2
-          FOR UPDATE",
-    )
-    .bind(session_id_to_uuid(request.request().session()))
-    .bind(session_id_to_uuid(request.child()))
-    .fetch_optional(connection)
-    .await
-    .map(|value| value.map(tool_request_id_from_uuid))
-    .map_err(Into::into)
+    sqlx::query_scalar::<_, Uuid>(DELEGATION_FIND_RELATION_FOR_WAIT)
+        .bind(session_id_to_uuid(request.request().session()))
+        .bind(session_id_to_uuid(request.child()))
+        .fetch_optional(connection)
+        .await
+        .map(|value| value.map(tool_request_id_from_uuid))
+        .map_err(Into::into)
 }
 
 async fn find_relation_for_message(
     connection: &mut PgConnection,
     request: &DelegationMessageRequest,
 ) -> Result<Option<ToolRequestId>, SessionDelegationRepositoryError> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT spawning_tool_request_id
-           FROM session_delegation
-          WHERE (parent_session_id = $1 AND child_session_id = $2)
-             OR (parent_session_id = $2 AND child_session_id = $1)
-          FOR UPDATE",
-    )
-    .bind(session_id_to_uuid(request.request().session()))
-    .bind(session_id_to_uuid(request.peer()))
-    .fetch_optional(connection)
-    .await
-    .map(|value| value.map(tool_request_id_from_uuid))
-    .map_err(Into::into)
+    sqlx::query_scalar::<_, Uuid>(DELEGATION_FIND_RELATION_FOR_MESSAGE)
+        .bind(session_id_to_uuid(request.request().session()))
+        .bind(session_id_to_uuid(request.peer()))
+        .fetch_optional(connection)
+        .await
+        .map(|value| value.map(tool_request_id_from_uuid))
+        .map_err(Into::into)
 }
 
 async fn relation_endpoints(
@@ -575,22 +568,11 @@ async fn load_relation(
     connection: &mut PgConnection,
     spawning_request: ToolRequestId,
 ) -> Result<SessionDelegation, SessionDelegationRepositoryError> {
-    let row = sqlx::query(
-        "SELECT relation.parent_session_id, relation.parent_turn_id,
-                relation.child_session_id, relation.policy_kind,
-                relation.on_parent_stopped, relation.on_parent_cancelled,
-                task.turn_id AS child_turn_id, task.task_content
-           FROM session_delegation AS relation
-           JOIN session_delegation_initial_task AS task
-             ON task.spawning_tool_request_id = relation.spawning_tool_request_id
-            AND task.child_session_id = relation.child_session_id
-          WHERE relation.spawning_tool_request_id = $1
-          FOR UPDATE OF relation",
-    )
-    .bind(tool_request_id_to_uuid(spawning_request))
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(SessionDelegationCorruption::Missing("delegation relation"))?;
+    let row = sqlx::query(DELEGATION_LOAD_RELATION)
+        .bind(tool_request_id_to_uuid(spawning_request))
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(SessionDelegationCorruption::Missing("delegation relation"))?;
     let parent = session_id_from_uuid(required(&row, "parent_session_id")?);
     let parent_turn = turn_id_from_uuid(required(&row, "parent_turn_id")?);
     let child = session_id_from_uuid(required(&row, "child_session_id")?);
