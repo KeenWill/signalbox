@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
-    ConversationMessage, ConversationRole, DeliveryMode, FastMode, MessagePart, ModelOperation,
-    OpenAiServiceTier, PreparationFailure, ReasoningLevel, ServiceTier, ToolChoice,
+    AnthropicServiceTier, CodexCliServiceTier, ConversationMessage, ConversationRole, DeliveryMode,
+    FastMode, MessagePart, ModelOperation, OpenAiServiceTier, PreparationFailure, ReasoningLevel,
+    ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
@@ -141,7 +142,14 @@ fn openai_service_tier<C>(
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Scale)) => Some("scale"),
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Priority)) => Some("priority"),
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Fast)) => Some("fast"),
-        Some(ServiceTier::Anthropic(_)) | Some(ServiceTier::CodexCli(_)) => {
+        Some(ServiceTier::Anthropic(
+            AnthropicServiceTier::Auto | AnthropicServiceTier::StandardOnly,
+        ))
+        | Some(ServiceTier::CodexCli(
+            CodexCliServiceTier::Default
+            | CodexCliServiceTier::Priority
+            | CodexCliServiceTier::Flex,
+        )) => {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: "OpenAI cannot enforce another provider's service tier".to_string(),
             });
