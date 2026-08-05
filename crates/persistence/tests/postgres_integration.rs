@@ -41,8 +41,9 @@ use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DelegateApprovalRecommendation, DelegationMessageId, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    DecideToolRequestResult, DelegateApprovalRecommendation, DelegationAwaitRequest,
+    DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
@@ -107,6 +108,9 @@ use signalbox_persistence::{
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     session_credentials::{
         SessionCredentialPin, SessionModelCredential, current_session_credential,
+    },
+    session_delegation::{
+        RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, SessionDelegationRepository,
     },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
@@ -209,6 +213,9 @@ const DELEGATION_CHILD_STREAM_FIXTURE_SEED: u128 = 0xd770;
 const DELEGATION_PARENT_STREAM_FIXTURE_SEED: u128 = 0xd780;
 const DELEGATION_DUPLICATE_MESSAGE_FIXTURE_SEED: u128 = 0xd790;
 const DELEGATION_REVERSE_INSERT_FIXTURE_SEED: u128 = 0xd7a0;
+const DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED: u128 = 0xd7b0;
+const DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED: u128 = 0xd7c0;
+const DELEGATION_REPOSITORY_MESSAGE_SEED: u128 = 0xd7d0;
 const DELEGATION_OUTBOX_COMMAND_ID: u128 = 0xdc00;
 const DELEGATION_LIFECYCLE_COMMAND_ID: u128 = 0xdd10;
 const DELEGATION_CASCADE_ROOT_COMMAND_ID: u128 = 0xe640;
@@ -218,6 +225,7 @@ const DELEGATION_AFTER_MESSAGE_OUTCOME_ORDINAL: i16 = 3;
 struct RawDelegationPurposes<'a> {
     spawn_arguments: &'a str,
     message_arguments: &'a str,
+    wait_mode: &'a str,
 }
 
 #[derive(Clone, Copy)]
@@ -249,7 +257,7 @@ async fn prepare_raw_delegation(
     let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
     let await_arguments = serde_json::json!({
         "child_session_id": child.as_uuid().to_string(),
-        "mode": "background",
+        "mode": purposes.wait_mode,
     })
     .to_string();
     let (parent, _repository, _observation, requests) = checkpoint_confirmed_tool_batch(
@@ -365,6 +373,7 @@ async fn prepare_canonical_raw_delegation(
         RawDelegationPurposes {
             spawn_arguments: &spawn_arguments,
             message_arguments: &message_arguments,
+            wait_mode: "background",
         },
     )
     .await
@@ -836,6 +845,313 @@ async fn insert_raw_delegation_with_update(
     .await
 }
 
+async fn prepare_delegation_repository_fixture(
+    pool: &PgPool,
+    seed: u128,
+    wait_mode: &str,
+) -> Result<RawDelegationFixture, Box<dyn Error>> {
+    let spawn_arguments = serde_json::json!({
+        "relationship": { "kind": "background" },
+        "task": RAW_DELEGATED_TASK,
+    })
+    .to_string();
+    let child = SessionId::from_uuid(Uuid::from_u128(seed + 0x200));
+    let message_arguments = serde_json::json!({
+        "content": RAW_DELEGATED_MESSAGE,
+        "peer_session_id": child.as_uuid().to_string(),
+    })
+    .to_string();
+    let await_arguments = serde_json::json!({
+        "child_session_id": child.as_uuid().to_string(),
+        "mode": wait_mode,
+    })
+    .to_string();
+    let (parent, _repository, _observation, requests) = checkpoint_tool_batch_with_approval(
+        pool,
+        seed,
+        &[
+            ("spawn_session", spawn_arguments.as_str()),
+            ("await_session", await_arguments.as_str()),
+            ("send_session_message", message_arguments.as_str()),
+        ],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let fixture = RawDelegationFixture {
+        parent: parent.session,
+        parent_turn: parent.turn,
+        parent_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xc1)),
+        child,
+        initial_turn: TurnId::from_uuid(Uuid::from_u128(seed + 0x201)),
+        initial_semantic_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x202)),
+        spawning_request: requests[0],
+        awaiting_request: requests[1],
+        message_request: requests[2],
+        message_id: Uuid::from_u128(seed + 0x400),
+    };
+    insert_raw_delegation_tool_receipts(pool, fixture, seed).await?;
+    let mut transaction = pool.begin().await?;
+    insert_raw_delegation_with_update(&mut transaction, fixture).await?;
+    transaction.commit().await?;
+    Ok(fixture)
+}
+
+async fn repository_wait_dispatch(
+    pool: &PgPool,
+    fixture: RawDelegationFixture,
+    seed: u128,
+) -> Result<ToolDispatchAuthority, Box<dyn Error>> {
+    let message_attempt = Uuid::from_u128(seed + 0x302);
+    let wait_attempt = Uuid::from_u128(seed + 0x301);
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM tool_attempt WHERE attempt_id IN ($1, $2)")
+        .bind(wait_attempt)
+        .bind(message_attempt)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .prepare_next_attempt(
+            fixture.parent,
+            fixture.parent_turn,
+            ToolAttemptId::from_uuid(wait_attempt),
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the wait fixture prepares its next attempt");
+    repository
+        .authorize_attempt(
+            fixture.parent,
+            fixture.parent_turn,
+            ToolAttemptId::from_uuid(wait_attempt),
+        )
+        .await
+        .map_err(Into::into)
+}
+
+async fn repository_message_dispatch(
+    pool: &PgPool,
+    fixture: RawDelegationFixture,
+    seed: u128,
+) -> Result<ToolDispatchAuthority, Box<dyn Error>> {
+    let message_attempt = Uuid::from_u128(seed + 0x302);
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM tool_attempt WHERE attempt_id = $1")
+        .bind(message_attempt)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .prepare_next_attempt(
+            fixture.parent,
+            fixture.parent_turn,
+            ToolAttemptId::from_uuid(message_attempt),
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?
+        .expect("the message fixture prepares its next attempt");
+    repository
+        .authorize_attempt(
+            fixture.parent,
+            fixture.parent_turn,
+            ToolAttemptId::from_uuid(message_attempt),
+        )
+        .await
+        .map_err(Into::into)
+}
+
+/// S17 / INV-032: a background wait, its completed receipt, and its update are
+/// one replay-idempotent commit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let recorded = repository.record_wait(request.clone(), &dispatch).await?;
+    let RecordDelegationWaitOutcome::Recorded(recorded) = recorded else {
+        panic!("the related background await records")
+    };
+    let replayed = repository.record_wait(request, &dispatch).await?;
+    let RecordDelegationWaitOutcome::Recorded(replayed) = replayed else {
+        panic!("the equal wait replay returns its recorded receipt")
+    };
+    let evidence: (i64, i64, i64, String) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM session_delegation_wait
+              WHERE awaiting_tool_request_id = $1),
+            (SELECT count(*) FROM delegation_update_outbox_event
+              WHERE awaiting_tool_request_id = $1),
+            (SELECT count(*) FROM tool_attempt
+              WHERE request_id = $1 AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'),
+            (SELECT result_text FROM tool_attempt WHERE request_id = $1)",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(recorded, replayed);
+    assert_eq!(recorded.wait().mode(), DelegationWaitMode::Background);
+    assert_eq!((evidence.0, evidence.1, evidence.2), (1, 1, 1));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&evidence.3)?,
+        serde_json::json!({
+            "result": "session_await_registered",
+            "tool_request_id": fixture.awaiting_request.as_uuid().to_string(),
+            "child_session_id": fixture.child.as_uuid().to_string(),
+            "mode": "background",
+        })
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-005 / INV-032: foreground registration ends the physical await
+/// attempt and parks the same turn without retaining a live attempt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv005_inv032_delegation_repository_parks_foreground_wait_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Foreground,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let recorded = repository.record_wait(request.clone(), &dispatch).await?;
+    let RecordDelegationWaitOutcome::Recorded(recorded) = recorded else {
+        panic!("the related foreground await records")
+    };
+    let replayed = repository.record_wait(request, &dispatch).await?;
+    let RecordDelegationWaitOutcome::Recorded(replayed) = replayed else {
+        panic!("the parked wait replays before stale-dispatch validation")
+    };
+    let evidence: (String, Option<Uuid>, String, String, String, i64) = sqlx::query_as(
+        "SELECT lifecycle.active_phase_kind, lifecycle.current_attempt_id,
+                attempt.state_kind, attempt.terminal_disposition_kind,
+                issuing.end_disposition,
+                (SELECT count(*) FROM delegation_update_outbox_event
+                  WHERE awaiting_tool_request_id = $1)
+           FROM turn_lifecycle AS lifecycle
+           JOIN tool_attempt AS attempt ON attempt.request_id = $1
+           JOIN turn_attempt AS issuing
+             ON issuing.turn_attempt_id = attempt.issuing_turn_attempt_id
+          WHERE lifecycle.turn_id = $2 AND lifecycle.session_id = $3",
+    )
+    .bind(fixture.awaiting_request.into_uuid())
+    .bind(fixture.parent_turn.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(recorded, replayed);
+    assert_eq!(recorded.wait().mode(), DelegationWaitMode::Foreground);
+    assert_eq!(evidence.0, "awaiting_child");
+    assert_eq!(evidence.1, None);
+    assert_eq!(evidence.2, "terminal");
+    assert_eq!(evidence.3, "awaiting_child");
+    assert_eq!(evidence.4, "yielded_to_durable_wait");
+    assert_eq!(evidence.5, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-032: a message, recipient delivery, completed receipt, update,
+/// and wake are committed once, while physical replay returns the stored ID.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let message = DelegationMessageId::from_uuid(fixture.message_id);
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let recorded = repository
+        .record_message(request.clone(), message, &dispatch)
+        .await?;
+    let RecordDelegationMessageOutcome::Recorded(recorded) = recorded else {
+        panic!("the related parent-to-child message records")
+    };
+    let replayed = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await?;
+    let RecordDelegationMessageOutcome::Recorded(replayed) = replayed else {
+        panic!("the equal message replay returns its original identity")
+    };
+    let evidence: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM session_delegation_event
+              WHERE provenance_tool_request_id = $1),
+            (SELECT count(*) FROM session_message WHERE message_id = $2),
+            (SELECT count(*) FROM session_message_delivery WHERE message_id = $2),
+            (SELECT count(*) FROM delegation_update_outbox_event WHERE message_id = $2),
+            (SELECT count(*) FROM delegation_wake_outbox_event WHERE message_id = $2),
+            (SELECT count(*) FROM tool_attempt
+              WHERE request_id = $1 AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed')",
+    )
+    .bind(fixture.message_request.into_uuid())
+    .bind(fixture.message_id)
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(recorded, replayed);
+    assert_eq!(recorded.message(), message);
+    assert_eq!(
+        recorded.direction(),
+        DelegationMessageDirection::ParentToChild
+    );
+    assert_eq!(recorded.ordinal().get(), 2);
+    assert_eq!(recorded.delivery_sequence().get(), 1);
+    assert_eq!(evidence, (1, 1, 1, 1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn insert_raw_wait_and_message_with_delivery(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
@@ -987,6 +1303,7 @@ async fn prepared_complete_delegation_outbox(
         RawDelegationPurposes {
             spawn_arguments: &spawn_arguments,
             message_arguments: &message_arguments,
+            wait_mode: "background",
         },
     )
     .await?;
@@ -1687,6 +2004,7 @@ async fn delegation_spawn_purpose_requires_exact_json() -> Result<(), Box<dyn Er
         RawDelegationPurposes {
             spawn_arguments: &extra_spawn,
             message_arguments: &canonical_message,
+            wait_mode: "background",
         },
     )
     .await?;
@@ -1731,6 +2049,7 @@ async fn delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn 
         RawDelegationPurposes {
             spawn_arguments: &canonical_spawn,
             message_arguments: &extra_message,
+            wait_mode: "background",
         },
     )
     .await?;
@@ -1784,6 +2103,7 @@ async fn s19_delegation_cascade_rejects_unrelated_disposition_source() -> Result
         RawDelegationPurposes {
             spawn_arguments: &spawn_arguments,
             message_arguments: &first_message,
+            wait_mode: "background",
         },
     )
     .await?;
@@ -1793,6 +2113,7 @@ async fn s19_delegation_cascade_rejects_unrelated_disposition_source() -> Result
         RawDelegationPurposes {
             spawn_arguments: &spawn_arguments,
             message_arguments: &second_message,
+            wait_mode: "background",
         },
     )
     .await?;
