@@ -16036,6 +16036,151 @@ async fn activate_delegated_result_fixture(
     Ok((parent, child, child_turn, spawning_request, selection))
 }
 
+struct AuthorizedDelegatedModelCallFixture {
+    parent: SessionId,
+    child: SessionId,
+    spawning_request: ToolRequestId,
+    repository: PostgresModelCallRepository,
+    authorized: AuthorizedModelCall,
+}
+
+async fn authorize_delegated_model_call_fixture(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<AuthorizedDelegatedModelCallFixture, Box<dyn Error>> {
+    let (parent, child, _turn, spawning_request, selection) =
+        activate_delegated_result_fixture(pool, seed).await?;
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 20));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one delegated terminal fixture target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed + 21));
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                child,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 26)),
+                    )
+                },
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(child, call).await?
+    else {
+        panic!("the delegated terminal fixture authorizes its exact call")
+    };
+    Ok(AuthorizedDelegatedModelCallFixture {
+        parent,
+        child,
+        spawning_request,
+        repository,
+        authorized: *authorized,
+    })
+}
+
+async fn attach_delegation_relationship_fixture(
+    pool: &PgPool,
+    child: SessionId,
+    child_turn: TurnId,
+    selection: DirectModelSelection,
+    seed: u128,
+) -> Result<(SessionId, ToolRequestId), Box<dyn Error>> {
+    let parent = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let parent_turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let spawning_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 3));
+    let task_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 4));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 5,
+            seed + 1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let mut fixture = pool.begin().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;",
+    )
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ($1, 1, 'spawned', 'tool_request', $2, $3, $1)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(parent.into_uuid())
+    .bind(parent_turn.into_uuid())
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ($1, $2, $3, $4, 'background')",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(parent.into_uuid())
+    .bind(parent_turn.into_uuid())
+    .bind(child.into_uuid())
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ($1, $2, $3, $4, 1, 1, 'direct', $5, 'direct', $5, $6)",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(child.into_uuid())
+    .bind(child_turn.into_uuid())
+    .bind(task_entry.into_uuid())
+    .bind(selection.into_uuid())
+    .bind("retain unresolved delegated ambiguity")
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ($1, $2, 'delegated_task', $3)",
+    )
+    .bind(child.into_uuid())
+    .bind(task_entry.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .execute(&mut *fixture)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER ALL;
+         ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;",
+    )
+    .execute(&mut *fixture)
+    .await?;
+    fixture.commit().await?;
+    Ok((parent, spawning_request))
+}
+
 /// S17 / INV-032: completing a delegated initial task atomically creates its
 /// typed returned result, parent update, and parent wake before commit.
 #[tokio::test(flavor = "multi_thread")]
@@ -16100,6 +16245,180 @@ async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
             1,
         )
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-032: reconciliation-required delegated work remains unresolved
+/// relationship work and cannot publish a child result, parent update, or wake.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_delegated_reconciliation_withholds_result_and_parent_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xd600;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let (parent, spawning_request) = attach_delegation_relationship_fixture(
+        &pool,
+        fixture.session,
+        fixture.turn,
+        selection,
+        seed + 0x100,
+    )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         DISABLE TRIGGER turn_lifecycle_requires_typed_origin",
+    )
+    .execute(&pool)
+    .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 30,
+                seed + 1,
+                "interrupt the ambiguous delegated call",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 31)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 32))),
+        )
+        .await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    let terminal = repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Ambiguous(
+                signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+                ),
+            ),
+            |_| panic!("the delegated fixture has no pending steering"),
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+         ENABLE TRIGGER turn_lifecycle_requires_typed_origin",
+    )
+    .execute(&pool)
+    .await?;
+    let evidence: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE session_id = $1 AND turn_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'reconciliation_required'),
+            (SELECT count(*) FROM session_child_result
+              WHERE spawning_tool_request_id = $3),
+            (SELECT count(*) FROM session_delegation_event
+              WHERE spawning_tool_request_id = $3
+                AND event_kind = 'outcome_recorded'),
+            (SELECT count(*) FROM delegation_update_outbox_event
+              WHERE session_id = $4
+                AND result_spawning_request_id = $3),
+            (SELECT count(*) FROM delegation_wake_outbox_event
+              WHERE session_id = $4
+                AND result_spawning_request_id = $3)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(spawning_request.into_uuid())
+    .bind(parent.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(
+        terminal,
+        ModelCallTerminalOutcome::ReconciliationRequired(_)
+    ));
+    assert_eq!(evidence, (1, 0, 0, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-032: a child terminal commit waits for its parent session before
+/// taking the relationship lock, matching descendant-cascade lock order.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xd700;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let mut parent_lock = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE")
+        .bind(fixture.parent.into_uuid())
+        .execute(&mut *parent_lock)
+        .await?;
+    let child = fixture.child;
+    let spawning_request = fixture.spawning_request;
+    let terminal = tokio::spawn(async move {
+        let observation = fixture
+            .authorized
+            .observation_correlation()
+            .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new(String::from("ordered result"))
+                        .expect("fixture result content is admitted"),
+                ],
+            });
+        fixture
+            .repository
+            .apply_terminal_observation(
+                child,
+                observation,
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        seed + 30,
+                    ))],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+                )),
+                |_| panic!("the delegated fixture has no pending steering"),
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the child terminal commit must wait on the parent session lock"
+    );
+    sqlx::query("SET LOCAL lock_timeout = '250ms'")
+        .execute(&mut *parent_lock)
+        .await?;
+    let locked_request: Uuid = sqlx::query_scalar(
+        "SELECT spawning_tool_request_id
+           FROM session_delegation
+          WHERE spawning_tool_request_id = $1
+          FOR UPDATE",
+    )
+    .bind(spawning_request.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
+    assert_eq!(locked_request, spawning_request.into_uuid());
+    parent_lock.commit().await?;
+    let committed = terminal.await??;
+    let result_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM session_child_result
+          WHERE spawning_tool_request_id = $1",
+    )
+    .bind(spawning_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(committed, ModelCallTerminalOutcome::Completed(_)));
+    assert_eq!(result_count, 1);
 
     pool.close().await;
     drop(container);
