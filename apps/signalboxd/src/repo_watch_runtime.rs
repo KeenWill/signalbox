@@ -1554,11 +1554,11 @@ fn normalize_checks_outcome(
     conclusion: Option<&str>,
 ) -> Result<ChecksOutcome, RepositoryWatchAttemptError> {
     match normalize_conclusion(conclusion)? {
-        CheckConclusion::Success => Ok(ChecksOutcome::Success),
+        CheckConclusion::Success | CheckConclusion::Neutral | CheckConclusion::Skipped => {
+            Ok(ChecksOutcome::Success)
+        }
         CheckConclusion::Failure
-        | CheckConclusion::Neutral
         | CheckConclusion::Cancelled
-        | CheckConclusion::Skipped
         | CheckConclusion::TimedOut
         | CheckConclusion::ActionRequired
         | CheckConclusion::Stale
@@ -1834,7 +1834,7 @@ mod tests {
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse,
+        ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse, normalize_checks_outcome,
         normalize_pull_request_context, object_id, supervise_repository_tasks,
     };
     use signalbox_domain::{BranchName, CommitSha, ReactionSubject};
@@ -2860,6 +2860,22 @@ mod tests {
         assert_eq!(
             pull.completed_check_suites()[0].outcome(),
             EXPECTED_CHECKS_OUTCOME
+        );
+    }
+
+    #[test]
+    fn neutral_check_suite_conclusion_is_success_like() {
+        assert_eq!(
+            normalize_checks_outcome(Some("neutral")),
+            Ok(ChecksOutcome::Success)
+        );
+    }
+
+    #[test]
+    fn skipped_check_suite_conclusion_is_success_like() {
+        assert_eq!(
+            normalize_checks_outcome(Some("skipped")),
+            Ok(ChecksOutcome::Success)
         );
     }
 

@@ -33,12 +33,14 @@ versions, zero intervals, malformed values, and invalid entries fail
 configuration before either runtime starts. Other daemon GitHub credentials do
 not substitute for a missing repository-watch credential reference. Credential
 paths are absolute and cannot contain parent-directory components, so lexical
-and filesystem aliases cannot bypass duplicate-reference validation. Final and
-intermediate symlink components are resolved even while their target file or
-directory is absent; later creation of that target therefore cannot turn two
-admitted references into one shared credential. The daemon's session GitHub
-credential reference is likewise normalized before this overlap check, including
-when an intermediate lexical component does not yet exist.
+and filesystem aliases cannot bypass duplicate-reference validation. On Unix,
+existing files are also compared by device and inode, so hard links cannot
+bypass the boundary. Final and intermediate symlink components are resolved even
+while their target file or directory is absent; later creation of that target
+therefore cannot turn two admitted references into one shared credential. The
+daemon's session GitHub credential reference is likewise normalized before this
+overlap check, including when an intermediate lexical component does not yet
+exist.
 
 **Committed unimplemented functionality.** Slice 4 adds versioned structured
 rules to this same section and makes invalid rules a startup configuration
@@ -195,7 +197,8 @@ repository event history in cursor-generation and event-ordinal order.
 - `HeadChanged { previous, current }`
 - `MergeableStateChanged { current }`, where current is `mergeable`,
   `conflicting`, or `unknown`
-- `ChecksCompleted { outcome }`, where outcome is `success` or `failure`
+- `ChecksCompleted { outcome }`, where outcome is `success` or `failure`;
+  completed `success`, `neutral`, and `skipped` suites normalize to `success`
 - `CheckRunCompleted { name, conclusion }`
 - `BranchWorkflowRunCompleted { branch, workflow, conclusion }`, a branch-level
   event rather than a PR event, including when the watched branch is `main`

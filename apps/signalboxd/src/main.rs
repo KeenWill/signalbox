@@ -340,7 +340,24 @@ fn socket_artifacts_conflict(process_path: &Path, runner_path: &Path) -> bool {
 }
 
 fn credential_files_conflict(left: &Path, right: &Path) -> bool {
-    resolved_file_reference(left) == resolved_file_reference(right)
+    let left = resolved_file_reference(left);
+    let right = resolved_file_reference(right);
+    left == right || same_file_identity(&left, &right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> bool {
+    false
 }
 
 fn resolved_file_reference(path: &Path) -> PathBuf {
@@ -2230,6 +2247,18 @@ mod tests {
         std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
 
         assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_watch_hard_link_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let hard_link = directory.path().join("watch-token");
+        std::fs::hard_link(&credential, &hard_link).expect("the credential hard link exists");
+
+        assert!(credential_files_conflict(&credential, &hard_link));
     }
 
     #[test]

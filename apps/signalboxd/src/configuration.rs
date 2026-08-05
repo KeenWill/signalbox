@@ -959,7 +959,7 @@ fn parse_repository_watch_configuration(
     }
     let mut repositories = Vec::with_capacity(repository_tables.len());
     let mut repository_set = HashSet::with_capacity(repository_tables.len());
-    let mut credential_file_set = HashSet::with_capacity(repository_tables.len());
+    let mut credential_file_references: Vec<PathBuf> = Vec::with_capacity(repository_tables.len());
     for repository in repository_tables {
         reject_unknown_fields(
             repository,
@@ -994,9 +994,13 @@ fn parse_repository_watch_configuration(
         {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
-        if !credential_file_set.insert(resolved_credential_file_reference(&credential_file)?) {
+        let resolved_credential_file = resolved_credential_file_reference(&credential_file)?;
+        if credential_file_references.iter().any(|existing| {
+            credential_file_references_conflict(existing, &resolved_credential_file)
+        }) {
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
+        credential_file_references.push(resolved_credential_file);
         repositories.push(WatchedRepositoryConfiguration {
             repository: repository_slug,
             poll_interval: Duration::from_secs(interval),
@@ -1008,6 +1012,25 @@ fn parse_repository_watch_configuration(
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
     })
+}
+
+fn credential_file_references_conflict(left: &Path, right: &Path) -> bool {
+    left == right || same_file_identity(left, right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> bool {
+    false
 }
 
 fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
@@ -2142,6 +2165,27 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         let configured = configuration_with_repository_watch()
             .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
             .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_watch_rejects_a_shared_hard_linked_credential_file() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let hard_link = directory.path().join("watch-token-hard-link");
+        std::fs::hard_link(&credential, &hard_link).expect("the credential hard link exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(
+                SECOND_WATCH_CREDENTIAL_FILE,
+                &hard_link.display().to_string(),
+            );
 
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
