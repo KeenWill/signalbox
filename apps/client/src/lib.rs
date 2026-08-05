@@ -5142,6 +5142,7 @@ mod tests {
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                         turn_id: historical_terminal_turn_id,
                         acceptance_position: CanonicalU64::new(1),
+                        model_settings: None,
                         state: TurnState::ReconciliationRequired {
                             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
                             terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(6)),
@@ -5154,6 +5155,7 @@ mod tests {
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                         turn_id: queued_turn_id,
                         acceptance_position: CanonicalU64::new(3),
+                        model_settings: None,
                         state: TurnState::Queued {
                             accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(10)),
                             content: InputContent::new(String::from("wait behind recovery")),
@@ -5165,6 +5167,7 @@ mod tests {
                     &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                         turn_id: current_blocker_turn_id,
                         acceptance_position: CanonicalU64::new(4),
+                        model_settings: None,
                         state: blocker_state,
                     })?)
                     .map_err(io::Error::other)?,
@@ -5287,6 +5290,7 @@ mod tests {
                 &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                     turn_id,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
                         content: InputContent::new(String::from("stream the reply")),
@@ -5379,6 +5383,7 @@ mod tests {
                 &encode_server_line(&frame(ServerMessage::TranscriptTurn {
                     turn_id,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
                         content: InputContent::new(String::from("stream the reply")),

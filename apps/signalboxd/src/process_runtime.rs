@@ -155,7 +155,8 @@ use signalbox_process_protocol::{
     SettingOverlay as WireSettingOverlay, SystemPromptMember, SystemPromptText,
     ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnState, UsageProvenance,
+    TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+    TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
     content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
@@ -9343,6 +9344,7 @@ where
             turn_id: wire_uuid(turn.turn().into_uuid()),
             acceptance_position: CanonicalU64::new(turn.acceptance_position()),
             state: wire_turn_state(turn.state()),
+            model_settings: turn.model_settings().map(wire_turn_model_settings),
         },
     )
     .await
@@ -10257,6 +10259,28 @@ fn wire_model_settings(settings: ValidatedModelSettings) -> WireModelSettingsSna
         validated_for_selection_id: settings
             .validated_for()
             .map(|selection| wire_uuid(selection.into_uuid())),
+    }
+}
+
+fn wire_turn_model_settings(
+    event: &DomainTurnModelSettingsResolved,
+) -> WireTurnModelSettingsSnapshot {
+    WireTurnModelSettingsSnapshot {
+        accepted_input_id: wire_uuid(event.accepted_input().into_uuid()),
+        defaults_version: CanonicalU64::new(event.defaults_version().as_u64()),
+        requested_model: wire_frozen_model_selection(event.selection()),
+        selected_direct_id: wire_uuid(event.selection().selected_direct().into_uuid()),
+        per_call_override: wire_model_settings_overlay(event.per_call_override()),
+        settings: wire_model_settings(event.settings()),
+        adjusted_from_selection_id: event
+            .adjusted_from_selection()
+            .map(|selection| wire_uuid(selection.into_uuid())),
+        adjustments: event
+            .adjustments()
+            .iter()
+            .copied()
+            .map(wire_model_change_adjustment)
+            .collect(),
     }
 }
 
@@ -14021,6 +14045,7 @@ context_window_tokens = 200000
             ServerMessage::TranscriptTurn {
                 turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX)),
                 acceptance_position: CanonicalU64::new(u64::MAX),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
                     content: InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),

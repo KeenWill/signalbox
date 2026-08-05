@@ -43,10 +43,10 @@ use signalbox_domain::{
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
     DecideToolRequestResult, DelegateApprovalRecommendation, DeliveryRequest, DirectModelSelection,
     DurableCommandId, FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport,
-    InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelCapabilities,
-    ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    FrozenModelSelection, InitialToolApproval, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelCapabilities, ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
     PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
     ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel,
@@ -1361,6 +1361,47 @@ fn prepared(
             TranscriptAncestry::None,
         ),
         SessionConfigurationDefaults::new(selection),
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
+    .expect("user-initiated creation without ancestry is preparable")
+}
+
+fn prepared_with_low_reasoning(
+    command: u128,
+    session: u128,
+    selection: DirectModelSelection,
+) -> PreparedCreateSession {
+    let precedence = ModelSettingsPrecedence::new(
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::Low),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        ),
+        ModelSettingsOverlay::inherit_all(),
+        ModelSettingsOverlay::inherit_all(),
+    );
+    let settings = ModelCapabilities::new(
+        BTreeSet::from([ReasoningLevel::Low]),
+        FastModeSupport::Unsupported,
+        BTreeSet::new(),
+    )
+    .validate_precedence(selection, precedence)
+    .expect("the fixture capability admits low reasoning");
+    let defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        ModelSelectionRequest::Direct(selection),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        None,
+        settings,
+    )
+    .expect("the fixture settings belong to the direct selection");
+    CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        defaults,
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
     .expect("user-initiated creation without ancestry is preparable")
@@ -20746,6 +20787,24 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
     assert_eq!(queued_snapshot.turns().len(), 1);
     assert_eq!(queued_snapshot.turns()[0].turn(), turn);
     assert_eq!(queued_snapshot.turns()[0].acceptance_position(), 1);
+    let queued_settings = queued_snapshot.turns()[0]
+        .model_settings()
+        .expect("the settings-aware turn retains its frozen settings evidence");
+    assert_eq!(queued_settings.accepted_input(), accepted_input);
+    assert_eq!(queued_settings.turn(), turn);
+    assert_eq!(queued_settings.defaults_version().as_u64(), 1);
+    assert_eq!(
+        queued_settings.selection(),
+        &FrozenModelSelection::Direct(selection)
+    );
+    assert_eq!(
+        queued_settings.per_call_override(),
+        ModelSettingsOverlay::inherit_all()
+    );
+    assert_eq!(
+        queued_settings.settings().precedence().per_call(),
+        ModelSettingsOverlay::inherit_all()
+    );
     assert_eq!(
         queued_snapshot.turns()[0].state(),
         &ProcessTurnState::Queued {
@@ -22478,6 +22537,214 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
             OutboxCorruption::MissingTypedRecord
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-008 / INV-012 / INV-053: native session creation retains the
+/// caller's settings independently from its effect row, so a cross-wired
+/// defaults snapshot cannot authenticate command replay.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv008_inv012_inv053_native_creation_authenticates_command_settings()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3761));
+    let command = prepared_with_low_reasoning(0x3762, 0x3763, selection);
+    let provider_defaults = prepared(0x3764, 0x3765, direct(0x3766));
+    let repository = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
+    repository.handle(command.clone()).await?;
+    repository.handle(provider_defaults.clone()).await?;
+
+    sqlx::query("ALTER TABLE session_defaults_version DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_defaults_version AS target
+            SET model_settings = source.model_settings
+           FROM session_defaults_version AS source
+          WHERE target.session_id = $1
+            AND target.version = 1
+            AND source.session_id = $2
+            AND source.version = 1",
+    )
+    .bind(command.applied_result().session().into_uuid())
+    .bind(provider_defaults.applied_result().session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_defaults_version ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        repository.load(command.command().command_id()).await,
+        Err(CreateSessionRepositoryError::Corruption(
+            CreateSessionCorruption::Domain(_)
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032 / INV-053: turn-settings dispatch authenticates the retained
+/// per-call overlay against the accepted origin rather than trusting only the
+/// settings event row.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_inv053_dispatcher_rejects_crosswired_turn_settings_origin()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x3771));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0x3772));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0x3773, 0x3774, direct(0x3775)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x3776,
+                0x3774,
+                "settings-origin request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(turn),
+        )
+        .await?;
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET model_settings_override = $1
+          WHERE accepted_input_id = $2",
+    )
+    .bind(serde_json::json!({
+        "reasoning_level": { "kind": "provider_default" },
+        "fast_mode": { "kind": "inherit" },
+        "service_tier": { "kind": "inherit" }
+    }))
+    .bind(accepted_input.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("cross-wired turn settings must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidModelSettingsEvent
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032 / INV-053: defaults-settings dispatch compares both event
+/// snapshots with their independently retained immutable defaults epochs.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_inv053_dispatcher_rejects_crosswired_defaults_settings_event()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3781));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared_with_low_reasoning(0x3782, 0x3783, selection))
+        .await?;
+    let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3785));
+    let caller_settings = ModelSettingsOverlay::new(
+        SettingOverlay::ProviderDefault,
+        FastModeOverlay::Inherit,
+        SettingOverlay::Inherit,
+    );
+    let installed_settings = ModelCapabilities::new(
+        BTreeSet::new(),
+        FastModeSupport::Unsupported,
+        BTreeSet::new(),
+    )
+    .validate_precedence(
+        installed_selection,
+        ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::inherit_all(),
+            caller_settings,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        ),
+    )
+    .expect("the provider-default fixture is valid for the replacement");
+    let installed_defaults = SessionConfigurationDefaults::complete_with_model_settings(
+        ModelSelectionRequest::Direct(installed_selection),
+        signalbox_domain::DangerousToolAutoApproval::Disabled,
+        None,
+        installed_settings,
+    )
+    .expect("the replacement settings belong to the direct selection");
+    let replacement = ReplaceSessionDefaults::with_model_settings(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x3784)),
+        SessionId::from_uuid(Uuid::from_u128(0x3783)),
+        SessionConfigurationDefaultsVersion::try_from_u64(1)
+            .expect("the fixture version is positive"),
+        installed_defaults,
+        caller_settings,
+    );
+    ReplaceSessionDefaultsRepository::new(pool.clone())
+        .handle(replacement)
+        .await?;
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+
+    sqlx::query("ALTER TABLE session_model_settings_changed DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let update = sqlx::query(
+        "UPDATE session_model_settings_changed
+            SET prior_model_settings = installed_model_settings
+          WHERE session_id = $1
+            AND installed_defaults_version = 2",
+    )
+    .bind(Uuid::from_u128(0x3783))
+    .execute(&pool)
+    .await?;
+    assert_eq!(update.rows_affected(), 1);
+    sqlx::query("ALTER TABLE session_model_settings_changed ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let outcome = dispatcher
+        .dispatch_next(|_| panic!("cross-wired defaults settings must not be offered"))
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(OutboxDispatchError::Corruption(
+                OutboxCorruption::InvalidModelSettingsEvent
+            ))
+        ),
+        "unexpected dispatch outcome: {outcome:?}"
+    );
 
     pool.close().await;
     drop(container);

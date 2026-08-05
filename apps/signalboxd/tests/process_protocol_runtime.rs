@@ -1463,6 +1463,7 @@ fn transcript_turn_projection(message: &ServerMessage) -> (CanonicalUuid, u64, T
             turn_id,
             acceptance_position,
             state,
+            ..
         } => (*turn_id, acceptance_position.value(), state.clone()),
         message => panic!("fixture expected transcript-turn projection, got {message:?}"),
     }

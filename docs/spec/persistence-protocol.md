@@ -34,12 +34,14 @@ the approval-judge lifecycle transactions were verified through this PR
 (`agent/approval-judge-execution-support`); the approval-decision outbox is
 verified against this implementing change; and the session-placement event,
 current head, and creation transaction were verified through PR #415
-(`agent/scoped-visibility-creation`). This page covers the Postgres
-representation in `crates/persistence` (source and migrations), migration
-discipline, durable command storage and replay equality, the fail-closed
-reconstitution boundary, the lock protocol, pending-steering durable state, the
-corruption taxonomy, commit-ambiguity handling, and the transactional outbox.
-Session aggregate semantics live in
+(`agent/scoped-visibility-creation`); the model-settings command fields,
+immutable evidence, snapshot projection, and typed outbox records were verified
+through this PR (`agent/model-settings-persistence`). This page covers the
+Postgres representation in `crates/persistence` (source and migrations),
+migration discipline, durable command storage and replay equality, the
+fail-closed reconstitution boundary, the lock protocol, pending-steering durable
+state, the corruption taxonomy, commit-ambiguity handling, and the transactional
+outbox. Session aggregate semantics live in
 [sessions-and-transcript](sessions-and-transcript.md), turn and attempt
 lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
 identity kinds and command construction in
@@ -160,7 +162,9 @@ Implemented table families (across the forward-only migrations):
   `abandon_lost_runner_command`, `promote_pending_runner_command`, and
   `goal_command`);
 - `session`, `imported_session_seed`, `session_defaults_version`,
-  `session_current_defaults`, `session_scheduler`;
+  `session_current_defaults`, `session_scheduler`, plus the immutable
+  `session_model_settings_changed` and `turn_model_settings_resolved` evidence
+  records;
 - `session_metadata` plus its current tag and attribute satellites,
   `session_metadata_installation`, and the complete tag and attribute satellites
   of `replace_session_metadata_command`;
@@ -1054,12 +1058,13 @@ storage below plus the delegation-stack extension identified inline:
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `input_accepted_outbox_event`,
-  `goal_turn_retired_outbox_event`, `turn_activated_outbox_event`,
-  `turn_failed_outbox_event`, `model_call_transition_outbox_event`,
-  `tool_batch_transition_outbox_event`, `tool_approval_decided_outbox_event`,
-  `context_compacted_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`,
-  `turn_reconciliation_required_outbox_event`,
+  `session_model_settings_changed_outbox_event`,
+  `turn_model_settings_resolved_outbox_event`, `goal_turn_retired_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
+  `model_call_transition_outbox_event`, `tool_batch_transition_outbox_event`,
+  `tool_approval_decided_outbox_event`, `context_compacted_outbox_event`,
+  `turn_completed_outbox_event`, `turn_refused_outbox_event`,
+  `turn_cancelled_outbox_event`, `turn_reconciliation_required_outbox_event`,
   `runner_state_transition_outbox_event`, and the delegation stack's
   `delegation_update_outbox_event` and `delegation_wake_outbox_event` — with a
   deferred trigger requiring exactly one typed record per header. A
@@ -1131,6 +1136,9 @@ existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: `CreateSession` and
 `CreateSessionFromImportedFrontier` handling each append `session_created`; an
+applied defaults replacement that changes model selection or settings appends
+`session_model_settings_changed`; every new origin records and appends
+`turn_model_settings_resolved` before its correlated `input_accepted`. An
 applied `SubmitInput` that creates a turn origin appends `input_accepted`, while
 `PendingSteering` appends nothing until terminal reclassification mints its
 successor turn and appends that correlated `input_accepted`; an applied

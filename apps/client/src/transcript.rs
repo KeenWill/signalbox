@@ -386,6 +386,7 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
             turn_id,
             acceptance_position,
             state,
+            ..
         } => Ok(SnapshotRecord::Turn(TranscriptTurn {
             turn_id,
             acceptance_position: acceptance_position.value(),

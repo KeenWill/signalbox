@@ -215,9 +215,12 @@ ignored and are not part of this stack's validation.
 Protocol version one adds a capability-catalog list request and ordered item
 stream, complete settings on creation/defaults reads and receipts, provenance-
 preserving overrides on defaults replacement and origin-producing input, typed
-unsupported-setting results, and the two durable settings events above. The
-protocol freeze condition has not occurred, so the same-tree protocol changes in
-place.
+unsupported-setting results, and the two durable settings events above. A
+transcript turn committed with settings evidence carries that complete frozen
+fact in every later authoritative snapshot, so a follower that attaches after
+the outbox event remains settings-complete; legacy turns carry explicit null.
+The protocol freeze condition has not occurred, so the same-tree protocol
+changes in place.
 
 The capability projection never exposes a mapped fast serving identity. Client
 choices name only the durable direct selection and supported setting values.
