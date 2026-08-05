@@ -8,7 +8,8 @@
 //! and no independent configuration by construction.
 
 use crate::{
-    DescendantTerminationScope, ModelSelectionOverride, SessionConfigurationDefaultsVersion, TurnId,
+    DescendantTerminationScope, ModelSelectionOverride, ModelSettingsOverlay,
+    SessionConfigurationDefaultsVersion, TurnId,
 };
 
 /// The caller's complete per-input configuration choice for new logical work.
@@ -21,6 +22,7 @@ use crate::{
 pub struct PerInputConfigurationChoices {
     expected_session_defaults_version: SessionConfigurationDefaultsVersion,
     model: ModelSelectionOverride,
+    model_settings: ModelSettingsOverlay,
 }
 
 impl PerInputConfigurationChoices {
@@ -33,6 +35,21 @@ impl PerInputConfigurationChoices {
         Self {
             expected_session_defaults_version,
             model,
+            model_settings: ModelSettingsOverlay::inherit_all(),
+        }
+    }
+
+    /// Binds model and settings overrides to the exact defaults version the
+    /// caller expects to be current.
+    pub const fn with_model_settings(
+        expected_session_defaults_version: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        model_settings: ModelSettingsOverlay,
+    ) -> Self {
+        Self {
+            expected_session_defaults_version,
+            model,
+            model_settings,
         }
     }
 
@@ -44,6 +61,11 @@ impl PerInputConfigurationChoices {
     /// Returns the caller's model-selection override.
     pub const fn model(&self) -> ModelSelectionOverride {
         self.model
+    }
+
+    /// Returns the caller's per-call settings override.
+    pub const fn model_settings(&self) -> ModelSettingsOverlay {
+        self.model_settings
     }
 }
 

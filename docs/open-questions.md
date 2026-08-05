@@ -179,16 +179,21 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 ## Configuration categories
 
-- **Additional effective-configuration categories.** Prompt composition and
-  custom parameters, instructions, tool enablement/configuration, placement
+- **Additional effective-configuration categories.** Prompt composition,
+  sampling and output-shape parameters beyond the implemented model/session
+  settings contract, instructions, tool enablement/configuration, placement
   constraints, per-turn resources, and interpreting-policy selections remain
   unavailable; a future subsystem decision must extend the request,
   session-default, override, and effective-value algebras together
   ([configuration-and-credentials](spec/configuration-and-credentials.md)).
-  Static copy-on-create session templates compose only the already-implemented
-  model selection, bounded system prompt, and dangerous-tool blanket; every
+  Reasoning level, fast mode, and provider-tagged service tier are owned by
+  [model and session settings](spec/model-session-settings.md). Compaction
+  threshold, target size, and never-compact/full-context controls remain
+  deferred here for a separate follow-on slice. Static copy-on-create session
+  templates compose model selection, bounded system prompt, dangerous-tool
+  blanket, and the model-settings layer owned by that contract; every other
   richer composition or configuration category stays blocked here. (S02, S05,
-  S13–S16, S34, S35)
+  S13–S16, S34, S35, S37)
 
 ## Template storage and authoring
 

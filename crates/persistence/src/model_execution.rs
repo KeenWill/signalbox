@@ -27,13 +27,14 @@ use signalbox_domain::{
     AssistantText, AuthorizedModelCall, CancelledModelCallTurn, CancelledToolRoundModelCallTurn,
     CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
     CorrelatedModelCallTerminalObservation, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
-    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
+    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
+    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
     PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
     PreparedDelegatedTurnActivation, PreparedModelCallRequest, PreparedToolResultProjection,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
@@ -4210,29 +4211,55 @@ async fn persist_terminal_outcome_with_usage(
 ) -> Result<(), ModelCallRepositoryError> {
     match outcome {
         ModelCallTerminalOutcome::Completed(completed) => {
-            persist_completed(connection, completed, usage).await
+            persist_completed(connection, completed, usage).await?;
+            persist_delegated_child_result(
+                connection,
+                &DelegationOutcome::from_completed_child(completed),
+            )
+            .await
         }
         ModelCallTerminalOutcome::ToolRound(round) => {
             persist_tool_round(connection, round, usage).await
         }
         ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) => {
             persist_cancelled_tool_round(connection, cancelled, usage).await?;
-            persist_delegated_child_cancellation(connection, cancelled.session(), cancelled.turn())
-                .await
+            persist_delegated_child_result(
+                connection,
+                &DelegationOutcome::from_cancelled_tool_round_child(cancelled),
+            )
+            .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
-            persist_failed(connection, failed, usage, provider_failure_cause).await
+            persist_failed(connection, failed, usage, provider_failure_cause).await?;
+            persist_delegated_child_result(
+                connection,
+                &DelegationOutcome::from_failed_child(failed),
+            )
+            .await
         }
         ModelCallTerminalOutcome::Cancelled(cancelled) => {
             persist_cancelled(connection, cancelled, usage).await?;
-            persist_delegated_child_cancellation(connection, cancelled.session(), cancelled.turn())
-                .await
+            persist_delegated_child_result(
+                connection,
+                &DelegationOutcome::from_cancelled_child(cancelled),
+            )
+            .await
         }
         ModelCallTerminalOutcome::Refused(refused) => {
-            persist_refused(connection, refused, usage).await
+            persist_refused(connection, refused, usage).await?;
+            persist_delegated_child_result(
+                connection,
+                &DelegationOutcome::from_refused_child(refused),
+            )
+            .await
         }
         ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) => {
-            persist_reconciliation_required(connection, reconciliation, usage).await
+            persist_reconciliation_required(connection, reconciliation, usage).await?;
+            persist_delegated_child_result(
+                connection,
+                &DelegationOutcome::from_model_reconciliation_child(reconciliation),
+            )
+            .await
         }
         ModelCallTerminalOutcome::AwaitingRecovery(ambiguous) => {
             persist_ambiguous(connection, ambiguous, usage).await
@@ -4240,11 +4267,37 @@ async fn persist_terminal_outcome_with_usage(
     }
 }
 
-async fn persist_delegated_child_cancellation(
+async fn persist_delegated_child_result(
     connection: &mut PgConnection,
-    child: SessionId,
-    turn: TurnId,
+    outcome: &DelegationOutcome,
 ) -> Result<(), ModelCallRepositoryError> {
+    let (child, turn) =
+        outcome
+            .provenance()
+            .child_turn()
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated child result provenance",
+            ))?;
+    let (outcome_kind, reason_kind) = match (outcome.kind(), outcome.reason()) {
+        (DelegationOutcomeKind::ResultReturned, DelegationOutcomeReason::ChildCompleted) => {
+            ("result_returned", "child_completed")
+        }
+        (DelegationOutcomeKind::ChildFailed, DelegationOutcomeReason::ChildExecutionFailed) => {
+            ("child_failed", "child_execution_failed")
+        }
+        (DelegationOutcomeKind::ChildFailed, DelegationOutcomeReason::ChildResultUnavailable) => {
+            ("child_failed", "child_result_unavailable")
+        }
+        (DelegationOutcomeKind::ChildCancelled, DelegationOutcomeReason::ChildCancelled) => {
+            ("child_cancelled", "child_cancelled")
+        }
+        _ => {
+            return Err(
+                ModelCallCorruption::Inconsistent("terminal delegated child outcome").into(),
+            );
+        }
+    };
+    let content = outcome.content().map(DelegationContent::as_str);
     let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT task.spawning_tool_request_id, relation.parent_session_id
            FROM session_delegation_initial_task AS task
@@ -4252,7 +4305,8 @@ async fn persist_delegated_child_cancellation(
              ON relation.spawning_tool_request_id = task.spawning_tool_request_id
             AND relation.child_session_id = task.child_session_id
           WHERE task.child_session_id = $1
-            AND task.turn_id = $2",
+            AND task.turn_id = $2
+          FOR UPDATE OF relation",
     )
     .bind(session_id_to_uuid(child))
     .bind(turn_id_to_uuid(turn))
@@ -4290,22 +4344,27 @@ async fn persist_delegated_child_cancellation(
             (spawning_tool_request_id, event_ordinal, event_kind,
              outcome_kind, reason_kind, provenance_kind,
              provenance_session_id, provenance_turn_id)
-         VALUES ($1, $2, 'outcome_recorded', 'child_cancelled',
-                 'child_cancelled', 'child_turn', $3, $4)",
+         VALUES ($1, $2, 'outcome_recorded', $3,
+                 $4, 'child_turn', $5, $6)",
     )
     .bind(spawning_request)
     .bind(event_ordinal)
+    .bind(outcome_kind)
+    .bind(reason_kind)
     .bind(session_id_to_uuid(child))
     .bind(turn_id_to_uuid(turn))
     .execute(&mut *connection)
     .await?;
     sqlx::query(
         "INSERT INTO session_child_result
-            (spawning_tool_request_id, event_ordinal, event_kind, outcome_kind)
-         VALUES ($1, $2, 'outcome_recorded', 'child_cancelled')",
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, $2, 'outcome_recorded', $3, $4)",
     )
     .bind(spawning_request)
     .bind(event_ordinal)
+    .bind(outcome_kind)
+    .bind(content)
     .execute(&mut *connection)
     .await?;
 
@@ -4374,16 +4433,19 @@ async fn persist_delegated_child_cancellation(
              update_kind, spawning_tool_request_id, child_session_id,
              outcome_kind, reason_kind, provenance_kind,
              provenance_session_id, provenance_turn_id,
-             result_spawning_request_id)
+             result_spawning_request_id, content_text)
          SELECT event_sequence, event_kind, storage_version, session_id,
-                'child_result', $2, $3, 'child_cancelled', 'child_cancelled',
-                'child_turn', $3, $4, $2
+                'child_result', $2, $3, $4, $5,
+                'child_turn', $3, $6, $2, $7
            FROM header",
     )
     .bind(parent)
     .bind(spawning_request)
     .bind(session_id_to_uuid(child))
+    .bind(outcome_kind)
+    .bind(reason_kind)
     .bind(turn_id_to_uuid(turn))
+    .bind(content)
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -4551,6 +4613,11 @@ pub(crate) async fn persist_tool_reconciliation_required(
         },
     )
     .await?;
+    persist_delegated_child_result(
+        connection,
+        &DelegationOutcome::from_tool_reconciliation_child(reconciliation),
+    )
+    .await?;
     Ok(())
 }
 
@@ -4672,7 +4739,8 @@ async fn persist_tool_round(
             .rows_affected();
             require_single(rows, "auto-approved tool execution phase")?;
         }
-        ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+        ActiveTurnPhase::AwaitingChild { .. }
+        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
             return Err(
                 ModelCallCorruption::Inconsistent("fresh tool round recovery phase").into(),
             );
