@@ -1112,8 +1112,6 @@ impl DelegationOutcome {
     pub fn from_refused_child(value: &RefusedModelCallTurn) -> Self;
     pub fn from_cancelled_child(value: &CancelledModelCallTurn) -> Self;
     pub fn from_cancelled_tool_round_child(value: &CancelledToolRoundModelCallTurn) -> Self;
-    pub fn from_model_reconciliation_child(value: &ReconciliationRequiredModelCallTurn) -> Self;
-    pub fn from_tool_reconciliation_child(value: &ReconciliationRequiredToolTurn) -> Self;
     pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
         -> Option<Self>;
     pub fn reconstitute(
