@@ -11,7 +11,9 @@ use std::{
 
 use reqwest::{
     Client, Method, Response, StatusCode, Url,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderValue, IF_NONE_MATCH, USER_AGENT},
+    header::{
+        ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderValue, IF_NONE_MATCH, LINK, USER_AGENT,
+    },
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -785,12 +787,8 @@ impl GitHubRepositoryPoller {
         let branch_heads = self.fetch_branch_heads().await?;
         let workflows = self.fetch_workflows().await?;
         let mut workflow_runs = Vec::new();
-        for branch in &branch_heads {
-            for workflow in &workflows {
-                if let Some(run) = self.fetch_workflow_run(branch, workflow).await? {
-                    workflow_runs.push(run);
-                }
-            }
+        for workflow in &workflows {
+            workflow_runs.extend(self.fetch_workflow_runs(&branch_heads, workflow).await?);
         }
         let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests,
@@ -818,11 +816,11 @@ impl GitHubRepositoryPoller {
                     ("page", page.to_string()),
                 ],
             )?;
-            let values: Vec<PullNumberResponse> = self
-                .conditional_json("pulls", Method::GET, url, None)
+            let response = self
+                .conditional_json_page::<Vec<PullNumberResponse>>("pulls", Method::GET, url, None)
                 .await?;
-            let has_next = values.len() == PAGE_SIZE;
-            for value in values {
+            let has_next = response.has_next_page;
+            for value in response.value {
                 positive(value.number)?;
                 numbers.insert(value.number);
             }
@@ -900,8 +898,8 @@ impl GitHubRepositoryPoller {
         let mut suite_ids = Vec::new();
         let mut page = 1_u16;
         loop {
-            let response: CheckSuitesResponse = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<CheckSuitesResponse>(
                     "check-suites",
                     Method::GET,
                     self.repository_url(
@@ -915,8 +913,8 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.check_suites.len() == PAGE_SIZE;
-            for suite in response.check_suites {
+            let has_next = response.has_next_page;
+            for suite in response.value.check_suites {
                 let suite_id = object_id(suite.id)?;
                 suite_ids.push(suite_id);
                 if suite.status == "completed" {
@@ -944,8 +942,8 @@ impl GitHubRepositoryPoller {
             let suite_id = suite_id.get().to_string();
             let mut page = 1_u16;
             loop {
-                let response: CheckRunsResponse = self
-                    .conditional_json(
+                let response = self
+                    .conditional_json_page::<CheckRunsResponse>(
                         "check-runs",
                         Method::GET,
                         self.repository_url(
@@ -959,16 +957,13 @@ impl GitHubRepositoryPoller {
                         None,
                     )
                     .await?;
-                let has_next = response.check_runs.len() == PAGE_SIZE;
-                for run in response.check_runs {
+                let has_next = response.has_next_page;
+                for run in response.value.check_runs {
                     if run.status == "completed" {
                         observations.push(RepoWatchCheckRunObservation::new(
                             object_id(run.id)?,
-                            RepoWatchCheckCompletionGeneration::try_new(
-                                run.completed_at
-                                    .ok_or(RepositoryWatchAttemptError::Normalization)?,
-                            )
-                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                            RepoWatchCheckCompletionGeneration::try_new(run.updated_at)
+                                .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             CheckRunName::try_new(run.name)
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
@@ -993,8 +988,8 @@ impl GitHubRepositoryPoller {
         let number_text = number.to_string();
         let mut page = 1_u16;
         loop {
-            let response: Vec<ReviewResponse> = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<Vec<ReviewResponse>>(
                     "reviews",
                     Method::GET,
                     self.repository_url(
@@ -1007,8 +1002,8 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.len() == PAGE_SIZE;
-            for review in response {
+            let has_next = response.has_next_page;
+            for review in response.value {
                 let state = match normalize_review_state(&review.state)? {
                     ProviderReviewState::Submitted(state) => Some(state),
                     ProviderReviewState::Dismissed => None,
@@ -1163,8 +1158,8 @@ impl GitHubRepositoryPoller {
         let mut ids = Vec::new();
         let mut page = 1_u16;
         loop {
-            let response: Vec<CommentResponse> = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<Vec<CommentResponse>>(
                     resource_kind,
                     Method::GET,
                     self.repository_url(
@@ -1177,8 +1172,8 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.len() == PAGE_SIZE;
-            for comment in response {
+            let has_next = response.has_next_page;
+            for comment in response.value {
                 ids.push(object_id(comment.id)?);
             }
             if !has_next {
@@ -1198,8 +1193,8 @@ impl GitHubRepositoryPoller {
         let mut identity_incomplete = false;
         let mut page = 1_u16;
         loop {
-            let response: Vec<ReactionResponse> = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<Vec<ReactionResponse>>(
                     "reactions",
                     Method::GET,
                     self.repository_url(
@@ -1212,8 +1207,8 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.len() == PAGE_SIZE;
-            for reaction in response {
+            let has_next = response.has_next_page;
+            for reaction in response.value {
                 if reaction.user.is_none() {
                     identity_incomplete = true;
                     continue;
@@ -1238,6 +1233,7 @@ impl GitHubRepositoryPoller {
                             .into_iter()
                             .flatten()
                             .filter(|reaction| reaction.subject() == subject)
+                            .filter(|reaction| self.signal_reviewers.contains(reaction.reactor()))
                             .cloned(),
                     );
                 }
@@ -1260,8 +1256,8 @@ impl GitHubRepositoryPoller {
         let mut heads = Vec::new();
         let mut page = 1_u16;
         loop {
-            let response: Vec<BranchResponse> = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<Vec<BranchResponse>>(
                     "branches",
                     Method::GET,
                     self.repository_url(
@@ -1274,8 +1270,8 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.len() == PAGE_SIZE;
-            for branch in response {
+            let has_next = response.has_next_page;
+            for branch in response.value {
                 heads.push(RepoWatchBranchHead::new(
                     BranchName::try_new(branch.name)
                         .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
@@ -1296,8 +1292,8 @@ impl GitHubRepositoryPoller {
         let mut workflows = Vec::new();
         let mut page = 1_u16;
         loop {
-            let response: WorkflowsResponse = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<WorkflowsResponse>(
                     "workflows",
                     Method::GET,
                     self.repository_url(
@@ -1310,13 +1306,13 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.workflows.len() == PAGE_SIZE;
-            for workflow in &response.workflows {
+            let has_next = response.has_next_page;
+            for workflow in &response.value.workflows {
                 positive(workflow.id)?;
                 WorkflowName::try_new(workflow.name.clone())
                     .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
             }
-            workflows.extend(response.workflows);
+            workflows.extend(response.value.workflows);
             if !has_next {
                 return Ok(workflows);
             }
@@ -1324,19 +1320,27 @@ impl GitHubRepositoryPoller {
         }
     }
 
-    async fn fetch_workflow_run(
+    async fn fetch_workflow_runs(
         &mut self,
-        branch: &RepoWatchBranchHead,
+        branches: &[RepoWatchBranchHead],
         workflow: &WorkflowResponse,
-    ) -> Result<Option<RepoWatchWorkflowRunObservation>, RepositoryWatchAttemptError> {
+    ) -> Result<Vec<RepoWatchWorkflowRunObservation>, RepositoryWatchAttemptError> {
+        if branches.is_empty() {
+            return Ok(Vec::new());
+        }
         let workflow_id = workflow.id.to_string();
         let workflow_identity = object_id(workflow.id)?;
         let workflow_name = WorkflowName::try_new(workflow.name.clone())
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let mut pending_branches = branches
+            .iter()
+            .map(|branch| (branch.branch().as_str(), branch.branch()))
+            .collect::<HashMap<_, _>>();
+        let mut observations = Vec::with_capacity(pending_branches.len());
         let mut page = 1_u16;
         loop {
-            let response: WorkflowRunsResponse = self
-                .conditional_json(
+            let response = self
+                .conditional_json_page::<WorkflowRunsResponse>(
                     "workflow-runs",
                     Method::GET,
                     self.repository_url(
@@ -1349,13 +1353,20 @@ impl GitHubRepositoryPoller {
                     None,
                 )
                 .await?;
-            let has_next = response.workflow_runs.len() == PAGE_SIZE;
-            for run in response.workflow_runs {
-                if run.head_branch.as_deref() != Some(branch.branch().as_str())
-                    || run.status != "completed"
-                {
+            let has_next = response.has_next_page;
+            for run in response.value.workflow_runs {
+                if run.status != "completed" {
                     continue;
                 }
+                let Some(branch) = run
+                    .head_branch
+                    .as_deref()
+                    .and_then(|branch| pending_branches.get(branch))
+                    .copied()
+                    .cloned()
+                else {
+                    continue;
+                };
                 let run_id = object_id(run.id)?;
                 let run_attempt = RepoWatchWorkflowRunAttempt::new(
                     NonZeroU64::new(run.run_attempt)
@@ -1367,18 +1378,19 @@ impl GitHubRepositoryPoller {
                 let head_repository = RepositorySlug::try_new(head_repository.full_name)
                     .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
                 if head_repository == self.repository {
-                    return Ok(Some(RepoWatchWorkflowRunObservation::new(
+                    pending_branches.remove(branch.as_str());
+                    observations.push(RepoWatchWorkflowRunObservation::new(
                         run_id,
                         workflow_identity,
                         run_attempt,
-                        branch.branch().clone(),
-                        workflow_name,
+                        branch,
+                        workflow_name.clone(),
                         normalize_conclusion(run.conclusion.as_deref())?,
-                    )));
+                    ));
                 }
             }
-            if !has_next {
-                return Ok(None);
+            if pending_branches.is_empty() || !has_next {
+                return Ok(observations);
             }
             page = next_page(page)?;
         }
@@ -1422,7 +1434,39 @@ impl GitHubRepositoryPoller {
     where
         T: Any + Clone + DeserializeOwned + Send + Sync,
     {
+        Ok(self
+            .conditional_json_response(resource_kind, method, url, body, None)
+            .await?
+            .value)
+    }
+
+    async fn conditional_json_page<T>(
+        &mut self,
+        resource_kind: &'static str,
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+    ) -> Result<ConditionalJsonResponse<T>, RepositoryWatchAttemptError>
+    where
+        T: Any + Clone + DeserializeOwned + PageResponse + Send + Sync,
+    {
+        self.conditional_json_response(resource_kind, method, url, body, Some(T::item_count))
+            .await
+    }
+
+    async fn conditional_json_response<T>(
+        &mut self,
+        resource_kind: &'static str,
+        method: Method,
+        url: Url,
+        body: Option<Vec<u8>>,
+        page_item_count: Option<fn(&T) -> usize>,
+    ) -> Result<ConditionalJsonResponse<T>, RepositoryWatchAttemptError>
+    where
+        T: Any + Clone + DeserializeOwned + Send + Sync,
+    {
         let key = ResourceKey::new(resource_kind, &method, &url, body.as_deref());
+        let page_is_at_cap = page_item_count.is_some() && result_page(&url) == MAX_RESULT_PAGES;
         self.cache.touch(key.clone())?;
         let credential = self
             .credentials
@@ -1458,9 +1502,12 @@ impl GitHubRepositoryPoller {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Request)?;
         if response.status() == StatusCode::NOT_MODIFIED {
-            let accepted = self.cache.accepted::<T>(&key)?;
+            let mut accepted = self.cache.accepted::<ConditionalJsonResponse<T>>(&key)?;
             if let Some(entity_tag) = response.headers().get(ETAG).map(entity_tag).transpose()? {
                 self.cache.replace_entity_tag(&key, entity_tag)?;
+            }
+            if page_item_count.is_some() && accepted.page_is_full && !accepted.has_next_page {
+                accepted.has_next_page = true;
             }
             return Ok(accepted);
         }
@@ -1469,18 +1516,41 @@ impl GitHubRepositoryPoller {
         }
         self.cache.remove(&key);
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
+        let has_next_page = has_next_link(&response)?;
         let bytes = read_bounded(response, self.cache.remaining_poll_wire_bytes()?).await?;
         self.cache.record_poll_wire_bytes(bytes.len())?;
-        let accepted = serde_json::from_slice::<T>(&bytes)
+        let value = serde_json::from_slice::<T>(&bytes)
             .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+        let accepted = ConditionalJsonResponse {
+            page_is_full: page_item_count.is_some_and(|item_count| item_count(&value) == PAGE_SIZE),
+            value,
+            has_next_page,
+        };
         match response_entity_tag {
-            Some(entity_tag) => {
+            Some(entity_tag) if !page_is_at_cap => {
                 self.cache
                     .insert(key, entity_tag, bytes.len(), accepted.clone())?;
             }
-            None => self.cache.remove(&key),
+            Some(_) | None => self.cache.remove(&key),
         }
         Ok(accepted)
+    }
+}
+
+#[derive(Clone)]
+struct ConditionalJsonResponse<T> {
+    value: T,
+    has_next_page: bool,
+    page_is_full: bool,
+}
+
+trait PageResponse {
+    fn item_count(&self) -> usize;
+}
+
+impl<T> PageResponse for Vec<T> {
+    fn item_count(&self) -> usize {
+        self.len()
     }
 }
 
@@ -1529,6 +1599,29 @@ fn entity_tag(value: &HeaderValue) -> Result<EntityTag, RepositoryWatchAttemptEr
         return Err(RepositoryWatchAttemptError::InvalidEntityTag);
     }
     Ok(EntityTag(value.to_owned()))
+}
+
+fn has_next_link(response: &Response) -> Result<bool, RepositoryWatchAttemptError> {
+    for value in response.headers().get_all(LINK) {
+        let value = value
+            .to_str()
+            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+        if value.split(',').any(|link| {
+            link.split(';')
+                .skip(1)
+                .any(|parameter| parameter.trim() == "rel=\"next\"")
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn result_page(url: &Url) -> u16 {
+    url.query_pairs()
+        .find(|(name, _)| name == "page")
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0)
 }
 
 struct CachedResource {
@@ -1905,6 +1998,12 @@ struct CheckSuitesResponse {
     check_suites: Vec<CheckSuiteResponse>,
 }
 
+impl PageResponse for CheckSuitesResponse {
+    fn item_count(&self) -> usize {
+        self.check_suites.len()
+    }
+}
+
 #[derive(Clone, Deserialize)]
 struct CheckSuiteResponse {
     id: u64,
@@ -1918,13 +2017,19 @@ struct CheckRunsResponse {
     check_runs: Vec<CheckRunResponse>,
 }
 
+impl PageResponse for CheckRunsResponse {
+    fn item_count(&self) -> usize {
+        self.check_runs.len()
+    }
+}
+
 #[derive(Clone, Deserialize)]
 struct CheckRunResponse {
     id: u64,
     status: String,
     name: String,
     conclusion: Option<String>,
-    completed_at: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1962,6 +2067,12 @@ struct WorkflowsResponse {
     workflows: Vec<WorkflowResponse>,
 }
 
+impl PageResponse for WorkflowsResponse {
+    fn item_count(&self) -> usize {
+        self.workflows.len()
+    }
+}
+
 #[derive(Clone, Deserialize)]
 struct WorkflowResponse {
     id: u64,
@@ -1971,6 +2082,12 @@ struct WorkflowResponse {
 #[derive(Clone, Deserialize)]
 struct WorkflowRunsResponse {
     workflow_runs: Vec<WorkflowRunResponse>,
+}
+
+impl PageResponse for WorkflowRunsResponse {
+    fn item_count(&self) -> usize {
+        self.workflow_runs.len()
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -2082,6 +2199,7 @@ mod tests {
     const CREDENTIAL_FILE_NAME: &str = "watch-token";
     const CREDENTIAL_VALUE: &str = "fixture-token";
     const ENTITY_TAG: &str = "\"fixture-etag\"";
+    const NEXT_PAGE_LINK: &str = "<https://api.github.com/next>; rel=\"next\"";
     const PULLS_TARGET: &str = "/repos/namespace/project/pulls?state=open&per_page=100&page=1";
     const BRANCHES_TARGET: &str = "/repos/namespace/project/branches?per_page=100&page=1";
     const WORKFLOWS_TARGET: &str = "/repos/namespace/project/actions/workflows?per_page=100&page=1";
@@ -2109,8 +2227,6 @@ mod tests {
         "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
     const SECOND_MAIN_WORKFLOW_PAGE_TARGET: &str =
         "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=2";
-    const FEATURE_WORKFLOW_TARGET: &str =
-        "/repos/namespace/project/actions/workflows/61/runs?per_page=100&page=1";
     const EMPTY_LIST: &str = "[]";
     const EMPTY_WORKFLOW_LIST: &str = "{\"workflows\":[]}";
     const MALFORMED_JSON: &str = "not-json";
@@ -2146,7 +2262,8 @@ mod tests {
     const PULL_LABEL: &str = "watch-me";
     const CHECK_RUN_NAME: &str = "build";
     const CHECK_SUITE_COMPLETION_GENERATION: &str = "2026-08-03T12:34:56Z";
-    const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:07Z";
+    const CHECK_RUN_COMPLETED_AT: &str = "2026-08-03T12:35:07Z";
+    const CHECK_RUN_COMPLETION_GENERATION: &str = "2026-08-03T12:35:08Z";
     const QUEUED_CHECK_SUITE_UPDATED_AT: &str = "2026-08-03T12:35:18Z";
     const WORKFLOW_NAME: &str = "CI";
     const REVIEWER: &str = "signal-reviewer";
@@ -2241,14 +2358,16 @@ mod tests {
                     "status": "completed",
                     "name": CHECK_RUN_NAME,
                     "conclusion": "failure",
-                    "completed_at": CHECK_RUN_COMPLETION_GENERATION
+                    "completed_at": CHECK_RUN_COMPLETED_AT,
+                    "updated_at": CHECK_RUN_COMPLETION_GENERATION
                 },
                 {
                     "id": IN_PROGRESS_CHECK_RUN_ID,
                     "status": "in_progress",
                     "name": IN_PROGRESS_CHECK_RUN_NAME,
                     "conclusion": null,
-                    "completed_at": null
+                    "completed_at": null,
+                    "updated_at": QUEUED_CHECK_SUITE_UPDATED_AT
                 }
             ]
         })
@@ -2524,6 +2643,7 @@ mod tests {
         validator: Option<&'static str>,
         status: &'static str,
         entity_tag: Option<&'static str>,
+        link: Option<&'static str>,
         body: String,
     }
 
@@ -2535,6 +2655,19 @@ mod tests {
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
+                link: None,
+                body: body.into(),
+            }
+        }
+
+        fn ok_with_next(target: &'static str, body: impl Into<String>) -> Self {
+            Self {
+                method: "GET",
+                target,
+                validator: None,
+                status: "200 OK",
+                entity_tag: Some(ENTITY_TAG),
+                link: Some(NEXT_PAGE_LINK),
                 body: body.into(),
             }
         }
@@ -2546,6 +2679,7 @@ mod tests {
                 validator: Some(ENTITY_TAG),
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
+                link: None,
                 body: body.into(),
             }
         }
@@ -2557,6 +2691,7 @@ mod tests {
                 validator: Some(ENTITY_TAG),
                 status: "304 Not Modified",
                 entity_tag: None,
+                link: None,
                 body: String::new(),
             }
         }
@@ -2568,6 +2703,7 @@ mod tests {
                 validator: None,
                 status: "200 OK",
                 entity_tag: None,
+                link: None,
                 body: body.into(),
             }
         }
@@ -2637,10 +2773,15 @@ mod tests {
             .entity_tag
             .map(|value| format!("ETag: {value}\r\n"))
             .unwrap_or_default();
+        let link = response
+            .link
+            .map(|value| format!("Link: {value}\r\n"))
+            .unwrap_or_default();
         let encoded = format!(
-            "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.status,
             entity_tag,
+            link,
             response.body.len(),
             response.body,
         );
@@ -2725,7 +2866,6 @@ mod tests {
             ScriptedResponse::ok(BRANCHES_TARGET, branches()),
             ScriptedResponse::ok(WORKFLOWS_TARGET, workflows()),
             ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, main_workflow_run()),
-            ScriptedResponse::not_modified(FEATURE_WORKFLOW_TARGET),
         ]
     }
 
@@ -2826,11 +2966,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_listing_fetches_the_page_after_a_full_page() {
+    async fn workflow_listing_follows_the_link_after_a_full_page() {
         let server = ScriptedServer::start(vec![
             ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
             ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
-            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
+            ScriptedResponse::ok_with_next(WORKFLOWS_TARGET, full_workflow_page()),
             ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
         ])
         .await;
@@ -2839,6 +2979,51 @@ mod tests {
         server.finish().await;
 
         assert!(observation.state().workflow_runs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workflow_listing_accepts_a_full_terminal_page_without_a_link() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
+        ])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
+        server.finish().await;
+
+        assert!(observation.state().workflow_runs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cached_full_terminal_page_probes_one_bounded_successor() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(PULLS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(BRANCHES_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(WORKFLOWS_TARGET, full_workflow_page()),
+            ScriptedResponse::not_modified(PULLS_TARGET),
+            ScriptedResponse::not_modified(BRANCHES_TARGET),
+            ScriptedResponse::not_modified(WORKFLOWS_TARGET),
+            ScriptedResponse::ok(SECOND_WORKFLOWS_PAGE_TARGET, EMPTY_WORKFLOW_LIST),
+        ])
+        .await;
+        let mut fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let first = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("first poll succeeds");
+
+        let second = fixture
+            .poller
+            .poll(Some(&first))
+            .await
+            .expect("cached boundary poll succeeds");
+        server.finish().await;
+
+        assert_eq!(second, first);
     }
 
     #[tokio::test]
@@ -2854,9 +3039,11 @@ mod tests {
 
         let run = fixture
             .poller
-            .fetch_workflow_run(&branch, &workflow)
+            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow)
             .await
             .expect("workflow-run response is valid")
+            .into_iter()
+            .next()
             .expect("watched-repository run remains in the response");
         server.finish().await;
 
@@ -2876,9 +3063,11 @@ mod tests {
 
         let run = fixture
             .poller
-            .fetch_workflow_run(&branch, &workflow)
+            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow)
             .await
             .expect("unfiltered workflow-run response is valid")
+            .into_iter()
+            .next()
             .expect("latest completed run for the watched branch remains visible");
         server.finish().await;
 
@@ -2888,7 +3077,7 @@ mod tests {
     #[tokio::test]
     async fn branch_projection_follows_a_full_page_of_fork_runs() {
         let server = ScriptedServer::start(vec![
-            ScriptedResponse::ok(MAIN_WORKFLOW_TARGET, full_foreign_workflow_run_page()),
+            ScriptedResponse::ok_with_next(MAIN_WORKFLOW_TARGET, full_foreign_workflow_run_page()),
             ScriptedResponse::ok(SECOND_MAIN_WORKFLOW_PAGE_TARGET, main_workflow_run()),
         ])
         .await;
@@ -2898,9 +3087,11 @@ mod tests {
 
         let run = fixture
             .poller
-            .fetch_workflow_run(&branch, &workflow)
+            .fetch_workflow_runs(std::slice::from_ref(&branch), &workflow)
             .await
             .expect("workflow-run pages are valid")
+            .into_iter()
+            .next()
             .expect("watched-repository run is found on the next page");
         server.finish().await;
 
@@ -3209,6 +3400,37 @@ mod tests {
         server.finish().await;
 
         assert_eq!(reactions, [previous]);
+    }
+
+    #[tokio::test]
+    async fn a_changed_signal_reviewer_filter_drops_identity_less_prior_reactions() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(PULL_REACTIONS_TARGET, identity_less_reaction()),
+            ScriptedResponse::ok(ISSUE_COMMENTS_TARGET, EMPTY_LIST),
+            ScriptedResponse::ok(REVIEW_COMMENTS_TARGET, EMPTY_LIST),
+        ])
+        .await;
+        let current_reviewer = RepoWatchAuthorLogin::try_new(String::from(AMBIENT_REACTOR))
+            .expect("current reviewer fixture is valid");
+        let mut fixture =
+            poller_fixture_with_signal_reviewers(server.base_url.clone(), vec![current_reviewer])
+                .expect("poller is constructed");
+        let previous = RepoWatchReactionObservation::new(
+            ReactionSubject::PullRequestBody,
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+                .expect("previous reviewer fixture is valid"),
+            ReactionContent::try_new(String::from(SIGNAL_REACTION_CONTENTS[0]))
+                .expect("reaction fixture is valid"),
+        );
+
+        let reactions = fixture
+            .poller
+            .fetch_reactions(PULL_NUMBER, Some(std::slice::from_ref(&previous)))
+            .await
+            .expect("filter changes discard identity-less prior reactions");
+        server.finish().await;
+
+        assert!(reactions.is_empty());
     }
 
     #[tokio::test]

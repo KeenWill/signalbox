@@ -1026,7 +1026,7 @@ fn parse_repository_watch_configuration(
         {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
-        if !credential_file_set.insert(credential_file.clone()) {
+        if !credential_file_set.insert(resolved_credential_file_reference(&credential_file)?) {
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
         repositories.push(WatchedRepositoryConfiguration {
@@ -1354,6 +1354,75 @@ fn parse_repository_watch_actions(
             Ok(RepoWatchRuleActionV1::DispatchSession { template })
         })
         .collect()
+}
+
+fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
+    let mut resolved = normalize_absolute_reference(path)?;
+    for _ in 0..40 {
+        if let Ok(canonical) = fs::canonicalize(&resolved) {
+            return Ok(canonical);
+        }
+        let metadata = match fs::symlink_metadata(&resolved) {
+            Ok(metadata) => metadata,
+            Err(_) => return unresolved_credential_file_reference(&resolved),
+        };
+        if !metadata.file_type().is_symlink() {
+            return unresolved_credential_file_reference(&resolved);
+        }
+        let target = match fs::read_link(&resolved) {
+            Ok(target) => target,
+            Err(_) => return unresolved_credential_file_reference(&resolved),
+        };
+        let target = if target.is_absolute() {
+            target
+        } else {
+            resolved
+                .parent()
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                .join(target)
+        };
+        resolved = normalize_absolute_reference(&target)?;
+    }
+    if fs::symlink_metadata(&resolved).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    unresolved_credential_file_reference(&resolved)
+}
+
+fn unresolved_credential_file_reference(
+    resolved: &Path,
+) -> Result<PathBuf, HubModelConfigurationError> {
+    let file_name = resolved
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    let parent = resolved
+        .parent()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    Ok(fs::canonicalize(parent)
+        .unwrap_or_else(|_| parent.to_path_buf())
+        .join(file_name))
+}
+
+fn normalize_absolute_reference(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
+    if !path.is_absolute() {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+                }
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn parse_tool_approval_postures(
@@ -2543,6 +2612,57 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
         );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_shared_credential_file_alias() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let alias = directory.path().join("watch-token-alias");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_dangling_shared_credential_file_alias() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        let alias = directory.path().join("watch-token-alias");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_defers_an_unreadable_credential_file_reference() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("the credential fixture directory becomes unreadable");
+
+        let parsed = HubModelConfiguration::parse(&configured);
+
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("the credential fixture directory becomes removable");
+        parsed.expect("credential readability is deferred until request preparation");
     }
 
     #[test]

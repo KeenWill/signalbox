@@ -31,7 +31,10 @@ versions, zero intervals, malformed values, and invalid entries fail
 configuration before either runtime starts. Other daemon GitHub credentials do
 not substitute for a missing repository-watch credential reference. Credential
 paths are absolute and cannot contain parent-directory components, so lexical
-and filesystem aliases cannot bypass duplicate-reference validation.
+and filesystem aliases cannot bypass duplicate-reference validation. A final
+symlink component is resolved even while its target file is absent; later
+creation of that target therefore cannot turn two admitted references into one
+shared credential.
 
 **Implemented behavior.** The section also accepts versioned structured rules.
 Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
@@ -74,9 +77,15 @@ empty on every daemon start, so the first poll and the first poll after restart
 perform one complete unconditional fetch. When a current poll replaces a
 resource at the cache's entry bound, admission evicts an untouched stale entry
 before enforcing that bound; replacement within the bound cannot wedge later
-polls. A failed, rejected, partial, or unparseable poll submits no persistence
-candidate. The next poll occurs after the per-repository interval; version one
-has no webhook fallback and no speculative second polling transport.
+polls. REST continuation follows GitHub's `Link` relation for the next page, not
+response cardinality: a full terminal page at the 100-page bound completes the
+projection, while a next relation beyond that bound fails the poll. Because a
+`304` can omit changed pagination metadata, a cached full terminal page
+conservatively probes one bounded successor; the cap page is reread
+unconditionally so that probe never manufactures page 101. A failed, rejected,
+partial, or unparseable poll submits no persistence candidate. The next poll
+occurs after the per-repository interval; version one has no webhook fallback
+and no speculative second polling transport.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
@@ -116,25 +125,28 @@ per-pull-request state, branch heads, and completed branch-workflow identities
 event vocabulary below in deterministic order. The cursor retains provider
 identity and completion generation for completed check suites and check runs,
 plus provider identities for reviews, threads, and both the workflow definition
-and branch-workflow run attempt. A rerequested suite or run therefore emits its
-later completion even when its provider identity and conclusion are unchanged.
-Workflows that share a display name remain distinct, renaming a workflow cannot
-re-emit its already observed run attempt, and a new attempt under an unchanged
-run ID does emit. The display name remains the rule-visible event payload. A
-provider fact retained in the consecutive comparison baseline is not re-emitted.
-Rules receive only events: they cannot inspect normalized snapshots or rerun the
-differ. Why: transport independence requires both polling and a later
-authenticated webhook receiver to feed the same durable facts.
+and branch-workflow run attempt. The poller uses the provider's `updated_at`
+value as the completion generation for both completed check suites and check
+runs, so an edited completed run conclusion is observable even when its
+`completed_at` value is unchanged. A rerequested suite or run therefore emits
+its later completion even when its provider identity and conclusion are
+unchanged. Workflows that share a display name remain distinct, renaming a
+workflow cannot re-emit its already observed run attempt, and a new attempt
+under an unchanged run ID does emit. The display name remains the rule-visible
+event payload. A provider fact retained in the consecutive comparison baseline
+is not re-emitted. Rules receive only events: they cannot inspect normalized
+snapshots or rerun the differ. Why: transport independence requires both polling
+and a later authenticated webhook receiver to feed the same durable facts.
 
 **Implemented behavior.** Polling fetches repository state, not rule inputs. The
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
-the transport follows every result page needed to build that finite projection
-and retains its per-page validator only in the repository task's process-local
-cache. A same-named branch on a fork does not enter this projection: the poller
-accepts a run only when its provider head-repository identity equals the
-configured watched repository and continues through bounded result pages past
-foreign or absent head repositories.
+the transport scans each workflow's result pages once and collects every branch
+match from that scan, then retains each per-page validator only in the
+repository task's process-local cache. A same-named branch on a fork does not
+enter this projection: the poller accepts a run only when its provider
+head-repository identity equals the configured watched repository and continues
+through bounded result pages past foreign or absent head repositories.
 
 ## Durable event vocabulary
 
@@ -203,9 +215,11 @@ in the configured signal-reviewer list. Reactions from every other actor are
 excluded while normalizing state, and a reaction whose deleted actor has no
 current login identity is never added. When any current reaction for one subject
 lacks actor identity, normalization conservatively carries forward the prior
-retained signal-reviewer reactions for that subject so identity loss cannot
-manufacture removals. Why: reviewer signals are actionable facts; the full
-ambient emoji stream is neither a rule input nor retained noise.
+retained reactions for that subject only when their reactors remain in the
+current signal-reviewer set, so identity loss cannot manufacture removals and a
+filter change cannot preserve an excluded reactor. Why: reviewer signals are
+actionable facts; the full ambient emoji stream is neither a rule input nor
+retained noise.
 
 **Implemented behavior.** The cursor binds its filtered reaction projection to
 the exact canonical signal-reviewer login set. When that set changes, the next
