@@ -3,8 +3,9 @@
 use std::{error::Error, fmt, future::Future, num::NonZeroU64};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutorEvidence,
+    ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedDurableToolCompletion,
+    CorrelatedToolExecutorEvidence, OperatorFailureClass, ToolArgumentValidator,
+    ToolExecutionInvocation, ToolExecutorEvidence,
 };
 use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest,
@@ -844,6 +845,8 @@ impl ForegroundAwaitDelivered {
 pub enum SessionDelegationExecutionDisposition {
     /// Ordinary completed or known-failed tool evidence bound to its dispatch.
     Completed(CorrelatedToolExecutorEvidence),
+    /// Terminal evidence already committed atomically with its delegation effect.
+    DurableCompletion(CorrelatedDurableToolCompletion),
     /// An already-delivered foreground result retaining its typed outcome.
     ForegroundDelivered(ForegroundAwaitDelivered),
     /// A foreground wait registered without retaining a physical future.
@@ -922,6 +925,7 @@ where
 
 enum UnboundExecutionDisposition {
     Completed(ToolExecutorEvidence),
+    DurableCompletion(ToolExecutorEvidence),
     ForegroundDelivered(DeliveredChildResult),
     ForegroundPending(DelegationWait),
 }
@@ -944,6 +948,14 @@ where
             UnboundExecutionDisposition::Completed(evidence) => Ok(
                 SessionDelegationExecutionDisposition::Completed(invocation.bind(evidence)),
             ),
+            UnboundExecutionDisposition::DurableCompletion(
+                ToolExecutorEvidence::CompletedText(_),
+            ) => Ok(SessionDelegationExecutionDisposition::DurableCompletion(
+                invocation.durable_completion(),
+            )),
+            UnboundExecutionDisposition::DurableCompletion(_) => {
+                Err(SessionDelegationExecutorError::PortContract)
+            }
             UnboundExecutionDisposition::ForegroundDelivered(result) => {
                 Ok(SessionDelegationExecutionDisposition::ForegroundDelivered(
                     ForegroundAwaitDelivered {
@@ -1004,7 +1016,7 @@ where
                             && receipt.child() == expected_child
                             && receipt.mode() == expected_mode =>
                     {
-                        completed(encode_await_receipt(receipt)?)
+                        durably_completed(encode_await_receipt(receipt)?)
                     }
                     AwaitSessionPortOutcome::Delivered(result)
                         if expected_mode == DelegationWaitMode::Foreground
@@ -1043,7 +1055,7 @@ where
                     SessionDelegationPortOutcome::Applied(receipt)
                         if receipt.tool_request() == expected_request =>
                     {
-                        completed(encode_message_receipt(receipt)?)
+                        durably_completed(encode_message_receipt(receipt)?)
                     }
                     SessionDelegationPortOutcome::Rejected => self.rejected(),
                     SessionDelegationPortOutcome::Applied(_) => {
@@ -1072,6 +1084,17 @@ fn completed<PortError>(
         .map_err(|_| SessionDelegationExecutorError::ResultEncoding)?
         .into_string();
     Ok(UnboundExecutionDisposition::Completed(
+        ToolExecutorEvidence::CompletedText(result),
+    ))
+}
+
+fn durably_completed<PortError>(
+    result: String,
+) -> Result<UnboundExecutionDisposition, SessionDelegationExecutorError<PortError>> {
+    let result = ToolResultText::try_new(result)
+        .map_err(|_| SessionDelegationExecutorError::ResultEncoding)?
+        .into_string();
+    Ok(UnboundExecutionDisposition::DurableCompletion(
         ToolExecutorEvidence::CompletedText(result),
     ))
 }

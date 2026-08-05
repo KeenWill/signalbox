@@ -8,12 +8,12 @@ use signalbox_domain::{
     DelegationContent, DelegationEvent, DelegationEventOrdinal, DelegationMessage,
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationOutcome,
     DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance,
-    DelegationProvenanceReconstitutionInput, DelegationTransitionFailure, DelegationWait,
-    DelegationWaitMode, DescendantTerminationScope, DurableCommandId, GoalGeneration,
-    ReconstitutedToolAttempt, SessionDelegation, SessionDelegationReconstitutionFailure,
-    SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
-    ToolDispatchAuthority, ToolEffectClass, ToolRequestId, ToolResultContent, ToolResultText,
-    TurnId,
+    DelegationProvenanceReconstitutionInput, DelegationRequestFailure, DelegationTransitionFailure,
+    DelegationWait, DelegationWaitMode, DescendantTerminationScope, DurableCommandId,
+    GoalGeneration, ReconstitutedToolAttempt, SessionDelegation,
+    SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput, SessionId,
+    ToolAttemptEnd, ToolAttemptObservation, ToolDispatchAuthority, ToolEffectClass, ToolRequestId,
+    ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -562,6 +562,11 @@ impl SessionDelegationRepository {
         }
         let logical = match DelegationMessageRequest::parse(stored, peer, content) {
             Ok(logical) => logical,
+            Err(error)
+                if matches!(error.failure(), DelegationRequestFailure::InvalidContent(_)) =>
+            {
+                return Ok(ProcessDelegationOutcome::InvalidRequest);
+            }
             Err(_) if message_replay_exists(&mut connection, request).await? => {
                 return Ok(ProcessDelegationOutcome::Rejected(
                     ProcessDelegationRequestRejection::MessageConflict,

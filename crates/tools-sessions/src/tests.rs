@@ -229,6 +229,15 @@ fn completed_text(disposition: UnboundExecutionDisposition) -> String {
     result
 }
 
+fn durably_completed_text(disposition: UnboundExecutionDisposition) -> String {
+    let UnboundExecutionDisposition::DurableCompletion(ToolExecutorEvidence::CompletedText(result)) =
+        disposition
+    else {
+        panic!("fixture operation completes durably with text")
+    };
+    result
+}
+
 fn foreground_result(disposition: UnboundExecutionDisposition) -> DeliveredChildResult {
     let UnboundExecutionDisposition::ForegroundDelivered(result) = disposition else {
         panic!("fixture operation delivers one typed foreground result")
@@ -656,8 +665,8 @@ fn background_await_returns_registration_without_child_content() {
     let authority = dispatch(&raw, ToolEffectClass::EffectFree);
     let disposition = run_ready(executor.execute_operation(operation, authority))
         .expect("background registration succeeds");
-    let output: Value =
-        serde_json::from_str(&completed_text(disposition)).expect("await receipt is compact JSON");
+    let output: Value = serde_json::from_str(&durably_completed_text(disposition))
+        .expect("await receipt is compact JSON");
 
     assert_eq!(output["result"], json!("session_await_registered"));
     assert_eq!(output["tool_request_id"], raw.id().as_uuid().to_string());
@@ -876,7 +885,7 @@ fn message_executor_returns_identity_direction_ordinal_and_delivery_sequence() {
     let authority = dispatch(&raw, ToolEffectClass::ExternalEffect);
     let disposition =
         run_ready(executor.execute_operation(operation, authority)).expect("message send succeeds");
-    let output: Value = serde_json::from_str(&completed_text(disposition))
+    let output: Value = serde_json::from_str(&durably_completed_text(disposition))
         .expect("message receipt is compact JSON");
     let port = executor.into_port();
     let observed = single_message_request(&port);

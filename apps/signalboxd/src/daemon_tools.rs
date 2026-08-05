@@ -952,7 +952,8 @@ where
                 .map_err(|error| DaemonToolExecutorError::from_error(&error))?
             {
                 SessionDelegationExecutionDisposition::Completed(evidence) => Ok(evidence),
-                SessionDelegationExecutionDisposition::ForegroundDelivered(_)
+                SessionDelegationExecutionDisposition::DurableCompletion(_)
+                | SessionDelegationExecutionDisposition::ForegroundDelivered(_)
                 | SessionDelegationExecutionDisposition::ForegroundPending(_) => {
                     Err(DaemonToolExecutorError::unknown_tool())
                 }
@@ -986,6 +987,9 @@ where
             {
                 SessionDelegationExecutionDisposition::Completed(evidence) => {
                     Ok(ToolExecutorDisposition::Completed(evidence))
+                }
+                SessionDelegationExecutionDisposition::DurableCompletion(evidence) => {
+                    Ok(ToolExecutorDisposition::DurableCompletion(evidence))
                 }
                 SessionDelegationExecutionDisposition::ForegroundDelivered(delivered) => {
                     CorrelatedDurableChildWait::try_new(

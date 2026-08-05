@@ -29,12 +29,13 @@ use signalbox_domain::{
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
     ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
-    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
-    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
-    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
+    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
+    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
+    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
+    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
+    ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -784,6 +785,39 @@ impl PostgresToolLoopRepository {
         Ok(phase_matches && attempt_matches)
     }
 
+    /// Authenticates an executor-reported terminal transition against the
+    /// complete durable batch and exact ended dispatch fence.
+    pub async fn reread_durable_completion(
+        &self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, ToolLoopRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, correlation.session()).await?;
+        let Some(batch) = load_active_batch_from_connection(
+            &mut transaction,
+            correlation.session(),
+            correlation.turn(),
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let attempt_matches = matches!(
+            batch.attempt(correlation.request()),
+            Some(ReconstitutedToolAttempt::Ended(ended))
+                if ended.attempt() == correlation.attempt()
+                    && ended.session() == correlation.session()
+                    && ended.turn() == correlation.turn()
+                    && ended.issuing_attempt() == correlation.issuing_attempt()
+                    && ended.request() == correlation.request()
+                    && ended.generation() == correlation.generation()
+                    && matches!(ended.end(), ToolAttemptEnd::Completed { .. })
+        );
+        transaction.rollback().await?;
+        Ok(attempt_matches)
+    }
+
     /// Atomically records a lookup/schema error before any executor effect.
     pub async fn commit_preflight_error(
         &self,
@@ -1207,6 +1241,13 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         observation: &CorrelatedToolAttemptObservation,
     ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
         PostgresToolLoopRepository::reread_observation(self, observation).await
+    }
+
+    async fn reread_durable_completion(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, Self::Error> {
+        PostgresToolLoopRepository::reread_durable_completion(self, correlation).await
     }
 
     async fn reread_durable_child_wait(

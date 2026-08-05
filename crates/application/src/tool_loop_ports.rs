@@ -10,12 +10,12 @@ use signalbox_domain::{
     AcceptedInputId, CorrelatedToolAttemptObservation, CurrentToolAttempt, DecideToolRequest,
     EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId,
     PreparedDecideToolRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptId, ToolBatch,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
+    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolBatch, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolRequest,
+    TurnAttemptId, TurnId,
 };
 
-use crate::ClassifyOperatorFailure;
-use crate::CorrelatedDurableChildWait;
+use crate::{ClassifyOperatorFailure, CorrelatedDurableChildWait};
 
 /// Storage-resolved authority for one tool-related semantic entry.
 ///
@@ -275,6 +275,13 @@ pub trait ToolExecutionTransaction {
         &mut self,
         observation: &CorrelatedToolAttemptObservation,
     ) -> impl Future<Output = Result<RetainedToolAttemptObservationStatus, Self::Error>> + Send;
+
+    /// Authenticates an executor-reported terminal transition against the exact
+    /// ended dispatch fence committed by the executor transaction.
+    fn reread_durable_completion(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     /// Authenticates that executor-reported foreground wait evidence is the
     /// exact durable parked state for its dispatch.

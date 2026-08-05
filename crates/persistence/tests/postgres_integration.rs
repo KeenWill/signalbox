@@ -42,9 +42,9 @@ use signalbox_domain::{
     CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
     CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
     DecideToolRequestResult, DelegateApprovalRecommendation, DelegationAwaitRequest,
-    DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
-    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
+    DelegationContent, DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest,
+    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, InitialToolApproval, ModelAlias, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
     NormalizedToolArguments, PerInputConfigurationChoices,
@@ -1153,7 +1153,7 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
-    repository_message_dispatch(&pool, fixture, seed).await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
     let message = DelegationMessageId::from_uuid(fixture.message_id);
     let repository = SessionDelegationRepository::new(pool.clone());
     let (request, recorded) = process_message(
@@ -1190,6 +1190,39 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
             DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x402)),
         )
         .await?;
+    let empty_content = repository
+        .record_process_message(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.message_request,
+            fixture.child,
+            String::new(),
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x403)),
+        )
+        .await?;
+    let nul_content = repository
+        .record_process_message(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.message_request,
+            fixture.child,
+            String::from("contains\0nul"),
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x404)),
+        )
+        .await?;
+    let oversized_content = repository
+        .record_process_message(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.message_request,
+            fixture.child,
+            "m".repeat(DelegationContent::MAX_UTF8_BYTES + 1),
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x405)),
+        )
+        .await?;
+    let durable_completion = PostgresToolLoopRepository::new(pool.clone())
+        .reread_durable_completion(dispatch.correlation())
+        .await?;
     let evidence: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_delegation_event
@@ -1213,6 +1246,10 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
         conflict,
         ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::MessageConflict)
     );
+    assert_eq!(empty_content, ProcessDelegationOutcome::InvalidRequest);
+    assert_eq!(nul_content, ProcessDelegationOutcome::InvalidRequest);
+    assert_eq!(oversized_content, ProcessDelegationOutcome::InvalidRequest);
+    assert!(durable_completion);
     assert_eq!(recorded.message(), message);
     assert_eq!(
         recorded.direction(),

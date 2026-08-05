@@ -415,6 +415,13 @@ impl ToolExecutionTransaction for ExecutorFixtureTransaction {
         panic!("web-search fixtures never park on a delegated child wait")
     }
 
+    async fn reread_durable_completion(
+        &mut self,
+        _correlation: ToolAttemptDispatchCorrelation,
+    ) -> Result<bool, Self::Error> {
+        panic!("web-search fixtures never report a durable completion")
+    }
+
     async fn load_active_batch(
         &mut self,
         _session: SessionId,

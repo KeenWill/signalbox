@@ -6132,6 +6132,7 @@ pub struct ToolExecutionInvocation { /* private */ }
 impl ToolExecutionInvocation {
     // accessors: request(), dispatch_authority(), definition(), correlation()
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
+    pub fn durable_completion(self) -> CorrelatedDurableToolCompletion;
 }
 
 pub enum ToolExecutorEvidence {
@@ -6148,6 +6149,12 @@ impl CorrelatedToolExecutorEvidence {
     // accessors: correlation(), evidence()
 }
 
+pub struct CorrelatedDurableToolCompletion { /* private */ }
+// sealed: ToolExecutionInvocation::durable_completion
+impl CorrelatedDurableToolCompletion {
+    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation;
+}
+
 pub struct CorrelatedDurableChildWait { /* private */ }
 impl CorrelatedDurableChildWait {
     pub fn try_new(
@@ -6159,6 +6166,7 @@ impl CorrelatedDurableChildWait {
 
 pub enum ToolExecutorDisposition {
     Completed(CorrelatedToolExecutorEvidence),
+    DurableCompletion(CorrelatedDurableToolCompletion),
     DurableChildWait(CorrelatedDurableChildWait),
 }
 
@@ -6242,6 +6250,8 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ExecutorCorrelationMismatchCrashClassification(TransactionError),
     ObservationCommit(TransactionError),
     ObservationReconciliation(TransactionError),
+    DurableCompletionReconciliation(TransactionError),
+    DurableCompletionMismatch,
     ChildWaitReconciliation(TransactionError),
     ChildWaitMismatch,
     CrashClassification(TransactionError),
@@ -7493,6 +7503,10 @@ pub trait ToolExecutionTransaction {
         &mut self,
         observation: &CorrelatedToolAttemptObservation,
     ) -> impl Future<Output = Result<RetainedToolAttemptObservationStatus, Self::Error>> + Send;
+    fn reread_durable_completion(
+        &mut self,
+        correlation: ToolAttemptDispatchCorrelation,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
     fn reread_durable_child_wait(
         &mut self,
         wait: CorrelatedDurableChildWait,
@@ -9452,7 +9466,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)   |
 | application: load_session                          | 2 (incl. 1 trait)    |
 | application: model_execution                       | 32 (incl. 8 traits)  |
-| application: tool_loop                             | 25 (incl. 5 traits)  |
+| application: tool_loop                             | 26 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
@@ -9464,4 +9478,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **207**              |
+| **signalbox-application total**                    | **208**              |
