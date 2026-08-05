@@ -1065,6 +1065,7 @@ async fn insert_prepared_accepted_activation(
         }
         ActiveTurnPhase::Running { .. }
         | ActiveTurnPhase::AwaitingApproval { .. }
+        | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared initial active phase",
@@ -1275,6 +1276,7 @@ async fn insert_prepared_delegated_activation(
         }
         ActiveTurnPhase::Running { .. }
         | ActiveTurnPhase::AwaitingApproval { .. }
+        | ActiveTurnPhase::AwaitingChild { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared delegated initial phase",

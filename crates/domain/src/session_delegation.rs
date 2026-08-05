@@ -476,6 +476,29 @@ impl TerminalChildTurn {
         }
     }
 
+    /// Seals a reconciliation-required model-call turn as a failed child
+    /// result: the turn is terminal but has no deliverable return content.
+    const fn from_model_reconciliation(value: &crate::ReconciliationRequiredModelCallTurn) -> Self {
+        Self {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Failed,
+            reason: DelegationOutcomeReason::ChildExecutionFailed,
+            result_digest: None,
+        }
+    }
+
+    /// Seals a reconciliation-required tool turn as a failed child result.
+    const fn from_tool_reconciliation(value: &crate::ReconciliationRequiredToolTurn) -> Self {
+        Self {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Failed,
+            reason: DelegationOutcomeReason::ChildExecutionFailed,
+            result_digest: None,
+        }
+    }
+
     pub const fn session(self) -> SessionId {
         self.session
     }
@@ -803,6 +826,74 @@ pub enum DelegationProvenanceReconstitutionInput {
 }
 
 impl DelegationOutcome {
+    /// Derives the complete delivered outcome from a completed child turn's
+    /// proof-bearing assistant entries.
+    pub fn from_completed_child(value: &crate::CompletedModelCallTurn) -> Self {
+        let content = delegation_content_from_live_completed(value);
+        let terminal =
+            terminal_from_completed_content(value.session(), value.turn(), content.clone());
+        Self {
+            kind: if content.is_some() {
+                DelegationOutcomeKind::ResultReturned
+            } else {
+                DelegationOutcomeKind::ChildFailed
+            },
+            content,
+            reason: terminal.reason,
+            provenance: DelegationOutcomeProvenance::ChildTurn(terminal),
+        }
+    }
+
+    /// Derives a failed delivered outcome from a failed child turn.
+    pub fn from_failed_child(value: &crate::FailedModelCallTurn) -> Self {
+        Self::failed_child(TerminalChildTurn::from_failed(value))
+    }
+
+    /// Derives a failed delivered outcome from a refused child turn.
+    pub fn from_refused_child(value: &crate::RefusedModelCallTurn) -> Self {
+        Self::failed_child(TerminalChildTurn::from_refused(value))
+    }
+
+    /// Derives a cancelled delivered outcome from a cancelled child turn.
+    pub fn from_cancelled_child(value: &crate::CancelledModelCallTurn) -> Self {
+        Self::cancelled_child(TerminalChildTurn::from_cancelled(value))
+    }
+
+    /// Derives a cancelled delivered outcome from a cancelled tool-round child.
+    pub fn from_cancelled_tool_round_child(value: &crate::CancelledToolRoundModelCallTurn) -> Self {
+        Self::cancelled_child(TerminalChildTurn::from_cancelled_tool_round(value))
+    }
+
+    /// Derives a failed delivered outcome from terminal model-call ambiguity.
+    pub fn from_model_reconciliation_child(
+        value: &crate::ReconciliationRequiredModelCallTurn,
+    ) -> Self {
+        Self::failed_child(TerminalChildTurn::from_model_reconciliation(value))
+    }
+
+    /// Derives a failed delivered outcome from terminal tool ambiguity.
+    pub fn from_tool_reconciliation_child(value: &crate::ReconciliationRequiredToolTurn) -> Self {
+        Self::failed_child(TerminalChildTurn::from_tool_reconciliation(value))
+    }
+
+    fn failed_child(terminal: TerminalChildTurn) -> Self {
+        Self {
+            kind: DelegationOutcomeKind::ChildFailed,
+            content: None,
+            reason: terminal.reason,
+            provenance: DelegationOutcomeProvenance::ChildTurn(terminal),
+        }
+    }
+
+    fn cancelled_child(terminal: TerminalChildTurn) -> Self {
+        Self {
+            kind: DelegationOutcomeKind::ChildCancelled,
+            content: None,
+            reason: terminal.reason,
+            provenance: DelegationOutcomeProvenance::ChildTurn(terminal),
+        }
+    }
+
     /// Derives a returned, failed, or child-originated cancelled outcome from
     /// exact terminal child evidence. Stopped is not selectable here.
     pub fn from_terminal_child(
@@ -1099,6 +1190,18 @@ pub struct ChildWait {
 }
 
 impl ChildWait {
+    pub(crate) const fn from_checked_parts(
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+    ) -> Self {
+        Self {
+            awaiting_request,
+            spawning_request,
+            child,
+        }
+    }
+
     pub const fn awaiting_request(self) -> ToolRequestId {
         self.awaiting_request
     }
@@ -2170,9 +2273,11 @@ mod tests {
             .expect("live completed call seals terminal child evidence");
         let outcome = DelegationOutcome::from_terminal_child(terminal, Some(expected.clone()))
             .expect("sealed live result authenticates its exact content");
+        let directly_derived = DelegationOutcome::from_completed_child(&completed);
 
         assert_eq!(outcome.kind(), DelegationOutcomeKind::ResultReturned);
         assert_eq!(outcome.content(), Some(&expected));
+        assert_eq!(directly_derived, outcome);
     }
 
     /// S18 / INV-010: empty live completion is a typed unavailable result.
@@ -2199,9 +2304,11 @@ mod tests {
         let terminal = TerminalChildTurn::from_failed(&failed);
         let outcome = DelegationOutcome::from_terminal_child(terminal, None)
             .expect("sealed failed turn derives a child failure");
+        let directly_derived = DelegationOutcome::from_failed_child(&failed);
 
         assert_eq!((terminal.session(), terminal.turn()), expected_identity);
         assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildFailed);
+        assert_eq!(directly_derived, outcome);
     }
 
     /// S18 / INV-010: cancellation evidence can name a delegated-task-origin turn.
@@ -2212,9 +2319,11 @@ mod tests {
         let terminal = TerminalChildTurn::from_cancelled(&cancelled);
         let outcome = DelegationOutcome::from_terminal_child(terminal, None)
             .expect("sealed cancelled turn derives child cancellation");
+        let directly_derived = DelegationOutcome::from_cancelled_child(&cancelled);
 
         assert_eq!((terminal.session(), terminal.turn()), expected_identity);
         assert_eq!(outcome.kind(), DelegationOutcomeKind::ChildCancelled);
+        assert_eq!(directly_derived, outcome);
     }
 
     /// S18 / INV-010: oversized aggregate live completion is typed unavailable.

@@ -405,7 +405,8 @@ where
             ));
         }
         signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. }
-        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. } => {
+        | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
+        | signalbox_domain::ActiveTurnPhase::AwaitingChild { .. } => {
             return Ok(TransactionDecision::Rollback(
                 StartupScanSessionOutcome::NoActiveTurn,
             ));
