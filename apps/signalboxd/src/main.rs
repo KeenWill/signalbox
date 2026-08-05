@@ -13,7 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
@@ -345,47 +345,64 @@ fn credential_files_conflict(left: &Path, right: &Path) -> bool {
 }
 
 fn resolved_file_reference(path: &Path) -> PathBuf {
-    let mut resolved = if path.is_absolute() {
+    let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         env::current_dir()
             .map(|current| current.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     };
+    let mut resolved = normalize_file_reference(&absolute);
     for _ in 0..40 {
-        if let Ok(canonical) = fs::canonicalize(&resolved) {
-            return canonical;
+        let mut prefix = PathBuf::new();
+        let mut components = resolved.components();
+        let mut replacement = None;
+        while let Some(component) = components.next() {
+            prefix.push(component.as_os_str());
+            let Ok(metadata) = fs::symlink_metadata(&prefix) else {
+                return resolved;
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(target) = fs::read_link(&prefix) else {
+                return resolved;
+            };
+            let mut target = if target.is_absolute() {
+                target
+            } else {
+                prefix
+                    .parent()
+                    .map_or(target.clone(), |parent| parent.join(target))
+            };
+            target.extend(components.map(|remaining| remaining.as_os_str()));
+            replacement = Some(normalize_file_reference(&target));
+            break;
         }
-        let Ok(metadata) = fs::symlink_metadata(&resolved) else {
-            return unresolved_file_reference(&resolved);
+        let Some(replacement) = replacement else {
+            return fs::canonicalize(&resolved).unwrap_or(resolved);
         };
-        if !metadata.file_type().is_symlink() {
-            return unresolved_file_reference(&resolved);
-        }
-        let Ok(target) = fs::read_link(&resolved) else {
-            return unresolved_file_reference(&resolved);
-        };
-        resolved = if target.is_absolute() {
-            target
-        } else {
-            resolved
-                .parent()
-                .map_or(target.clone(), |parent| parent.join(target))
-        };
+        resolved = replacement;
     }
-    unresolved_file_reference(&resolved)
+    resolved
 }
 
-fn unresolved_file_reference(path: &Path) -> PathBuf {
-    let Some(file_name) = path.file_name().filter(|name| !name.is_empty()) else {
-        return path.to_path_buf();
-    };
-    let Some(parent) = path.parent() else {
-        return path.to_path_buf();
-    };
-    fs::canonicalize(parent)
-        .unwrap_or_else(|_| parent.to_path_buf())
-        .join(file_name)
+fn normalize_file_reference(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
 }
 
 fn socket_artifact_paths(path: &Path) -> Option<[PathBuf; 3]> {
@@ -2275,6 +2292,28 @@ mod tests {
         let credential = directory.path().join("github-token");
         let alias = directory.path().join("watch-token");
         std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
+    fn unresolved_lexical_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("github-token");
+        let alias = directory.path().join("pending/../github-token");
+
+        assert!(credential_files_conflict(&credential, &alias));
+    }
+
+    #[test]
+    fn dangling_intermediate_alias_cannot_reach_the_github_tool_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let target_directory = directory.path().join("pending-target");
+        let alias_directory = directory.path().join("pending-alias");
+        std::os::unix::fs::symlink(&target_directory, &alias_directory)
+            .expect("the intermediate credential alias exists");
+        let credential = target_directory.join("github-token");
+        let alias = alias_directory.join("github-token");
 
         assert!(credential_files_conflict(&credential, &alias));
     }

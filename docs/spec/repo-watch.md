@@ -31,10 +31,12 @@ versions, zero intervals, malformed values, and invalid entries fail
 configuration before either runtime starts. Other daemon GitHub credentials do
 not substitute for a missing repository-watch credential reference. Credential
 paths are absolute and cannot contain parent-directory components, so lexical
-and filesystem aliases cannot bypass duplicate-reference validation. A final
-symlink component is resolved even while its target file is absent; later
-creation of that target therefore cannot turn two admitted references into one
-shared credential.
+and filesystem aliases cannot bypass duplicate-reference validation. Final and
+intermediate symlink components are resolved even while their target file or
+directory is absent; later creation of that target therefore cannot turn two
+admitted references into one shared credential. The daemon's session GitHub
+credential reference is likewise normalized before this overlap check, including
+when an intermediate lexical component does not yet exist.
 
 **Implemented behavior.** The section also accepts versioned structured rules.
 Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
@@ -142,7 +144,10 @@ and a later authenticated webhook receiver to feed the same durable facts.
 branch-workflow projection retains the latest completed run identity and
 conclusion for every workflow on every extant branch in the watched repository;
 the transport scans each workflow's result pages once and collects every branch
-match from that scan, then retains each per-page validator only in the
+match from that scan. When the newest watched-repository run for a branch and
+workflow is queued or in progress, the projection retains its prior completed
+baseline until that run completes rather than selecting an older completed run
+from later in the result stream. Per-page validators remain only in the
 repository task's process-local cache. A same-named branch on a fork does not
 enter this projection: the poller accepts a run only when its provider
 head-repository identity equals the configured watched repository and continues
