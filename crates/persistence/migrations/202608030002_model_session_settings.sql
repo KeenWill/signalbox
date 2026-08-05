@@ -30,6 +30,12 @@ ALTER TABLE replace_session_defaults_command
     ADD CONSTRAINT replace_session_defaults_command_settings_event_key
         UNIQUE (command_id, result_session_id, result_installed_version);
 
+ALTER TABLE create_session_command
+    ADD COLUMN model_settings jsonb NOT NULL DEFAULT
+        '{"precedence":{"per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}},"effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},"reasoning_source":null,"fast_mode_source":null,"service_tier_source":null,"validated_for_selection_id":null}'::jsonb,
+    ADD CONSTRAINT create_session_command_model_settings_object
+        CHECK (jsonb_typeof(model_settings) = 'object');
+
 ALTER TABLE create_session_from_imported_frontier_command
     ADD COLUMN model_settings jsonb NOT NULL DEFAULT
         '{"precedence":{"per_call":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"profile":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"global_default":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}},"effective":{"reasoning_level":null,"fast_mode":"disabled","service_tier":null},"reasoning_source":null,"fast_mode_source":null,"service_tier_source":null,"validated_for_selection_id":null}'::jsonb,

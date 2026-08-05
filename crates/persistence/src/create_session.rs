@@ -465,11 +465,11 @@ async fn insert_prepared(
             (command_id, command_kind, storage_version,
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, system_prompt,
+             dangerous_tool_auto_approval, system_prompt, model_settings,
              template_name, template_content_digest,
              placement_path, root_global_read_intent,
              result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -491,6 +491,9 @@ async fn insert_prepared(
             .system_prompt()
             .map(signalbox_domain::SessionSystemPrompt::as_str),
     )
+    .bind(model_settings_to_json(
+        command.initial_configuration_defaults().model_settings(),
+    ))
     .bind(
         command
             .template_provenance()
@@ -559,6 +562,7 @@ async fn load_from_connection(
             c.model_alias_id AS command_alias_id,
             c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.system_prompt AS command_system_prompt,
+            c.model_settings AS command_model_settings,
             c.template_name AS command_template_name,
             c.template_content_digest AS command_template_digest,
             c.placement_path AS command_placement_path,
@@ -639,7 +643,7 @@ fn decode_complete(
             CreateSessionCorruption::Inconsistent("command initial defaults version").into(),
         );
     }
-    let stored_model_settings: Value = required(&row, "stored_model_settings")?;
+    let command_model_settings: Value = required(&row, "command_model_settings")?;
     let command_defaults = decode_selection(
         required(&row, "command_model_kind")?,
         row.try_get("command_direct_id")?,
@@ -647,7 +651,7 @@ fn decode_complete(
         StoredConfigurationFields {
             dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
             system_prompt: row.try_get("command_system_prompt")?,
-            model_settings: stored_model_settings.clone(),
+            model_settings: command_model_settings,
             storage_version: typed_version,
         },
         "command model selection",
@@ -718,6 +722,7 @@ fn decode_complete(
         return Err(CreateSessionCorruption::Inconsistent("session/defaults ownership").into());
     }
     let stored_version = decode_ordinal(&row, "stored_defaults_version")?;
+    let stored_model_settings: Value = required(&row, "stored_model_settings")?;
     let stored_defaults = decode_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
