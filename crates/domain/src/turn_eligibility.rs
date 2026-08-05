@@ -24,8 +24,8 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
-    AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ContextFrontierId,
-    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
+    AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ChildWait,
+    ContextFrontierId, CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
     DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
     ReconstitutedImportedSession, ReconstitutedModelCall,
@@ -452,6 +452,9 @@ enum StoredActiveTurnPhase {
     AwaitingApproval {
         wait: crate::AwaitingToolApproval,
     },
+    AwaitingChild {
+        wait: ChildWait,
+    },
     AwaitingToolRecovery {
         wait: crate::AwaitingToolRecovery,
         attempt_end: TerminalAttemptEndReconstitutionInput,
@@ -535,6 +538,38 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 yielded_snapshot: batch.yielded_snapshot().clone(),
                 batch_attempt: None,
                 awaiting_request: Some(wait.request()),
+                requests: batch
+                    .requests()
+                    .iter()
+                    .map(crate::ToolRequest::id)
+                    .collect(),
+            }),
+        })
+    }
+
+    /// Supplies an evidence-bearing stored foreground child wait derived from
+    /// the complete current tool batch.
+    pub fn awaiting_child(owning_turn: TurnId, batch: &crate::ToolBatch) -> Option<Self> {
+        let wait = match batch.phase() {
+            crate::ToolBatchPhase::AwaitingChild {
+                request,
+                spawning_request,
+                child,
+            } => ChildWait::from_checked_parts(request, spawning_request, child),
+            crate::ToolBatchPhase::AwaitingApproval { .. }
+            | crate::ToolBatchPhase::Executing { .. }
+            | crate::ToolBatchPhase::AwaitingRecovery { .. } => return None,
+        };
+        (batch.turn() == owning_turn).then(|| Self {
+            owning_turn,
+            current_attempt: None,
+            state: StoredActiveTurnPhase::AwaitingChild { wait },
+            executing_tool_batch: Some(ExecutingToolBatchReconstitutionFacts {
+                session: batch.session(),
+                producing_call: batch.producing_call(),
+                yielded_snapshot: batch.yielded_snapshot().clone(),
+                batch_attempt: None,
+                awaiting_request: Some(wait.awaiting_request()),
                 requests: batch
                     .requests()
                     .iter()
@@ -719,6 +754,12 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 },
             );
         }
+        if let StoredActiveTurnPhase::AwaitingChild { wait } = &self.state {
+            return self
+                .current_attempt
+                .is_none()
+                .then_some(ActiveTurnPhase::AwaitingChild { wait: *wait });
+        }
         let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt?);
         let current_attempt = match &self.state {
             StoredActiveTurnPhase::Prepared => current_attempt,
@@ -728,6 +769,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 .and_then(|attempt| attempt.request_cancellation(interrupt.proof()))
                 .ok()?,
             StoredActiveTurnPhase::AwaitingApproval { .. }
+            | StoredActiveTurnPhase::AwaitingChild { .. }
             | StoredActiveTurnPhase::AwaitingToolRecovery { .. }
             | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. } => return None,
         };
@@ -4333,6 +4375,10 @@ fn reconstitute_inner(
                                     _,
                                 ) => false,
                                 (
+                                    StoredActiveTurnPhase::AwaitingChild { .. },
+                                    _,
+                                ) => false,
+                                (
                                     StoredActiveTurnPhase::AwaitingToolRecovery { .. },
                                     _,
                                 ) => false,
@@ -4835,6 +4881,17 @@ fn reconstitute_inner(
                             },
                         )?
                     }
+                    StoredActiveTurnPhase::AwaitingChild { wait } => {
+                        if phase.current_attempt.is_some() {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        }
+                        ActiveTurnPhase::AwaitingChild { wait: *wait }
+                    }
                     StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end } => {
                         let Some(current_attempt) = phase.current_attempt else {
                             return Err(
@@ -5225,6 +5282,9 @@ fn reconstitute_inner(
                         ) => phase.current_attempt == Some(turn_attempt),
                         (StoredActiveTurnPhase::AwaitingApproval { wait }, None, Some(request)) => {
                             phase.current_attempt.is_none() && wait.request() == request
+                        }
+                        (StoredActiveTurnPhase::AwaitingChild { wait }, None, Some(request)) => {
+                            phase.current_attempt.is_none() && wait.awaiting_request() == request
                         }
                         _ => false,
                     };
@@ -6349,7 +6409,8 @@ fn reconstitute_active_acceptance_tail(
             }
             StoredActiveTurnPhase::Prepared
             | StoredActiveTurnPhase::Running
-            | StoredActiveTurnPhase::AwaitingApproval { .. } => None,
+            | StoredActiveTurnPhase::AwaitingApproval { .. }
+            | StoredActiveTurnPhase::AwaitingChild { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
@@ -7191,6 +7252,7 @@ fn prepare_active_turn_lost_failure(
         Some(ActiveTurnPhase::Running { current_attempt }) => current_attempt.clone(),
         Some(
             ActiveTurnPhase::AwaitingApproval { .. }
+            | ActiveTurnPhase::AwaitingChild { .. }
             | ActiveTurnPhase::AwaitingRecoveryDecision { .. },
         )
         | None => {
