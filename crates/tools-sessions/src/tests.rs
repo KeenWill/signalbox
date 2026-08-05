@@ -587,11 +587,13 @@ fn failed_child_result_retains_reason_and_turn_provenance() {
     )
     .expect("child outcome is compact JSON");
 
-    assert_eq!(output["result"], json!("child_outcome"));
-    assert_eq!(output["child_session_id"], child.as_uuid().to_string());
-    assert_eq!(output["outcome"], json!("child_failed"));
-    assert_eq!(output["reason"]["kind"], json!("child_result_unavailable"));
-    assert_eq!(output["provenance"]["kind"], json!("child_turn"));
+    assert_eq!(output["outcome"], json!("failed"));
+    assert_eq!(output["reason"], json!("child_result_unavailable"));
+    assert_eq!(output["provenance"]["type"], json!("child_turn"));
+    assert_eq!(
+        output["provenance"]["child_session_id"],
+        child.as_uuid().to_string()
+    );
     assert_eq!(
         output["provenance"]["child_turn_id"],
         terminal_turn.1.as_uuid().to_string()
@@ -626,8 +628,9 @@ fn stopped_child_result_retains_goal_command_provenance() {
     )
     .expect("child outcome is compact JSON");
 
-    assert_eq!(output["outcome"], json!("child_stopped"));
-    assert_eq!(output["provenance"]["kind"], json!("parent_goal_command"));
+    assert_eq!(output["outcome"], json!("stopped"));
+    assert_eq!(output["reason"], json!("parent_stopped"));
+    assert_eq!(output["provenance"]["type"], json!("parent_goal_command"));
     assert_eq!(
         output["provenance"]["parent_session_id"],
         parent.as_uuid().to_string()

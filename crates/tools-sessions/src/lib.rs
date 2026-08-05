@@ -11,10 +11,11 @@ use signalbox_domain::{
     DelegationContent, DelegationEvent, DelegationEventOrdinal, DelegationMessageDirection,
     DelegationMessageId, DelegationMessageRequest, DelegationOutcome, DelegationOutcomeKind,
     DelegationOutcomeReason, DelegationProvenance, DelegationRequestError, DelegationWait,
-    DelegationWaitMode, NormalizedToolArguments, ParentTerminationCommandSource, SessionDelegation,
-    SessionId, ToolAttemptDispatchCorrelation, ToolDispatchAuthority, ToolEffectClass,
+    DelegationWaitMode, NormalizedToolArguments, SessionDelegation, SessionId,
+    ToolAttemptDispatchCorrelation, ToolDispatchAuthority, ToolEffectClass,
     ToolExecutionErrorDetail, ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultText,
 };
+use signalbox_model_provider_runtime::render_delegation_outcome;
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
 };
@@ -345,10 +346,7 @@ impl SessionMessageReceipt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResult {
     child: SessionId,
-    kind: DelegationOutcomeKind,
-    content: Option<DelegationContent>,
-    reason: DelegationOutcomeReason,
-    provenance: DelegationProvenance,
+    outcome: DelegationOutcome,
 }
 
 impl DeliveredChildResult {
@@ -378,13 +376,7 @@ impl DeliveredChildResult {
         if !valid {
             return Err(DeliveredChildResultError { child, outcome });
         }
-        Ok(Self {
-            child,
-            kind: outcome.kind(),
-            content: outcome.content().cloned(),
-            reason: outcome.reason(),
-            provenance,
-        })
+        Ok(Self { child, outcome })
     }
 
     /// Returns the child whose terminal result is delivered.
@@ -394,22 +386,22 @@ impl DeliveredChildResult {
 
     /// Returns the closed terminal outcome kind.
     pub const fn kind(&self) -> DelegationOutcomeKind {
-        self.kind
+        self.outcome.kind()
     }
 
     /// Borrows returned content when this is a successful child result.
     pub const fn content(&self) -> Option<&DelegationContent> {
-        self.content.as_ref()
+        self.outcome.content()
     }
 
     /// Returns the typed lifecycle reason.
     pub const fn reason(&self) -> DelegationOutcomeReason {
-        self.reason
+        self.outcome.reason()
     }
 
     /// Returns the typed terminal authority projection.
     pub const fn provenance(&self) -> DelegationProvenance {
-        self.provenance
+        self.outcome.provenance()
     }
 }
 
@@ -1130,46 +1122,6 @@ fn encode_message_receipt<PortError>(
     })
 }
 
-#[derive(serde::Serialize)]
-struct ChildOutcomeOutput {
-    result: &'static str,
-    child_session_id: String,
-    outcome: &'static str,
-    reason: OutcomeReasonOutput,
-    provenance: OutcomeProvenanceOutput,
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum OutcomeReasonOutput {
-    ChildExecutionFailed,
-    ChildResultUnavailable,
-    ChildCancelled,
-    ParentStopped { scope: &'static str },
-    ParentCancelled { scope: &'static str },
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum OutcomeProvenanceOutput {
-    ChildTurn {
-        child_session_id: String,
-        child_turn_id: String,
-    },
-    ParentTurnCommand {
-        parent_session_id: String,
-        parent_turn_id: String,
-        command_id: String,
-        descendant_scope: &'static str,
-    },
-    ParentGoalCommand {
-        parent_session_id: String,
-        goal_generation: String,
-        command_id: String,
-        descendant_scope: &'static str,
-    },
-}
-
 /// Renders delivered child content or a typed terminal outcome for scheduling.
 ///
 /// A successful return is the child's exact delivered content with no JSON
@@ -1184,27 +1136,14 @@ pub fn render_delivered_child_result(
         ToolResultText::try_new(rendered.clone()).map_err(|_| DeliveredChildResultRenderError)?;
         return Ok(rendered);
     }
-    let kind = match result.kind() {
-        DelegationOutcomeKind::ChildFailed => "child_failed",
-        DelegationOutcomeKind::ChildStopped => "child_stopped",
-        DelegationOutcomeKind::ChildCancelled => "child_cancelled",
+    match result.kind() {
+        DelegationOutcomeKind::ChildFailed
+        | DelegationOutcomeKind::ChildStopped
+        | DelegationOutcomeKind::ChildCancelled => Ok(render_delegation_outcome(&result.outcome)),
         DelegationOutcomeKind::ResultReturned
         | DelegationOutcomeKind::AlreadyTerminal
-        | DelegationOutcomeKind::ContinueRunning => {
-            return Err(DeliveredChildResultRenderError);
-        }
-    };
-    let reason = reason_output(result.reason()).ok_or(DeliveredChildResultRenderError)?;
-    let provenance =
-        provenance_output(result.provenance()).ok_or(DeliveredChildResultRenderError)?;
-    serde_json::to_string(&ChildOutcomeOutput {
-        result: "child_outcome",
-        child_session_id: result.child().as_uuid().to_string(),
-        outcome: kind,
-        reason,
-        provenance,
-    })
-    .map_err(|_| DeliveredChildResultRenderError)
+        | DelegationOutcomeKind::ContinueRunning => Err(DeliveredChildResultRenderError),
+    }
 }
 
 /// A typed delivered result could not fit the model-facing result contract.
@@ -1218,68 +1157,6 @@ impl fmt::Display for DeliveredChildResultRenderError {
 }
 
 impl Error for DeliveredChildResultRenderError {}
-
-fn reason_output(reason: DelegationOutcomeReason) -> Option<OutcomeReasonOutput> {
-    match reason {
-        DelegationOutcomeReason::ChildCompleted => None,
-        DelegationOutcomeReason::ChildExecutionFailed => {
-            Some(OutcomeReasonOutput::ChildExecutionFailed)
-        }
-        DelegationOutcomeReason::ChildResultUnavailable => {
-            Some(OutcomeReasonOutput::ChildResultUnavailable)
-        }
-        DelegationOutcomeReason::ChildCancelled => Some(OutcomeReasonOutput::ChildCancelled),
-        DelegationOutcomeReason::ParentStopped { scope } => {
-            Some(OutcomeReasonOutput::ParentStopped {
-                scope: descendant_scope_output(scope),
-            })
-        }
-        DelegationOutcomeReason::ParentCancelled { scope } => {
-            Some(OutcomeReasonOutput::ParentCancelled {
-                scope: descendant_scope_output(scope),
-            })
-        }
-    }
-}
-
-const fn descendant_scope_output(
-    scope: signalbox_domain::DescendantTerminationScope,
-) -> &'static str {
-    match scope {
-        signalbox_domain::DescendantTerminationScope::ParentAlone => "parent_alone",
-        signalbox_domain::DescendantTerminationScope::ParentAndDescendants => {
-            "parent_and_descendants"
-        }
-    }
-}
-
-fn provenance_output(provenance: DelegationProvenance) -> Option<OutcomeProvenanceOutput> {
-    if let Some((session, turn)) = provenance.child_turn() {
-        return Some(OutcomeProvenanceOutput::ChildTurn {
-            child_session_id: session.as_uuid().to_string(),
-            child_turn_id: turn.as_uuid().to_string(),
-        });
-    }
-    let authority = provenance.parent_command()?;
-    Some(match authority.source() {
-        ParentTerminationCommandSource::Turn { turn } => {
-            OutcomeProvenanceOutput::ParentTurnCommand {
-                parent_session_id: authority.parent().as_uuid().to_string(),
-                parent_turn_id: turn.as_uuid().to_string(),
-                command_id: authority.command().as_uuid().to_string(),
-                descendant_scope: descendant_scope_output(authority.scope()),
-            }
-        }
-        ParentTerminationCommandSource::Goal { generation } => {
-            OutcomeProvenanceOutput::ParentGoalCommand {
-                parent_session_id: authority.parent().as_uuid().to_string(),
-                goal_generation: generation.get().to_string(),
-                command_id: authority.command().as_uuid().to_string(),
-                descendant_scope: descendant_scope_output(authority.scope()),
-            }
-        }
-    })
-}
 
 fn encode_json<PortError>(
     value: &impl serde::Serialize,
