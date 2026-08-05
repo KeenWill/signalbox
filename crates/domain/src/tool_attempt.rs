@@ -628,6 +628,34 @@ impl CurrentToolAttempt {
         Ok(self.end(end))
     }
 
+    /// Atomically parks one exact effect-free foreground delegation wait.
+    ///
+    /// This is a scheduler transition, not executor evidence: the persistence
+    /// transaction that records the wait also persists this terminal attempt.
+    pub fn end_foreground_child_wait(
+        self,
+        wait: crate::ChildWait,
+    ) -> Result<EndedToolAttempt, ToolAttemptTransitionError> {
+        if self.state != CurrentToolAttemptState::InFlight {
+            return Err(ToolAttemptTransitionError {
+                attempt: self,
+                failure: ToolAttemptTransitionFailure::InvalidState,
+            });
+        }
+        if self.effect_class != ToolEffectClass::EffectFree
+            || self.request != wait.awaiting_request()
+        {
+            return Err(ToolAttemptTransitionError {
+                attempt: self,
+                failure: ToolAttemptTransitionFailure::InvalidChildWait,
+            });
+        }
+        Ok(self.end(ToolAttemptEnd::AwaitingChild {
+            spawning_request: wait.spawning_request(),
+            child: wait.child(),
+        }))
+    }
+
     /// Classifies prior-process loss without retrying.
     pub fn classify_crash_loss(self) -> ToolAttemptCrashOutcome {
         match (self.state, self.effect_class) {
@@ -851,6 +879,8 @@ pub enum ToolAttemptTransitionFailure {
     InvalidObservationError,
     /// Effect-free work cannot produce external-effect ambiguity.
     EffectFreeCannotBeAmbiguous,
+    /// A foreground wait did not name this exact effect-free in-flight request.
+    InvalidChildWait,
 }
 
 /// Rejected transition retaining the unchanged current attempt.
@@ -1146,6 +1176,75 @@ mod tests {
                 result: ToolResultContent::Text(actual),
             } if actual == &text
         ));
+    }
+
+    /// S18 / INV-011: foreground waiting ends the exact effect-free in-flight
+    /// request with typed child-wait evidence.
+    #[test]
+    fn s18_inv011_foreground_wait_parks_exact_in_flight_attempt() {
+        let in_flight = prepared(ToolEffectClass::EffectFree)
+            .authorize()
+            .expect("prepared work can be authorized")
+            .into_parts()
+            .0;
+        let wait = crate::ChildWait::from_checked_parts(
+            in_flight.request(),
+            tool_request_id(8),
+            session_id(9),
+        );
+
+        let ended = in_flight
+            .end_foreground_child_wait(wait)
+            .expect("the exact effect-free request can park");
+
+        assert_eq!(
+            ended.end(),
+            &ToolAttemptEnd::AwaitingChild {
+                spawning_request: wait.spawning_request(),
+                child: wait.child(),
+            }
+        );
+    }
+
+    /// S18 / INV-011: child waiting cannot park external-effect work or a
+    /// different logical request.
+    #[test]
+    fn s18_inv011_foreground_wait_rejects_wrong_attempt_authority() {
+        let external = prepared(ToolEffectClass::ExternalEffect)
+            .authorize()
+            .expect("prepared work can be authorized")
+            .into_parts()
+            .0;
+        let external_wait = crate::ChildWait::from_checked_parts(
+            external.request(),
+            tool_request_id(8),
+            session_id(9),
+        );
+        let external_error = external
+            .end_foreground_child_wait(external_wait)
+            .expect_err("external effects cannot become child waits");
+        let effect_free = prepared(ToolEffectClass::EffectFree)
+            .authorize()
+            .expect("prepared work can be authorized")
+            .into_parts()
+            .0;
+        let foreign_wait = crate::ChildWait::from_checked_parts(
+            tool_request_id(99),
+            tool_request_id(8),
+            session_id(9),
+        );
+        let foreign_error = effect_free
+            .end_foreground_child_wait(foreign_wait)
+            .expect_err("a different request cannot park this attempt");
+
+        assert_eq!(
+            external_error.failure(),
+            ToolAttemptTransitionFailure::InvalidChildWait
+        );
+        assert_eq!(
+            foreign_error.failure(),
+            ToolAttemptTransitionFailure::InvalidChildWait
+        );
     }
 
     /// S12 / INV-011 / INV-024: ambiguous commit recovery can reconstruct
