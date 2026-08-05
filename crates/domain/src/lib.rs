@@ -247,7 +247,9 @@ pub use session_delegation::{
     DelegationRequestError, DelegationRequestFailure, DelegationTransitionError,
     DelegationTransitionFailure, DelegationWait, DelegationWaitMode, DescendantTerminationScope,
     ParentTerminationAuthority, ParentTerminationCommandSource, ParentTerminationKind,
-    RejectedDelegationTransition, SessionDelegation, TerminalChildTurn,
+    RejectedDelegationTransition, SessionDelegation, SessionDelegationReconstitutionError,
+    SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput,
+    TerminalChildTurn,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,

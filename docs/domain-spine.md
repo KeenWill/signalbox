@@ -1091,8 +1091,15 @@ pub enum DelegationProvenanceReconstitutionInput {
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
-// sealed: SessionDelegation::deliver_message
+// sealed: SessionDelegation::deliver_message or checked stored request reconstitution
 impl DelegationMessage {
+    pub fn reconstitute(
+        request: &DelegationMessageRequest,
+        id: DelegationMessageId,
+        direction: DelegationMessageDirection,
+        parent: SessionId,
+        child: SessionId,
+    ) -> Option<Self>;
     // accessors: id(), direction(), content(), provenance()
 }
 pub enum DelegationOutcomeReason {
@@ -1136,8 +1143,12 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: SessionDelegation::register_wait
+// sealed: SessionDelegation::register_wait or checked stored request reconstitution
 impl DelegationWait {
+    pub fn reconstitute(
+        relation: &SessionDelegation,
+        awaiting_request: &DelegationAwaitRequest,
+    ) -> Option<Self>;
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }
 pub struct DelegationEventOrdinal(/* private NonZeroU64 */);
@@ -1163,6 +1174,41 @@ impl DelegationEvent {
     // accessors: ordinal(), message(), outcome()
 }
 pub enum DelegationLifecycle { Active, Terminal }
+pub struct SessionDelegationReconstitutionInput { /* private complete stored relation */ }
+impl SessionDelegationReconstitutionInput {
+    pub fn new(
+        spawning_request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+        events: Vec<DelegationEvent>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<SessionDelegation, SessionDelegationReconstitutionError>;
+    // accessors: spawning_request(), child(), child_turn(), events()
+}
+pub enum SessionDelegationReconstitutionFailure {
+    SameSession,
+    MissingSpawnEvent,
+    NoncontiguousEventOrdinal,
+    InvalidSpawnEvent,
+    InvalidMessageProvenance,
+    DuplicateMessageIdentity,
+    DuplicateMessageRequest,
+    DuplicateOutcomeAuthority,
+    OutcomeReasonMismatch,
+    EventAfterTerminal,
+}
+pub struct SessionDelegationReconstitutionError { /* private unchanged input + failure */ }
+impl SessionDelegationReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionDelegationReconstitutionInput,
+        SessionDelegationReconstitutionFailure,
+    );
+    // accessors: input(), failure()
+}
 pub struct SessionDelegation { /* private */ }
 impl SessionDelegation {
     pub fn register_wait(
@@ -4479,6 +4525,10 @@ impl CurrentToolAttempt {
         self,
         observation: CorrelatedToolAttemptObservation,
     ) -> Result<EndedToolAttempt, ToolAttemptTransitionError>;
+    pub fn end_foreground_child_wait(
+        self,
+        wait: ChildWait,
+    ) -> Result<EndedToolAttempt, ToolAttemptTransitionError>;
     pub fn classify_crash_loss(self) -> ToolAttemptCrashOutcome;
     // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
     // generation(), state()
@@ -4500,6 +4550,7 @@ pub enum ToolAttemptTransitionFailure {
     InvalidPreflightError,
     InvalidObservationError,
     EffectFreeCannotBeAmbiguous,
+    InvalidChildWait,
 }
 pub struct ToolAttemptTransitionError { /* private */ }
 // accessors: attempt(), failure(), into_parts()
@@ -9337,7 +9388,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_template                           | 6                    |
 | domain: session_placement                          | 18                   |
 | domain: session                                    | 22                   |
-| domain: session_delegation                         | 32                   |
+| domain: session_delegation                         | 35                   |
 | domain: imported_session                           | 18                   |
 | domain: configuration                              | 24                   |
 | domain: model_settings                             | 25                   |
@@ -9367,7 +9418,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **743 (+7 free fn)** |
+| **signalbox-domain total**                         | **746 (+7 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)    |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
