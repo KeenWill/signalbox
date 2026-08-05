@@ -345,19 +345,20 @@ impl SessionMessageReceipt {
 /// A terminal child result selected for delivery to one exact parent wait.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResult {
-    child: SessionId,
+    wait: DelegationWait,
     outcome: DelegationOutcome,
 }
 
 impl DeliveredChildResult {
     /// Admits only a deliverable outcome event from the exact validated relation.
     pub fn try_new(
+        wait: DelegationWait,
         relation: &SessionDelegation,
         event: &DelegationEvent,
     ) -> Result<Self, DeliveredChildResultError> {
         let Some(outcome) = event.outcome() else {
             return Err(DeliveredChildResultError {
-                spawning_request: relation.spawning_request(),
+                wait,
                 event: Box::new(event.clone()),
             });
         };
@@ -370,24 +371,33 @@ impl DeliveredChildResult {
                 false
             }
         };
-        if relation.lifecycle() != signalbox_domain::DelegationLifecycle::Terminal
+        if wait.mode() != DelegationWaitMode::Foreground
+            || wait.spawning_request() != relation.spawning_request()
+            || wait.parent() != relation.parent()
+            || wait.child() != relation.child()
+            || relation.lifecycle() != signalbox_domain::DelegationLifecycle::Terminal
             || !valid_kind
             || !relation.events().iter().any(|candidate| candidate == event)
         {
             return Err(DeliveredChildResultError {
-                spawning_request: relation.spawning_request(),
+                wait,
                 event: Box::new(event.clone()),
             });
         }
         Ok(Self {
-            child: relation.child(),
+            wait,
             outcome: outcome.clone(),
         })
     }
 
+    /// Returns the exact foreground wait that selected this delivery.
+    pub const fn wait(&self) -> DelegationWait {
+        self.wait
+    }
+
     /// Returns the child whose terminal result is delivered.
     pub const fn child(&self) -> SessionId {
-        self.child
+        self.wait.child()
     }
 
     /// Returns the closed terminal outcome kind.
@@ -414,14 +424,14 @@ impl DeliveredChildResult {
 /// A nonterminal or cross-wired relationship event was offered for delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveredChildResultError {
-    spawning_request: ToolRequestId,
+    wait: DelegationWait,
     event: Box<DelegationEvent>,
 }
 
 impl DeliveredChildResultError {
     /// Returns the unchanged rejected input.
-    pub fn into_parts(self) -> (ToolRequestId, DelegationEvent) {
-        (self.spawning_request, *self.event)
+    pub fn into_parts(self) -> (DelegationWait, DelegationEvent) {
+        (self.wait, *self.event)
     }
 }
 
@@ -963,7 +973,10 @@ where
                     }
                     AwaitSessionPortOutcome::Delivered(result)
                         if expected_mode == DelegationWaitMode::Foreground
-                            && result.child() == expected_child =>
+                            && result.wait().awaiting_request() == expected_request
+                            && result.wait().parent() == expected_parent
+                            && result.wait().child() == expected_child
+                            && result.wait().mode() == expected_mode =>
                     {
                         let rendered = render_delivered_child_result(result)
                             .map_err(|_| SessionDelegationExecutorError::ResultEncoding)?;
