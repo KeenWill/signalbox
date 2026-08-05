@@ -21,7 +21,7 @@ reconstitution across a validated compaction boundary was verified through PR
 `#312` (`agent/context-compaction-core`); and the corresponding persistent
 final-state gate was verified through PR #314
 (`agent/context-compaction-protocol`); the delegated foreground-wait termination
-path and descendant-cascade ordering were verified through PR #416
+path and descendant-cascade ordering were verified through this PR
 (`agent/delegation`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
