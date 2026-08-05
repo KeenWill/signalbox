@@ -8112,10 +8112,10 @@ where
                 }
             }
         }
-        Ok(
-            ProcessSessionDefaultsRead::SessionNotFound
-            | ProcessSessionDefaultsRead::VersionNotFound,
-        ) => Some(ValidatedModelSettings::provider_defaults()),
+        Ok(ProcessSessionDefaultsRead::SessionNotFound) => None,
+        Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+            Some(ValidatedModelSettings::provider_defaults())
+        }
         Err(ProcessReadError::Database(_)) => {
             return write_error(
                 writer,
@@ -8156,10 +8156,10 @@ where
                 .await;
             }
         },
-        // A current epoch later than the caller's expectation can never move
-        // backward. Preserve the canonical caller overlay while supplying an
-        // inert replacement snapshot so the atomic command boundary records
-        // and replays its authoritative version-mismatch result first.
+        // A stale epoch can never move backward, and an absent session must be
+        // classified by the durable command boundary. Preserve the canonical
+        // caller overlay while supplying an inert replacement snapshot so the
+        // transaction records and replays its authoritative rejection first.
         None => {
             if model_configuration
                 .resolve_direct_selection(replacement_model)
@@ -8479,9 +8479,13 @@ where
             .map(|configuration| DeliveryRequest::StartWhenNoActiveTurn { configuration }),
         Some(InputDelivery::Steer {
             expected_active_turn_id,
-        }) if expected_defaults_version.is_none() => Some(DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
-        }),
+        }) if expected_defaults_version.is_none()
+            && model_settings == DomainModelSettingsOverlay::inherit_all() =>
+        {
+            Some(DeliveryRequest::NextSafePoint {
+                expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
+            })
+        }
         Some(InputDelivery::Queue {
             expected_active_turn_id,
         }) => configuration().map(|configuration| DeliveryRequest::AfterCurrentTurn {

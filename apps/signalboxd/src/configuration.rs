@@ -649,6 +649,12 @@ impl HubModelConfiguration {
                 }
             };
             capabilities
+                .validate_explicit(selection, global_model_settings)
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            capabilities
+                .validate_explicit(selection, profile)
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            capabilities
                 .validate_precedence(
                     selection,
                     ModelSettingsPrecedence::new(
@@ -3818,6 +3824,24 @@ extra = true"#,
             "version = 1",
             "version = 1\n\n[model_settings]\nreasoning_level = \"low\"",
         );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[model_settings]\nreasoning_level = \"low\"\n\n[[model_settings_profiles]]\nname = \"provider-defaults\"\nreasoning_level = \"provider_default\"",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nsettings_profile = \"provider-defaults\"",
+            );
 
         assert_eq!(
             HubModelConfiguration::parse(&configuration).err(),

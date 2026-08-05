@@ -5865,6 +5865,42 @@ async fn s37_inv012_stale_defaults_replacement_precedes_settings_validation()
     runtime.stop().await
 }
 
+/// S37 / INV-012: an absent session reaches the durable replacement boundary
+/// before compatibility validation and replays its recorded terminal result.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_absent_defaults_replacement_precedes_settings_validation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let absent_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(0x3701));
+    let replacement = ClientRequest::ReplaceSessionDefaults {
+        command_id: command()?,
+        session_id: absent_session_id,
+        expected_defaults_version: CanonicalU64::new(1),
+        model_selection: ModelSelection::Direct {
+            selection_id: next_direct_selection_id(),
+        },
+        model_settings: low_reasoning_override(),
+        dangerous_tool_auto_approval: false,
+        system_prompt: SystemPromptMember::present(None),
+    };
+    let expected = RejectionDetail::SessionNotFound {
+        session_id: absent_session_id,
+    };
+
+    connection.request(1, replacement.clone()).await?;
+    let first = rejected_detail(response_within(&mut connection).await?.message());
+    connection.request(2, replacement).await?;
+    let replayed = rejected_detail(response_within(&mut connection).await?.message());
+
+    assert_eq!(first, expected);
+    assert_eq!(replayed, expected);
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S01 / S03 / INV-005 / INV-014 / INV-015: explicit compaction uses a
 /// dedicated scripted call, retains the complete transcript and exact usage /
 /// range provenance, survives startup scan, and projects summary plus suffix

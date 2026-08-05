@@ -907,8 +907,28 @@ selection_id = "{SELECTION_ID}"
         .expect("synthetic model fixture is valid")
     }
 
-    fn models_with_global_reasoning() -> HubModelConfiguration {
-        HubModelConfiguration::parse(&format!(
+    struct GlobalReasoningModels {
+        configuration: HubModelConfiguration,
+        expected_reasoning_level: ReasoningLevel,
+        expected_reasoning_source: ModelSettingSource,
+    }
+
+    impl GlobalReasoningModels {
+        const fn configuration(&self) -> &HubModelConfiguration {
+            &self.configuration
+        }
+
+        const fn expected_reasoning_level(&self) -> ReasoningLevel {
+            self.expected_reasoning_level
+        }
+
+        const fn expected_reasoning_source(&self) -> ModelSettingSource {
+            self.expected_reasoning_source
+        }
+    }
+
+    fn models_with_global_reasoning() -> GlobalReasoningModels {
+        let configuration = HubModelConfiguration::parse(&format!(
             r#"
 version = 1
 
@@ -941,7 +961,12 @@ alias_id = "{ALIAS_ID}"
 selection_id = "{SELECTION_ID}"
 "#,
         ))
-        .expect("synthetic lower-layer model fixture is valid")
+        .expect("synthetic lower-layer model fixture is valid");
+        GlobalReasoningModels {
+            configuration,
+            expected_reasoning_level: ReasoningLevel::Low,
+            expected_reasoning_source: ModelSettingSource::GlobalDefault,
+        }
     }
 
     fn inline_catalog(extra: &str) -> String {
@@ -1030,11 +1055,12 @@ documentation-code-drift = "Find documentation drift."
 
     #[test]
     fn template_defaults_copy_the_selected_models_lower_settings_layers() {
+        let reasoning_models = models_with_global_reasoning();
         let configuration = SessionTemplateConfiguration::parse_at(
             &inline_catalog(""),
             Path::new("deployment/session-templates.toml"),
             None,
-            &models_with_global_reasoning(),
+            reasoning_models.configuration(),
         )
         .expect("valid settings-aware template catalog loads");
         let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())
@@ -1047,11 +1073,11 @@ documentation-code-drift = "Find documentation drift."
 
         assert_eq!(
             settings.effective().reasoning_level(),
-            Some(ReasoningLevel::Low)
+            Some(reasoning_models.expected_reasoning_level())
         );
         assert_eq!(
             settings.resolved().reasoning_source(),
-            Some(ModelSettingSource::GlobalDefault)
+            Some(reasoning_models.expected_reasoning_source())
         );
     }
 
@@ -1059,6 +1085,7 @@ documentation-code-drift = "Find documentation drift."
     /// snapshot as well as the model, approval posture, and prompt.
     #[test]
     fn inv047_template_content_digest_commits_copied_model_settings() {
+        let reasoning_models = models_with_global_reasoning();
         let provider_defaults = SessionTemplateConfiguration::parse_at(
             &inline_catalog(""),
             Path::new("deployment/session-templates.toml"),
@@ -1070,7 +1097,7 @@ documentation-code-drift = "Find documentation drift."
             &inline_catalog(""),
             Path::new("deployment/session-templates.toml"),
             None,
-            &models_with_global_reasoning(),
+            reasoning_models.configuration(),
         )
         .expect("settings-aware template catalog loads");
         let name = SessionTemplateName::try_new(TEMPLATE_NAME.to_owned())
@@ -1503,6 +1530,7 @@ dangerous_tool_auto_approval = false
 
     #[test]
     fn review_digest_commits_copied_model_settings() {
+        let reasoning_models = models_with_global_reasoning();
         let provider_defaults = SessionTemplateConfiguration::parse_at(
             &review_catalog(""),
             Path::new("deployment/session-templates.toml"),
@@ -1514,7 +1542,7 @@ dangerous_tool_auto_approval = false
             &review_catalog(""),
             Path::new("deployment/session-templates.toml"),
             None,
-            &models_with_global_reasoning(),
+            reasoning_models.configuration(),
         )
         .expect("settings-aware review library loads");
         let provider_default_selection = provider_defaults

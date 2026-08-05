@@ -741,7 +741,7 @@ domain-separated SHA-256 over the same unsigned-64-bit length framing. Its
 frames, in order, are ASCII `signalbox/review-template/orchestration-digest/v2`;
 the exact stage or concern key; the source version as eight unsigned big-endian
 bytes; ASCII `direct` or `alias`; the selected UUID's 16 network-order bytes;
-ASCII `disabled` or `approve_all`; SHA-256 of the exact shared-header bytes; and
+ASCII `disabled` or `approve_all`; SHA-256 of the exact shared-header bytes;
 SHA-256 of the exact body bytes; and the generated template's 32-byte ordinary
 content digest. The key frame makes equal prompt bytes used for different stages
 or concerns distinct orchestration inputs. The content-digest frame binds the

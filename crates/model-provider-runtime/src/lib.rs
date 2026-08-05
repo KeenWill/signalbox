@@ -3254,13 +3254,23 @@ mod tests {
     fn mapped_fast_target_supplies_the_authorized_delivery_identity_and_limit() {
         let selected_model = "fixture-standard";
         let serving_model = "fixture-fast";
-        let ordinary =
-            RuntimeModelDefinition::try_new(target(1), String::from(selected_model), 64, 200_000)
-                .expect("ordinary fixture definition is valid")
-                .with_fast_target(target(2));
-        let fast =
-            RuntimeModelDefinition::try_new(target(2), String::from(serving_model), 32, 200_000)
-                .expect("fast fixture definition is valid");
+        let selected_output_limit = 64;
+        let serving_output_limit = 32;
+        let ordinary = RuntimeModelDefinition::try_new(
+            target(1),
+            String::from(selected_model),
+            selected_output_limit,
+            200_000,
+        )
+        .expect("ordinary fixture definition is valid")
+        .with_fast_target(target(2));
+        let fast = RuntimeModelDefinition::try_new(
+            target(2),
+            String::from(serving_model),
+            serving_output_limit,
+            200_000,
+        )
+        .expect("fast fixture definition is valid");
         let catalog = RuntimeModelCatalog::try_from_definitions([ordinary, fast])
             .expect("mapped target is present");
         let source = catalog
@@ -3278,28 +3288,28 @@ mod tests {
                 .effective_definition(source, FastMode::Disabled)
                 .expect("ordinary target resolves")
                 .provider_model(),
-            "fixture-standard"
+            selected_model
         );
         assert_eq!(
             catalog
                 .effective_definition(source, FastMode::Disabled)
                 .expect("ordinary target resolves")
                 .max_output_tokens(),
-            64
+            selected_output_limit
         );
         assert_eq!(
             catalog
                 .effective_definition(source, FastMode::Enabled)
                 .expect("mapped fast target resolves")
                 .provider_model(),
-            "fixture-fast"
+            serving_model
         );
         assert_eq!(
             catalog
                 .effective_definition(source, FastMode::Enabled)
                 .expect("mapped fast target resolves")
                 .max_output_tokens(),
-            32
+            serving_output_limit
         );
     }
 
