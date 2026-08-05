@@ -118,4 +118,11 @@ impl ModelSettings {
             service_tier: None,
         }
     }
+
+    /// Reports whether any catalog-governed provider control is explicit.
+    pub fn has_explicit_provider_controls(&self) -> bool {
+        self.reasoning_level.is_some()
+            || self.fast_mode == FastMode::Enabled
+            || self.service_tier.is_some()
+    }
 }

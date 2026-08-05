@@ -2105,7 +2105,8 @@ final class ProcessSessionDetailViewModel: ObservableObject {
         diagnostic: decodingDiagnostic?.message,
         cursor: followed.cursor
       )
-    case .sessionCreated, .contextCompacted:
+    case .sessionCreated, .sessionModelSettingsChanged, .turnModelSettingsResolved,
+      .contextCompacted:
       break
     }
   }

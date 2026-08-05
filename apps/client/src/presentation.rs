@@ -1432,6 +1432,35 @@ impl<'a> Output<'a> {
                     "event={cursor} session={session_id} session_created"
                 )
             }
+            SessionEvent::SessionModelSettingsChanged {
+                command_id,
+                prior_defaults_version,
+                installed_defaults_version,
+                adjustments,
+                ..
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} session_model_settings_changed \
+                 command={command_id} prior_defaults_version={} \
+                 installed_defaults_version={} adjustment_count={}",
+                prior_defaults_version.value(),
+                installed_defaults_version.value(),
+                adjustments.len()
+            ),
+            SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id,
+                turn_id,
+                defaults_version,
+                adjustments,
+                ..
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} turn_model_settings_resolved \
+                 accepted_input={accepted_input_id} turn={turn_id} defaults_version={} \
+                 adjustment_count={}",
+                defaults_version.value(),
+                adjustments.len()
+            ),
             SessionEvent::InputAccepted {
                 accepted_input_id,
                 turn_id,
@@ -2992,6 +3021,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id,
                     content: InputContent::new("queued user text".to_owned()),
@@ -3180,6 +3210,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: selected_turn,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::ToolReconciliationRequired {
                         terminal_frontier_id: selected_frontier,
                         terminal_attempt_id: wire_uuid(9),
@@ -3708,6 +3739,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: wire_uuid(1),
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: wire_uuid(10),
                         content: InputContent::new("transcript content".to_owned()),
@@ -3913,6 +3945,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id: wire_uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state,
             }],
         )
