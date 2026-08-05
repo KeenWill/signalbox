@@ -2251,6 +2251,9 @@ async fn load_next_transcript_turn(
             configuration_origin.frozen_model_alias_id AS origin_frozen_alias_id,
             configuration_origin.frozen_alias_selected_direct_id
                 AS origin_frozen_alias_selected_direct_id,
+            origin_accepted.model_settings_override
+                AS origin_model_settings_override,
+            origin_defaults.model_settings AS origin_defaults_model_settings,
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
@@ -2282,6 +2285,14 @@ async fn load_next_transcript_turn(
                   FROM configuration_chain
                  WHERE source_configuration_turn_id IS NULL
            ) AS configuration_origin ON TRUE
+           LEFT JOIN accepted_input AS origin_accepted
+             ON origin_accepted.accepted_input_id =
+                configuration_origin.accepted_input_id
+            AND origin_accepted.session_id = configuration_origin.session_id
+            AND origin_accepted.origin_turn_id = configuration_origin.turn_id
+           LEFT JOIN session_defaults_version AS origin_defaults
+             ON origin_defaults.session_id = configuration_origin.session_id
+            AND origin_defaults.version = configuration_origin.defaults_version
            LEFT JOIN model_call AS current_call
              ON current_call.turn_attempt_id = turn.current_attempt_id
             AND current_call.turn_id = turn.turn_id
@@ -2475,13 +2486,13 @@ fn decode_transcript_turn_model_settings(
     )?;
     let per_call = model_settings_overlay_from_json(stored_per_call)
         .map_err(|_| ProcessReadCorruption::Inconsistent("turn per-call model settings"))?;
-    let accepted_per_call =
-        model_settings_overlay_from_json(required(row, "accepted_model_settings_override")?)
+    let origin_per_call =
+        model_settings_overlay_from_json(required(row, "origin_model_settings_override")?)
             .map_err(|_| ProcessReadCorruption::Inconsistent("turn accepted model settings"))?;
     if defaults_version != origin_defaults
         || requested != requested_from_transcript_frozen(&frozen)
         || frozen.selected_direct().into_uuid() != stored_selected
-        || per_call != accepted_per_call
+        || per_call != origin_per_call
     {
         return Err(ProcessReadCorruption::Inconsistent("turn model settings origin").into());
     }
@@ -2501,6 +2512,12 @@ fn decode_transcript_turn_model_settings(
     .ok_or(ProcessReadCorruption::Inconsistent(
         "turn model settings evidence",
     ))?;
+    let origin_defaults =
+        model_settings_from_json(required(row, "origin_defaults_model_settings")?)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn defaults model settings"))?;
+    if !crate::model_settings_resolution::matches_defaults(&event, origin_defaults) {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings defaults").into());
+    }
     Ok(Some(event))
 }
 
