@@ -21,9 +21,10 @@ use signalbox_domain::{
     GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
     GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
     GoalUserProvenance, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput, ToolRequestId,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    ReplaceSessionDefaults, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionInputPosition, SubmitInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -37,6 +38,9 @@ use signalbox_persistence::{
         DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::ProcessReadRepository,
+    replace_session_defaults::{
+        ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
+    },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
@@ -2235,19 +2239,19 @@ async fn inv048_changed_unknown_alias_is_a_typed_continuation_outcome() -> Resul
         attached_turn.turn()
     );
     mark_goal_turn_completed(&pool, attached_turn.turn()).await?;
-    sqlx::query(
-        "INSERT INTO session_defaults_version
-            (session_id, version, model_selection_kind, model_alias_id)
-         VALUES ($1, 2, 'alias', $2)",
-    )
-    .bind(Uuid::from_u128(SESSION))
-    .bind(changed_alias.into_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("UPDATE session_current_defaults SET current_version = 2 WHERE session_id = $1")
-        .bind(Uuid::from_u128(SESSION))
-        .execute(&pool)
+    let replacement = ReplaceSessionDefaults::new(
+        command(0x972),
+        session(SESSION),
+        SessionConfigurationDefaultsVersion::first(),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Alias(changed_alias)),
+    );
+    let replaced = ReplaceSessionDefaultsRepository::new(pool.clone())
+        .handle(replacement)
         .await?;
+    assert!(matches!(
+        replaced,
+        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+    ));
     assert_eq!(
         repository
             .reconcile_current_after_execution(

@@ -304,7 +304,7 @@ fn decode_complete(
     requested_session: SessionId,
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
-    authenticate_defaults_settings_version(&row, &ancestry)?;
+    let settings_authentication = authenticate_defaults_settings_version(&row, &ancestry);
     if ancestry == "imported_conversation" {
         if row
             .try_get::<Option<String>, _>("stored_template_name")?
@@ -320,7 +320,7 @@ fn decode_complete(
         }
         let placement =
             decode_current_placement(&row, PlacementCreationFamily::ImportedConversation)?;
-        return create_session_from_imported_frontier::reconstitute_bounded_current(
+        let session = create_session_from_imported_frontier::reconstitute_bounded_current(
             requested_session,
             row,
             placement.current_session,
@@ -328,7 +328,9 @@ fn decode_complete(
             placement.event_session,
             placement.placement,
         )
-        .map_err(map_imported_error);
+        .map_err(map_imported_error)?;
+        settings_authentication?;
+        return Ok(session);
     }
     if row.try_get::<Option<Uuid>, _>("seed_session_id")?.is_some() {
         return Err(
@@ -364,7 +366,7 @@ fn decode_complete(
     )?;
     let placement = decode_current_placement(&row, PlacementCreationFamily::Native)?;
 
-    SessionReconstitutionInput::new_with_template_and_placement(
+    let session = SessionReconstitutionInput::new_with_template_and_placement(
         requested_session,
         stored_session,
         provenance,
@@ -382,7 +384,9 @@ fn decode_complete(
         },
     )
     .reconstitute()
-    .map_err(|error| SessionCorruption::Domain(error.failure()).into())
+    .map_err(|error| SessionCorruption::Domain(error.failure()))?;
+    settings_authentication?;
+    Ok(session)
 }
 
 fn authenticate_defaults_settings_version(
@@ -392,6 +396,9 @@ fn authenticate_defaults_settings_version(
     let defaults_version = decode_ordinal(row, "selected_defaults_version")?;
     let model_settings = model_settings_from_json(required(row, "model_settings")?)
         .map_err(|_| SessionCorruption::Inconsistent("model settings"))?;
+    if model_settings == signalbox_domain::ValidatedModelSettings::provider_defaults() {
+        return Ok(());
+    }
     let storage_version: i16 = if defaults_version == SessionConfigurationDefaultsVersion::first() {
         match ancestry {
             "none" => required(row, "create_storage_version")?,
@@ -408,9 +415,7 @@ fn authenticate_defaults_settings_version(
     } else {
         crate::create_session::MODEL_SETTINGS_FROM_STORAGE_VERSION
     };
-    if storage_version < settings_cutover
-        && model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults()
-    {
+    if storage_version < settings_cutover {
         return Err(SessionCorruption::Inconsistent(
             "defaults storage version without model settings",
         )
