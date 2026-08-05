@@ -4708,50 +4708,10 @@ where
         }
     }
 
-    let model_settings = match validate_session_model_settings(
-        model_configuration,
-        model_selection,
-        caller_model_settings,
-    ) {
-        Ok(settings) => settings,
-        Err(error) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                model_settings_protocol_error(error),
-            )
-            .await;
-        }
-    };
-    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
-        model_selection,
-        DangerousToolAutoApproval::Disabled,
-        None,
-        model_settings,
-    ) else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    };
-
-    if model_configuration
-        .resolve_session_model(model_selection)
-        .is_err()
-    {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    }
-
+    // An unclaimed command resolves its wire address against the immutable
+    // imported aggregate before any application construction, so an absent
+    // conversation or an out-of-range position wins over a settings admission
+    // failure and each still leaves the command identity unclaimed.
     let Some(position) = ImportedTranscriptPosition::try_from_u64(through_position.value()) else {
         return write_error(
             writer,
@@ -4815,6 +4775,51 @@ where
         .await;
     };
     let last_position = last_imported_position(&conversation);
+
+    let model_settings = match validate_session_model_settings(
+        model_configuration,
+        model_selection,
+        caller_model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
+    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
+        model_selection,
+        DangerousToolAutoApproval::Disabled,
+        None,
+        model_settings,
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+
+    if model_configuration
+        .resolve_session_model(model_selection)
+        .is_err()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
+
     let request = CreateSessionFromImportedFrontierRequest::try_new(
         command_id,
         frontier,
@@ -7991,6 +7996,23 @@ where
     } else {
         PromptMemberStatement::Stated
     };
+    // The immutable catalog decides an unknown direct selection or alias before
+    // any application construction below, so that read-only fact can never be
+    // recorded under this command identity as a defaults-version mismatch by
+    // the rejection-only boundary. Unlike a capability rejection, it depends on
+    // no defaults snapshot and therefore cannot lose a race worth replaying.
+    if model_configuration
+        .resolve_direct_selection(replacement_model)
+        .is_none()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            model_settings_protocol_error(ModelSettingsAdmissionError::UnknownModel),
+        )
+        .await;
+    }
     let prior_model_settings = match ProcessReadRepository::new(pool.clone())
         .read_session_defaults(session, None)
         .await
@@ -8183,27 +8205,14 @@ where
             }
         },
         // A stale epoch can never move backward, and an absent session must be
-        // classified by the durable command boundary. Preserve the canonical
-        // caller overlay while supplying an inert replacement snapshot so the
-        // transaction records and replays its authoritative rejection first.
-        None => {
-            if model_configuration
-                .resolve_direct_selection(replacement_model)
-                .is_none()
-            {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    model_settings_protocol_error(ModelSettingsAdmissionError::UnknownModel),
-                )
-                .await;
-            }
-            (
-                ValidatedModelSettings::provider_defaults(),
-                Vec::<DomainModelChangeAdjustment>::new().into_boxed_slice(),
-            )
-        }
+        // classified by the durable command boundary. The catalog identity was
+        // already decided above, so preserve the canonical caller overlay while
+        // supplying an inert replacement snapshot and let the transaction
+        // record and replay its authoritative rejection first.
+        None => (
+            ValidatedModelSettings::provider_defaults(),
+            Vec::<DomainModelChangeAdjustment>::new().into_boxed_slice(),
+        ),
     };
     let Some(replacement) = SessionConfigurationDefaults::complete_with_model_settings(
         replacement_model,

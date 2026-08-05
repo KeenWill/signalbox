@@ -2175,6 +2175,76 @@ async fn s28_continuation_names_an_absent_imported_conversation() -> Result<(), 
     runtime.stop().await
 }
 
+/// S28 / INV-012: the imported wire address resolves against the immutable
+/// aggregate before settings admission, so an absent conversation and an
+/// out-of-range position each win over an explicit setting the selected model
+/// cannot support.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv012_imported_address_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0x28f0));
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: absent,
+                through_position: CanonicalU64::new(1),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: low_reasoning_override(),
+            },
+        )
+        .await?;
+    let missing_conversation = response_within(&mut connection).await?.message().clone();
+
+    connection
+        .request(
+            2,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: fixture.conversation,
+                through_position: CanonicalU64::new(999_999),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: low_reasoning_override(),
+            },
+        )
+        .await?;
+    let out_of_range = response_within(&mut connection).await?.message().clone();
+
+    assert_eq!(
+        protocol_error_code(&missing_conversation),
+        ErrorCode::Rejected
+    );
+    assert_eq!(
+        protocol_error_detail(&missing_conversation),
+        Some(RejectionDetail::ImportedConversationNotFound {
+            imported_conversation_id: absent,
+        })
+    );
+    assert_eq!(protocol_error_code(&out_of_range), ErrorCode::Rejected);
+    assert_eq!(
+        protocol_error_detail(&out_of_range),
+        Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+            imported_conversation_id: fixture.conversation,
+            requested_position: CanonicalU64::new(999_999),
+            last_position: fixture.last_position,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S28: the explicit Codex selection reaches the fixed Codex converter rather
 /// than applying format detection or the Claude Code interpretation.
 #[tokio::test]
@@ -5855,6 +5925,70 @@ async fn s37_inv012_stale_defaults_replacement_precedes_settings_validation()
     assert_eq!(applied.defaults_version, current_version);
     assert_eq!(first, expected_rejection);
     assert_eq!(replayed, expected_rejection);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-012: an unknown replacement selection is the read-only catalog
+/// error even when the same frame names an epoch the session has not reached,
+/// and it leaves the command identity available for the corrected request.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_unknown_replacement_model_precedes_defaults_version_mismatch()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    let command_id = command()?;
+    let unknown_selection = CanonicalUuid::from_uuid(Uuid::from_u128(0xffff));
+
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(2),
+                model_selection: ModelSelection::Direct {
+                    selection_id: unknown_selection,
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let unknown = response_within(&mut connection).await?.message().clone();
+
+    assert_eq!(protocol_error_code(&unknown), ErrorCode::InvalidRequest);
+    assert_eq!(protocol_error_detail(&unknown), None);
+
+    connection
+        .request(
+            3,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let corrected =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+
+    assert_eq!(corrected.defaults_version, CanonicalU64::new(2));
 
     drop(connection);
     runtime.stop().await
