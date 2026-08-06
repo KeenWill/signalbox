@@ -446,6 +446,7 @@ in
       # preserved and remains subject to the ordinary fail-closed parser.
       cp ${shellArg daemonConfigFile} ${shellArg daemonRuntimeConfigFile}
       python3 -c ${shellArg ''
+        import copy
         import json
         import re
         import sys
@@ -461,14 +462,32 @@ in
         # a raw DEL, which ensure_ascii=False deliberately preserves.
         encoded_supervisor = encoded_supervisor.replace(chr(0x7F), r"\u007F")
         setting = f"exec_supervisor_executable = {encoded_supervisor}"
-        placeholder = re.compile(
+        placeholder_value = "/usr/local/bin/signalbox-exec-supervisor"
+        placeholder_line = re.compile(
             r'^exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"\r?$',
             re.MULTILINE,
         )
-        if placeholder.search(content):
-            content = placeholder.sub(lambda _: setting, content, count=1)
-        elif "daemon_tools" not in document:
+        daemon_tools = document.get("daemon_tools")
+        if daemon_tools is None:
             content = f"{content.rstrip()}\n\n[daemon_tools]\n{setting}\n"
+        elif (
+            isinstance(daemon_tools, dict)
+            and daemon_tools.get("exec_supervisor_executable") == placeholder_value
+        ):
+            expected = copy.deepcopy(document)
+            expected["daemon_tools"]["exec_supervisor_executable"] = supervisor
+            replacements = []
+            for match in placeholder_line.finditer(content):
+                candidate = f"{content[:match.start()]}{setting}{content[match.end():]}"
+                try:
+                    candidate_document = tomllib.loads(candidate)
+                except tomllib.TOMLDecodeError:
+                    continue
+                if candidate_document == expected:
+                    replacements.append(candidate)
+            if len(replacements) != 1:
+                raise ValueError("cannot locate the daemon tool supervisor placeholder")
+            content = replacements[0]
         config_path.write_text(content)
       ''} ${shellArg daemonRuntimeConfigFile} "$supervisor_executable"
       chmod 600 ${shellArg daemonRuntimeConfigFile}
