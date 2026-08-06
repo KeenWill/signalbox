@@ -3303,7 +3303,7 @@ struct PrunedEdgeRecordCounts {
     logical_terminals: i64,
 }
 
-/// S18 / INV-010 / INV-012: a descendant-scoped stop descends into a nested
+/// S19 / INV-010 / INV-012: a descendant-scoped stop descends into a nested
 /// relationship under its immediate parent's disposition, not under the root
 /// command's kind.
 ///
@@ -3316,7 +3316,7 @@ struct PrunedEdgeRecordCounts {
 /// `parent_stopped_parent_and_descendants`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_nested_cascade_descends_under_immediate_parent_disposition()
+async fn s19_inv010_inv012_nested_cascade_descends_under_immediate_parent_disposition()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf600;
@@ -3471,7 +3471,7 @@ async fn s18_inv010_inv012_nested_cascade_descends_under_immediate_parent_dispos
     Ok(())
 }
 
-/// S18 / INV-010 / INV-012: a descendant-scoped stop stops descending below a
+/// S19 / INV-010 / INV-012: a descendant-scoped stop stops descending below a
 /// relationship that survives it, leaving that whole subtree runnable.
 ///
 /// `background_child` keeps running under any parent termination, so the
@@ -3482,7 +3482,7 @@ async fn s18_inv010_inv012_nested_cascade_descends_under_immediate_parent_dispos
 /// queued delegated turn stays eligible.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
+async fn s19_inv010_inv012_nested_cascade_prunes_below_a_surviving_edge()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let parent = 0xf700;
