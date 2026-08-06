@@ -648,15 +648,23 @@ Locks per transaction, in acquisition order:
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
 
-- **Delegated await and peer-message transactions**: each transaction first
-  locks its delivery endpoint session row `FOR NO KEY UPDATE`, then the issuing
-  session's `session_scheduler` row `FOR UPDATE`, and only then the exact
-  `session_delegation` row `FOR UPDATE`. This session-before-scheduler prefix
-  matches input transitions that can race with await registration.
-  Delivery-sequence allocation runs while the recipient session lock is held.
-  Message recording claims the global `message_id` before inserting the
-  relationship event; a concurrent claim loser returns the typed
-  message-identity collision without leaving a partial event.
+- **Delegated await transactions**: await first locks its issuing delivery
+  session row `FOR NO KEY UPDATE`, then that session's `session_scheduler` row
+  `FOR UPDATE`, and only then the exact `session_delegation` row `FOR UPDATE`.
+  This session-before-scheduler prefix matches input transitions that can race
+  with await registration.
+
+- **Delegated peer-message transactions**: after a nonlocking peer-existence
+  read, message recording locks both endpoint session rows `FOR NO KEY UPDATE`
+  in ascending session-identity order, then both endpoint `session_scheduler`
+  rows `FOR UPDATE` in that same order, and only then the exact
+  `session_delegation` row `FOR UPDATE`. An absent peer instead locks the
+  issuing session and scheduler before returning the typed rejection. This
+  common endpoint order is acyclic with simultaneous input and opposite-
+  direction message transactions. Delivery-sequence allocation runs while the
+  recipient session lock is held. Message recording claims the global
+  `message_id` before inserting the relationship event; a concurrent claim loser
+  returns the typed message-identity collision without leaving a partial event.
 
 - **ReplaceSessionDefaults**: an unseen command locks its
   `session_current_defaults` pointer row `FOR UPDATE` before loading and

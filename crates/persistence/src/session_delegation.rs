@@ -21,7 +21,7 @@ use crate::{
     commit_failure_is_ambiguous,
     lock_inventory::{
         DELEGATION_DELIVERY_SESSION, DELEGATION_FIND_RELATION_FOR_MESSAGE,
-        DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION,
+        DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION, ordered_session_pair,
     },
     mapping::{
         DelegationPolicyStorageKind, bound_child_action_from_str,
@@ -339,8 +339,19 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_tool_session(&mut transaction, request.request().session()).await?;
-            if !delivery_session_exists(&mut transaction, request.peer()).await? {
+            let peer_exists = session_exists(&mut transaction, request.peer()).await?;
+            if peer_exists {
+                lock_message_sessions(
+                    &mut transaction,
+                    request.request().session(),
+                    request.peer(),
+                )
+                .await?;
+            } else {
+                lock_delivery_session(&mut transaction, request.request().session()).await?;
+                lock_tool_session(&mut transaction, request.request().session()).await?;
+            }
+            if !peer_exists {
                 return Ok(RecordDelegationMessageOutcome::Rejected(
                     DelegationOperationRejection::RelationshipNotFound,
                 ));
@@ -567,26 +578,26 @@ async fn find_relation_for_wait(
     connection: &mut PgConnection,
     request: &DelegationAwaitRequest,
 ) -> Result<Option<ToolRequestId>, SessionDelegationRepositoryError> {
-    sqlx::query_scalar::<_, Uuid>(DELEGATION_FIND_RELATION_FOR_WAIT)
+    let row = sqlx::query(DELEGATION_FIND_RELATION_FOR_WAIT)
         .bind(session_id_to_uuid(request.request().session()))
         .bind(session_id_to_uuid(request.child()))
         .fetch_optional(connection)
-        .await
-        .map(|value| value.map(tool_request_id_from_uuid))
-        .map_err(Into::into)
+        .await?;
+    row.map(|row| required::<Uuid>(&row, "spawning_tool_request_id").map(tool_request_id_from_uuid))
+        .transpose()
 }
 
 async fn find_relation_for_message(
     connection: &mut PgConnection,
     request: &DelegationMessageRequest,
 ) -> Result<Option<ToolRequestId>, SessionDelegationRepositoryError> {
-    sqlx::query_scalar::<_, Uuid>(DELEGATION_FIND_RELATION_FOR_MESSAGE)
+    let row = sqlx::query(DELEGATION_FIND_RELATION_FOR_MESSAGE)
         .bind(session_id_to_uuid(request.request().session()))
         .bind(session_id_to_uuid(request.peer()))
         .fetch_optional(connection)
-        .await
-        .map(|value| value.map(tool_request_id_from_uuid))
-        .map_err(Into::into)
+        .await?;
+    row.map(|row| required::<Uuid>(&row, "spawning_tool_request_id").map(tool_request_id_from_uuid))
+        .transpose()
 }
 
 #[derive(Clone, Copy)]
@@ -658,6 +669,7 @@ async fn load_events(
                 event.provenance_goal_generation,
                 event.provenance_tool_request_id, event.provenance_command_id,
                 message.message_id, message.direction, message.content_text,
+                result.outcome_kind AS result_outcome_kind,
                 result.content_text AS result_content_text
            FROM session_delegation_event AS event
            LEFT JOIN session_message AS message
@@ -766,6 +778,12 @@ fn validate_spawn_event(
 
 fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRepositoryError> {
     let kind = decode_outcome_kind(&required::<String>(row, "outcome_kind")?)?;
+    let payload_kind = optional::<String>(row, "result_outcome_kind")?
+        .map(|value| decode_outcome_kind(&value))
+        .transpose()?;
+    if !outcome_payload_matches(kind, payload_kind) {
+        return Err(SessionDelegationCorruption::Inconsistent("delegation outcome payload").into());
+    }
     let reason = decode_outcome_reason(&required::<String>(row, "reason_kind")?)?;
     let content = optional::<String>(row, "result_content_text")?
         .map(DelegationContent::try_new)
@@ -806,13 +824,45 @@ fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRep
         .ok_or_else(|| SessionDelegationCorruption::Inconsistent("delegation outcome").into())
 }
 
+fn outcome_payload_matches(
+    kind: DelegationOutcomeKind,
+    payload_kind: Option<DelegationOutcomeKind>,
+) -> bool {
+    match kind {
+        DelegationOutcomeKind::ResultReturned
+        | DelegationOutcomeKind::ChildFailed
+        | DelegationOutcomeKind::ChildStopped
+        | DelegationOutcomeKind::ChildCancelled => payload_kind == Some(kind),
+        DelegationOutcomeKind::AlreadyTerminal | DelegationOutcomeKind::ContinueRunning => {
+            payload_kind.is_none()
+        }
+    }
+}
+
 fn decode_policy(row: &PgRow) -> Result<ChildRelationshipPolicy, SessionDelegationRepositoryError> {
     let kind: String = required(row, "policy_kind")?;
+    let on_parent_stopped: Option<String> = optional(row, "on_parent_stopped")?;
+    let on_parent_cancelled: Option<String> = optional(row, "on_parent_cancelled")?;
     match delegation_policy_kind_from_str(&kind) {
-        Some(DelegationPolicyStorageKind::Background) => Ok(ChildRelationshipPolicy::Background),
+        Some(DelegationPolicyStorageKind::Background)
+            if on_parent_stopped.is_none() && on_parent_cancelled.is_none() =>
+        {
+            Ok(ChildRelationshipPolicy::Background)
+        }
+        Some(DelegationPolicyStorageKind::Background) => {
+            Err(SessionDelegationCorruption::Inconsistent("background policy shape").into())
+        }
         Some(DelegationPolicyStorageKind::Bound) => Ok(ChildRelationshipPolicy::Bound {
-            on_parent_stopped: decode_action(&required::<String>(row, "on_parent_stopped")?)?,
-            on_parent_cancelled: decode_action(&required::<String>(row, "on_parent_cancelled")?)?,
+            on_parent_stopped: decode_action(
+                on_parent_stopped
+                    .as_deref()
+                    .ok_or(SessionDelegationCorruption::Missing("on_parent_stopped"))?,
+            )?,
+            on_parent_cancelled: decode_action(
+                on_parent_cancelled
+                    .as_deref()
+                    .ok_or(SessionDelegationCorruption::Missing("on_parent_cancelled"))?,
+            )?,
         }),
         None => Err(SessionDelegationCorruption::Unsupported {
             field: "policy_kind",
@@ -1095,6 +1145,34 @@ async fn delivery_session_exists(
         .fetch_optional(connection)
         .await?;
     Ok(locked.is_some_and(|locked| session_id_from_uuid(locked) == recipient))
+}
+
+async fn session_exists(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, SessionDelegationRepositoryError> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
+        .bind(session_id_to_uuid(session))
+        .fetch_one(connection)
+        .await
+        .map_err(Into::into)
+}
+
+async fn lock_message_sessions(
+    connection: &mut PgConnection,
+    sender: SessionId,
+    peer: SessionId,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let (first, second) = ordered_session_pair(sender, peer);
+    lock_delivery_session(connection, first).await?;
+    if second != first {
+        lock_delivery_session(connection, second).await?;
+    }
+    lock_tool_session(connection, first).await?;
+    if second != first {
+        lock_tool_session(connection, second).await?;
+    }
+    Ok(())
 }
 
 async fn insert_message_state(
@@ -1383,5 +1461,44 @@ fn require_single(
         Ok(())
     } else {
         Err(SessionDelegationCorruption::Inconsistent(relationship).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S18 / INV-010: either message direction locks the same endpoint order.
+    #[test]
+    fn s18_inv010_opposite_message_directions_share_canonical_lock_order() {
+        let lower = SessionId::from_uuid(Uuid::from_u128(1));
+        let higher = SessionId::from_uuid(Uuid::from_u128(2));
+
+        assert_eq!(ordered_session_pair(lower, higher), (lower, higher));
+        assert_eq!(ordered_session_pair(higher, lower), (lower, higher));
+    }
+
+    #[test]
+    fn terminal_outcome_reconstitution_requires_its_payload_row() {
+        assert!(!outcome_payload_matches(
+            DelegationOutcomeKind::ChildFailed,
+            None
+        ));
+        assert!(outcome_payload_matches(
+            DelegationOutcomeKind::ChildFailed,
+            Some(DelegationOutcomeKind::ChildFailed)
+        ));
+    }
+
+    #[test]
+    fn non_payload_outcome_reconstitution_rejects_a_payload_row() {
+        assert!(outcome_payload_matches(
+            DelegationOutcomeKind::ContinueRunning,
+            None
+        ));
+        assert!(!outcome_payload_matches(
+            DelegationOutcomeKind::ContinueRunning,
+            Some(DelegationOutcomeKind::ChildFailed)
+        ));
     }
 }
