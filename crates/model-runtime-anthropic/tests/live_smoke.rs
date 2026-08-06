@@ -96,31 +96,7 @@ async fn the_anthropic_api_completes_one_exchange() {
         .await;
 
     let decoded = require_decoded_response(report.evidence);
-    assert_eq!(
-        decoded.exchange.http_status,
-        Some(200),
-        "the adapter no longer records the documented success status"
-    );
-    assert!(
-        decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0),
-        "the Messages API no longer reports input usage the adapter can decode"
-    );
-    // A completion always billed generating at least one output token for
-    // this prompt, but a valid refusal can legitimately arrive before any
-    // completion token is produced (`output_tokens: Some(0)`): the spec's
-    // compatibility-smoke contract promises usage *present*, not positive.
-    // Only the completed path can honestly demand a positive count.
-    if decoded.completed {
-        assert!(
-            decoded.usage.output_tokens.is_some_and(|tokens| tokens > 0),
-            "the Messages API no longer reports output usage the adapter can decode"
-        );
-    } else {
-        assert!(
-            decoded.usage.output_tokens.is_some(),
-            "the Messages API no longer reports output usage the adapter can decode"
-        );
-    }
+    assert_well_formed_response(&decoded);
 }
 
 /// Resolves the live API key from the environment, exactly once per
@@ -166,10 +142,6 @@ fn require_prepared<C, P>(outcome: PreparationOutcome<C, P>) -> P {
 struct DecodedResponse {
     exchange: ExchangeFacts,
     usage: TokenUsage,
-    /// `true` for genuine `Completed` evidence, `false` for the adapter's
-    /// downgraded-refusal `ProviderError` shape. The two paths carry
-    /// different honest usage guarantees (see the call site).
-    completed: bool,
 }
 
 /// Accepts a completion, or the adapter's own decoded-refusal shape, as
@@ -188,17 +160,13 @@ struct DecodedResponse {
 /// refusal, so this recognizes what the adapter actually returns instead. The
 /// `http_status == 200` guard keeps this arm from also swallowing a genuine
 /// unrecognized 4xx/5xx provider error, which the assertions below must still
-/// fail on. The returned `completed` flag distinguishes the two accepted
-/// shapes for the caller: a refusal can legitimately arrive with zero output
-/// tokens (blocked before any completion token was produced), so only the
-/// completed path may honestly demand a positive count.
+/// fail on.
 #[track_caller]
 fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
         TerminalEvidence::Completed(completed) => DecodedResponse {
             exchange: completed.exchange,
             usage: completed.usage,
-            completed: true,
         },
         TerminalEvidence::ProviderError(error)
             if error.kind == ProviderErrorKind::Unrecognized
@@ -207,7 +175,6 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             DecodedResponse {
                 exchange: error.exchange,
                 usage: error.usage,
-                completed: false,
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
@@ -223,6 +190,34 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             panic!("the Anthropic API returned no decoded response: {rejected:?}")
         }
     }
+}
+
+/// Asserts a decoded response is well-formed under the compatibility-smoke
+/// contract in `docs/spec/runtime-substrate.md`: a definitive success status
+/// and provider-reported input/output usage *present*. Input tokens must
+/// also be positive — a request that reached the model always billed at
+/// least one — but output tokens are asserted only present, not positive: a
+/// valid `Completed` response can legitimately report zero output tokens
+/// (the adapter's own streamed fixtures cover an `end_turn` with
+/// `output_tokens: Some(0)` as `Completed`), and a downgraded-refusal
+/// `ProviderError` can be blocked before any completion token is produced.
+/// Straight-line and credential-free: no test body branches on which
+/// accepted shape arrived.
+#[track_caller]
+fn assert_well_formed_response(decoded: &DecodedResponse) {
+    assert_eq!(
+        decoded.exchange.http_status,
+        Some(200),
+        "the adapter no longer records the documented success status"
+    );
+    assert!(
+        decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0),
+        "the Messages API no longer reports input usage the adapter can decode"
+    );
+    assert!(
+        decoded.usage.output_tokens.is_some(),
+        "the Messages API no longer reports output usage the adapter can decode"
+    );
 }
 
 /// Credential-free, straight-line coverage for `require_decoded_response`'s
@@ -264,7 +259,33 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-        assert!(decoded.completed);
+    }
+
+    #[test]
+    fn completed_with_zero_output_tokens_is_accepted() {
+        // The adapter's own streamed fixtures already prove an `end_turn`
+        // response with `output_tokens: Some(0)` decodes as `Completed`
+        // (`stream.rs`), so this classifier must not reject it either —
+        // only `assert_well_formed_response` requires usage merely present,
+        // not positive, for exactly this reason.
+        let expected_exchange = exchange(200);
+        let expected_usage = TokenUsage {
+            input_tokens: Some(3),
+            output_tokens: Some(0),
+            ..TokenUsage::default()
+        };
+
+        let decoded = require_decoded_response(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: expected_exchange.clone(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::EndTurn,
+            content: Vec::new(),
+            usage: expected_usage,
+        }));
+
+        assert_eq!(decoded.exchange, expected_exchange);
+        assert_eq!(decoded.usage, expected_usage);
     }
 
     #[test]
@@ -289,16 +310,16 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-        assert!(!decoded.completed);
     }
 
     #[test]
     fn downgraded_refusal_with_zero_output_tokens_is_accepted() {
         // A refusal can be blocked before any completion token is produced —
-        // `output_tokens: Some(0)` is a valid, honest report here, unlike for
-        // a genuine completion. The classifier must still accept it; only
-        // the caller's `completed`-gated assertion (see
-        // `the_anthropic_api_completes_one_exchange`) tells the two apart.
+        // `output_tokens: Some(0)` is a valid, honest report here too (see
+        // `completed_with_zero_output_tokens_is_accepted` above for the
+        // completed path). The classifier accepts both shapes identically;
+        // only `assert_well_formed_response`'s single, uniform
+        // usage-presence check applies to either.
         let expected_exchange = exchange(200);
         let expected_usage = TokenUsage {
             input_tokens: Some(3),
@@ -321,7 +342,6 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-        assert!(!decoded.completed);
     }
 
     #[test]
@@ -396,6 +416,70 @@ mod require_decoded_response_tests {
     }
 }
 
+/// Credential-free, straight-line coverage for `assert_well_formed_response`,
+/// the helper the paid live test calls instead of branching on the decoded
+/// shape itself.
+#[cfg(test)]
+mod assert_well_formed_response_tests {
+    use super::*;
+
+    fn decoded(
+        http_status: u16,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    ) -> DecodedResponse {
+        DecodedResponse {
+            exchange: ExchangeFacts {
+                http_status: Some(http_status),
+                ..ExchangeFacts::default()
+            },
+            usage: TokenUsage {
+                input_tokens,
+                output_tokens,
+                ..TokenUsage::default()
+            },
+        }
+    }
+
+    #[test]
+    fn positive_usage_passes() {
+        assert_well_formed_response(&decoded(200, Some(3), Some(1)));
+    }
+
+    #[test]
+    fn present_zero_output_tokens_passes() {
+        // The exact edge both accept paths can legitimately report: a
+        // present-but-zero output count is not a positivity requirement.
+        assert_well_formed_response(&decoded(200, Some(3), Some(0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "documented success status")]
+    fn non_200_status_panics() {
+        assert_well_formed_response(&decoded(500, Some(3), Some(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "input usage")]
+    fn missing_input_tokens_panics() {
+        assert_well_formed_response(&decoded(200, None, Some(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "input usage")]
+    fn zero_input_tokens_panics() {
+        // Unlike output, input tokens must be positive: a request that
+        // reached the model always billed at least one.
+        assert_well_formed_response(&decoded(200, Some(0), Some(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "output usage")]
+    fn missing_output_tokens_panics() {
+        assert_well_formed_response(&decoded(200, Some(3), None));
+    }
+}
+
 /// Credential-free, straight-line coverage for `require_prepared`'s
 /// branching: it is generic over the prepared capability type, so a
 /// placeholder `u32` capability exercises every `PreparationOutcome` variant
@@ -406,9 +490,11 @@ mod require_prepared_tests {
 
     #[test]
     fn prepared_outcome_returns_its_capability() {
-        let outcome: PreparationOutcome<String, u32> = PreparationOutcome::Prepared(7);
+        let expected_capability: u32 = 7;
+        let outcome: PreparationOutcome<String, u32> =
+            PreparationOutcome::Prepared(expected_capability);
 
-        assert_eq!(require_prepared(outcome), 7);
+        assert_eq!(require_prepared(outcome), expected_capability);
     }
 
     #[test]

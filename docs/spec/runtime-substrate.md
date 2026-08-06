@@ -454,7 +454,28 @@ a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
 from that same 200 exchange — see the refusal-downgrade rule above; a raw
 `Refused` never leaves the adapter) — either way with provider-reported input
-and output usage present — and nothing about answer quality.
+and output usage present — and nothing about answer quality. Output usage is
+asserted present, not positive: a valid `Completed` response can legitimately
+report zero output tokens, and a downgraded refusal can be blocked before any
+completion token is produced, so both accepted shapes share one usage-presence
+check.
+
+Unlike the OpenAI smoke, this smoke pins no explicit reasoning effort: Claude's
+extended-thinking budget is opt-in per request (a `thinking` block the adapter
+only emits when `ModelSettings.reasoning_level` is explicitly set), and this
+smoke never sets it, so `claude-haiku-4-5` never spends hidden reasoning tokens
+here in the first place — the deterministic-completion risk that the OpenAI
+adapter's always-on reasoning tier creates does not apply.
+
+This smoke's required aggregate is merge-gating for a pull request that changes
+the adapter crate or the workflow itself — an explicit exception to
+`CONTRIBUTING.md`'s general testing-strategy default that a credentialed
+live-provider smoke is never the merge gate, extending the same accepted
+tradeoff already commissioned for the Codex CLI smoke's required check. Provider
+unavailability, rate limiting, or a misconfigured credential therefore reports
+as a temporary red rather than a verdict on the change's correctness; the
+accepted remedy is rerunning the smoke once the provider or environment
+recovers, not weakening the gate.
 
 The workflow reports on every pull request without a path filter. GitHub
 independently withholds secrets from ordinary fork `pull_request` runs
@@ -471,6 +492,16 @@ requires the smoke, the aggregate also repeats the same-repository comparison.
 Manual dispatch remains available, and a path-filtered push to `main` — gated on
 the adapter crate and the workflow file itself, so an edit to the workflow's own
 definition cannot land unexercised — reruns the smoke after merge.
+
+A twice-daily schedule (`0 13 * * *` and `0 1 * * *` UTC) also triggers the
+workflow as a provider-drift canary between adapter-touching pull requests,
+spending one more real, paid exchange per run. A scheduled trigger is not a
+`pull_request` event, so the eligibility gate's non-`pull_request` branch marks
+it required unconditionally — the same branch a manual dispatch or a qualifying
+push takes — and the workflow-level concurrency group already falls back to the
+run id for a non-`pull_request` event, so each scheduled run keeps its own slot.
+GitHub only fires `schedule` events from a repository's default branch, so the
+schedule takes effect only once a change lands on `main`.
 
 The `anthropic-smoke` environment is configured for all branches, for the same
 reason the `codex-smoke` environment is: GitHub evaluates an environment used by
