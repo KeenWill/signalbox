@@ -85,6 +85,7 @@ const FIXTURE_HEAD_REVISION: &str = "59af8a3634792a30cfb9480bea08cb04acd17bbf";
 const SMOKE_ALIAS: u128 = 0x7fde05bcb4c344f78a87748814c80191;
 const TRANSCRIPT_MARKER: &str = "live conversation transcript marker";
 const SEED_PATH: &str = "seed.txt";
+const GIT_ADMINISTRATION_DIRECTORY: &str = ".git";
 const SEED_CONTENT: &str = "needle from the real workspace\n";
 const SEED_PATTERN: &str = "needle";
 const STAGED_PATH: &str = "staged.txt";
@@ -781,7 +782,8 @@ fn assert_workspace_read_results(results: &[Value]) -> SmokeResult {
     };
     assert_eq!(read["content"], SEED_CONTENT);
     assert_eq!(read["truncated"], false);
-    assert_eq!(list["entries"][0]["path"], SEED_PATH);
+    assert_eq!(list["entries"][0]["path"], GIT_ADMINISTRATION_DIRECTORY);
+    assert_eq!(list["entries"][1]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["path"], SEED_PATH);
     assert_eq!(search["matches"][0]["line"], 1);
     Ok(())
