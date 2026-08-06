@@ -34,11 +34,10 @@ composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
 the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The OpenAI
 compatibility smoke was verified through PR #466 (`agent/openai-api-smoke`).
 This page covers the provider-neutral operation, observation, and evidence
-vocabulary; SSE framing; structured-output and tool decode; `ScriptedModel`;
-the four provider adapters; and their credential boundaries. Layer-2
-authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+vocabulary; SSE framing; structured-output and tool decode; `ScriptedModel`; the
+four provider adapters; and their credential boundaries. Layer-2 authorization
+and evidence classification ([model-call-execution](model-call-execution.md)),
+credential channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
