@@ -3,6 +3,7 @@
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
+use signalbox_application::DelegationMessageDeliveryProjection;
 use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest,
     DelegationContent, DelegationEvent, DelegationEventOrdinal, DelegationMessage,
@@ -20,8 +21,8 @@ use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 use crate::{
     commit_failure_is_ambiguous,
     lock_inventory::{
-        DELEGATION_FIND_RELATION_FOR_MESSAGE, DELEGATION_FIND_RELATION_FOR_WAIT,
-        DELEGATION_LOAD_RELATION,
+        DELEGATION_DELIVERY_SESSION, DELEGATION_FIND_RELATION_FOR_MESSAGE,
+        DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION,
     },
     mapping::{
         durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid,
@@ -50,6 +51,7 @@ impl RecordedDelegationWait {
 /// One successful peer-message receipt, equal replay included.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordedDelegationMessage {
+    tool_request: ToolRequestId,
     message: DelegationMessageId,
     direction: DelegationMessageDirection,
     ordinal: DelegationEventOrdinal,
@@ -57,6 +59,10 @@ pub struct RecordedDelegationMessage {
 }
 
 impl RecordedDelegationMessage {
+    pub const fn tool_request(self) -> ToolRequestId {
+        self.tool_request
+    }
+
     pub const fn message(self) -> DelegationMessageId {
         self.message
     }
@@ -70,6 +76,28 @@ impl RecordedDelegationMessage {
     }
 
     pub const fn delivery_sequence(self) -> NonZeroU64 {
+        self.delivery_sequence
+    }
+}
+
+impl DelegationMessageDeliveryProjection for RecordedDelegationMessage {
+    fn tool_request(&self) -> ToolRequestId {
+        self.tool_request
+    }
+
+    fn message(&self) -> DelegationMessageId {
+        self.message
+    }
+
+    fn direction(&self) -> DelegationMessageDirection {
+        self.direction
+    }
+
+    fn ordinal(&self) -> DelegationEventOrdinal {
+        self.ordinal
+    }
+
+    fn delivery_sequence(&self) -> NonZeroU64 {
         self.delivery_sequence
     }
 }
@@ -180,6 +208,7 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delivery_session(&mut transaction, request.request().session()).await?;
             lock_tool_session(&mut transaction, request.request().session()).await?;
             if let Some(spawning_request) =
                 load_wait_replay_subject(&mut transaction, request.request().id()).await?
@@ -229,7 +258,8 @@ impl SessionDelegationRepository {
             let background_delivery_sequence = match (result_exists, wait.mode()) {
                 (true, DelegationWaitMode::Background) => {
                     let Some(sequence) =
-                        next_delivery_sequence(&mut transaction, wait.parent()).await?
+                        next_delivery_sequence_for_locked_session(&mut transaction, wait.parent())
+                            .await?
                     else {
                         return Ok(RecordDelegationWaitOutcome::Rejected(
                             DelegationOperationRejection::DeliverySequenceExhausted,
@@ -298,6 +328,11 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            if !delivery_session_exists(&mut transaction, request.peer()).await? {
+                return Ok(RecordDelegationMessageOutcome::Rejected(
+                    DelegationOperationRejection::RelationshipNotFound,
+                ));
+            }
             lock_tool_session(&mut transaction, request.request().session()).await?;
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
                 return Ok(RecordDelegationMessageOutcome::Recorded(receipt));
@@ -320,11 +355,7 @@ impl SessionDelegationRepository {
                     "send_session_message requires an external-effect attempt",
                 ));
             }
-            if message_identity_exists(&mut transaction, message).await? {
-                return Ok(RecordDelegationMessageOutcome::Rejected(
-                    DelegationOperationRejection::MessageIdentityCollision,
-                ));
-            }
+            let tool_request = request.request().id();
             let (_, event) = match relation.deliver_message(request, message, dispatch) {
                 Ok(recorded) => recorded,
                 Err(error) => {
@@ -342,13 +373,13 @@ impl SessionDelegationRepository {
             let endpoints = relation_endpoints(&mut transaction, spawning_request).await?;
             let recipient = message_recipient(stored_message.direction(), endpoints);
             let Some(delivery_sequence) =
-                next_delivery_sequence(&mut transaction, recipient).await?
+                next_delivery_sequence_for_locked_session(&mut transaction, recipient).await?
             else {
                 return Ok(RecordDelegationMessageOutcome::Rejected(
                     DelegationOperationRejection::DeliverySequenceExhausted,
                 ));
             };
-            insert_message_state(
+            if !insert_message_state(
                 &mut transaction,
                 spawning_request,
                 event.ordinal(),
@@ -356,7 +387,12 @@ impl SessionDelegationRepository {
                 recipient,
                 delivery_sequence,
             )
-            .await?;
+            .await?
+            {
+                return Ok(RecordDelegationMessageOutcome::Rejected(
+                    DelegationOperationRejection::MessageIdentityCollision,
+                ));
+            }
             append_message_update(
                 &mut transaction,
                 spawning_request,
@@ -373,6 +409,7 @@ impl SessionDelegationRepository {
             )
             .await?;
             let receipt = RecordedDelegationMessage {
+                tool_request,
                 message: stored_message.id(),
                 direction: stored_message.direction(),
                 ordinal: event.ordinal(),
@@ -1023,20 +1060,10 @@ async fn park_foreground_turn(
     require_single(lifecycle_rows, "foreground turn parking")
 }
 
-async fn next_delivery_sequence(
+async fn next_delivery_sequence_for_locked_session(
     connection: &mut PgConnection,
     recipient: SessionId,
 ) -> Result<Option<NonZeroU64>, SessionDelegationRepositoryError> {
-    let locked = sqlx::query_scalar::<_, Uuid>(
-        "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE",
-    )
-    .bind(session_id_to_uuid(recipient))
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(SessionDelegationCorruption::Missing("delivery recipient"))?;
-    if session_id_from_uuid(locked) != recipient {
-        return Err(SessionDelegationCorruption::Inconsistent("delivery recipient lock").into());
-    }
     let latest = sqlx::query_scalar::<_, Option<Decimal>>(
         "SELECT max(delivery_sequence) FROM session_pending_delivery WHERE recipient_session_id = $1",
     )
@@ -1049,15 +1076,25 @@ async fn next_delivery_sequence(
     }
 }
 
-async fn message_identity_exists(
+async fn lock_delivery_session(
     connection: &mut PgConnection,
-    message: DelegationMessageId,
+    recipient: SessionId,
+) -> Result<(), SessionDelegationRepositoryError> {
+    if !delivery_session_exists(connection, recipient).await? {
+        return Err(SessionDelegationCorruption::Missing("delivery recipient").into());
+    }
+    Ok(())
+}
+
+async fn delivery_session_exists(
+    connection: &mut PgConnection,
+    recipient: SessionId,
 ) -> Result<bool, SessionDelegationRepositoryError> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session_message WHERE message_id = $1)")
-        .bind(message.into_uuid())
-        .fetch_one(connection)
-        .await
-        .map_err(Into::into)
+    let locked = sqlx::query_scalar::<_, Uuid>(DELEGATION_DELIVERY_SESSION)
+        .bind(session_id_to_uuid(recipient))
+        .fetch_optional(connection)
+        .await?;
+    Ok(locked.is_some_and(|locked| session_id_from_uuid(locked) == recipient))
 }
 
 async fn insert_message_state(
@@ -1067,7 +1104,7 @@ async fn insert_message_state(
     message: &DelegationMessage,
     recipient: SessionId,
     delivery_sequence: NonZeroU64,
-) -> Result<(), SessionDelegationRepositoryError> {
+) -> Result<bool, SessionDelegationRepositoryError> {
     let (source, turn, request) =
         message
             .provenance()
@@ -1075,6 +1112,24 @@ async fn insert_message_state(
             .ok_or(SessionDelegationCorruption::Inconsistent(
                 "message provenance",
             ))?;
+    let message_rows = sqlx::query(
+        "INSERT INTO session_message
+            (message_id, spawning_tool_request_id, event_ordinal,
+             event_kind, direction, content_text)
+         VALUES ($1, $2, $3, 'message_delivered', $4, $5)
+         ON CONFLICT (message_id) DO NOTHING",
+    )
+    .bind(message.id().into_uuid())
+    .bind(tool_request_id_to_uuid(spawning_request))
+    .bind(Decimal::from(ordinal.get()))
+    .bind(encode_direction(message.direction()))
+    .bind(message.content().as_str())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    if message_rows == 0 {
+        return Ok(false);
+    }
     sqlx::query(
         "INSERT INTO session_delegation_event
             (spawning_tool_request_id, event_ordinal, event_kind,
@@ -1087,19 +1142,6 @@ async fn insert_message_state(
     .bind(session_id_to_uuid(source))
     .bind(turn_id_to_uuid(turn))
     .bind(tool_request_id_to_uuid(request))
-    .execute(&mut *connection)
-    .await?;
-    sqlx::query(
-        "INSERT INTO session_message
-            (message_id, spawning_tool_request_id, event_ordinal,
-             event_kind, direction, content_text)
-         VALUES ($1, $2, $3, 'message_delivered', $4, $5)",
-    )
-    .bind(message.id().into_uuid())
-    .bind(tool_request_id_to_uuid(spawning_request))
-    .bind(Decimal::from(ordinal.get()))
-    .bind(encode_direction(message.direction()))
-    .bind(message.content().as_str())
     .execute(&mut *connection)
     .await?;
     sqlx::query(
@@ -1119,7 +1161,7 @@ async fn insert_message_state(
     .bind(tool_request_id_to_uuid(spawning_request))
     .execute(connection)
     .await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn append_message_update(
@@ -1266,6 +1308,7 @@ async fn load_message_replay(
         return Err(SessionDelegationCorruption::Inconsistent("message replay").into());
     }
     Ok(Some(RecordedDelegationMessage {
+        tool_request: request.request().id(),
         message: DelegationMessageId::from_uuid(required(&row, "message_id")?),
         direction,
         ordinal: decode_ordinal(required(&row, "event_ordinal")?)?,

@@ -4,7 +4,8 @@ use std::{error::Error, fmt, future::Future, num::NonZeroU64};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
-    OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutorEvidence,
+    DelegationMessageDeliveryProjection, OperatorFailureClass, ToolArgumentValidator,
+    ToolExecutionInvocation, ToolExecutorEvidence,
 };
 use signalbox_domain::{
     BoundChildAction, ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest,
@@ -14,6 +15,7 @@ use signalbox_domain::{
     DelegationWaitMode, NormalizedToolArguments, SessionDelegation, SessionId,
     ToolAttemptDispatchCorrelation, ToolDispatchAuthority, ToolEffectClass,
     ToolExecutionErrorDetail, ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultText,
+    await_session_tool_name, send_session_message_tool_name, spawn_session_tool_name,
 };
 use signalbox_model_provider_runtime::render_delegation_outcome;
 use signalbox_tool_contract::{
@@ -21,11 +23,11 @@ use signalbox_tool_contract::{
 };
 
 /// Model-facing child-spawn tool name.
-pub const SPAWN_SESSION_NAME: &str = "spawn_session";
+pub const SPAWN_SESSION_NAME: &str = spawn_session_tool_name();
 /// Model-facing child-result wait tool name.
-pub const AWAIT_SESSION_NAME: &str = "await_session";
+pub const AWAIT_SESSION_NAME: &str = await_session_tool_name();
 /// Model-facing bidirectional-message tool name.
-pub const SEND_SESSION_MESSAGE_NAME: &str = "send_session_message";
+pub const SEND_SESSION_MESSAGE_NAME: &str = send_session_message_tool_name();
 /// Stable session-delegation registry names in declaration order.
 pub const SESSION_DELEGATION_TOOL_NAMES: [&str; 3] = [
     SPAWN_SESSION_NAME,
@@ -157,7 +159,17 @@ enum SessionDelegationToolKind {
 }
 
 impl SessionDelegationToolKind {
-    const ALL: [Self; 3] = [Self::Spawn, Self::Await, Self::SendMessage];
+    fn all() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::Spawn), |kind| kind.successor())
+    }
+
+    const fn successor(self) -> Option<Self> {
+        match self {
+            Self::Spawn => Some(Self::Await),
+            Self::Await => Some(Self::SendMessage),
+            Self::SendMessage => None,
+        }
+    }
 
     fn definition(self) -> Result<signalbox_application::ToolDefinition, ToolContractCompileError> {
         match self {
@@ -280,40 +292,18 @@ pub struct SessionMessageReceipt {
 }
 
 impl SessionMessageReceipt {
-    /// Projects a receipt only when the relation event matches the request.
-    pub fn from_relation_event(
+    /// Projects a receipt only from one persistence-owned durable delivery.
+    pub fn from_delivery(
         request: &DelegationMessageRequest,
-        relation: &SessionDelegation,
-        event: &DelegationEvent,
-        delivery_sequence: NonZeroU64,
+        delivery: &impl DelegationMessageDeliveryProjection,
     ) -> Option<Self> {
-        let message = event.message()?;
-        let source = request.request().session();
-        let expected_direction =
-            if source == relation.parent() && request.peer() == relation.child() {
-                DelegationMessageDirection::ParentToChild
-            } else if source == relation.child() && request.peer() == relation.parent() {
-                DelegationMessageDirection::ChildToParent
-            } else {
-                return None;
-            };
-        let provenance = message.provenance().tool_request()?;
-        (relation.events().contains(event)
-            && provenance
-                == (
-                    request.request().session(),
-                    request.request().turn(),
-                    request.request().id(),
-                )
-            && message.content() == request.content()
-            && message.direction() == expected_direction)
-            .then_some(Self {
-                tool_request: request.request().id(),
-                message: message.id(),
-                direction: message.direction(),
-                ordinal: event.ordinal(),
-                delivery_sequence,
-            })
+        (delivery.tool_request() == request.request().id()).then_some(Self {
+            tool_request: request.request().id(),
+            message: delivery.message(),
+            direction: delivery.direction(),
+            ordinal: delivery.ordinal(),
+            delivery_sequence: delivery.delivery_sequence(),
+        })
     }
 
     /// Returns the exact sending tool request.
@@ -457,7 +447,7 @@ pub enum SessionDelegationPortOutcome<Value> {
 pub enum AwaitSessionPortOutcome {
     /// Background delivery was registered or equally replayed.
     BackgroundRegistered(AwaitSessionReceipt),
-    /// A foreground result already existed and is deliverable immediately.
+    /// A foreground result whose wait and physical attempt closed atomically.
     Delivered(DeliveredChildResult),
     /// The foreground wait and physical-attempt closure were atomically parked.
     ForegroundPending(DelegationWait),
@@ -469,6 +459,8 @@ pub enum AwaitSessionPortOutcome {
 pub trait SessionDelegationPort: Send {
     /// Sanitized adapter failure returned when no trustworthy result exists.
     type Error: ClassifyOperatorFailure;
+    /// Persistence-owned message record binding its event to one delivery sequence.
+    type MessageDelivery: DelegationMessageDeliveryProjection;
 
     /// Creates or equally replays one delegated child and relationship.
     fn spawn_session(
@@ -480,10 +472,13 @@ pub trait SessionDelegationPort: Send {
 
     /// Registers or observes one wait without waiting for child completion.
     ///
-    /// Before returning [`AwaitSessionPortOutcome::ForegroundPending`], the port
-    /// commits the wait registration, physical-attempt closure, and turn
-    /// `AwaitingChild` state in one durable transaction. The returned handoff
-    /// stops local execution; it does not authorize a later parking write.
+    /// Before returning [`AwaitSessionPortOutcome::ForegroundPending`] or
+    /// [`AwaitSessionPortOutcome::Delivered`], the port commits the wait
+    /// registration, physical-attempt closure, and turn `AwaitingChild` state
+    /// in one durable transaction. For immediate delivery, the associated
+    /// durable result delivery is committed in that transaction as well.
+    /// Either handoff stops local execution; it does not authorize a later
+    /// parking or attempt-closure write.
     fn await_session(
         &mut self,
         request: DelegationAwaitRequest,
@@ -496,7 +491,7 @@ pub trait SessionDelegationPort: Send {
         request: DelegationMessageRequest,
         dispatch: ToolDispatchAuthority,
     ) -> impl Future<
-        Output = Result<SessionDelegationPortOutcome<SessionMessageReceipt>, Self::Error>,
+        Output = Result<SessionDelegationPortOutcome<Self::MessageDelivery>, Self::Error>,
     > + Send;
 }
 
@@ -538,8 +533,7 @@ impl<Port> SessionDelegationTools<Port> {
     pub fn try_new(port: Port) -> Result<Self, SessionDelegationToolsConstructionError> {
         let invalid_arguments_detail = detail(INVALID_ARGUMENTS_DETAIL)?;
         let rejected_detail = detail(REJECTED_DETAIL)?;
-        let compiled = SessionDelegationToolKind::ALL
-            .into_iter()
+        let compiled = SessionDelegationToolKind::all()
             .map(|kind| {
                 let definition = kind.definition().map_err(map_contract_error)?;
                 Ok(CompiledTool::new(
@@ -1033,22 +1027,18 @@ where
                 }
             }
             SessionDelegationOperation::SendMessage(request) => {
-                let expected_request = request.request().id();
                 let result = self
                     .port
-                    .send_session_message(request, dispatch)
+                    .send_session_message(request.clone(), dispatch)
                     .await
                     .map_err(SessionDelegationExecutorError::Port)?;
                 match result {
-                    SessionDelegationPortOutcome::Applied(receipt)
-                        if receipt.tool_request() == expected_request =>
-                    {
+                    SessionDelegationPortOutcome::Applied(delivery) => {
+                        let receipt = SessionMessageReceipt::from_delivery(&request, &delivery)
+                            .ok_or(SessionDelegationExecutorError::PortContract)?;
                         completed(encode_message_receipt(receipt)?)
                     }
                     SessionDelegationPortOutcome::Rejected => self.rejected(),
-                    SessionDelegationPortOutcome::Applied(_) => {
-                        Err(SessionDelegationExecutorError::PortContract)
-                    }
                 }
             }
         }
