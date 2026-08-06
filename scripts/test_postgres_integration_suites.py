@@ -271,8 +271,17 @@ class ArchivePlanTests(unittest.TestCase):
         self.assertTrue(all(len(row.split("\t")) == 3 for row in rows))
 
 
+# The upload step comes last so a case can append a step, or extra keys to that
+# step, and have them land where a reader would expect. A trailing block scalar
+# would swallow anything appended after it.
 AGREEING_WORKFLOW = """
 jobs:
+  postgres-integration-run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: >-
+          cargo nextest run --archive-file a.tar.zst
+          --run-ignored only --no-fail-fast
   postgres-integration-build:
     runs-on: ubuntu-latest
     steps:
@@ -281,6 +290,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: postgres-integration-archive-alpha
+"""
+ARCHIVE_RUN_STEP = """      - run: >-
+          cargo nextest run --archive-file a.tar.zst
+          --run-ignored only --no-fail-fast
 """
 
 
@@ -389,6 +402,39 @@ class WorkflowAgreementTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_a_workflow_that_runs_no_archive_is_reported(self) -> None:
+        # Every other assertion is negative, and negatives alone are satisfied
+        # by a workflow that runs nothing: delete the run step and the shards
+        # pass having only downloaded their archives.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(ARCHIVE_RUN_STEP, "")
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--run-ignored only", failures[0])
+
+    def test_an_archive_run_without_the_ignored_selection_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                ARCHIVE_RUN_STEP,
+                "      - run: cargo nextest run --archive-file a.tar.zst\n",
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--run-ignored only", failures[0])
+
+    def test_a_run_without_an_archive_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW.replace(
+                ARCHIVE_RUN_STEP,
+                "      - run: cargo nextest run --run-ignored only\n",
+            )
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--run-ignored only", failures[0])
 
     def test_a_global_option_before_the_subcommand_is_reported(self) -> None:
         failures = self.disagreements(
@@ -652,6 +698,37 @@ class DocumentedCommandTests(unittest.TestCase):
 
     def test_another_cargo_subcommand_is_not_a_test_run(self) -> None:
         self.assertIsNone(cargo_test_arguments(["cargo", "build", "-p", "x"]))
+
+    def test_cargos_test_alias_is_a_test_run(self) -> None:
+        # `t` is Cargo's own alias and selects the same tests.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo t -p pa --features other --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_all_features_is_reported_rather_than_guessed(self) -> None:
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test -p pa --all-features --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--all-features", failures[0][1])
+
+    def test_no_default_features_is_reported_rather_than_guessed(self) -> None:
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test -p pa --no-default-features -F one --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--no-default-features", failures[0][1])
 
     def test_attached_option_forms_are_read(self) -> None:
         # Cargo accepts `--package=<spec>`; documentation uses it. Reading only

@@ -53,6 +53,11 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
     )
     workflow.write_text(
         "jobs:\n"
+        "  postgres-integration-run:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: cargo nextest run --archive-file a.tar.zst"
+        " --run-ignored only\n"
         "  postgres-integration-build:\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
@@ -675,6 +680,11 @@ class DocsConsistencyTests(unittest.TestCase):
         workflow.parent.mkdir(parents=True, exist_ok=True)
         workflow.write_text(
             "jobs:\n"
+            "  postgres-integration-run:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: cargo nextest run --archive-file a.tar.zst"
+            " --run-ignored only\n"
             "  postgres-integration-build:\n"
             "    runs-on: ubuntu-latest\n"
             "    steps:\n"

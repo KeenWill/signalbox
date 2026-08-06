@@ -57,6 +57,7 @@ INTERPRETERS = ("python3", "python")
 COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
 ATTACHED_SHORT_OPTIONS = ("-p", "-F", "-j")
 CARGO_GLOBAL_VALUE_OPTIONS = ("--color", "--config", "--explain", "-Z", "-C")
+CARGO_TEST_COMMANDS = ("test", "t")
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -440,6 +441,13 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"{MANIFEST}: {' '.join(tokens)}"
             )
 
+    if not any(runs_archived_ignored_tests(tokens) for tokens in executed):
+        failures.append(
+            f"{WORKFLOW} runs no archive-backed `cargo nextest run` with "
+            f"`--run-ignored only`, so the suites {MANIFEST} declares are "
+            "never executed"
+        )
+
     targets = {match.group("target") for match in RUNS_ON.finditer(text)}
     if targets and targets != {"ubuntu-latest"}:
         listing = ", ".join(sorted(targets))
@@ -477,12 +485,14 @@ def normalized_cargo_arguments(arguments: list[str]) -> list[str]:
     return normalized
 
 
-def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
-    """Return one `cargo test` invocation's arguments, or `None` if it is not one.
+def cargo_subcommand_arguments(
+    tokens: list[str], names: tuple[str, ...]
+) -> list[str] | None:
+    """Return one Cargo subcommand's arguments, or `None` for another command.
 
     Cargo takes global options before the subcommand — `cargo --locked test` is
     as valid as `cargo test --locked` — so the subcommand is located rather
-    than assumed adjacent. Arguments come back normalized.
+    than assumed adjacent.
     """
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "cargo":
         return None
@@ -491,9 +501,39 @@ def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
         if tokens[index] in CARGO_GLOBAL_VALUE_OPTIONS:
             index += 1
         index += 1
-    if index >= len(tokens) or tokens[index] != "test":
+    if index >= len(tokens) or tokens[index] not in names:
         return None
-    return normalized_cargo_arguments(tokens[index + 1 :])
+    return tokens[index + 1 :]
+
+
+def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
+    """Return one `cargo test` invocation's normalized arguments.
+
+    `t` is Cargo's own alias for `test` and selects the same tests, so a
+    command spelled with it makes the same claim about what CI runs.
+    """
+    arguments = cargo_subcommand_arguments(tokens, CARGO_TEST_COMMANDS)
+    return None if arguments is None else normalized_cargo_arguments(arguments)
+
+
+def runs_archived_ignored_tests(tokens: list[str]) -> bool:
+    """Return whether one command runs a nextest archive's ignored tests.
+
+    The positive half of the workflow's contract. Every other assertion here is
+    negative — nothing else may run ignored tests, no suite may lack an
+    artifact — and negatives alone are satisfied by a workflow that runs
+    nothing at all: delete the run step and the shards pass having merely
+    downloaded their archives, while `docs/invariants.md` goes on claiming
+    those tests are enforced.
+    """
+    arguments = cargo_subcommand_arguments(tokens, ("nextest",))
+    if not arguments or arguments[0] != "run":
+        return False
+    arguments = normalized_cargo_arguments(arguments[1:])
+    if "--archive-file" not in arguments or "--run-ignored" not in arguments:
+        return False
+    selection = arguments.index("--run-ignored") + 1
+    return selection < len(arguments) and arguments[selection] == "only"
 
 
 def runs_ignored_tests(arguments: list[str]) -> bool:
@@ -566,6 +606,27 @@ def documentation_disagreements(
                 continue
             index += 1
         if package is None or package not in packages:
+            continue
+        # `--all-features` and `--no-default-features` name a feature set by
+        # reference to the package's own table rather than by listing it, so
+        # what they select cannot be compared against the manifest without
+        # resolving that table — and a reader cannot see which suite they mean
+        # either. Documentation of a manifested suite states the manifest's
+        # features explicitly, so these are reported rather than guessed at.
+        indirect = sorted(
+            flag
+            for flag in ("--all-features", "--no-default-features")
+            if flag in cargo_arguments
+        )
+        if indirect:
+            failures.append(
+                (
+                    line,
+                    f"{label} documents `cargo test -p {package}` for ignored "
+                    f"tests with {' and '.join(indirect)}; state the features "
+                    f"{MANIFEST} archives that suite with instead",
+                )
+            )
             continue
         if (package, frozenset(features)) in known:
             continue
