@@ -1147,11 +1147,18 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: SessionDelegation::register_wait or DelegationWait::reconstitute
+// sealed: SessionDelegation::register_wait or DelegationWait reconstitution
 impl DelegationWait {
     pub fn reconstitute(
         relation: &SessionDelegation,
         awaiting_request: &DelegationAwaitRequest,
+    ) -> Option<Self>;
+    pub fn reconstitute_stored(
+        awaiting_request: &DelegationAwaitRequest,
+        spawning_request: ToolRequestId,
+        parent: SessionId,
+        child: SessionId,
+        mode: DelegationWaitMode,
     ) -> Option<Self>;
     // accessors: awaiting_request(), spawning_request(), parent(), child(), mode(), foreground_subject()
 }

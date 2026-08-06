@@ -51,7 +51,9 @@ use crate::{
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
-    model_execution::{insert_prepared_call, insert_snapshot},
+    model_execution::{
+        insert_prepared_call, insert_snapshot, lock_delegated_child_endpoint_sessions,
+    },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
 
@@ -805,17 +807,24 @@ impl PostgresToolLoopRepository {
             transaction.rollback().await?;
             return Ok(false);
         };
-        let attempt_matches = matches!(
-            batch.attempt(correlation.request()),
-            Some(ReconstitutedToolAttempt::Ended(ended))
-                if ended.attempt() == correlation.attempt()
+        let attempt_matches = match batch.attempt(correlation.request()) {
+            Some(ReconstitutedToolAttempt::Ended(ended)) => {
+                let terminal_matches = match ended.end() {
+                    ToolAttemptEnd::Completed { .. } => true,
+                    ToolAttemptEnd::KnownFailed { .. }
+                    | ToolAttemptEnd::AwaitingChild { .. }
+                    | ToolAttemptEnd::Ambiguous => false,
+                };
+                ended.attempt() == correlation.attempt()
                     && ended.session() == correlation.session()
                     && ended.turn() == correlation.turn()
                     && ended.issuing_attempt() == correlation.issuing_attempt()
                     && ended.request() == correlation.request()
                     && ended.generation() == correlation.generation()
-                    && matches!(ended.end(), ToolAttemptEnd::Completed { .. })
-        );
+                    && terminal_matches
+            }
+            Some(ReconstitutedToolAttempt::Current(_)) | None => false,
+        };
         transaction.rollback().await?;
         Ok(attempt_matches)
     }
@@ -863,6 +872,9 @@ impl PostgresToolLoopRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session)
+                .await
+                .map_err(map_model_call_error)?;
             lock_tool_session(&mut transaction, session).await?;
             load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
@@ -1040,6 +1052,9 @@ impl PostgresToolLoopRepository {
         )?;
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session)
+                .await
+                .map_err(map_model_call_error)?;
             lock_tool_session(&mut transaction, session).await?;
             let Some(batch) =
                 load_active_batch_from_connection(&mut transaction, session, turn).await?

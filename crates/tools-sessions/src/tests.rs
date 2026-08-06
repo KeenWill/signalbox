@@ -220,15 +220,6 @@ fn run_ready<Output>(future: impl Future<Output = Output>) -> Output {
     }
 }
 
-fn completed_text(disposition: UnboundExecutionDisposition) -> String {
-    let UnboundExecutionDisposition::Completed(ToolExecutorEvidence::CompletedText(result)) =
-        disposition
-    else {
-        panic!("fixture operation completes with text")
-    };
-    result
-}
-
 fn durably_completed_text(disposition: UnboundExecutionDisposition) -> String {
     let UnboundExecutionDisposition::DurableCompletion(ToolExecutorEvidence::CompletedText(result)) =
         disposition
@@ -543,16 +534,49 @@ fn catalog_declares_the_exact_automatic_effect_classes() {
 }
 
 #[test]
-fn spawn_schema_requires_task_and_closed_relationship() {
+fn spawn_schema_requires_and_bounds_task() {
     let schema = rendered_contract_schema::<SpawnSessionContract>();
 
-    assert_eq!(schema["additionalProperties"], json!(false));
-    assert_eq!(schema["required"], json!(["task", "relationship"]));
+    assert!(
+        schema["required"]
+            .as_array()
+            .expect("spawn required fields are an array")
+            .contains(&json!("task"))
+    );
     assert_eq!(schema["properties"]["task"]["minLength"], json!(1));
     assert_eq!(
         schema["properties"]["task"]["maxLength"],
         json!(MAX_DELEGATION_CONTENT_BYTES)
     );
+}
+
+#[test]
+fn spawn_schema_closes_the_root_argument_object() {
+    let schema = rendered_contract_schema::<SpawnSessionContract>();
+
+    assert_eq!(schema["additionalProperties"], json!(false));
+}
+
+#[test]
+fn spawn_schema_requires_and_closes_relationship_variants() {
+    let schema = rendered_contract_schema::<SpawnSessionContract>();
+    let variants = schema["$defs"]["ChildRelationshipArguments"]["oneOf"]
+        .as_array()
+        .expect("relationship variants are an array");
+
+    assert!(
+        schema["required"]
+            .as_array()
+            .expect("spawn required fields are an array")
+            .contains(&json!("relationship"))
+    );
+    assert_eq!(
+        schema["properties"]["relationship"]["$ref"],
+        json!("#/$defs/ChildRelationshipArguments")
+    );
+    assert_eq!(variants.len(), 2);
+    assert_eq!(variants[0]["additionalProperties"], json!(false));
+    assert_eq!(variants[1]["additionalProperties"], json!(false));
 }
 
 #[test]
@@ -646,7 +670,7 @@ fn validator_rejects_empty_message_content() {
 }
 
 #[test]
-fn spawn_executor_returns_child_receipt_and_forwards_sealed_request() {
+fn spawn_executor_returns_durable_child_receipt_and_forwards_sealed_request() {
     let raw = background_spawn(11);
     let tool_request = raw.id();
     let child = session(12);
@@ -663,8 +687,8 @@ fn spawn_executor_returns_child_receipt_and_forwards_sealed_request() {
     let authority = dispatch(&raw, ToolEffectClass::ExternalEffect);
     let disposition =
         run_ready(executor.execute_operation(operation, authority)).expect("spawn succeeds");
-    let output: Value =
-        serde_json::from_str(&completed_text(disposition)).expect("spawn receipt is compact JSON");
+    let output: Value = serde_json::from_str(&durably_completed_text(disposition))
+        .expect("spawn receipt is compact JSON");
     let port = executor.into_port();
     let observed = single_spawn_request(&port);
 

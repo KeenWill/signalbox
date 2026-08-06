@@ -2213,6 +2213,34 @@ where
     }
 }
 
+fn nudge_after_process_message_rejection(
+    eligibility_nudge: &impl EligibilityNudge,
+    issuer: SessionId,
+    rejection: ProcessDelegationRequestRejection,
+) {
+    let attempt_ended = match rejection {
+        ProcessDelegationRequestRejection::MessageIdentityCollision { .. }
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::RelationshipNotFound
+            | DelegationOperationRejection::MessageIdentityCollision
+            | DelegationOperationRejection::DeliverySequenceExhausted
+            | DelegationOperationRejection::Transition { .. },
+        ) => true,
+        ProcessDelegationRequestRejection::SessionNotFound
+        | ProcessDelegationRequestRejection::ToolRequestNotFound
+        | ProcessDelegationRequestRejection::ToolRequestNotInSession
+        | ProcessDelegationRequestRejection::RequestNotInTurn
+        | ProcessDelegationRequestRejection::AwaitConflict
+        | ProcessDelegationRequestRejection::MessageConflict
+        | ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch { .. },
+        ) => false,
+    };
+    if attempt_ended {
+        nudge_delegation_issuer(eligibility_nudge, issuer);
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "foreground delivery keeps socket cancellation and durable correlation explicit"
@@ -2369,6 +2397,11 @@ where
             .await
         }
         Ok(ProcessDelegationOutcome::Rejected(rejection)) => {
+            nudge_after_process_message_rejection(
+                eligibility_nudge,
+                SessionId::from_uuid(session_id.into_uuid()),
+                rejection,
+            );
             write_error(
                 writer,
                 version,
@@ -13654,8 +13687,9 @@ mod tests {
         foreground_peer_activity, handle_append_conversation_import,
         handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
-        internal_protocol_error, map_rejection, nudge_delegation_issuer, nudge_delegation_wake,
-        observe_outbox_metrics_once, operational_import_error, process_delegation_rejection,
+        internal_protocol_error, map_rejection, nudge_after_process_message_rejection,
+        nudge_delegation_issuer, nudge_delegation_wake, observe_outbox_metrics_once,
+        operational_import_error, process_delegation_rejection,
         process_delegation_rejection_for_recipient, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
@@ -16276,6 +16310,54 @@ mod tests {
                 .expect("recorded nudge lock remains available")
                 .as_slice(),
             &[issuer]
+        );
+    }
+
+    #[test]
+    fn definitive_process_message_rejection_nudges_exact_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(17));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_after_process_message_rejection(
+            &nudge,
+            issuer,
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::RelationshipNotFound,
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[issuer]
+        );
+    }
+
+    #[test]
+    fn stale_process_message_rejection_does_not_nudge_issuer() {
+        let issuer = SessionId::from_uuid(Uuid::from_u128(18));
+        let nudge = RecordingEligibilityNudge::default();
+        let recorded = Arc::clone(&nudge.sessions);
+
+        nudge_after_process_message_rejection(
+            &nudge,
+            issuer,
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AttemptEnded,
+                },
+            ),
+        );
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("recorded nudge lock remains available")
+                .as_slice(),
+            &[]
         );
     }
 

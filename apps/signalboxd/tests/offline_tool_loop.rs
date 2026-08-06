@@ -58,6 +58,7 @@ use signalbox_process_protocol::{
     InputDelivery, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
     decode_server_line, encode_client_line,
 };
+use signalbox_tools_git::{GIT_STATUS_NAME, GitIdentity};
 use signalbox_tools_web::{
     WEB_FETCH_NAME, WebSearchRequest, WebSearchTransport, WebSearchTransportFailure,
     WebSearchTransportOutcome,
@@ -108,6 +109,12 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalboxd_tool_loop_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
+const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
+
+fn git_identity() -> GitIdentity {
+    GitIdentity::try_new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL).expect("fixture Git identity is valid")
+}
 
 fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin {
     signalbox_persistence::SessionCredentialPin::try_new(vec![
@@ -1116,6 +1123,7 @@ fn offline_daemon_tools<Writer, HostTransport>(
     }
 
     let workspace = tempdir().expect("fixture workspace root exists");
+    git2::Repository::init(workspace.path()).expect("fixture repository initializes");
     DaemonTools::try_new(
         epoch as fn() -> SystemTime,
         web,
@@ -1131,6 +1139,7 @@ fn offline_daemon_tools<Writer, HostTransport>(
         GitHubEgressPolicy::github_api_only(),
         LocalWorkspaceFileSystem,
         workspace.path(),
+        git_identity(),
         UnusedConversationPort,
         UnusedConversationPort,
         web_fetch_egress_policy,
@@ -1222,6 +1231,7 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
         SystemTime::UNIX_EPOCH
     }
 
+    git2::Repository::init(workspace_root).expect("fixture repository initializes");
     DaemonTools::try_new(
         epoch as fn() -> SystemTime,
         OfflineWebTransport::unused(),
@@ -1237,6 +1247,7 @@ fn commissioned_daemon_tools<HostTransport, GitHubTransportType>(
         GitHubEgressPolicy::github_api_only(),
         LocalWorkspaceFileSystem,
         workspace_root,
+        git_identity(),
         PostgresConversationIntrospection::new(pool.clone()),
         signalbox_persistence::plan::SessionPlanRepository::new(pool.clone()),
         WebFetchEgressPolicy::deny_all(),
@@ -2576,6 +2587,44 @@ async fn s10_composed_workspace_read_executes_offline() -> Result<(), Box<dyn Er
             "truncated": false
         })
     );
+    assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
+    Ok(())
+}
+
+/// S10: the composed local Git executor observes the injected repository
+/// worktree and returns its fixture path through the daemon tool loop.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_composed_local_git_status_executes_offline() -> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let workspace = tempdir()?;
+    let relative_path = "untracked.txt";
+    let fixture_content = "local Git fixture\n";
+    fs::write(workspace.path().join(relative_path), fixture_content)?;
+    let (tool_catalog, tool_executor) = commissioned_daemon_tools(
+        &fixture.pool,
+        UnusedCodeHostTransport,
+        UnusedGitHubTransport,
+        workspace.path(),
+    )?
+    .into_parts();
+    let expected_catalog_names = commissioned_catalog_names(&tool_catalog);
+    let arguments = serde_json::json!({}).to_string();
+    let (execution, runtime) = fixture.execution(
+        [
+            tool_use_script(&[(GIT_STATUS_NAME, arguments.as_str())]),
+            completion_script("local Git status observed"),
+        ],
+        tool_catalog,
+        tool_executor,
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    let result = continuation_result_json(&runtime)?;
+    assert_eq!(result["entries"][0]["path"], relative_path);
     assert_commissioned_catalog(&runtime.received_operations()[0], &expected_catalog_names);
     Ok(())
 }

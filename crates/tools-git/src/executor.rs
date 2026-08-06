@@ -1071,6 +1071,7 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
         first_failure.map_or(Ok(()), Err)
     }
 
+    #[cfg(test)]
     pub(super) fn branch_switch(
         &self,
         repository: &Repository,
@@ -1258,30 +1259,6 @@ impl<FileSystem: WorkspaceFileSystem> LocalGitExecutor<FileSystem> {
                 before_target_publish: || {},
                 post_checkout: || {},
                 post_index_publish: || {},
-                before_head_publish: || {},
-            },
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn branch_switch_with_index_publish_hook<Hook: FnOnce()>(
-        &self,
-        repository: &Repository,
-        arguments: GitBranchSwitchArguments,
-        post_index_publish: Hook,
-    ) -> Result<BranchResult, LocalGitFailure> {
-        let pinned_objects = PinnedObjectDatabase::capture(&self.repository_authority)?;
-        self.branch_switch_with_hooks(
-            repository,
-            &pinned_objects,
-            arguments,
-            BranchSwitchHooks {
-                before_reference_locks: || {},
-                before_quarantine_snapshot: || {},
-                post_quarantine: || {},
-                before_target_publish: || {},
-                post_checkout: || {},
-                post_index_publish,
                 before_head_publish: || {},
             },
         )

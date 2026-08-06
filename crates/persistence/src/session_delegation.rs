@@ -294,8 +294,8 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationWaitOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_delivery_session(&mut transaction, request.request().session()).await?;
             lock_tool_session(&mut transaction, request.request().session()).await?;
+            lock_delivery_session(&mut transaction, request.request().session()).await?;
             if let Some(spawning_request) =
                 load_wait_replay_subject(&mut transaction, request.request().id()).await?
             {
@@ -306,15 +306,18 @@ impl SessionDelegationRepository {
                         },
                     ));
                 }
-                let relation = load_relation(&mut transaction, spawning_request).await?;
-                let wait = DelegationWait::reconstitute(&relation, &request).ok_or(
-                    SessionDelegationCorruption::Inconsistent("stored wait purpose"),
-                )?;
-                if load_wait_mode(&mut transaction, request.request().id()).await? != wait.mode() {
-                    return Err(
-                        SessionDelegationCorruption::Inconsistent("stored wait mode").into(),
-                    );
-                }
+                let endpoints = relation_endpoints(&mut transaction, spawning_request).await?;
+                let stored_mode = load_wait_mode(&mut transaction, request.request().id()).await?;
+                let wait = DelegationWait::reconstitute_stored(
+                    &request,
+                    spawning_request,
+                    endpoints.parent,
+                    endpoints.child,
+                    stored_mode,
+                )
+                .ok_or(SessionDelegationCorruption::Inconsistent(
+                    "stored wait purpose",
+                ))?;
                 return Ok(RecordDelegationWaitOutcome::Recorded(
                     RecordedDelegationWait { wait },
                 ));
@@ -442,17 +445,18 @@ impl SessionDelegationRepository {
                 DispatchSource::Issued(_) => false,
                 DispatchSource::Reconstitute => true,
             };
-            if !session_exists(&mut transaction, request.peer()).await? {
-                return Ok(RecordDelegationMessageOutcome::Rejected(
-                    DelegationOperationRejection::RelationshipNotFound,
-                ));
+            let peer_exists = session_exists(&mut transaction, request.peer()).await?;
+            if peer_exists {
+                lock_message_sessions(
+                    &mut transaction,
+                    request.request().session(),
+                    request.peer(),
+                )
+                .await?;
+            } else {
+                lock_delivery_session(&mut transaction, request.request().session()).await?;
+                lock_tool_session(&mut transaction, request.request().session()).await?;
             }
-            lock_message_sessions(
-                &mut transaction,
-                request.request().session(),
-                request.peer(),
-            )
-            .await?;
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
                 if !dispatch.matches_request(request.request()) {
                     return Ok(RecordDelegationMessageOutcome::Rejected(
@@ -476,6 +480,15 @@ impl SessionDelegationRepository {
                 return Err(SessionDelegationRepositoryError::InvalidTransition(
                     "send_session_message requires an external-effect attempt",
                 ));
+            }
+            if !peer_exists {
+                return reject_message_operation(
+                    &mut transaction,
+                    &dispatch,
+                    DelegationOperationRejection::RelationshipNotFound,
+                    persist_definitive_rejection,
+                )
+                .await;
             }
             let Some(spawning_request) =
                 find_relation_for_message(&mut transaction, &request).await?
@@ -992,13 +1005,14 @@ async fn load_wait_mode(
     connection: &mut PgConnection,
     request: ToolRequestId,
 ) -> Result<DelegationWaitMode, SessionDelegationRepositoryError> {
-    let value = sqlx::query_scalar::<_, String>(
+    let row = sqlx::query(
         "SELECT wait_mode FROM session_delegation_wait WHERE awaiting_tool_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(request))
     .fetch_optional(connection)
     .await?
     .ok_or(SessionDelegationCorruption::Missing("delegation wait"))?;
+    let value: String = required(&row, "wait_mode")?;
     decode_wait_mode(&value)
 }
 

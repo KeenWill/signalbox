@@ -1245,15 +1245,34 @@ impl DelegationWait {
         relation: &SessionDelegation,
         awaiting_request: &DelegationAwaitRequest,
     ) -> Option<Self> {
-        (awaiting_request.request().session() == relation.parent
-            && awaiting_request.request().id() != relation.spawning_request
-            && awaiting_request.child() == relation.child)
+        Self::reconstitute_stored(
+            awaiting_request,
+            relation.spawning_request,
+            relation.parent,
+            relation.child,
+            awaiting_request.mode(),
+        )
+    }
+
+    /// Reconstitutes one stored wait from its immutable relationship endpoints
+    /// and mode without loading relationship event history.
+    pub fn reconstitute_stored(
+        awaiting_request: &DelegationAwaitRequest,
+        spawning_request: ToolRequestId,
+        parent: SessionId,
+        child: SessionId,
+        mode: DelegationWaitMode,
+    ) -> Option<Self> {
+        (awaiting_request.request().session() == parent
+            && awaiting_request.request().id() != spawning_request
+            && awaiting_request.child() == child
+            && awaiting_request.mode() == mode)
             .then_some(Self {
                 awaiting_request: awaiting_request.request().id(),
-                spawning_request: relation.spawning_request,
-                parent: relation.parent,
-                child: relation.child,
-                mode: awaiting_request.mode(),
+                spawning_request,
+                parent,
+                child,
+                mode,
             })
     }
 
@@ -3239,6 +3258,31 @@ mod aggregate_tests {
             .expect("stored exact request validates without dispatch authority");
 
         assert_eq!(reconstituted, recorded);
+    }
+
+    /// S18 / INV-010 / INV-012: immutable endpoint facts reconstitute an exact
+    /// wait without loading the relationship event stream.
+    #[test]
+    fn wait_reconstitution_uses_stored_endpoints_and_mode() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        );
+        let expected = DelegationWait::reconstitute(&relation, &awaiting)
+            .expect("aggregate-backed reconstitution validates");
+
+        let reconstituted = DelegationWait::reconstitute_stored(
+            &awaiting,
+            relation.spawning_request(),
+            relation.parent(),
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        )
+        .expect("stored endpoint facts validate");
+
+        assert_eq!(reconstituted, expected);
     }
 
     #[derive(Clone, Copy)]

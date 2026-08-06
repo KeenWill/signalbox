@@ -499,6 +499,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
@@ -620,7 +621,7 @@ impl PostgresModelCallRepository {
                                 "target-resolution failure could not close fresh execution state",
                             )
                         })?;
-                    persist_failed(
+                    persist_failed_with_delegated_child_result(
                         &mut transaction,
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
@@ -801,6 +802,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             let execution = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
@@ -817,7 +819,7 @@ impl PostgresModelCallRepository {
                         "capability failure requires a Prepared call",
                     )
                 })?;
-            persist_failed(
+            persist_failed_with_delegated_child_result(
                 &mut transaction,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
@@ -1342,7 +1344,7 @@ where
                         "continuation target failure could not close execution",
                     )
                 })?;
-            persist_failed(
+            persist_failed_with_delegated_child_result(
                 connection,
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
@@ -1418,8 +1420,8 @@ pub(crate) async fn resolve_session_credential(
 }
 
 /// Closes a turn after a prepared or effect-free tool attempt was lost across
-/// process restart. The caller owns the scheduler lock and commits this
-/// closure with the attempt's `CrashLost` evidence.
+/// process restart. The caller owns the delegated endpoint and scheduler locks
+/// and commits this closure with the attempt's `CrashLost` evidence.
 pub(crate) async fn fail_tool_crash_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1460,7 +1462,7 @@ where
                 "tool crash could not close evidence-free execution",
             )
         })?;
-    persist_failed(
+    persist_failed_with_delegated_child_result(
         connection,
         &failed,
         ProviderReportedTokenUsage::unreported(),
@@ -4264,12 +4266,11 @@ async fn persist_terminal_outcome_with_usage(
             .await
         }
         ModelCallTerminalOutcome::Failed(failed) => {
-            lock_delegated_child_result_frontier(connection, failed.session(), failed.turn())
-                .await?;
-            persist_failed(connection, failed, usage, provider_failure_cause).await?;
-            persist_delegated_child_result(
+            persist_failed_with_delegated_child_result(
                 connection,
-                &DelegationOutcome::from_failed_child(failed),
+                failed,
+                usage,
+                provider_failure_cause,
             )
             .await
         }
@@ -4300,6 +4301,17 @@ async fn persist_terminal_outcome_with_usage(
             persist_ambiguous(connection, ambiguous, usage).await
         }
     }
+}
+
+async fn persist_failed_with_delegated_child_result(
+    connection: &mut PgConnection,
+    failed: &FailedModelCallTurn,
+    usage: ProviderReportedTokenUsage,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
+) -> Result<(), ModelCallRepositoryError> {
+    lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
+    persist_failed(connection, failed, usage, provider_failure_cause).await?;
+    persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
 }
 
 async fn lock_delegated_child_result_frontier(

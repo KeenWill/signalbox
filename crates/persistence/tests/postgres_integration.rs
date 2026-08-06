@@ -1676,6 +1676,68 @@ async fn s18_inv005_inv010_process_message_collision_terminalizes_attempt()
     Ok(())
 }
 
+/// S18 / INV-005 / INV-010: an executable process message naming an absent
+/// peer terminalizes its attempt with the typed relationship rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv005_inv010_process_message_absent_peer_terminalizes_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let absent_peer = SessionId::from_uuid(Uuid::from_u128(seed + 0x500));
+    let arguments = serde_json::json!({
+        "content": RAW_DELEGATED_MESSAGE,
+        "peer_session_id": absent_peer.as_uuid().to_string(),
+    })
+    .to_string();
+    sqlx::query("ALTER TABLE tool_request DISABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE tool_request SET arguments_text = $1 WHERE request_id = $2")
+        .bind(arguments)
+        .bind(fixture.message_request.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE tool_request ENABLE TRIGGER tool_request_is_append_only")
+        .execute(&pool)
+        .await?;
+    let _dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let outcome = SessionDelegationRepository::new(pool.clone())
+        .record_process_message(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.message_request,
+            absent_peer,
+            RAW_DELEGATED_MESSAGE.to_owned(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+        )
+        .await?;
+    let attempt_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_attempt
+          WHERE request_id = $1",
+    )
+    .bind(fixture.message_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        outcome,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::RelationshipNotFound,
+        ))
+    );
+    assert_eq!(
+        attempt_state,
+        (String::from("terminal"), Some(String::from("known_failed")))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn insert_raw_wait_and_message_with_delivery(
     connection: &mut PgConnection,
     fixture: RawDelegationFixture,
@@ -19429,6 +19491,81 @@ async fn s17_inv032_delegated_completion_materializes_result_update_and_wake()
             "child_completed".into(),
             "child_turn".into(),
             "completed".into(),
+            1,
+            1,
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-032: initial target resolution failure for a delegated child
+/// atomically materializes the failed result, parent update, and parent wake.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_delegated_initial_target_failure_materializes_parent_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xd550;
+    let (parent, child, child_turn, spawning_request, _selection) =
+        activate_delegated_result_fixture(&pool, seed).await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([]).expect("an empty target catalog is valid");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let outcome = repository
+        .prepare_initial_call(
+            child,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 20)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 25)),
+                )
+            },
+        )
+        .await?;
+    let PrepareInitialModelCallOutcome::TargetUnavailable(_) = outcome else {
+        panic!("the empty target catalog must fail the delegated initial call")
+    };
+    let materialized: (String, String, String, String, i64, i64) = sqlx::query_as(
+        "SELECT result.outcome_kind, event.reason_kind, event.provenance_kind,
+                lifecycle.terminal_disposition_kind,
+                (SELECT count(*) FROM delegation_update_outbox_event AS update
+                  WHERE update.result_spawning_request_id = $1
+                    AND update.session_id = $2),
+                (SELECT count(*) FROM delegation_wake_outbox_event AS wake
+                  WHERE wake.result_spawning_request_id = $1
+                    AND wake.session_id = $2)
+           FROM session_child_result AS result
+           JOIN session_delegation_event AS event
+             ON event.spawning_tool_request_id = result.spawning_tool_request_id
+            AND event.event_ordinal = result.event_ordinal
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = $3 AND lifecycle.session_id = $4
+          WHERE result.spawning_tool_request_id = $1",
+    )
+    .bind(spawning_request.into_uuid())
+    .bind(parent.into_uuid())
+    .bind(child_turn.into_uuid())
+    .bind(child.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        materialized,
+        (
+            String::from("child_failed"),
+            String::from("child_execution_failed"),
+            String::from("child_turn"),
+            String::from("failed"),
             1,
             1,
         )
