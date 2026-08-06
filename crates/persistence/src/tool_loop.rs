@@ -770,21 +770,23 @@ impl PostgresToolLoopRepository {
                 spawning_request: wait.spawning_request(),
                 child: wait.child(),
             };
-        let attempt_matches = matches!(
-            batch.attempt(correlation.request()),
-            Some(ReconstitutedToolAttempt::Ended(ended))
-                if ended.attempt() == correlation.attempt()
+        let attempt_matches = match batch.attempt(correlation.request()) {
+            Some(ReconstitutedToolAttempt::Ended(ended)) => {
+                ended.attempt() == correlation.attempt()
                     && ended.session() == correlation.session()
                     && ended.turn() == correlation.turn()
                     && ended.issuing_attempt() == correlation.issuing_attempt()
                     && ended.request() == correlation.request()
                     && ended.generation() == correlation.generation()
                     && ended.effect_class() == ToolEffectClass::EffectFree
-                    && ended.end() == &(ToolAttemptEnd::AwaitingChild {
-                        spawning_request: wait.spawning_request(),
-                        child: wait.child(),
-                    })
-        );
+                    && ended.end()
+                        == &(ToolAttemptEnd::AwaitingChild {
+                            spawning_request: wait.spawning_request(),
+                            child: wait.child(),
+                        })
+            }
+            None | Some(ReconstitutedToolAttempt::Current(_)) => false,
+        };
         transaction.rollback().await?;
         Ok(phase_matches && attempt_matches)
     }

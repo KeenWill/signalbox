@@ -1077,26 +1077,29 @@ exact completed effect-free attempt and normalized registration receipt for its
 awaiting request. `session_message` is append-only, uniquely orders messages per
 relationship, and requires exact parent/child sender and recipient plus the
 sending tool request. A concurrent global `message_id` claim loser is a typed
-message-identity collision, not an unclassified database failure.
-`session_child_result` has at most one row per spawning request and carries
-exactly one returned-text, failed, stopped, or cancelled shape with child turn
-provenance for returned, failed, result-unavailable, and child-originated
-terminal outcomes, or one of the same exclusive parent-turn-command and
-parent-goal-command provenance arms for a policy-driven stop or cancellation.
-Delivery satellites bind messages/results to their exact semantic entries; no
-transcript query supplies result content. Every pending message and background
-result delivery additionally receives one positive recipient-wide
-`delivery_sequence` under the recipient session lock. That sequence is unique
-and gap-free per recipient across both kinds; relationship ordinals remain
-relationship-local evidence and never order two different relationships.
-Foreground results stay ordered by their exact awaiting request and do not
-consume an inbox sequence. Their semantic entry repeats that awaiting request as
-the ordinary logical tool-result correlation, so the unchanged proposal-order
-and single-result checks admit it as the `await_session` result without
-admitting a second result for the same request. Tool-batch outbox decoding and
-context-compaction evidence count that foreground correlation as one tool
-result; a background result has no tool-result correlation and counts as neither
-one.
+message-identity collision, not an unclassified database failure. A definitive
+process-message rejection stores its closed rejection kind, transition evidence
+when applicable, and originally minted message identity beside the exact
+terminal attempt; exact replay returns that typed outcome before classifying the
+request as non-executable. `session_child_result` has at most one row per
+spawning request and carries exactly one returned-text, failed, stopped, or
+cancelled shape with child turn provenance for returned, failed,
+result-unavailable, and child-originated terminal outcomes, or one of the same
+exclusive parent-turn-command and parent-goal-command provenance arms for a
+policy-driven stop or cancellation. Delivery satellites bind messages/results to
+their exact semantic entries; no transcript query supplies result content. Every
+pending message and background result delivery additionally receives one
+positive recipient-wide `delivery_sequence` under the recipient session lock.
+That sequence is unique and gap-free per recipient across both kinds;
+relationship ordinals remain relationship-local evidence and never order two
+different relationships. Foreground results stay ordered by their exact awaiting
+request and do not consume an inbox sequence. Their semantic entry repeats that
+awaiting request as the ordinary logical tool-result correlation, so the
+unchanged proposal-order and single-result checks admit it as the
+`await_session` result without admitting a second result for the same request.
+Tool-batch outbox decoding and context-compaction evidence count that foreground
+correlation as one tool result; a background result has no tool-result
+correlation and counts as neither one.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous

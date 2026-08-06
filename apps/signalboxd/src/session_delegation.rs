@@ -302,14 +302,19 @@ where
     Retry: FnMut() -> RetryFuture,
     RetryFuture: Future<Output = Result<T, SessionDelegationRepositoryError>>,
 {
-    let mut result = first;
-    while matches!(
-        result,
-        Err(SessionDelegationRepositoryError::CommitAmbiguous(_))
-    ) {
-        result = retry().await;
+    match first {
+        Err(SessionDelegationRepositoryError::CommitAmbiguous(_)) => {}
+        decided => return decided,
     }
-    result
+    loop {
+        match retry().await {
+            Err(
+                SessionDelegationRepositoryError::CommitAmbiguous(_)
+                | SessionDelegationRepositoryError::Database(_),
+            ) => {}
+            decided => return decided,
+        }
+    }
 }
 
 impl SessionDelegationPort for DaemonSessionDelegationPort {
@@ -358,6 +363,9 @@ mod tests {
     async fn commit_ambiguous_delegation_effect_retries_its_exact_replay() {
         let mut retries = [
             Err(SessionDelegationRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            )),
+            Err(SessionDelegationRepositoryError::Database(
                 sqlx::Error::PoolClosed,
             )),
             Ok(7),

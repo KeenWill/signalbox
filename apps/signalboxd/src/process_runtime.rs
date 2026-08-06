@@ -207,6 +207,7 @@ use crate::{
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const DELEGATION_DELIVERY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
@@ -2265,21 +2266,23 @@ where
         else {
             return Ok(());
         };
-        match delivery {
-            Ok(Some(result)) => {
+        match preserve_committed_foreground_wait(delivery) {
+            CommittedForegroundDelivery::Delivered(result) => {
                 return write_message(writer, version, request_id, wire_child_result(&result)?)
                     .await;
             }
-            Ok(None) => {}
-            Err(error) => {
-                return write_delegation_port_error(
-                    writer,
-                    version,
-                    request_id,
-                    wire_uuid(wait.parent().into_uuid()),
-                    error,
-                )
-                .await;
+            CommittedForegroundDelivery::Pending => {}
+            CommittedForegroundDelivery::Retry(error) => {
+                tracing::error!(
+                    diagnostic = "delegation_foreground_delivery_reread_failed",
+                    cause_code = error.operator_failure_cause_code(),
+                    "foreground process delivery reread failed after wait commit"
+                );
+                tokio::select! {
+                    () = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                    peer = foreground_peer_activity(reader) => return peer,
+                    () = sleep(DELEGATION_DELIVERY_RETRY_INTERVAL) => continue,
+                }
             }
         }
         loop {
@@ -2295,6 +2298,23 @@ where
                 Err(broadcast::error::RecvError::Closed) => return Ok(()),
             }
         }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CommittedForegroundDelivery<T, E> {
+    Delivered(T),
+    Pending,
+    Retry(E),
+}
+
+fn preserve_committed_foreground_wait<T, E>(
+    delivery: Result<Option<T>, E>,
+) -> CommittedForegroundDelivery<T, E> {
+    match delivery {
+        Ok(Some(delivered)) => CommittedForegroundDelivery::Delivered(delivered),
+        Ok(None) => CommittedForegroundDelivery::Pending,
+        Err(error) => CommittedForegroundDelivery::Retry(error),
     }
 }
 
@@ -13668,8 +13688,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ContextCompactionRangeLoadError, ConversationImportState, ConversionFailureDisposition,
-        GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
+        CommittedForegroundDelivery, ContextCompactionRangeLoadError, ConversationImportState,
+        ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_IMPORTS,
         MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS,
@@ -13689,7 +13709,7 @@ mod tests {
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_message_rejection,
         nudge_delegation_issuer, nudge_delegation_wake, observe_outbox_metrics_once,
-        operational_import_error, process_delegation_rejection,
+        operational_import_error, preserve_committed_foreground_wait, process_delegation_rejection,
         process_delegation_rejection_for_recipient, read_frame_line,
         retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
@@ -16233,6 +16253,13 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn committed_process_foreground_wait_retries_follow_up_read_failure() {
+        let disposition = preserve_committed_foreground_wait::<u8, _>(Err("database"));
+
+        assert_eq!(disposition, CommittedForegroundDelivery::Retry("database"));
     }
 
     #[test]

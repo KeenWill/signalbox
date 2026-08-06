@@ -1735,11 +1735,12 @@ async fn s18_inv010_inv012_concurrent_message_identity_collision_is_typed()
     Ok(())
 }
 
-/// S18 / INV-005 / INV-010: a definitive process-message collision retains the
-/// exact minted identity and terminalizes its executable attempt as known failed.
+/// S18 / INV-005 / INV-010 / INV-012: a definitive process-message collision
+/// retains the exact minted identity, terminalizes its executable attempt as
+/// known failed, and replays the typed rejection from durable evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s18_inv005_inv010_process_message_collision_terminalizes_attempt()
+async fn s18_inv005_inv010_inv012_process_message_collision_replays_typed_rejection()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
@@ -1772,6 +1773,17 @@ async fn s18_inv005_inv010_process_message_collision_terminalizes_attempt()
             message,
         )
         .await?;
+    let replay_candidate = DelegationMessageId::from_uuid(Uuid::from_u128(first_seed + 0x780));
+    let replay = repository
+        .record_process_message(
+            first_fixture.parent,
+            first_fixture.parent_turn,
+            first_fixture.message_request,
+            first_fixture.child,
+            RAW_DELEGATED_MESSAGE.to_owned(),
+            replay_candidate,
+        )
+        .await?;
     let attempt_state: (String, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind
            FROM tool_attempt
@@ -1788,6 +1800,7 @@ async fn s18_inv005_inv010_process_message_collision_terminalizes_attempt()
             ProcessDelegationRequestRejection::MessageIdentityCollision { message }
         )
     );
+    assert_eq!(replay, collision);
     assert_eq!(
         attempt_state,
         (String::from("terminal"), Some(String::from("known_failed")))
