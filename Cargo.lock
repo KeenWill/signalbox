@@ -3400,6 +3400,7 @@ dependencies = [
  "serde_json",
  "signalbox-application",
  "signalbox-domain",
+ "uuid",
 ]
 
 [[package]]
