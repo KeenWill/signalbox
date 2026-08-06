@@ -2186,12 +2186,13 @@ where
                 writer,
                 version,
                 request_id,
-                process_delegation_rejection(
+                process_delegation_rejection_for_recipient(
                     rejection,
                     session_id,
                     turn_id,
                     tool_request_id,
                     child_session_id,
+                    session_id,
                 ),
             )
             .await
@@ -2397,6 +2398,24 @@ fn process_delegation_rejection(
     tool_request_id: CanonicalUuid,
     peer_session_id: CanonicalUuid,
 ) -> ProtocolError {
+    process_delegation_rejection_for_recipient(
+        rejection,
+        session_id,
+        turn_id,
+        tool_request_id,
+        peer_session_id,
+        peer_session_id,
+    )
+}
+
+fn process_delegation_rejection_for_recipient(
+    rejection: ProcessDelegationRequestRejection,
+    session_id: CanonicalUuid,
+    turn_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    peer_session_id: CanonicalUuid,
+    delivery_recipient_id: CanonicalUuid,
+) -> ProtocolError {
     let detail = match rejection {
         ProcessDelegationRequestRejection::SessionNotFound => {
             RejectionDetail::SessionNotFound { session_id }
@@ -2464,8 +2483,13 @@ fn process_delegation_rejection(
             last: CanonicalU64::new(u64::MAX),
         },
         ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::DeliverySequenceExhausted,
+        ) => RejectionDetail::DelegationDeliverySequenceExhausted {
+            recipient_session_id: delivery_recipient_id,
+            last: CanonicalU64::new(u64::MAX),
+        },
+        ProcessDelegationRequestRejection::Operation(
             DelegationOperationRejection::MessageIdentityCollision
-            | DelegationOperationRejection::DeliverySequenceExhausted
             | DelegationOperationRejection::Transition { .. },
         ) => {
             return internal_protocol_error(
@@ -13629,7 +13653,8 @@ mod tests {
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_delegation_issuer, nudge_delegation_wake,
         observe_outbox_metrics_once, operational_import_error, process_delegation_rejection,
-        read_frame_line, retain_inbound_frame_permit_during_import_admission,
+        process_delegation_rejection_for_recipient, read_frame_line,
+        retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
@@ -16435,6 +16460,33 @@ mod tests {
             ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
                 tool_request_id: request_id,
                 state: WireDelegationToolRequestState::AttemptEnded,
+            })
+        );
+    }
+
+    #[test]
+    fn delivery_sequence_exhaustion_names_the_operation_recipient() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+        let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
+        let peer_id = CanonicalUuid::from_uuid(Uuid::from_u128(16));
+        let recipient_id = CanonicalUuid::from_uuid(Uuid::from_u128(17));
+        let error = process_delegation_rejection_for_recipient(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::DeliverySequenceExhausted,
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+            recipient_id,
+        );
+
+        assert_eq!(
+            error.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationDeliverySequenceExhausted {
+                recipient_session_id: recipient_id,
+                last: CanonicalU64::new(u64::MAX),
             })
         );
     }
