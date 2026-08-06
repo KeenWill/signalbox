@@ -242,8 +242,16 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # An ignored-test run spelled directly in the workflow is a run the
     # manifest does not describe, which is precisely the drift this gate
     # exists to prevent. `--ignored` reaches libtest only after a `--`.
+    #
+    # Prose that merely mentions the command — a comment saying what a job
+    # does not do — is not a command, and an apostrophe in it is not an
+    # unterminated quote. Anything shlex cannot read as a command line is
+    # therefore skipped rather than raised.
     for command in re.finditer(r"cargo\s+test\b[^\n]*", text):
-        arguments = shlex.split(command.group(0), comments=True)
+        try:
+            arguments = shlex.split(command.group(0), comments=True)
+        except ValueError:
+            continue
         if "--" in arguments and "--ignored" in arguments:
             failures.append(
                 f"{WORKFLOW} runs ignored tests through `cargo test` outside "

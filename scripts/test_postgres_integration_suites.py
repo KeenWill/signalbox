@@ -311,6 +311,17 @@ class WorkflowAgreementTests(unittest.TestCase):
             [],
         )
 
+    def test_prose_mentioning_the_command_is_not_read_as_one(self) -> None:
+        # An apostrophe in a comment is not an unterminated quote, and a
+        # sentence about the command is not a command.
+        self.assertEqual(
+            self.disagreements(
+                AGREEING_WORKFLOW
+                + "      # cargo test doesn't run --ignored here anymore\n"
+            ),
+            [],
+        )
+
     def test_leaving_ubuntu_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace("ubuntu-latest", "windows-latest")
