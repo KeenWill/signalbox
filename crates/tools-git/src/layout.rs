@@ -463,25 +463,6 @@ fn validate_shallow_file_at_with_hook<AfterRead: FnOnce()>(
     Ok(())
 }
 
-pub(super) fn reject_escaping_config(
-    config_path: &Path,
-) -> Result<(), LocalGitToolsConstructionError> {
-    open_repository_config(config_path).map(drop)
-}
-
-pub(super) fn open_repository_config(
-    config_path: &Path,
-) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
-    let descriptor = openat(
-        CWD,
-        config_path,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    validate_repository_config_descriptor(descriptor)
-}
-
 pub(super) fn open_repository_config_at(
     git_directory: &fs::File,
 ) -> Result<RepositoryConfig, LocalGitToolsConstructionError> {
