@@ -147,6 +147,7 @@ let
   # discover the workspace toolchain file.
   workspaceRustToolchain =
     (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
+  tomlPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.tomlkit ]);
 in
 
 {
@@ -209,6 +210,42 @@ in
             signalbox-client signalbox
       )" || exit $?
       exec "$executable" "$@"
+    '';
+  };
+
+  scripts.signalbox-materialize-config = {
+    description = "Resolve the daemon exec-supervisor placeholder in a config copy.";
+    exec = ''
+      if [ "$#" -ne 3 ]; then
+        echo "usage: signalbox-materialize-config <source> <destination> <exec-supervisor>" >&2
+        exit 2
+      fi
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import sys
+        from pathlib import Path
+
+        import tomlkit
+
+        source_path = Path(sys.argv[1])
+        destination_path = Path(sys.argv[2])
+        supervisor = sys.argv[3]
+        content = source_path.read_text()
+        document = tomlkit.parse(content)
+        placeholder = "/usr/local/bin/signalbox-exec-supervisor"
+        daemon_tools = document.get("daemon_tools")
+        if daemon_tools is None:
+            daemon_tools = tomlkit.table()
+            daemon_tools["exec_supervisor_executable"] = supervisor
+            document["daemon_tools"] = daemon_tools
+            content = tomlkit.dumps(document)
+        elif (
+            isinstance(daemon_tools, dict)
+            and daemon_tools.get("exec_supervisor_executable") == placeholder
+        ):
+            daemon_tools["exec_supervisor_executable"] = supervisor
+            content = tomlkit.dumps(document)
+        destination_path.write_text(content)
+      ''} "$1" "$2" "$3"
     '';
   };
 
@@ -444,52 +481,9 @@ in
       # table. Materialize a runtime-only copy that resolves the placeholder or
       # adds the missing dev-managed table. An explicitly configured table is
       # preserved and remains subject to the ordinary fail-closed parser.
-      cp ${shellArg daemonConfigFile} ${shellArg daemonRuntimeConfigFile}
-      python3 -c ${shellArg ''
-        import copy
-        import json
-        import re
-        import sys
-        import tomllib
-        from pathlib import Path
-
-        config_path = Path(sys.argv[1])
-        supervisor = sys.argv[2]
-        content = config_path.read_text()
-        document = tomllib.loads(content)
-        encoded_supervisor = json.dumps(supervisor, ensure_ascii=False)
-        # JSON already escapes the C0 controls TOML forbids. TOML also forbids
-        # a raw DEL, which ensure_ascii=False deliberately preserves.
-        encoded_supervisor = encoded_supervisor.replace(chr(0x7F), r"\u007F")
-        setting = f"exec_supervisor_executable = {encoded_supervisor}"
-        placeholder_value = "/usr/local/bin/signalbox-exec-supervisor"
-        placeholder_line = re.compile(
-            r'^exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"\r?$',
-            re.MULTILINE,
-        )
-        daemon_tools = document.get("daemon_tools")
-        if daemon_tools is None:
-            content = f"{content.rstrip()}\n\n[daemon_tools]\n{setting}\n"
-        elif (
-            isinstance(daemon_tools, dict)
-            and daemon_tools.get("exec_supervisor_executable") == placeholder_value
-        ):
-            expected = copy.deepcopy(document)
-            expected["daemon_tools"]["exec_supervisor_executable"] = supervisor
-            replacements = []
-            for match in placeholder_line.finditer(content):
-                candidate = f"{content[:match.start()]}{setting}{content[match.end():]}"
-                try:
-                    candidate_document = tomllib.loads(candidate)
-                except tomllib.TOMLDecodeError:
-                    continue
-                if candidate_document == expected:
-                    replacements.append(candidate)
-            if len(replacements) != 1:
-                raise ValueError("cannot locate the daemon tool supervisor placeholder")
-            content = replacements[0]
-        config_path.write_text(content)
-      ''} ${shellArg daemonRuntimeConfigFile} "$supervisor_executable"
+      signalbox-materialize-config \
+        ${shellArg daemonConfigFile} ${shellArg daemonRuntimeConfigFile} \
+        "$supervisor_executable"
       chmod 600 ${shellArg daemonRuntimeConfigFile}
 
       # Deployment-owned credential channels: one file per secret. The launcher
