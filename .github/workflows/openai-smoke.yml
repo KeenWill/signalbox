@@ -40,6 +40,15 @@ on:
     paths:
       - "crates/model-runtime-openai/**"
       - ".github/workflows/openai-smoke.yml"
+  # Twice-daily provider-drift canary at 9AM/9PM Eastern during daylight
+  # time (13:00/01:00 UTC; drifts to 8AM/8PM Eastern under standard time —
+  # accepted). Scheduled runs are not pull_request events, so the gate's
+  # non-pull_request branch marks them smoke_required unconditionally, and
+  # they run from the default branch, which GitHub requires for scheduled
+  # workflows regardless of what this file's history looks like elsewhere.
+  schedule:
+    - cron: "0 13 * * *"
+    - cron: "0 1 * * *"
 
 # Superseded pull-request runs release their slots against the public
 # concurrency cap. Every other event takes a group of its own: sharing one
