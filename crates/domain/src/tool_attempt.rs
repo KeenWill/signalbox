@@ -961,13 +961,7 @@ impl ToolAttemptReconstitutionInput {
     /// the first dispatch generation.
     pub fn reconstitute(self) -> Result<ReconstitutedToolAttempt, ToolAttemptReconstitutionError> {
         if self.generation != ToolDispatchGeneration::first()
-            || matches!(
-                (&self.effect_class, &self.state),
-                (
-                    ToolEffectClass::ExternalEffect,
-                    ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild { .. })
-                )
-            )
+            || !effect_class_allows_reconstituted_state(self.effect_class, &self.state)
         {
             return Err(ToolAttemptReconstitutionError {
                 input: Box::new(self),
@@ -1021,6 +1015,30 @@ impl ToolAttemptReconstitutionInput {
                 })
             }
         })
+    }
+}
+
+fn effect_class_allows_reconstituted_state(
+    effect_class: ToolEffectClass,
+    state: &ToolAttemptReconstitutionState,
+) -> bool {
+    match (effect_class, state) {
+        (
+            ToolEffectClass::ExternalEffect,
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild { .. }),
+        ) => false,
+        (
+            ToolEffectClass::EffectFree | ToolEffectClass::ExternalEffect,
+            ToolAttemptReconstitutionState::Prepared
+            | ToolAttemptReconstitutionState::InFlight
+            | ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed { .. })
+            | ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed { .. })
+            | ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
+        )
+        | (
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::AwaitingChild { .. }),
+        ) => true,
     }
 }
 
