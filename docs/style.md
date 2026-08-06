@@ -151,6 +151,18 @@ Name the first version that admits the feature and compare stored versions only
 against that threshold. Advancing a writer version must not reinterpret rows
 written under an older feature threshold.
 
+A name has one spelling per file. A type or constant the file imports is never
+also written as a crate-qualified path in a signature, field, or body; the two
+spellings advertise one item as two, and a reader comparing sibling signatures
+cannot tell whether they name the same thing. Spell both ways only to
+disambiguate two same-named items from different crates, which is the one case
+where the qualification carries the meaning.
+
+A durable command identity, or any other value a verb must print for the user to
+replay it, is printed through the one shared helper that produces it. A verb
+that inlines the generation and the printing can forget the second half, and the
+user loses the identity silently.
+
 ### Rows carry labels and failed reads stay typed
 
 Decode a SQL projection into a named `FromRow` record with aliased columns, or
@@ -167,6 +179,44 @@ static field or relationship label and, when needed, the observed durable
 discriminator. Do not construct corruption classifications from free-form
 formatted prose.
 
+No code under `apps/` writes SQL that names a database table. Table access goes
+through a method on a persistence repository or store that returns typed values
+— domain enums and newtypes, never a `String` compared against a state literal.
+Advisory-lock and connection-level statements that name no table are outside the
+rule, as is the `signalbox-debug` diagnostic binary. A schema rename must break
+the persistence crate's own tests, not the daemon at runtime.
+
+### Durable and wire shapes change with their registries
+
+A migration that drops and re-adds an existing named constraint carries, above
+the `DROP CONSTRAINT`, a comment naming the migration whose definition it
+supersedes; without it the constraint's current shape is knowable only by
+folding the whole migration set in order. Migration filenames sort identically
+under lexical and numeric ordering, and the ordering prefix is chosen at merge
+time, not at authoring time — the prefix is load-bearing policy, because a file
+that sorts earlier than the definition it supersedes silently re-issues the
+older text.
+
+Every `command_kind` spelling a durable `CHECK` constraint admits gains its
+registry variant, its join, and its presence entry in the same commit as the
+migration that admits it. Consumers match the registry exhaustively, so the
+first step is the only one a rule has to force.
+
+Where a wire type declares `Serialize` and `Deserialize` separately — a `Raw*`
+shadow type or a hand-written impl — every variant and every optional member is
+covered by a byte-pinned round-trip test. Nothing else links the two
+declarations, so a field-name divergence in a common state otherwise ships
+silently. A canonical-form or version rule enforced by a SQL `CHECK` on durable
+text is likewise pinned by a test that writes the Rust producer's output for
+that rule through the real constraint. A rule that exists on only one side of
+that boundary does not ship.
+
+A wire type's fields stay private behind a checking constructor and accessors
+whenever any doc comment on the type states an invariant — positivity,
+nonemptiness, a unit, or a correlation between members. A `pub` field is
+admissible only for a member whose full range is legal, and a doc comment
+asserting a rule names the code that enforces it.
+
 ### Owned enums are exhaustive
 
 A decision over a project-owned enum enumerates every variant. Do not use a
@@ -175,6 +225,73 @@ implicit fallthrough, or a hand-maintained variant inventory as the source of
 truth. Collapsed outcomes use or-patterns; repeated decisions belong behind one
 named, exhaustive accessor. Wildcards remain appropriate for foreign enums and
 for non-enum or structurally open scrutinees.
+
+### Absence is a shape, not a sentinel
+
+"This fact is absent" is never an in-band value of a scalar that has real
+meanings: no sentinel HTTP status, index, or identifier. Use `Option<T>`, or
+split the function so neither half has to represent the empty case.
+
+A boolean flag never restates the presence of an `Option` beside it — a
+`truncated` flag next to a `next_cursor`, an in-flight flag next to the
+timestamp that would prove it. Model the two states as one enum, so a
+constructor cannot be handed a contradictory pair and no agreement check is
+needed at runtime. This is principle 5 at a seam rather than inside a module.
+
+### Signatures carry labels, not runs
+
+Two adjacent parameters of one function do not share a type. Group them into a
+struct with named fields or give them distinct newtypes, and always do so when
+the parameters carry different sanitization, provenance, or trust contracts, so
+a transposition cannot compile. This extends principle 2 from tuples and test
+fixtures to production signatures, where a transposition is most costly and the
+parameter names are invisible at the call site. An
+`#[allow(clippy::too_many_arguments)]` is a signal the rule is being broken, not
+a licence to break it.
+
+`bool` does not appear as a public struct field or a public function parameter
+in the domain and application crates. Express each such axis as a two-variant
+enum named for the question it answers, carrying the yes-case's evidence when it
+has any. The rule reaches exactly the sites where the parameter name is
+invisible to the caller; the private local booleans those crates use
+idiomatically are untouched.
+
+### Bodies stay small enough to read
+
+No function body exceeds 400 lines. When a body accumulates shared mutable state
+across several match arms or loop bodies, that state becomes a named struct and
+each arm or phase becomes a function taking `&mut` that struct. The ceiling
+constrains only genuine outliers; the named-scope clause is what the author does
+instead, because the reason a long body resists reading is an unnamed working
+set that every arm reads and mutates, not the line count itself.
+
+### Shared machinery has one home
+
+Where two or more crates implement the same named role — provider adapters,
+source-format importers, transport clients — a helper that is byte-identical, or
+differs only in provider names and diagnostic strings, lives in the shared crate
+they both depend on. A change that would add such a helper to a second sibling
+moves it to the shared crate instead, in the same change. No per-crate reviewer
+can see the second copy, which is why the sibling relationship has to be named
+rather than left to notice.
+
+Code in a provider-adapter crate names at least one of that provider's own wire
+types. Machinery that operates only on the shared runtime's types — evidence
+redaction, transport-error classification, bounded body collection, base-URL
+validation, client construction, cancellation racing — belongs in the shared
+crate, not copied per provider.
+
+A rule deciding whether domain values are consistent with each other belongs to
+the crate owning those types and is reached through that crate's public API. A
+downstream crate does not restate such a rule as a local table or predicate,
+even when the upstream function is currently private: make it public instead.
+
+Before hand-writing a scanner, framer, encoder, or truncator over bytes or text,
+name the standard-library function or already-declared dependency API you
+rejected, and why, in a comment or the change description. A bounded-input
+framer that survives that check is a sans-IO push-based framer with
+per-chunk-split tests, following the shared SSE framer, and lives beside the
+constant that bounds it.
 
 ### Diagnostics retain attribution and context
 
@@ -192,6 +309,13 @@ Do not silently erase a typed error when mapping it into a coarser runtime
 outcome. Emit a safe closed discriminant immediately before the mapping. A
 startup configuration rejection additionally records the sanitized reason and,
 for environment input, the variable name.
+
+A fallible domain operation returns a failure type scoped to that operation, and
+the failure value retains the rejected input: the offending string for a scalar
+admission, the boxed input for a reconstitution. Never write `map_err(|_| ...)`
+over a structured error — add or extend a variant that carries it. One flat enum
+serving dozens of operations, whose variants carry no context, is the shape this
+rule exists to prevent.
 
 A tracing event for session work carries `session_id`; turn-scoped work also
 carries `turn_id`. A subordinate identity such as a request or model-call ID
@@ -216,7 +340,39 @@ and label inputs.
 
 Every bounded or unit-bearing CLI argument has an explicit value name and help
 text stating the bound and unit. Optional arguments also state what omission
-does.
+does. Every argument and every `ValueEnum` variant carries a doc comment, since
+that comment is the text a user reads in `--help`; a flag with none ships a
+blank line.
+
+A proc-macro diagnostic is spanned on the user's tokens, never on the macro call
+site, and each distinct error path has a compile-fail case with a checked
+`.stderr`. A diagnostic pointing at the derive rather than at the offending
+literal cannot be acted on, and the missing goldens are why mis-spanning goes
+unnoticed.
+
+### Every file and public item states what it owns
+
+Every Rust module and every Swift file under `clients/native/Sources/` opens
+with a file-level doc comment — `//!` in Rust, `///` in Swift — naming what the
+file owns and, where one exists, the `docs/spec/` page that governs it. A Swift
+type or decoder mirroring a wire shape additionally names the wire discriminant
+it decodes, which makes a missing decoder visible by inspection.
+
+Every public item in the domain and application crates — including enum variants
+and public struct fields — carries a doc comment. This codifies a property those
+crates already hold by discipline rather than adding an obligation.
+
+Every arm of a tagged wire decoder in the native client names its complete
+admitted field set, through the shared rejection helper or a hand-written
+`init(from:)` that does the same. A synthesized `Decodable` conformance is not
+an acceptable decoder for a protocol message or nested record: it discards
+unadmitted members, so whether a malformed frame is rejected would depend on
+which arms an author remembered.
+
+A failed prepared command is classified in exactly one named type per command
+family. View models do not inline the branches that decide whether to retain a
+command identity; copies of that policy drift, and the drift is invisible
+because each copy reads as complete.
 
 ## Mechanical enforcement
 
@@ -251,12 +407,47 @@ domain and persistence matches require a separate exhaustive-match follow-up.
 Review enforces explicit matching until that complete inventory reaches zero and
 the lint can be enabled at `deny`.
 
-Review continues to enforce the semantic halves that syntax alone cannot prove:
-which crate owns a bound or durable spelling, whether a row record's labels are
-correct, whether an enum is project-owned, whether an error value is safe to
-render, whether diagnostic context is sufficient, and whether comments and
-presentation labels name the fact they actually describe. A lint warning is
-never treated as permission to add a blanket crate-level allowance.
+### The style-rule checker
+
+`scripts/check_style_rules.py` decides the conventions above that a text scan
+can decide without type resolution. It runs in CI as a report-only step: it
+prints a per-rule count table and its findings, and cannot fail the workflow.
+Promotion to a blocking gate is a separate, deliberate step, taken per rule once
+that rule's count reaches zero — never as a side effect of a change that merely
+reduces a count. Until then the counts are a burndown baseline and review is
+still what enforces the conventions.
+
+Each rule below names the convention it decides:
+
+| Rule  | Convention it decides                                                                  |
+| ----- | -------------------------------------------------------------------------------------- |
+| SR-1  | every file states what it owns (Rust `//!`, Swift `///`)                               |
+| SR-2  | comments state constraints, not process artifacts                                      |
+| SR-3  | one spelling per name per file                                                         |
+| SR-4  | public `*Error`/`*Failure`/`*Defect`/`*Exceeded` types implement `Display` and `Error` |
+| SR-5  | no `bool` in a public field or parameter of the domain and application crates          |
+| SR-6  | no row decoded as an anonymous tuple                                                   |
+| SR-7  | a stored version is compared against a named threshold, not the writer's version       |
+| SR-8  | no production code under `apps/` names a table in SQL                                  |
+| SR-9  | a superseding migration names what it supersedes, and filenames sort one way           |
+| SR-10 | no two adjacent parameters of a public function share a type                           |
+| SR-11 | no function body exceeds 400 lines                                                     |
+| SR-12 | every clap argument and `ValueEnum` variant carries a doc comment                      |
+| SR-13 | no proc-macro diagnostic is spanned on the macro call site                             |
+
+The remaining conventions stay judgment-only, and the reason is the same in
+every case: the fact they turn on is not in the text. Whether a bound or durable
+spelling is owned by the crate restating it, whether a row record's labels
+describe the columns, whether a scrutinee's enum is project-owned, whether an
+error value is safe to render, whether a helper in a second sibling crate is the
+same helper, whether an alternative in the standard library was actually
+considered, whether a comment names the failure its defense prevents, whether a
+label describes the state it is derived from, and whether a tracing event's
+identities are the ones a reader would join on — each needs a reader who knows
+what the code means. Exhaustive matching and undocumented public items are
+Clippy's and rustc's to decide, once the counts above allow those lints to be
+configured at `deny`. A lint warning is never treated as permission to add a
+blanket crate-level allowance.
 
 ## Rust mechanics (appendix)
 
