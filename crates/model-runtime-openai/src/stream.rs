@@ -23,6 +23,18 @@ use signalbox_model_runtime::{
     ToolName, validate_provider_json_nesting,
 };
 
+/// The violation detail reported when an otherwise well-formed stream ends on
+/// an unrecognized finish reason — in practice, `length`, the token this
+/// adapter declines to map because the provider reuses it for two different
+/// bounds.
+///
+/// Public because a caller cannot otherwise distinguish that outcome from any
+/// other protocol violation: the loss evidence carries only the cause and the
+/// finish, and the finish is deliberately retained for truncated tool calls
+/// too. Exporting the exact spelling makes this one shared constant rather
+/// than a string a caller has to guess and keep in sync.
+pub const OUTPUT_CEILING_VIOLATION_DETAIL: &str = "stream carries an unrecognized finish_reason";
+
 use crate::response::{StopSequences, convert_usage, map_finish};
 use crate::status::classify_error_envelope;
 use crate::translate::is_valid_function_name;
@@ -384,11 +396,11 @@ impl StreamDecoder {
                         !self.tool_builders.is_empty() || !self.completed_tools.is_empty();
                     self.finish = Some(finish);
                     if opened_tool_calls {
-                        return self.violation(
-                            "stream carries an unrecognized finish_reason after a tool call opened",
-                        );
+                        return self.violation(format!(
+                            "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
+                        ));
                     }
-                    return self.violation("stream carries an unrecognized finish_reason");
+                    return self.violation(OUTPUT_CEILING_VIOLATION_DETAIL);
                 }
                 if !self.refusal_text.is_empty() {
                     // Accumulated refusal material is the provider's refusal
@@ -625,7 +637,9 @@ mod tests {
         TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
-    use super::{StreamDecoder, StreamStep};
+    use signalbox_model_runtime::ProviderErrorEvidence;
+
+    use super::{OUTPUT_CEILING_VIOLATION_DETAIL, StreamDecoder, StreamStep};
     use crate::response::StopSequences;
 
     /// Pushes one chunk that must frame without a failure and returns its
@@ -1030,6 +1044,16 @@ mod tests {
         }
     }
 
+    /// The provider-error payload of a terminal outcome, so a case about
+    /// *which* error occurred reads as setup and assertions with no branch.
+    #[track_caller]
+    fn expect_provider_error(terminal: Option<TerminalEvidence>) -> ProviderErrorEvidence {
+        match terminal {
+            Some(TerminalEvidence::ProviderError(error)) => error,
+            other => panic!("expected provider-error evidence, got {other:?}"),
+        }
+    }
+
     /// Whether any tool-argument fragment reached the sink. Named because the
     /// case that uses it is *about* this fact being absent, and a search
     /// spelled inline would put the discriminator in the test body.
@@ -1099,9 +1123,9 @@ mod tests {
         // this path.
         assert_eq!(
             loss.cause,
-            protocol_violation(
-                "stream carries an unrecognized finish_reason after a tool call opened"
-            )
+            protocol_violation(&format!(
+                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
+            ))
         );
     }
 
@@ -1126,9 +1150,9 @@ mod tests {
         let loss = expect_boundary_loss(terminal);
         assert_eq!(
             loss.cause,
-            protocol_violation(
-                "stream carries an unrecognized finish_reason after a tool call opened"
-            )
+            protocol_violation(&format!(
+                "{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"
+            ))
         );
     }
 
@@ -1164,9 +1188,8 @@ mod tests {
             b"data: {\"error\":{\"type\":\"teapot_error\",\"message\":\"short and stout\"}}\n\n",
         ]);
 
-        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
-            panic!("an error carrying native material stays definitive evidence");
-        };
+        let error = expect_provider_error(terminal);
+
         assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
         assert_eq!(error.native.message, Some("short and stout".to_string()));
     }

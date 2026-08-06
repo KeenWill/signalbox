@@ -72,7 +72,9 @@ use signalbox_model_runtime::{
     ObservationFact, PreparationOutcome, ProviderErrorKind, ProviderReportedModel, RequestedTarget,
     ResolvedTarget, TerminalEvidence, TokenUsage,
 };
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
+use signalbox_model_runtime_openai::{
+    OUTPUT_CEILING_VIOLATION_DETAIL, OpenAiConfig, OpenAiRuntime,
+};
 
 /// The environment variable this smoke reads its API key from. Configured in
 /// CI via the `openai-smoke` environment; see
@@ -446,12 +448,6 @@ fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
     }
 }
 
-/// The violation detail the decoder reports for a `length` finish on a stream
-/// that opened no tool call. This smoke declares no tools, so the decoder's
-/// tool-aware variant of the same violation means the provider volunteered
-/// something nobody asked for, and must not pass as an ordinary truncation.
-const OUTPUT_CEILING_VIOLATION: &str = "stream carries an unrecognized finish_reason";
-
 /// Whether this loss is the plain output-ceiling stop rather than some other
 /// protocol violation that reached the same evidence variant.
 ///
@@ -463,7 +459,7 @@ const OUTPUT_CEILING_VIOLATION: &str = "stream carries an unrecognized finish_re
 /// so a new cause forces this merge-gating decision to be reconsidered.
 fn is_the_output_ceiling_violation(cause: &LossCause) -> bool {
     match cause {
-        LossCause::StreamProtocolViolation { detail } => detail == OUTPUT_CEILING_VIOLATION,
+        LossCause::StreamProtocolViolation { detail } => detail == OUTPUT_CEILING_VIOLATION_DETAIL,
         LossCause::CancellationRequested
         | LossCause::TimedOut(_)
         | LossCause::TransportFailed(_)
@@ -833,7 +829,7 @@ mod require_decoded_response_tests {
     fn stopped_at_ceiling() -> BoundaryLossEvidence {
         BoundaryLossEvidence {
             cause: LossCause::StreamProtocolViolation {
-                detail: "stream carries an unrecognized finish_reason".to_string(),
+                detail: OUTPUT_CEILING_VIOLATION_DETAIL.to_string(),
             },
             exchange: exchange(200),
             reported_model: Some(ProviderReportedModel::new("model-exact-1")),
@@ -924,8 +920,7 @@ mod require_decoded_response_tests {
         // provider volunteered something nobody asked for.
         let mut loss = stopped_at_ceiling();
         loss.cause = LossCause::StreamProtocolViolation {
-            detail: "stream carries an unrecognized finish_reason after a tool call opened"
-                .to_string(),
+            detail: format!("{OUTPUT_CEILING_VIOLATION_DETAIL} after a tool call opened"),
         };
 
         let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
