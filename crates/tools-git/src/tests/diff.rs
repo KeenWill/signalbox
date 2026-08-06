@@ -3,7 +3,6 @@
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 use git2::Repository;
-use rustix::fs::{CWD, Mode, mkfifoat};
 
 use crate::arguments::{GitDiffArguments, LocalOperation};
 use crate::failure::LocalGitFailure;
@@ -11,7 +10,7 @@ use crate::limits::MAX_DIFF_BYTES;
 use crate::tests::planting::plant_over_budget_worktree;
 use crate::tests::support::{
     CHANGED_CONTENT, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, ModeOnlyPathFixture, TRACKED_PATH,
-    UNTRACKED_CONTENT, UNTRACKED_PATH, commit_all, commit_index, execute,
+    UNTRACKED_CONTENT, UNTRACKED_PATH, commit_all, commit_index, create_fifo, execute,
     install_missing_skip_worktree_entry, install_staged_missing_skip_worktree_entry,
 };
 
@@ -280,7 +279,7 @@ fn worktree_diff_quotes_control_bytes_in_a_mode_only_path() {
 fn worktree_diff_never_opens_a_worktree_ignore_fifo() {
     let fixture = Fixture::new();
     let ignore_path = fixture.root().join(".gitignore");
-    mkfifoat(CWD, &ignore_path, Mode::RUSR | Mode::WUSR).expect("worktree ignore FIFO constructs");
+    create_fifo(&ignore_path).expect("worktree ignore FIFO constructs");
     fs::write(fixture.root().join(TRACKED_PATH), CHANGED_CONTENT).expect("fixture change writes");
     let executor = fixture.executor();
 

@@ -16,7 +16,7 @@ use rustix::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::descriptor::{FileIdentity, file_identity};
+use crate::descriptor::{FileIdentity, file_identity, permission_bits};
 use crate::failure::LocalGitFailure;
 use crate::limits::MAX_REFLOG_BYTES;
 use crate::pack_install::{pack_lock_is_owned, remove_owned_pack_lock};
@@ -106,7 +106,7 @@ impl ReferenceLogLock {
         };
         guard
             .lock
-            .set_permissions(fs::Permissions::from_mode(file_mode.bits()))
+            .set_permissions(fs::Permissions::from_mode(permission_bits(file_mode)))
             .map_err(|_| LocalGitFailure::Operation)?;
         guard.copy_existing()?;
         Ok(guard)
