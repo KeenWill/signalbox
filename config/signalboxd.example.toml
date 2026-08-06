@@ -182,6 +182,12 @@ workspace_root = "/srv/signalbox/workspace"
 family = "conversations"
 adapter = "application"
 
+# The complete mapped composition uses this explicit identity for both author
+# and committer fields. It never consults ambient Git configuration.
+[git_identity]
+author_name = "Signalbox Daemon"
+author_email = "signalbox@example.invalid"
+
 # Exact-name overrides are optional. Any composed tool omitted here retains its
 # existing permission default and session-blanket behavior.
 [tool_approval_postures]

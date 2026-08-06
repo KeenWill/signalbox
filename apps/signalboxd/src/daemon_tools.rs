@@ -22,6 +22,7 @@ use signalbox_tools_code_host::{
 use signalbox_tools_conversations::{
     CONVERSATION_TOOL_NAMES, ConversationExecutor, ConversationIntrospectionPort, ConversationTools,
 };
+use signalbox_tools_git::{GitIdentity, LOCAL_GIT_TOOL_NAMES, LocalGitExecutor, LocalGitTools};
 use signalbox_tools_github::{
     GITHUB_TOOL_NAMES, GitHubApiTransport, GitHubEgressPolicy, GitHubExecutor, GitHubTools,
     GitHubTransport,
@@ -145,6 +146,7 @@ struct ComposedToolFamilies<
     github: Option<GitHubTools<Credentials, GitHubTransportType>>,
     workspace_read: Option<WorkspaceReadTools<FileSystem>>,
     workspace_mutation: Option<WorkspaceMutationTools<FileSystem>>,
+    local_git: Option<LocalGitTools<FileSystem>>,
     conversations: Option<ConversationTools<ConversationPort>>,
     plan: PlanTools<PlanPort>,
     goal: Option<GoalDeclarationTool>,
@@ -219,6 +221,7 @@ impl<Clock>
         code_host_transport: GitHubCodeHostTransport,
         github_egress_policy: GitHubEgressPolicy,
         workspace_root: &Path,
+        git_identity: GitIdentity,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let MappedDaemonCredentialInputs {
@@ -243,8 +246,10 @@ impl<Clock>
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
         let workspace_read = WorkspaceReadTools::try_new(workspace.clone(), workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
-        let workspace_mutation = WorkspaceMutationTools::try_new(workspace, workspace_root)
+        let workspace_mutation = WorkspaceMutationTools::try_new(workspace.clone(), workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
+        let local_git = LocalGitTools::try_new(workspace, workspace_root, git_identity)
+            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
                 .map_err(|_| DaemonToolsConstructionError::Conversations)?;
@@ -262,6 +267,7 @@ impl<Clock>
                 github: Some(github),
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
+                local_git: Some(local_git),
                 conversations: Some(conversations),
                 plan,
                 goal: Some(goal),
@@ -307,6 +313,7 @@ impl<Clock>
                 github: None,
                 workspace_read: None,
                 workspace_mutation: None,
+                local_git: None,
                 conversations: None,
                 plan,
                 goal: Some(goal),
@@ -355,6 +362,7 @@ where
         github_egress_policy: GitHubEgressPolicy,
         filesystem: FileSystem,
         workspace_root: &Path,
+        git_identity: GitIdentity,
         conversation_port: ConversationPort,
         plan_port: PlanPort,
         web_fetch_egress_policy: WebFetchEgressPolicy,
@@ -380,8 +388,11 @@ where
             .map_err(|_| DaemonToolsConstructionError::GitHub)?;
         let workspace_read = WorkspaceReadTools::try_new(filesystem.clone(), workspace_root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
-        let workspace_mutation = WorkspaceMutationTools::try_new(filesystem, workspace_root)
-            .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
+        let workspace_mutation =
+            WorkspaceMutationTools::try_new(filesystem.clone(), workspace_root)
+                .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
+        let local_git = LocalGitTools::try_new(filesystem, workspace_root, git_identity)
+            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
         let plan = PlanTools::try_new(plan_port).map_err(|_| DaemonToolsConstructionError::Plan)?;
@@ -395,6 +406,7 @@ where
                 github: Some(github),
                 workspace_read: Some(workspace_read),
                 workspace_mutation: Some(workspace_mutation),
+                local_git: Some(local_git),
                 conversations: Some(conversations),
                 plan,
                 goal: None,
@@ -424,6 +436,7 @@ where
             github,
             workspace_read,
             workspace_mutation,
+            local_git,
             conversations,
             plan,
             goal,
@@ -441,6 +454,7 @@ where
         let github = github.map(GitHubTools::into_parts);
         let workspace_read = workspace_read.map(WorkspaceReadTools::into_parts);
         let workspace_mutation = workspace_mutation.map(WorkspaceMutationTools::into_parts);
+        let local_git = local_git.map(LocalGitTools::into_parts);
         let conversations = conversations.map(ConversationTools::into_parts);
         let (plan_catalog, plan) = plan.into_parts();
         let goal = goal.map(GoalDeclarationTool::into_parts);
@@ -460,6 +474,7 @@ where
                 .as_ref()
                 .map(|(catalog, _)| catalog.clone()),
         );
+        catalogs.extend(local_git.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(conversations.as_ref().map(|(catalog, _)| catalog.clone()));
         catalogs.extend(goal.as_ref().map(|(catalog, _)| catalog.clone()));
         let catalog = DaemonToolCatalog::try_new(catalogs)
@@ -477,6 +492,7 @@ where
                 workspace_read: workspace_read.map(|(_, executor)| executor),
                 workspace_mutation: workspace_mutation
                     .map(|(_, executor)| SharedToolExecutor::new(executor)),
+                local_git: local_git.map(|(_, executor)| SharedToolExecutor::new(executor)),
                 conversations: conversations.map(|(_, executor)| executor),
                 plan,
                 goal: goal.map(|(_, executor)| executor),
@@ -529,6 +545,8 @@ pub enum DaemonToolsConstructionError {
     WorkspaceRead,
     /// The workspace mutation catalog or pinned root was invalid.
     WorkspaceMutation,
+    /// The local Git catalog, repository root, or identity was invalid.
+    LocalGit,
     /// The conversation declarations or introspection port were invalid.
     Conversations,
     /// The plan declarations or session plan port were invalid.
@@ -551,6 +569,7 @@ impl fmt::Display for DaemonToolsConstructionError {
             Self::GitHub => "GitHub pull-request tool suite construction failed",
             Self::WorkspaceRead => "workspace read tool suite construction failed",
             Self::WorkspaceMutation => "workspace mutation tool suite construction failed",
+            Self::LocalGit => "local Git tool suite construction failed",
             Self::Conversations => "conversation tool suite construction failed",
             Self::Plan => "plan tool suite construction failed",
             Self::GoalDeclaration => "goal_declare tool construction failed",
@@ -644,6 +663,7 @@ fn configured_composition_contains(name: &ToolName, composition: DaemonToolCompo
             GITHUB_TOOL_NAMES.contains(&name)
                 || WORKSPACE_READ_TOOL_NAMES.contains(&name)
                 || WORKSPACE_MUTATION_TOOL_NAMES.contains(&name)
+                || LOCAL_GIT_TOOL_NAMES.contains(&name)
                 || CONVERSATION_TOOL_NAMES.contains(&name)
         }
     };
@@ -777,6 +797,7 @@ pub struct DaemonToolExecutor<
     github: Option<GitHubExecutor<Credentials, GitHubTransportType>>,
     workspace_read: Option<WorkspaceReadExecutor<FileSystem>>,
     workspace_mutation: Option<SharedToolExecutor<WorkspaceMutationExecutor<FileSystem>>>,
+    local_git: Option<SharedToolExecutor<LocalGitExecutor<FileSystem>>>,
     conversations: Option<ConversationExecutor<ConversationPort>>,
     plan: PlanExecutor<PlanPort>,
     goal: Option<GoalDeclarationExecutor>,
@@ -910,6 +931,13 @@ where
                 .execute(invocation)
                 .await
                 .map_err(|error| DaemonToolExecutorError::from_error(&error)),
+            name if LOCAL_GIT_TOOL_NAMES.contains(&name) => self
+                .local_git
+                .as_mut()
+                .ok_or_else(DaemonToolExecutorError::unknown_tool)?
+                .execute(invocation)
+                .await
+                .map_err(|error| DaemonToolExecutorError::from_error(&error)),
             name if CONVERSATION_TOOL_NAMES.contains(&name) => self
                 .conversations
                 .as_mut()
@@ -958,6 +986,14 @@ mod tests {
         SessionStatusWriteOutcome, WRITE_FILE_NAME, WebFetchRequest, WebFetchResponse,
         WebFetchTransportFailure,
     };
+
+    const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
+    const GIT_AUTHOR_EMAIL: &str = "signalbox@example.test";
+
+    fn git_identity() -> GitIdentity {
+        GitIdentity::try_new(GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL)
+            .expect("fixture Git identity is valid")
+    }
 
     #[derive(Clone, Copy, Debug)]
     struct OfflineTransport;
@@ -1231,6 +1267,18 @@ mod tests {
     }
 
     #[test]
+    fn mapped_composition_prevalidation_accepts_a_local_git_tool() {
+        let mapped = ToolName::try_new(String::from(signalbox_tools_git::GIT_STATUS_NAME))
+            .expect("mapped local Git fixture name is valid");
+
+        DaemonToolCatalog::validate_approval_postures_for_composition(
+            [(mapped, ToolApprovalPosture::Human)],
+            DaemonToolComposition::WithMappedFamilies,
+        )
+        .expect("mapped composition includes the local Git family");
+    }
+
+    #[test]
     fn composition_prevalidation_accepts_delegated_posture() {
         let echo = ToolName::try_new(String::from(ECHO_NAME)).expect("fixture name is valid");
 
@@ -1338,6 +1386,7 @@ mod tests {
                 github: None::<GitHubTools<OfflineCredentials, OfflineGitHubTransport>>,
                 workspace_read: None::<WorkspaceReadTools<LocalWorkspaceFileSystem>>,
                 workspace_mutation: None::<WorkspaceMutationTools<LocalWorkspaceFileSystem>>,
+                local_git: None::<LocalGitTools<LocalWorkspaceFileSystem>>,
                 conversations: None::<ConversationTools<OfflineConversationPort>>,
                 plan: PlanTools::try_new(OfflineConversationPort)
                     .expect("offline plan tools compile"),
@@ -1385,6 +1434,7 @@ mod tests {
     #[test]
     fn daemon_catalog_contains_every_injected_tool_family() {
         let workspace = tempfile::tempdir().expect("workspace root exists");
+        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
         let (catalog, _executor) = DaemonTools::try_new(
             || SystemTime::UNIX_EPOCH,
             OfflineTransport,
@@ -1400,6 +1450,7 @@ mod tests {
             GitHubEgressPolicy::github_api_only(),
             LocalWorkspaceFileSystem,
             workspace.path(),
+            git_identity(),
             OfflineConversationPort,
             OfflineConversationPort,
             WebFetchEgressPolicy::deny_all(),
@@ -1430,6 +1481,13 @@ mod tests {
                 CURRENT_TIME_NAME,
                 ECHO_NAME,
                 EDIT_FILE_NAME,
+                signalbox_tools_git::GIT_BRANCH_CREATE_NAME,
+                signalbox_tools_git::GIT_BRANCH_SWITCH_NAME,
+                signalbox_tools_git::GIT_CREATE_COMMIT_NAME,
+                signalbox_tools_git::GIT_DIFF_NAME,
+                signalbox_tools_git::GIT_LOG_NAME,
+                signalbox_tools_git::GIT_STAGE_NAME,
+                signalbox_tools_git::GIT_STATUS_NAME,
                 PULL_REQUEST_DIFF_NAME,
                 PULL_REQUEST_METADATA_NAME,
                 PULL_REQUEST_PUBLISH_REVIEW_NAME,
