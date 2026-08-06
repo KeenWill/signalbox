@@ -28,6 +28,7 @@ on:
       - "crates/tools-git/**"
       - "crates/tools-web/**"
       - "crates/tools-workspace/**"
+      - "crates/tools-exec/**"
       - "apps/signalboxd/tests/live_tool_evals.rs"
       - ".github/workflows/tool-evals.yml"
   push:
@@ -36,6 +37,7 @@ on:
       - "crates/tools-git/**"
       - "crates/tools-web/**"
       - "crates/tools-workspace/**"
+      - "crates/tools-exec/**"
       - "apps/signalboxd/tests/live_tool_evals.rs"
       - ".github/workflows/tool-evals.yml"
   # One daily provider/model drift sample. GitHub schedules only the copy on
@@ -86,7 +88,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        family: [git, workspace, web]
+        family: [git, workspace, web, exec]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -94,6 +96,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Bubblewrap for the exec family
+        if: ${{ matrix.family == 'exec' }}
+        run: sudo apt-get install --yes bubblewrap
+      - name: Enable unprivileged user namespaces for the exec family
+        if: ${{ matrix.family == 'exec' }}
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -109,11 +117,18 @@ jobs:
             | tail -n1)
           test -n "${executable}" || { echo "::error::no test executable produced"; exit 1; }
           echo "executable=${executable}" >> "${GITHUB_OUTPUT}"
+          if [[ "${{ matrix.family }}" == "exec" ]]; then
+            cargo build -p signalbox-tools-exec --bin signalbox-exec-supervisor
+            supervisor="$(pwd)/target/debug/signalbox-exec-supervisor"
+            test -x "${supervisor}" || { echo "::error::no exec supervisor produced"; exit 1; }
+            echo "supervisor=${supervisor}" >> "${GITHUB_OUTPUT}"
+          fi
       - name: Run and summarize the live family eval
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SIGNALBOX_TOOL_EVAL_FAMILY: ${{ matrix.family }}
           SIGNALBOX_TOOL_EVAL_SUMMARY: ${{ runner.temp }}/tool-eval-summary.md
+          SIGNALBOX_EXEC_SUPERVISOR: ${{ steps.build.outputs.supervisor }}
         run: |
           set -euo pipefail
           result="${RUNNER_TEMP}/tool-eval-test-output"

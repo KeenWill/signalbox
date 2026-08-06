@@ -54,6 +54,11 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
 };
+use signalbox_tools_exec::{
+    CARGO_DIAGNOSTICS_NAME, CargoDiagnosticsExecutor, CargoDiagnosticsTool, ExecExecutor,
+    SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
+    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+};
 use signalbox_tools_git::{
     GIT_BRANCH_CREATE_NAME, GIT_BRANCH_SWITCH_NAME, GIT_CREATE_COMMIT_NAME, GIT_DIFF_NAME,
     GIT_LOG_NAME, GIT_STAGE_NAME, GIT_STATUS_NAME, GitIdentity, LocalGitExecutor, LocalGitTools,
@@ -103,6 +108,9 @@ const GIT_NATURAL_MESSAGE: &str = "tool eval commit";
 const WORKSPACE_SEED_PATH: &str = "brief.txt";
 const WORKSPACE_ANSWER_PATH: &str = "answer.txt";
 const WORKSPACE_ANSWER: &str = "model loop observed\n";
+const EXEC_SUPERVISOR_VARIABLE: &str = "SIGNALBOX_EXEC_SUPERVISOR";
+const EXEC_RESULT_PATH: &str = "exec-result.txt";
+const EXEC_RESULT: &str = "model loop observed\n";
 const WEB_ORIGIN: &str = "https://example.com";
 const WEB_URL: &str = "https://example.com/eval";
 const SYNTHETIC_WEB_CREDENTIAL: &[u8] = b"synthetic-web-eval-key";
@@ -195,6 +203,7 @@ enum EvalFamily {
     Git,
     Workspace,
     Web,
+    Exec,
 }
 
 impl EvalFamily {
@@ -203,6 +212,7 @@ impl EvalFamily {
             Ok("git") => Ok(Self::Git),
             Ok("workspace") => Ok(Self::Workspace),
             Ok("web") => Ok(Self::Web),
+            Ok("exec") => Ok(Self::Exec),
             _ => Err(io::Error::other("the tool-eval family is missing or unsupported").into()),
         }
     }
@@ -212,6 +222,7 @@ impl EvalFamily {
             Self::Git => "git",
             Self::Workspace => "workspace",
             Self::Web => "web",
+            Self::Exec => "exec",
         }
     }
 
@@ -220,6 +231,7 @@ impl EvalFamily {
             Self::Git => FamilySuite::git(),
             Self::Workspace => FamilySuite::workspace(),
             Self::Web => FamilySuite::web(),
+            Self::Exec => FamilySuite::exec(),
         }
     }
 }
@@ -302,6 +314,21 @@ const WEB_CASES: &[ForcedCase] = &[
     },
 ];
 
+const EXEC_CASES: &[ForcedCase] = &[
+    ForcedCase {
+        name: SANDBOXED_EXEC_NAME,
+        prompt: "Call sandboxed_exec with exactly {\"program\":\"printf\",\"arguments\":[\"forced sandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. After its result, answer done without another tool call.",
+    },
+    ForcedCase {
+        name: UNSANDBOXED_EXEC_NAME,
+        prompt: "Call unsandboxed_exec with exactly {\"program\":\"printf\",\"arguments\":[\"forced unsandboxed eval\\n\"],\"working_directory\":\".\",\"timeout_seconds\":30}. After its result, answer done without another tool call.",
+    },
+    ForcedCase {
+        name: CARGO_DIAGNOSTICS_NAME,
+        prompt: "Call cargo_diagnostics with exactly {\"command\":\"check\",\"timeout_seconds\":120}. After its result, answer done without another tool call.",
+    },
+];
+
 struct FamilySuite {
     family: EvalFamily,
     workspace: TempDir,
@@ -370,11 +397,41 @@ impl FamilySuite {
         })
     }
 
+    fn exec() -> EvalResult<Self> {
+        let workspace = tempfile::tempdir()?;
+        seed_exec_workspace(workspace.path())?;
+        let supervisor = std::env::var_os(EXEC_SUPERVISOR_VARIABLE)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::other("the exec supervisor path is missing"))?;
+        let runner = TokioProcessRunner::try_new(supervisor)?;
+        let sandboxed = SandboxedExecTool::try_new(runner.clone(), workspace.path())?;
+        let unsandboxed = UnsandboxedExecTool::try_new(runner.clone(), workspace.path())?;
+        let diagnostics = CargoDiagnosticsTool::try_new(runner, workspace.path())?;
+        let (sandboxed_catalog, sandboxed_executor) = sandboxed.into_parts();
+        let (unsandboxed_catalog, unsandboxed_executor) = unsandboxed.into_parts();
+        let (diagnostics_catalog, diagnostics_executor) = diagnostics.into_parts();
+        Ok(Self {
+            family: EvalFamily::Exec,
+            workspace,
+            catalog: MergedCatalog::try_new([
+                sandboxed_catalog,
+                unsandboxed_catalog,
+                diagnostics_catalog,
+            ])?,
+            executor: SharedFamilyExecutor::new(FamilyExecutor::Exec {
+                sandboxed: sandboxed_executor,
+                unsandboxed: unsandboxed_executor,
+                diagnostics: diagnostics_executor,
+            }),
+        })
+    }
+
     const fn forced_cases(&self) -> &'static [ForcedCase] {
         match self.family {
             EvalFamily::Git => GIT_CASES,
             EvalFamily::Workspace => WORKSPACE_CASES,
             EvalFamily::Web => WEB_CASES,
+            EvalFamily::Exec => EXEC_CASES,
         }
     }
 
@@ -388,6 +445,9 @@ impl FamilySuite {
             }
             EvalFamily::Web => {
                 "Search the web for 'Signalbox tool evaluation', then fetch the result at https://example.com/eval. Use the available tools, then briefly report what you found."
+            }
+            EvalFamily::Exec => {
+                "Use sandboxed_exec to create exec-result.txt containing exactly 'model loop observed' followed by a newline. Keep every side effect inside the current workspace, then briefly report completion."
             }
         }
     }
@@ -409,8 +469,22 @@ impl FamilySuite {
                     == Some(WORKSPACE_ANSWER.as_bytes()))
             }
             EvalFamily::Web => Ok(true),
+            EvalFamily::Exec => Ok(fs::read(self.workspace.path().join(EXEC_RESULT_PATH))
+                .ok()
+                .as_deref()
+                == Some(EXEC_RESULT.as_bytes())),
         }
     }
+}
+
+fn seed_exec_workspace(root: &Path) -> EvalResult {
+    fs::create_dir(root.join("src"))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tool-eval-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )?;
+    fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n")?;
+    Ok(())
 }
 
 fn seed_git_repository(root: &Path) -> EvalResult {
@@ -526,6 +600,11 @@ enum FamilyExecutor {
         fetch: WebFetchExecutor<FixtureWebFetchTransport>,
         search: WebSearchExecutor<FixtureWebCredential, FixtureWebSearchTransport>,
     },
+    Exec {
+        sandboxed: ExecExecutor<SandboxedCommandRunner<TokioProcessRunner>>,
+        unsandboxed: ExecExecutor<UnsandboxedCommandRunner<TokioProcessRunner>>,
+        diagnostics: CargoDiagnosticsExecutor<TokioProcessRunner>,
+    },
 }
 
 #[derive(Clone)]
@@ -591,6 +670,20 @@ impl ToolExecutor for SharedFamilyExecutor {
                 .await
                 .map_err(|_| FamilyExecutorError),
             FamilyExecutor::Web { search, .. } => search
+                .execute(invocation)
+                .await
+                .map_err(|_| FamilyExecutorError),
+            FamilyExecutor::Exec { sandboxed, .. } if name == SANDBOXED_EXEC_NAME => sandboxed
+                .execute(invocation)
+                .await
+                .map_err(|_| FamilyExecutorError),
+            FamilyExecutor::Exec { unsandboxed, .. } if name == UNSANDBOXED_EXEC_NAME => {
+                unsandboxed
+                    .execute(invocation)
+                    .await
+                    .map_err(|_| FamilyExecutorError)
+            }
+            FamilyExecutor::Exec { diagnostics, .. } => diagnostics
                 .execute(invocation)
                 .await
                 .map_err(|_| FamilyExecutorError),
@@ -966,6 +1059,7 @@ impl CaseOutcome {
             EvalFamily::Git => &[GIT_STAGE_NAME, GIT_CREATE_COMMIT_NAME],
             EvalFamily::Workspace => &[READ_FILE_NAME, WRITE_FILE_NAME],
             EvalFamily::Web => &[WEB_SEARCH_NAME, WEB_FETCH_NAME],
+            EvalFamily::Exec => &[SANDBOXED_EXEC_NAME],
         };
         EvalDisposition::from_passed(
             self.execution_completed
