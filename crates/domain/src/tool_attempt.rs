@@ -1206,10 +1206,9 @@ mod tests {
         );
     }
 
-    /// S18 / INV-011: child waiting cannot park external-effect work or a
-    /// different logical request.
+    /// S18 / INV-011: child waiting cannot park external-effect work.
     #[test]
-    fn s18_inv011_foreground_wait_rejects_wrong_attempt_authority() {
+    fn s18_inv011_foreground_wait_rejects_external_effect_attempt() {
         let external = prepared(ToolEffectClass::ExternalEffect)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1223,6 +1222,16 @@ mod tests {
         let external_error = external
             .end_foreground_child_wait(external_wait)
             .expect_err("external effects cannot become child waits");
+
+        assert_eq!(
+            external_error.failure(),
+            ToolAttemptTransitionFailure::InvalidChildWait
+        );
+    }
+
+    /// S18 / INV-011: child waiting cannot park a different logical request.
+    #[test]
+    fn s18_inv011_foreground_wait_rejects_foreign_logical_request() {
         let effect_free = prepared(ToolEffectClass::EffectFree)
             .authorize()
             .expect("prepared work can be authorized")
@@ -1237,10 +1246,6 @@ mod tests {
             .end_foreground_child_wait(foreign_wait)
             .expect_err("a different request cannot park this attempt");
 
-        assert_eq!(
-            external_error.failure(),
-            ToolAttemptTransitionFailure::InvalidChildWait
-        );
         assert_eq!(
             foreign_error.failure(),
             ToolAttemptTransitionFailure::InvalidChildWait
