@@ -592,6 +592,15 @@ mod tests {
         parent.path().join("runner-state")
     }
 
+    /// Widens a rustix mode to the `u32` that `std` permissions are built from.
+    ///
+    /// rustix's `RawMode` is the host's native `mode_t`: `u16` on Apple targets
+    /// and `u32` on Linux, where the cast is a no-op.
+    #[allow(clippy::unnecessary_cast)]
+    fn permission_bits(mode: Mode) -> u32 {
+        mode.bits() as u32
+    }
+
     fn empty_advertisement() -> Advertisement {
         Advertisement {
             capability_classes: Vec::new(),
@@ -666,7 +675,7 @@ mod tests {
         drop(first);
         fs::set_permissions(
             path.join(STATE_FILE),
-            fs::Permissions::from_mode(Mode::RUSR.bits() | Mode::WUSR.bits() | Mode::RGRP.bits()),
+            fs::Permissions::from_mode(permission_bits(Mode::RUSR | Mode::WUSR | Mode::RGRP)),
         )
         .expect("the fixture state permissions change");
 
