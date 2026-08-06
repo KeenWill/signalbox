@@ -660,6 +660,7 @@ impl PinnedObjectDatabase {
             .map_err(|_| LocalGitFailure::Operation)
     }
 
+    #[cfg(test)]
     pub(super) fn compressed_bytes(&self) -> u64 {
         self.compressed_bytes
     }
@@ -1368,30 +1369,6 @@ pub(super) fn repository_ignorecase(repository: &Repository) -> Result<bool, Loc
     match config.get_bool("core.ignorecase") {
         Ok(ignorecase) => Ok(ignorecase),
         Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
-        Err(_) => Err(LocalGitFailure::Repository),
-    }
-}
-
-pub(super) fn pin_optional_git_file(
-    path: &Path,
-    max_bytes: usize,
-) -> Result<Option<fs::File>, LocalGitFailure> {
-    match openat(
-        CWD,
-        path,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(descriptor) => {
-            let file = fs::File::from(descriptor);
-            let metadata = file.metadata().map_err(|_| LocalGitFailure::Repository)?;
-            if metadata.is_file() && metadata.len() <= max_bytes as u64 {
-                Ok(Some(file))
-            } else {
-                Err(LocalGitFailure::Repository)
-            }
-        }
-        Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(_) => Err(LocalGitFailure::Repository),
     }
 }
