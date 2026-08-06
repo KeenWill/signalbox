@@ -1058,7 +1058,18 @@ fn message_race_disposition(outcome: RecordDelegationMessageOutcome) -> MessageR
         RecordDelegationMessageOutcome::Rejected(
             DelegationOperationRejection::MessageIdentityCollision,
         ) => MessageRaceDisposition::IdentityCollision,
-        unexpected => panic!("unexpected message race outcome: {unexpected:?}"),
+        RecordDelegationMessageOutcome::Rejected(
+            DelegationOperationRejection::RelationshipNotFound,
+        ) => panic!("message race lost its relationship"),
+        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::StaleDispatch) => {
+            panic!("message race lost its dispatch")
+        }
+        RecordDelegationMessageOutcome::Rejected(
+            DelegationOperationRejection::DeliverySequenceExhausted,
+        ) => panic!("message race exhausted its delivery sequence"),
+        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::Transition(_)) => {
+            panic!("message race reached an invalid transition")
+        }
     }
 }
 
@@ -1554,11 +1565,31 @@ async fn s18_inv010_inv012_concurrent_message_identity_collision_is_typed()
     )?;
     let shared_message = DelegationMessageId::from_uuid(first_fixture.message_id);
     let repository = SessionDelegationRepository::new(pool.clone());
-
-    let (first, second) = tokio::join!(
-        repository.record_message(first_request, shared_message, &first_dispatch),
-        repository.record_message(second_request, shared_message, &second_dispatch),
+    let mut provisional_claim = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session_message
+            (message_id, spawning_tool_request_id, event_ordinal,
+             event_kind, direction, content_text)
+         VALUES ($1, $2, 2, 'message_delivered', 'parent_to_child', 'provisional claim')",
+    )
+    .bind(shared_message.into_uuid())
+    .bind(first_fixture.spawning_request.into_uuid())
+    .execute(&mut *provisional_claim)
+    .await?;
+    let mut race = tokio::spawn(async move {
+        tokio::join!(
+            repository.record_message(first_request, shared_message, &first_dispatch),
+            repository.record_message(second_request, shared_message, &second_dispatch),
+        )
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut race)
+            .await
+            .is_err(),
+        "both message claims wait behind the uncommitted global identity"
     );
+    provisional_claim.rollback().await?;
+    let (first, second) = race.await?;
     let mut dispositions = [
         message_race_disposition(first?),
         message_race_disposition(second?),
