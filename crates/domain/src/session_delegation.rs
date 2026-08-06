@@ -1,6 +1,6 @@
 //! Typed delegated-session relation, messages, outcomes, and wait subject.
 
-use std::num::NonZeroU64;
+use std::{collections::HashSet, num::NonZeroU64};
 
 use sha2::{Digest, Sha256};
 
@@ -12,6 +12,21 @@ use crate::{
 const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
 const AWAIT_SESSION_TOOL_NAME: &str = "await_session";
 const SEND_SESSION_MESSAGE_TOOL_NAME: &str = "send_session_message";
+
+/// Returns the persisted model-facing child-spawn tool name.
+pub const fn spawn_session_tool_name() -> &'static str {
+    SPAWN_SESSION_TOOL_NAME
+}
+
+/// Returns the persisted model-facing child-result wait tool name.
+pub const fn await_session_tool_name() -> &'static str {
+    AWAIT_SESSION_TOOL_NAME
+}
+
+/// Returns the persisted model-facing bidirectional-message tool name.
+pub const fn send_session_message_tool_name() -> &'static str {
+    SEND_SESSION_MESSAGE_TOOL_NAME
+}
 
 /// Action applied to a bound child when its parent terminalizes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -713,16 +728,51 @@ pub enum DelegationMessageDirection {
     ChildToParent,
 }
 
+/// Labeled parent and child endpoints used to restore one stored message.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DelegationMessageEndpoints {
+    pub parent: SessionId,
+    pub child: SessionId,
+}
+
 /// One immutable bidirectional message whose content is authoritative.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DelegationMessage {
     id: DelegationMessageId,
     direction: DelegationMessageDirection,
+    peer: SessionId,
     content: DelegationContent,
     provenance: DelegationProvenance,
 }
 
 impl DelegationMessage {
+    /// Reconstitutes one stored message from its canonical logical request.
+    ///
+    /// The containing [`SessionDelegation`] reconstitution validates the
+    /// direction against the immutable parent and child endpoints.
+    pub fn reconstitute(
+        request: &DelegationMessageRequest,
+        id: DelegationMessageId,
+        direction: DelegationMessageDirection,
+        endpoints: DelegationMessageEndpoints,
+    ) -> Option<Self> {
+        let endpoints_match = match direction {
+            DelegationMessageDirection::ParentToChild => {
+                request.request().session() == endpoints.parent && request.peer() == endpoints.child
+            }
+            DelegationMessageDirection::ChildToParent => {
+                request.request().session() == endpoints.child && request.peer() == endpoints.parent
+            }
+        };
+        endpoints_match.then(|| Self {
+            id,
+            direction,
+            peer: request.peer(),
+            content: request.content().clone(),
+            provenance: DelegationProvenance::from_message(request),
+        })
+    }
+
     pub const fn id(&self) -> DelegationMessageId {
         self.id
     }
@@ -1189,6 +1239,24 @@ pub struct DelegationWait {
 }
 
 impl DelegationWait {
+    /// Reconstitutes one stored wait from the checked relationship and exact
+    /// canonical await request. No live dispatch authority is minted.
+    pub fn reconstitute(
+        relation: &SessionDelegation,
+        awaiting_request: &DelegationAwaitRequest,
+    ) -> Option<Self> {
+        (awaiting_request.request().session() == relation.parent
+            && awaiting_request.request().id() != relation.spawning_request
+            && awaiting_request.child() == relation.child)
+            .then_some(Self {
+                awaiting_request: awaiting_request.request().id(),
+                spawning_request: relation.spawning_request,
+                parent: relation.parent,
+                child: relation.child,
+                mode: awaiting_request.mode(),
+            })
+    }
+
     pub const fn awaiting_request(self) -> ToolRequestId {
         self.awaiting_request
     }
@@ -1229,7 +1297,6 @@ impl DelegationEventOrdinal {
         self.0.get()
     }
 
-    #[cfg(test)]
     const fn first() -> Self {
         Self(NonZeroU64::MIN)
     }
@@ -1287,6 +1354,107 @@ pub enum DelegationLifecycle {
     Terminal,
 }
 
+/// Complete canonical facts required to reconstitute one stored relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDelegationReconstitutionInput {
+    spawning_request: DelegatedSpawnRequest,
+    child: SessionId,
+    child_turn: TurnId,
+    events: Vec<DelegationEvent>,
+}
+
+impl SessionDelegationReconstitutionInput {
+    pub fn new(
+        spawning_request: DelegatedSpawnRequest,
+        child: SessionId,
+        child_turn: TurnId,
+        events: Vec<DelegationEvent>,
+    ) -> Self {
+        Self {
+            spawning_request,
+            child,
+            child_turn,
+            events,
+        }
+    }
+
+    pub const fn spawning_request(&self) -> &DelegatedSpawnRequest {
+        &self.spawning_request
+    }
+
+    pub const fn child(&self) -> SessionId {
+        self.child
+    }
+
+    pub const fn child_turn(&self) -> TurnId {
+        self.child_turn
+    }
+
+    pub fn events(&self) -> &[DelegationEvent] {
+        &self.events
+    }
+
+    /// Validates the complete ordered history without authorizing a new
+    /// spawn, message, outcome, or wait effect.
+    pub fn reconstitute(self) -> Result<SessionDelegation, SessionDelegationReconstitutionError> {
+        SessionDelegation::reconstitute(self)
+    }
+}
+
+/// Why stored relationship facts could not form one canonical aggregate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionDelegationReconstitutionFailure {
+    SameSession,
+    MissingSpawnEvent,
+    NoncontiguousEventOrdinal,
+    InvalidSpawnEvent,
+    InvalidMessageProvenance,
+    DuplicateMessageIdentity,
+    DuplicateMessageRequest,
+    DuplicateOutcomeAuthority,
+    OutcomeReasonMismatch,
+    EventAfterTerminal,
+}
+
+/// Rejected reconstitution retaining every canonical input fact unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionDelegationReconstitutionError {
+    input: Box<SessionDelegationReconstitutionInput>,
+    failure: SessionDelegationReconstitutionFailure,
+}
+
+impl SessionDelegationReconstitutionError {
+    pub const fn input(&self) -> &SessionDelegationReconstitutionInput {
+        &self.input
+    }
+
+    pub const fn failure(&self) -> SessionDelegationReconstitutionFailure {
+        self.failure
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionDelegationReconstitutionInput,
+        SessionDelegationReconstitutionFailure,
+    ) {
+        (*self.input, self.failure)
+    }
+}
+
+impl std::fmt::Display for SessionDelegationReconstitutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "delegation {} reconstitution failed: {:?}",
+            self.input.spawning_request.request().id().as_uuid(),
+            self.failure
+        )
+    }
+}
+
+impl std::error::Error for SessionDelegationReconstitutionError {}
+
 /// One exact parent/child relationship keyed by its spawning request.
 ///
 /// Construction is intentionally sealed inside this module until the
@@ -1306,6 +1474,36 @@ pub struct SessionDelegation {
 }
 
 impl SessionDelegation {
+    fn reconstitute(
+        input: SessionDelegationReconstitutionInput,
+    ) -> Result<Self, SessionDelegationReconstitutionError> {
+        let lifecycle = match validate_reconstituted_history(&input) {
+            Ok(lifecycle) => lifecycle,
+            Err(failure) => return Err(reconstitution_error(input, failure)),
+        };
+        let SessionDelegationReconstitutionInput {
+            spawning_request,
+            child,
+            child_turn,
+            events,
+        } = input;
+        let DelegatedSpawnRequest {
+            request,
+            task,
+            policy,
+        } = spawning_request;
+        Ok(Self {
+            spawning_request: request.id(),
+            parent: request.session(),
+            child,
+            child_turn,
+            task,
+            policy,
+            lifecycle,
+            events,
+        })
+    }
+
     #[cfg(test)]
     fn spawn_fixture(
         spawning_request: DelegatedSpawnRequest,
@@ -1483,6 +1681,7 @@ impl SessionDelegation {
             message: DelegationMessage {
                 id,
                 direction,
+                peer: sending_request.peer(),
                 content: sending_request.content().clone(),
                 provenance,
             },
@@ -1496,6 +1695,27 @@ impl SessionDelegation {
         outcome: DelegationOutcome,
     ) -> Result<Self, DelegationTransitionError> {
         let provenance = outcome.provenance();
+        if let Some(authority) = provenance.parent_command()
+            && let Some(existing) = self
+                .events
+                .iter()
+                .filter_map(DelegationEvent::outcome)
+                .find(|existing| {
+                    existing
+                        .provenance()
+                        .parent_command()
+                        .is_some_and(|existing| existing.command() == authority.command())
+                })
+        {
+            if existing == &outcome {
+                return Ok(self);
+            }
+            return Err(Self::reject_outcome(
+                self,
+                outcome,
+                DelegationTransitionFailure::DuplicateOutcomeAuthority,
+            ));
+        }
         if let Some(existing) = self
             .events
             .iter()
@@ -1528,7 +1748,7 @@ impl SessionDelegation {
                 DelegationTransitionFailure::OutcomeReasonMismatch,
             ));
         }
-        if !outcome_matches_relation(&self, &outcome) {
+        if !outcome_matches_relation(DelegationRelationIdentity::from_relation(&self), &outcome) {
             return Err(Self::reject_outcome(
                 self,
                 outcome,
@@ -1676,6 +1896,191 @@ impl SessionDelegation {
     }
 }
 
+fn reconstitution_error(
+    input: SessionDelegationReconstitutionInput,
+    failure: SessionDelegationReconstitutionFailure,
+) -> SessionDelegationReconstitutionError {
+    SessionDelegationReconstitutionError {
+        input: Box::new(input),
+        failure,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DelegationRelationIdentity {
+    spawning_request: ToolRequestId,
+    parent: SessionId,
+    child: SessionId,
+    child_turn: TurnId,
+    policy: ChildRelationshipPolicy,
+}
+
+impl DelegationRelationIdentity {
+    const fn from_relation(relation: &SessionDelegation) -> Self {
+        Self {
+            spawning_request: relation.spawning_request,
+            parent: relation.parent,
+            child: relation.child,
+            child_turn: relation.child_turn,
+            policy: relation.policy,
+        }
+    }
+}
+
+fn validate_reconstituted_history(
+    input: &SessionDelegationReconstitutionInput,
+) -> Result<DelegationLifecycle, SessionDelegationReconstitutionFailure> {
+    let identity = DelegationRelationIdentity {
+        spawning_request: input.spawning_request.request().id(),
+        parent: input.spawning_request.request().session(),
+        child: input.child,
+        child_turn: input.child_turn,
+        policy: input.spawning_request.policy(),
+    };
+    if identity.parent == identity.child {
+        return Err(SessionDelegationReconstitutionFailure::SameSession);
+    }
+    let Some(first) = input.events.first() else {
+        return Err(SessionDelegationReconstitutionFailure::MissingSpawnEvent);
+    };
+    if first
+        != &(DelegationEvent::Spawned {
+            ordinal: DelegationEventOrdinal::first(),
+            provenance: DelegationProvenance::from_spawn(&input.spawning_request),
+        })
+    {
+        return Err(SessionDelegationReconstitutionFailure::InvalidSpawnEvent);
+    }
+
+    let mut lifecycle = DelegationLifecycle::Active;
+    let mut seen_message_ids = HashSet::new();
+    let mut seen_message_requests = HashSet::new();
+    let mut seen_parent_commands = HashSet::new();
+    let mut seen_outcome_provenance = HashSet::new();
+    let mut seen_child_terminal = false;
+    for (index, event) in input.events.iter().enumerate() {
+        let expected = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1));
+        if expected != Some(event.ordinal().get()) {
+            return Err(SessionDelegationReconstitutionFailure::NoncontiguousEventOrdinal);
+        }
+        match event {
+            DelegationEvent::Spawned { .. } if index == 0 => {}
+            DelegationEvent::Spawned { .. } => {
+                return Err(SessionDelegationReconstitutionFailure::InvalidSpawnEvent);
+            }
+            DelegationEvent::MessageDelivered { message, .. } => {
+                validate_reconstituted_message(
+                    identity,
+                    message,
+                    &mut seen_message_ids,
+                    &mut seen_message_requests,
+                )?;
+            }
+            DelegationEvent::OutcomeRecorded { outcome, .. } => {
+                lifecycle = validate_reconstituted_outcome(
+                    identity,
+                    lifecycle,
+                    outcome,
+                    &mut seen_parent_commands,
+                    &mut seen_outcome_provenance,
+                    &mut seen_child_terminal,
+                )?;
+            }
+        }
+    }
+    Ok(lifecycle)
+}
+
+fn validate_reconstituted_message(
+    relation: DelegationRelationIdentity,
+    message: &DelegationMessage,
+    seen_ids: &mut HashSet<DelegationMessageId>,
+    seen_requests: &mut HashSet<ToolRequestId>,
+) -> Result<(), SessionDelegationReconstitutionFailure> {
+    let (source, request, purpose) = match message.provenance.kind {
+        DelegationProvenanceKind::ToolRequest {
+            source_session,
+            request,
+            purpose,
+            ..
+        } => (source_session, request, purpose),
+        DelegationProvenanceKind::ChildTurn { .. }
+        | DelegationProvenanceKind::ParentCommand { .. } => {
+            return Err(SessionDelegationReconstitutionFailure::InvalidMessageProvenance);
+        }
+    };
+    let endpoints_match = match message.direction {
+        DelegationMessageDirection::ParentToChild => {
+            source == relation.parent && message.peer == relation.child
+        }
+        DelegationMessageDirection::ChildToParent => {
+            source == relation.child && message.peer == relation.parent
+        }
+    };
+    if purpose != DelegationToolRequestPurpose::SendMessage
+        || request == relation.spawning_request
+        || !endpoints_match
+    {
+        return Err(SessionDelegationReconstitutionFailure::InvalidMessageProvenance);
+    }
+    if !seen_ids.insert(message.id()) {
+        return Err(SessionDelegationReconstitutionFailure::DuplicateMessageIdentity);
+    }
+    if !seen_requests.insert(request) {
+        return Err(SessionDelegationReconstitutionFailure::DuplicateMessageRequest);
+    }
+    Ok(())
+}
+
+fn validate_reconstituted_outcome(
+    relation: DelegationRelationIdentity,
+    lifecycle: DelegationLifecycle,
+    outcome: &DelegationOutcome,
+    seen_parent_commands: &mut HashSet<DurableCommandId>,
+    seen_provenance: &mut HashSet<DelegationProvenance>,
+    seen_child_terminal: &mut bool,
+) -> Result<DelegationLifecycle, SessionDelegationReconstitutionFailure> {
+    if let Some(authority) = outcome.provenance().parent_command()
+        && !seen_parent_commands.insert(authority.command())
+    {
+        return Err(SessionDelegationReconstitutionFailure::DuplicateOutcomeAuthority);
+    }
+    if !seen_provenance.insert(outcome.provenance()) {
+        return Err(SessionDelegationReconstitutionFailure::DuplicateOutcomeAuthority);
+    }
+    let records_terminal_evaluation = outcome.kind() == DelegationOutcomeKind::AlreadyTerminal;
+    if lifecycle == DelegationLifecycle::Terminal
+        && (!records_terminal_evaluation || !*seen_child_terminal)
+    {
+        return Err(SessionDelegationReconstitutionFailure::EventAfterTerminal);
+    }
+    if lifecycle == DelegationLifecycle::Active && records_terminal_evaluation {
+        return Err(SessionDelegationReconstitutionFailure::OutcomeReasonMismatch);
+    }
+    if !outcome_matches_relation(relation, outcome) {
+        return Err(SessionDelegationReconstitutionFailure::OutcomeReasonMismatch);
+    }
+    if matches!(
+        outcome.kind(),
+        DelegationOutcomeKind::ResultReturned
+            | DelegationOutcomeKind::ChildFailed
+            | DelegationOutcomeKind::ChildStopped
+            | DelegationOutcomeKind::ChildCancelled
+    ) {
+        *seen_child_terminal = true;
+    }
+    match outcome.kind() {
+        DelegationOutcomeKind::ContinueRunning => Ok(DelegationLifecycle::Active),
+        DelegationOutcomeKind::ResultReturned
+        | DelegationOutcomeKind::ChildFailed
+        | DelegationOutcomeKind::ChildStopped
+        | DelegationOutcomeKind::ChildCancelled
+        | DelegationOutcomeKind::AlreadyTerminal => Ok(DelegationLifecycle::Terminal),
+    }
+}
+
 fn dispatch_matches(request: &ToolRequest, dispatch: &crate::ToolDispatchAuthority) -> bool {
     dispatch.request() == request
 }
@@ -1696,7 +2101,10 @@ fn has_child_terminal_outcome(relation: &SessionDelegation) -> bool {
         })
 }
 
-fn outcome_matches_relation(relation: &SessionDelegation, outcome: &DelegationOutcome) -> bool {
+fn outcome_matches_relation(
+    relation: DelegationRelationIdentity,
+    outcome: &DelegationOutcome,
+) -> bool {
     let reason = outcome.reason();
     let child_matches = || {
         outcome
@@ -1735,7 +2143,7 @@ fn outcome_matches_relation(relation: &SessionDelegation, outcome: &DelegationOu
 }
 
 fn parent_outcome_matches(
-    relation: &SessionDelegation,
+    relation: DelegationRelationIdentity,
     outcome: &DelegationOutcome,
     reason: DelegationOutcomeReason,
     expected_action: BoundChildAction,
@@ -1745,7 +2153,7 @@ fn parent_outcome_matches(
 }
 
 fn parent_evaluation_matches(
-    relation: &SessionDelegation,
+    relation: DelegationRelationIdentity,
     outcome: &DelegationOutcome,
     reason: DelegationOutcomeReason,
 ) -> bool {
@@ -2612,6 +3020,225 @@ mod aggregate_tests {
     fn completed_child_relation(policy: ChildRelationshipPolicy) -> SessionDelegation {
         SessionDelegation::spawn_fixture(spawn_request(policy), session_id(1), turn_id(3))
             .expect("completed-turn fixture child is distinct from parent")
+    }
+
+    /// S18 / INV-010 / INV-012: restart restores one complete active history.
+    #[test]
+    fn relation_reconstitution_round_trips_complete_active_history() {
+        let policy = ChildRelationshipPolicy::Background;
+        let spawning = spawn_request(policy);
+        let relation =
+            SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
+                .expect("fixture parent and child are distinct");
+        let sending = message_request(RequestFixture::ParentMessage, relation.child(), "progress");
+        let dispatch = dispatch_for(sending.request());
+        let (relation, _) = relation
+            .deliver_message(sending, delegation_message_id(5), &dispatch)
+            .expect("canonical message extends the relation");
+        let input = SessionDelegationReconstitutionInput::new(
+            spawning,
+            relation.child(),
+            relation.child_turn(),
+            relation.events().to_vec(),
+        );
+
+        let reconstituted = input
+            .reconstitute()
+            .expect("complete stored history reconstitutes");
+
+        assert_eq!(reconstituted, relation);
+    }
+
+    /// S18 / INV-010 / INV-012: restart derives lifecycle from terminal history.
+    #[test]
+    fn relation_reconstitution_derives_terminal_lifecycle_from_history() {
+        let policy = ChildRelationshipPolicy::Background;
+        let spawning = spawn_request(policy);
+        let relation = completed_child_relation(policy)
+            .record_outcome(returned_outcome("done"))
+            .expect("the exact child result terminalizes the relation");
+        let input = SessionDelegationReconstitutionInput::new(
+            spawning,
+            relation.child(),
+            relation.child_turn(),
+            relation.events().to_vec(),
+        );
+
+        let reconstituted = input
+            .reconstitute()
+            .expect("complete terminal history reconstitutes");
+
+        assert_eq!(reconstituted, relation);
+        assert_eq!(reconstituted.lifecycle(), relation.lifecycle());
+    }
+
+    /// S18 / INV-010 / INV-012: restart rejects a gap in relationship history.
+    #[test]
+    fn relation_reconstitution_rejects_noncontiguous_history() {
+        let policy = ChildRelationshipPolicy::Background;
+        let spawning = spawn_request(policy);
+        let relation =
+            SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
+                .expect("fixture parent and child are distinct");
+        let sending = message_request(RequestFixture::ParentMessage, relation.child(), "progress");
+        let message = DelegationMessage::reconstitute(
+            &sending,
+            delegation_message_id(5),
+            DelegationMessageDirection::ParentToChild,
+            DelegationMessageEndpoints {
+                parent: relation.parent(),
+                child: relation.child(),
+            },
+        )
+        .expect("fixture endpoints match the stored direction");
+        let events = vec![
+            relation.events()[0].clone(),
+            DelegationEvent::MessageDelivered {
+                ordinal: DelegationEventOrdinal::new(
+                    NonZeroU64::new(3).expect("fixture ordinal is positive"),
+                ),
+                message,
+            },
+        ];
+        let input = SessionDelegationReconstitutionInput::new(
+            spawning,
+            relation.child(),
+            relation.child_turn(),
+            events,
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("a skipped event ordinal is corrupt");
+
+        assert_eq!(
+            error.failure(),
+            SessionDelegationReconstitutionFailure::NoncontiguousEventOrdinal
+        );
+    }
+
+    /// S18 / INV-010 / INV-012: restart rejects cross-wired message provenance.
+    #[test]
+    fn relation_reconstitution_rejects_cross_wired_message_direction() {
+        let policy = ChildRelationshipPolicy::Background;
+        let spawning = spawn_request(policy);
+        let relation =
+            SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
+                .expect("fixture parent and child are distinct");
+        let sending = message_request(RequestFixture::ChildMessage, relation.parent(), "progress");
+        let message = DelegationMessage::reconstitute(
+            &sending,
+            delegation_message_id(5),
+            DelegationMessageDirection::ParentToChild,
+            DelegationMessageEndpoints {
+                parent: relation.child(),
+                child: relation.parent(),
+            },
+        )
+        .expect("the swapped endpoint fixture admits its own direction");
+        let input = SessionDelegationReconstitutionInput::new(
+            spawning,
+            relation.child(),
+            relation.child_turn(),
+            vec![
+                relation.events()[0].clone(),
+                DelegationEvent::MessageDelivered {
+                    ordinal: DelegationEventOrdinal::new(
+                        NonZeroU64::new(2).expect("fixture ordinal is positive"),
+                    ),
+                    message,
+                },
+            ],
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("the stored direction must match both endpoints");
+
+        assert_eq!(
+            error.failure(),
+            SessionDelegationReconstitutionFailure::InvalidMessageProvenance
+        );
+    }
+
+    /// S18 / INV-010 / INV-012: restart rejects two parent authorities that
+    /// reuse one durable command identity.
+    #[test]
+    fn s18_inv010_inv012_reconstitution_rejects_reused_parent_command_identity() {
+        let policy = ChildRelationshipPolicy::Background;
+        let spawning = spawn_request(policy);
+        let relation =
+            SessionDelegation::spawn_fixture(spawning.clone(), session_id(3), turn_id(7))
+                .expect("fixture parent and child are distinct");
+        let first_authority = parent_authority(
+            TerminationAuthoritySource::Parent,
+            ParentTerminationKind::Stopped,
+            DescendantTerminationScope::ParentAndDescendants,
+        );
+        let conflicting_authority = ParentTerminationAuthority {
+            parent: first_authority.parent(),
+            source: ParentTerminationCommandSource::Turn { turn: turn_id(11) },
+            command: first_authority.command(),
+            kind: ParentTerminationKind::Cancelled,
+            scope: first_authority.scope(),
+        };
+        let first =
+            DelegationOutcome::from_parent_policy(first_authority, BoundChildAction::KeepRunning)
+                .expect("background policy records typed survival");
+        let conflicting = DelegationOutcome::from_parent_policy(
+            conflicting_authority,
+            BoundChildAction::KeepRunning,
+        )
+        .expect("background policy records typed survival");
+        let input = SessionDelegationReconstitutionInput::new(
+            spawning,
+            relation.child(),
+            relation.child_turn(),
+            vec![
+                relation.events()[0].clone(),
+                DelegationEvent::OutcomeRecorded {
+                    ordinal: DelegationEventOrdinal::new(
+                        NonZeroU64::new(2).expect("fixture ordinal is positive"),
+                    ),
+                    outcome: first,
+                },
+                DelegationEvent::OutcomeRecorded {
+                    ordinal: DelegationEventOrdinal::new(
+                        NonZeroU64::new(3).expect("fixture ordinal is positive"),
+                    ),
+                    outcome: conflicting,
+                },
+            ],
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("one command identity cannot denote two authorities");
+
+        assert_eq!(
+            error.failure(),
+            SessionDelegationReconstitutionFailure::DuplicateOutcomeAuthority
+        );
+    }
+
+    /// S18 / INV-010 / INV-012: restart binds waits to one request and relation.
+    #[test]
+    fn wait_reconstitution_uses_exact_relation_and_request() {
+        let relation = relation(ChildRelationshipPolicy::Background);
+        let awaiting = await_request(
+            RequestFixture::Await,
+            relation.child(),
+            DelegationWaitMode::Foreground,
+        );
+        let dispatch = dispatch_for(awaiting.request());
+        let recorded = relation
+            .register_wait(&awaiting, &dispatch)
+            .expect("live registration validates");
+
+        let reconstituted = DelegationWait::reconstitute(&relation, &awaiting)
+            .expect("stored exact request validates without dispatch authority");
+
+        assert_eq!(reconstituted, recorded);
     }
 
     #[derive(Clone, Copy)]
