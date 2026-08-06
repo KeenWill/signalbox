@@ -5361,6 +5361,14 @@ async fn persist_reclassified_pending_steering(
     if successors.is_empty() {
         return Ok(());
     }
+    // An accepted-input source turn resolves to its configuration root through
+    // the queue chain. A delegation-origin source turn has no
+    // `queued_input_origin` row at all — it is its own configuration root, the
+    // successor's configuration comes from
+    // `turn_origin_exact_model_configuration` below, and a delegated turn
+    // carries no resolved per-turn settings evidence to copy — so its successor
+    // requires none. Exactly one arm below produces a row; a missing
+    // accepted-input root stays a corruption.
     let model_settings_evidence_required: bool = sqlx::query_scalar(
         "WITH RECURSIVE configuration_chain AS (
             SELECT source.*
@@ -5376,7 +5384,13 @@ async fn persist_reclassified_pending_steering(
          )
          SELECT model_settings_evidence_required
            FROM configuration_chain
- WHERE source_configuration_turn_id IS NULL",
+          WHERE source_configuration_turn_id IS NULL
+         UNION ALL
+         SELECT FALSE
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.turn_id = $1
+            AND lifecycle.session_id = $2
+            AND lifecycle.origin_kind = 'delegation'",
     )
     .bind(turn_id_to_uuid(source_turn))
     .bind(session_id_to_uuid(session))

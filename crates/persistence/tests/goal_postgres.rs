@@ -2815,6 +2815,19 @@ async fn inv048_goal_turn_insert_waits_for_scheduler_lock() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Delivery evidence one descendant-scoped cascade publishes: the bound child's
+/// single relationship result, the dispositions addressed to the commanding
+/// parent and to each terminalized child, the result updates, and the wake the
+/// bound child's result raises.
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct CascadeDeliveryFacts {
+    bound_child_results: i64,
+    parent_addressed_dispositions: i64,
+    child_addressed_dispositions: i64,
+    child_result_updates: i64,
+    bound_child_result_wakes: i64,
+}
+
 /// S18 / INV-010 / INV-012 / INV-032: an applied descendant-scoped goal stop
 /// atomically records every edge, logically terminalizes active and queued
 /// bound children with exact provenance, and leaves the background child
@@ -3080,31 +3093,45 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
             ),
         ]
     );
-    let delivered: (i64, i64, i64, i64, i64) = sqlx::query_as(
+    let delivered: CascadeDeliveryFacts = sqlx::query_as(
         "SELECT
             (SELECT count(*)::bigint FROM session_child_result
-              WHERE spawning_tool_request_id = $1),
+              WHERE spawning_tool_request_id = $1)
+                AS bound_child_results,
             (SELECT count(*)::bigint FROM delegation_update_outbox_event
               WHERE provenance_command_id = $2
                 AND update_kind = 'child_lifecycle_disposition'
-                AND session_id = $3),
+                AND session_id = $3)
+                AS parent_addressed_dispositions,
             (SELECT count(*)::bigint FROM delegation_update_outbox_event
                 AS addressed
               WHERE addressed.provenance_command_id = $2
                 AND addressed.update_kind = 'child_lifecycle_disposition'
-                AND addressed.session_id = addressed.child_session_id),
+                AND addressed.session_id = addressed.child_session_id)
+                AS child_addressed_dispositions,
             (SELECT count(*)::bigint FROM delegation_update_outbox_event
               WHERE provenance_command_id = $2
-                AND update_kind = 'child_result'),
+                AND update_kind = 'child_result')
+                AS child_result_updates,
             (SELECT count(*)::bigint FROM delegation_wake_outbox_event
-              WHERE result_spawning_request_id = $1)",
+              WHERE result_spawning_request_id = $1)
+                AS bound_child_result_wakes",
     )
     .bind(Uuid::from_u128(bound_request))
     .bind(Uuid::from_u128(stop_command))
     .bind(Uuid::from_u128(parent))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(delivered, (1, 3, 2, 2, 1));
+    assert_eq!(
+        delivered,
+        CascadeDeliveryFacts {
+            bound_child_results: 1,
+            parent_addressed_dispositions: 3,
+            child_addressed_dispositions: 2,
+            child_result_updates: 2,
+            bound_child_result_wakes: 1,
+        }
+    );
     let terminalized_children: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
         "SELECT session_id, child_session_id, outcome_kind
            FROM delegation_update_outbox_event
@@ -3239,6 +3266,161 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
         restarted_queued.turn(),
         TurnId::from_uuid(Uuid::from_u128(queued_bound_turn))
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-005 / INV-032: a delegated turn that completes while holding
+/// next-safe-point steering reclassifies that steering into a successor turn.
+///
+/// A delegated turn has no accepted-input queue origin, so reclassification
+/// must resolve its configuration through the delegated origin rather than the
+/// queue chain that an accepted-input turn walks.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let parent = 0xfb00;
+    let child = 0xfb01;
+    let spawning_request = 0xfb10;
+    let child_turn = 0xfb11;
+    let steer_command = 0xfb40;
+    let steered_input = 0xfb41;
+    let successor_turn = 0xfb42;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xfb01, parent, 0xfb21))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xfb02, child, 0xfb22))
+        .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request,
+            parent_session: parent,
+            parent_turn: 0xfb12,
+            child_session: child,
+            child_turn,
+            task_entry: 0xfb13,
+            selection: 0xfb22,
+            policy_kind: "background",
+            on_parent_stopped: None,
+            on_parent_cancelled: None,
+        },
+    )
+    .await?;
+    let StartEligibleTurnOutcome::Activated(_) = StartEligibleTurnRepository::new(pool.clone())
+        .handle(session(child), activation_identities(0xfb35))
+        .await?
+    else {
+        panic!("the delegated child must activate before it is steered");
+    };
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xfb50));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0xfb22)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfb51))),
+    )])
+    .expect("one delegated-child target forms a catalog");
+    let mut model_calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("delegated-steering-test-provider"),
+    );
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = model_calls
+        .prepare_initial_call(
+            session(child),
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xfb52)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xfb53)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfb54)),
+            |_| panic!("the delegated child holds no steering before its call is authorized"),
+        )
+        .await?
+    else {
+        panic!("the delegated child's first model call must checkpoint");
+    };
+    assert_eq!(checkpointed, call);
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        model_calls.authorize_send(session(child), call).await?
+    else {
+        panic!("the prepared delegated call must authorize");
+    };
+
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            SubmitInput::new(
+                command(steer_command),
+                session(child),
+                UserContent::try_text(String::from("steer the delegated child"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(child_turn)),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(steered_input)),
+            None,
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xfb43)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xfb44)),
+            ),
+            |_| panic!("steering cannot be reclassified while its source remains active"),
+            |_| panic!("the delegated child has no tool request to cancel"),
+        )
+        .await?;
+
+    let committed = CommitModelCallObservationTransaction::commit_observation(
+        &mut model_calls,
+        session(child),
+        authorized
+            .observation_correlation()
+            .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("delegated answer".into())
+                        .expect("fixture assistant text is valid"),
+                ],
+            }),
+        ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Completed(
+            CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    0xfb56,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xfb57)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xfb58)),
+            ),
+        )),
+        |_| TurnId::from_uuid(Uuid::from_u128(successor_turn)),
+    )
+    .await?;
+    assert!(committed.is_some());
+
+    let reclassified: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT disposition_kind, origin_turn_id
+           FROM accepted_input
+          WHERE accepted_input_id = $1",
+    )
+    .bind(Uuid::from_u128(steered_input))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        reclassified,
+        (
+            "reclassified_as_turn_origin".into(),
+            Some(Uuid::from_u128(successor_turn)),
+        )
+    );
+    let successor_state: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(child))
+    .bind(Uuid::from_u128(successor_turn))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(successor_state, "queued");
 
     pool.close().await;
     drop(container);
