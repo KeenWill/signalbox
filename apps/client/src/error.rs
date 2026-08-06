@@ -480,6 +480,15 @@ impl fmt::Display for RejectionDisplay {
                 "delegation_event_ordinal_exhausted spawning_request={spawning_request_id} last={}",
                 last.value()
             ),
+            RejectionDetail::DelegationDeliverySequenceExhausted {
+                recipient_session_id,
+                last,
+            } => write!(
+                formatter,
+                "delegation_delivery_sequence_exhausted recipient_session={recipient_session_id} \
+                 last={}",
+                last.value()
+            ),
             RejectionDetail::DefaultsVersionMismatch {
                 session_id,
                 expected,
@@ -654,9 +663,10 @@ const fn conversation_import_rejection_class_name(
 mod tests {
     use expect_test::expect;
     use signalbox_process_protocol::{
-        CanonicalU64, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
+        CanonicalU64, CanonicalUuid, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
         FailedModelCallCause, RejectionDetail,
     };
+    use uuid::Uuid;
 
     use super::ClientError;
 
@@ -699,6 +709,29 @@ mod tests {
         expect![[r#"
             invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
         .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn delegation_delivery_sequence_exhaustion_names_the_recipient_and_counter() {
+        let recipient_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(17));
+        let error = ClientError::remote(
+            ErrorCode::Rejected,
+            "delegation delivery sequence exhausted".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::DelegationDeliverySequenceExhausted {
+                recipient_session_id,
+                last: CanonicalU64::new(u64::MAX),
+            }),
+        );
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "rejected: delegation delivery sequence exhausted \
+                 (delegation_delivery_sequence_exhausted \
+                 recipient_session={recipient_session_id} last={})",
+                u64::MAX
+            )
+        );
     }
 
     #[test]
