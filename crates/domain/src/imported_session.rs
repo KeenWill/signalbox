@@ -508,6 +508,12 @@ impl BoundedImportedSessionReconstitutionInput {
                 BoundedImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
             ));
         }
+        if delegated_imported_session_mismatch(self.provenance) {
+            return Err(fail(
+                self,
+                BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+            ));
+        }
         let TranscriptAncestry::ImportedConversation {
             source_frontier, ..
         } = self.provenance.ancestry()
@@ -657,6 +663,8 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     PlacementSessionMismatch,
     /// The placement pointer and selected event name different versions.
     CurrentPlacementVersionMismatch,
+    /// Delegated creation cannot carry imported ancestry.
+    DelegatedAncestryMismatch,
     /// The stored ancestry is not imported ancestry.
     AncestryNotImported,
     /// No one-to-one seed record was supplied.
@@ -777,6 +785,17 @@ struct ValidatedImportedSeedProjection {
     seed: ImportedSessionSeed,
     snapshot: ResolvedContextFrontierSnapshot,
     semantic_entries: Box<[SemanticTranscriptEntry]>,
+}
+
+const fn delegated_imported_session_mismatch(provenance: SessionCreationProvenance) -> bool {
+    matches!(
+        (provenance.cause(), provenance.ancestry()),
+        (
+            SessionCreationCause::Delegated { .. },
+            TranscriptAncestry::SingleSource { .. }
+                | TranscriptAncestry::ImportedConversation { .. }
+        )
+    )
 }
 
 fn validate_imported_seed_projection(
@@ -1014,6 +1033,12 @@ impl ImportedSessionReconstitutionInput {
                 ImportedSessionReconstitutionFailure::CurrentPlacementVersionMismatch,
             ));
         }
+        if delegated_imported_session_mismatch(self.provenance) {
+            return Err(fail(
+                self,
+                ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+            ));
+        }
         let projection = match validate_imported_seed_projection(
             self.stored_session,
             self.provenance,
@@ -1145,6 +1170,8 @@ pub enum ImportedSessionReconstitutionFailure {
     PlacementSessionMismatch,
     /// The placement pointer and selected event name different versions.
     CurrentPlacementVersionMismatch,
+    /// Delegated creation cannot carry imported ancestry.
+    DelegatedAncestryMismatch,
     /// The imported seed projection is inconsistent.
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
@@ -1508,7 +1535,7 @@ mod tests {
     use super::*;
     use crate::test_support::{
         accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
-        imported_transcript_entry_id, semantic_transcript_entry_id, session_id,
+        imported_transcript_entry_id, semantic_transcript_entry_id, session_id, tool_request_id,
     };
     use crate::{
         ImportedConversationFormat, ImportedRawRecordPosition, ImportedRawSourceRecord,
@@ -2036,6 +2063,83 @@ mod tests {
             prepared.session().configuration_defaults()
         );
         assert_eq!(session.current_placement(), &placement);
+    }
+
+    /// S18 / INV-003: delegated bounded current sessions reject imported ancestry.
+    #[test]
+    fn s18_inv003_bounded_current_session_rejects_delegated_imported_ancestry() {
+        let (_, _, prepared) = prepared_fixture();
+        let mut input = bounded_input(&prepared);
+        input.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated {
+                spawning_request: tool_request_id(90),
+            },
+            input.provenance.ancestry(),
+        );
+
+        assert_bounded_failure(
+            input,
+            BoundedImportedSessionReconstitutionFailure::DelegatedAncestryMismatch,
+        );
+    }
+
+    /// S18 / INV-003: full imported-session reconstitution rejects the same
+    /// impossible delegated/imported provenance pairing before yielding a session.
+    #[test]
+    fn s18_inv003_full_current_session_rejects_delegated_imported_ancestry() {
+        let (conversation, _, prepared) = prepared_fixture();
+        let mut input = current_input(&conversation, &prepared);
+        input.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::Delegated {
+                spawning_request: tool_request_id(90),
+            },
+            input.provenance.ancestry(),
+        );
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("delegated creation cannot carry imported ancestry");
+
+        assert_eq!(
+            error.failure(),
+            ImportedSessionReconstitutionFailure::DelegatedAncestryMismatch
+        );
+        assert_eq!(error.input(), &unchanged);
+    }
+
+    /// S18 / INV-003: delegated no-ancestry facts remain a request to use the
+    /// wrong reconstitution seam, rather than claiming imported ancestry.
+    #[test]
+    fn s18_inv003_bounded_delegated_no_ancestry_is_not_imported() {
+        let (_, _, prepared) = prepared_fixture();
+        let mut input = bounded_input(&prepared);
+        input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
+
+        assert_bounded_failure(
+            input,
+            BoundedImportedSessionReconstitutionFailure::AncestryNotImported,
+        );
+    }
+
+    /// S18 / INV-003: the full imported-session seam preserves the same
+    /// no-ancestry classification for delegated creation.
+    #[test]
+    fn s18_inv003_full_delegated_no_ancestry_is_not_imported() {
+        let (conversation, _, prepared) = prepared_fixture();
+        let mut input = current_input(&conversation, &prepared);
+        input.provenance = SessionCreationProvenance::delegated(tool_request_id(90));
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("delegated no-ancestry facts do not use the imported seam");
+
+        assert_eq!(
+            error.failure(),
+            ImportedSessionReconstitutionFailure::Seed(
+                ImportedSessionSeedReconstitutionFailure::AncestryNotImported
+            )
+        );
+        assert_eq!(error.input(), &unchanged);
     }
 
     /// S28 / INV-002 / INV-003 / INV-015 / INV-039: every constructible

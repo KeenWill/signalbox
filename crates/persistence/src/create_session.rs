@@ -25,8 +25,8 @@ use crate::mapping::{
     PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
     dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
     defaults_version_to_numeric, durable_command_id_to_uuid, model_settings_from_json,
-    model_settings_to_json, session_id_from_uuid, session_id_to_uuid,
-    session_placement_event_kind_from_str, session_placement_event_kind_to_str,
+    model_settings_to_json, session_creation_cause_to_str, session_id_from_uuid,
+    session_id_to_uuid, session_placement_event_kind_from_str, session_placement_event_kind_to_str,
 };
 use crate::outbox;
 
@@ -37,8 +37,6 @@ const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
 const PLACEMENT_FROM_STORAGE_VERSION: i16 = 6;
 pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 7;
-// Applied migrations freeze this legacy storage spelling.
-const USER_INITIATED: &str = "owner_initiated";
 const NO_ANCESTRY: &str = "none";
 const APPLIED: &str = "applied";
 
@@ -399,7 +397,9 @@ async fn insert_prepared(
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(session_id_to_uuid(session.id()))
-    .bind(USER_INITIATED)
+    .bind(session_creation_cause_to_str(
+        &SessionCreationCause::UserInitiated,
+    ))
     .bind(NO_ANCESTRY)
     .bind(
         session
@@ -503,7 +503,9 @@ async fn insert_prepared(
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
     .bind(WRITTEN_STORAGE_VERSION)
-    .bind(USER_INITIATED)
+    .bind(session_creation_cause_to_str(
+        &SessionCreationCause::UserInitiated,
+    ))
     .bind(NO_ANCESTRY)
     .bind(defaults_version_to_numeric(defaults.version()))
     .bind(command_selection.kind)
@@ -601,6 +603,7 @@ async fn load_from_connection(
             s.session_id AS stored_session_id,
             s.creation_cause AS stored_cause,
             s.ancestry_kind AS stored_ancestry,
+            s.spawning_tool_request_id AS stored_spawning_request_id,
             s.template_name AS stored_template_name,
             s.template_content_digest AS stored_template_digest,
             v.session_id AS defaults_session_id,
@@ -665,6 +668,7 @@ fn decode_complete(
     let command_provenance = decode_provenance(
         required(&row, "command_cause")?,
         required(&row, "command_ancestry")?,
+        None,
     )?;
     let initial_version = decode_ordinal(&row, "initial_defaults_version")?;
     if initial_version != SessionConfigurationDefaultsVersion::first() {
@@ -733,6 +737,7 @@ fn decode_complete(
     let stored_provenance = decode_provenance(
         required(&row, "stored_cause")?,
         required(&row, "stored_ancestry")?,
+        row.try_get("stored_spawning_request_id")?,
     )?;
     let stored_template_provenance = decode_template_provenance(
         row.try_get("stored_template_name")?,
@@ -953,8 +958,9 @@ fn decode_ordinal(
 fn decode_provenance(
     cause: String,
     ancestry: String,
+    spawning_request: Option<Uuid>,
 ) -> Result<SessionCreationProvenance, CreateSessionRepositoryError> {
-    if cause != USER_INITIATED {
+    if cause != session_creation_cause_to_str(&SessionCreationCause::UserInitiated) {
         return Err(CreateSessionCorruption::Unsupported {
             field: "creation cause",
             value: cause,
@@ -967,6 +973,9 @@ fn decode_provenance(
             value: ancestry,
         }
         .into());
+    }
+    if spawning_request.is_some() {
+        return Err(CreateSessionCorruption::Inconsistent("creation cause provenance").into());
     }
     Ok(SessionCreationProvenance::new(
         SessionCreationCause::UserInitiated,
@@ -1096,10 +1105,40 @@ fn map_registry_error(error: RegistryInspectionError) -> CreateSessionRepository
 mod tests {
     use std::io;
 
+    use signalbox_domain::SessionCreationCause;
+    use sqlx::types::Uuid;
+
     use super::{
-        CreateSessionRepositoryError, WRITTEN_STORAGE_VERSION,
-        storage_version_supports_template_provenance,
+        CreateSessionCorruption, CreateSessionRepositoryError, NO_ANCESTRY,
+        WRITTEN_STORAGE_VERSION, decode_provenance, storage_version_supports_template_provenance,
     };
+    use crate::mapping::session_creation_cause_to_str;
+
+    fn corruption(error: CreateSessionRepositoryError) -> CreateSessionCorruption {
+        let CreateSessionRepositoryError::Corruption(corruption) = error else {
+            panic!("the mapping failure is durable corruption")
+        };
+        corruption
+    }
+
+    /// S01 / INV-003: the ordinary creation reader cannot silently discard a
+    /// delegated spawning identity from a user-initiated session row.
+    #[test]
+    fn s01_inv003_user_initiated_creation_rejects_spawning_request() {
+        let error = decode_provenance(
+            String::from(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            String::from(NO_ANCESTRY),
+            Some(Uuid::from_u128(1)),
+        )
+        .expect_err("user-initiated creation cannot carry a spawning request");
+
+        assert_eq!(
+            corruption(error),
+            CreateSessionCorruption::Inconsistent("creation cause provenance")
+        );
+    }
 
     /// Version four rows carrying template provenance remain valid after the
     /// writer advances to a later storage version.
