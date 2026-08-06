@@ -79,6 +79,19 @@ credential_profile = "anthropic-primary"
 # mcp_bridge_executable = "/absolute/path/to/signalbox-claude-mcp-bridge"
 # working_directory = "/absolute/path/to/workspace"
 
+# To serve an OpenAI model family, add this profile and mapping and set
+# OPENAI_API_KEY_FILE to the file holding the current key. Like the Anthropic
+# mapping, an openai mapping must name the openai-primary profile, because the
+# daemon binds its key file to that exact non-secret reference.
+# [[credential_profiles]]
+# name = "openai-primary"
+# billing_kind = "api_metered"
+#
+# [[adapter_mappings]]
+# model_family = "openai"
+# adapter = "openai"
+# credential_profile = "openai-primary"
+
 # A provider that implements fast mode through a distinct serving identity
 # declares that identity here without a selection_id. A selectable [[models]]
 # record may then use fast_mode = "alternate_target" and point fast_target_id

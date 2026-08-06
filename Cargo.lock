@@ -3595,6 +3595,7 @@ dependencies = [
  "signalbox-model-runtime-anthropic",
  "signalbox-model-runtime-claude-cli",
  "signalbox-model-runtime-codex-cli",
+ "signalbox-model-runtime-openai",
  "signalbox-persistence",
  "signalbox-process-protocol",
  "signalbox-runner-wire",

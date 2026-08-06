@@ -30,12 +30,13 @@ single-split parity, and geometric work bound). Exact Codex CLI usage-axis
 projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
 mappings and advisory exceptions are verified against PR #437
 (`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
-composition is verified against this PR (`agent/wire-claude-cli-adapter`). This
-page covers the provider-neutral operation, observation, and evidence
-vocabulary; SSE framing; structured-output and tool decode; `ScriptedModel`; the
-four provider adapters; and their credential boundaries. Layer-2 authorization
-and evidence classification ([model-call-execution](model-call-execution.md)),
-credential channels, delivery, and rotation discipline
+composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
+the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). This page
+covers the provider-neutral operation, observation, and evidence vocabulary; SSE
+framing; structured-output and tool decode; `ScriptedModel`; the four provider
+adapters; and their credential boundaries. Layer-2 authorization and evidence
+classification ([model-call-execution](model-call-execution.md)), credential
+channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -776,8 +777,9 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
 - The production implementation is signalboxd's `FileCredentialAccess`: each
-  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
-  production `AnthropicRuntime`.
+  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` or
+  `OPENAI_API_KEY_FILE` and feeds the production `AnthropicRuntime` or
+  `OpenAiRuntime`.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:

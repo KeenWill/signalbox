@@ -373,6 +373,23 @@ mod tests {
         assert!(exceeds_configured_limits(context_exceeded, limits));
     }
 
+    /// OpenAI's `prompt_tokens` already contains the cached prompt tokens it
+    /// reports beside it, so adding the cache axes would double-count them.
+    #[test]
+    fn openai_cache_breakdowns_are_not_added_to_the_reported_input_total() {
+        let usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(80))
+            .with_output_tokens(Some(20))
+            .with_cache_read_input_tokens(Some(40));
+        let limits = ConfiguredUsageLimits {
+            max_output_tokens: 50,
+            context_window_tokens: 100,
+            adapter: ModelAdapter::OpenAi,
+        };
+
+        assert!(!exceeds_configured_limits(usage, limits));
+    }
+
     #[test]
     fn codex_cache_breakdowns_are_not_added_to_the_reported_input_total() {
         let usage = ProviderReportedTokenUsage::unreported()
