@@ -54,7 +54,9 @@ SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inlin
 BLOCK_INDICATOR = re.compile(r"[|>][+-]?\d*")
 REQUIRED_MODES = ("--archive-plan", "--matrix")
 INTERPRETERS = ("python3", "python")
-COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&]")
+COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
+ATTACHED_SHORT_OPTIONS = ("-p", "-F", "-j")
+CARGO_GLOBAL_VALUE_OPTIONS = ("--color", "--config", "--explain", "-Z", "-C")
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -304,8 +306,13 @@ def workflow_shell_commands(text: str) -> list[str]:
             continue
         indentation = len(match.group("indent"))
         # `|`, `>-`, `|+2` and friends open a block; they are not command text.
+        # Which one decides how the block's lines rejoin: a literal `|` block
+        # keeps its newlines, and a newline separates commands, while a folded
+        # `>` block and an inline scalar wrap one command across lines.
         inline = match.group("inline").strip()
-        body = ["" if BLOCK_INDICATOR.fullmatch(inline) else inline]
+        opens_block = BLOCK_INDICATOR.fullmatch(inline) is not None
+        separator = "\n" if opens_block and inline.startswith("|") else " "
+        body = ["" if opens_block else inline]
         index += 1
         while index < len(lines):
             line = lines[index]
@@ -314,13 +321,19 @@ def workflow_shell_commands(text: str) -> list[str]:
             if line.strip():
                 body.append(line.strip())
             index += 1
-        # Comments are stripped per physical line, before the lines are
-        # joined: a comment ends its own line, not the rest of a `|` block.
-        joined = " ".join(
-            stripped
-            for part in body
-            if (stripped := strip_shell_comment(part).removesuffix("\\").strip())
-        )
+        # Comments are stripped per physical line, before the lines rejoin: a
+        # comment ends its own line, not the rest of the block. A line ending
+        # in a backslash continues regardless of the block style.
+        joined = ""
+        pending = " "
+        for part in body:
+            stripped = strip_shell_comment(part)
+            continues = stripped.endswith("\\")
+            stripped = stripped.removesuffix("\\").strip()
+            if not stripped:
+                continue
+            joined = stripped if not joined else f"{joined}{pending}{stripped}"
+            pending = " " if continues else separator
         if joined:
             commands.append(joined)
     return commands
@@ -416,23 +429,16 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
 
     # An ignored-test run spelled directly in the workflow is a run the
     # manifest does not describe, which is precisely the drift this gate
-    # exists to prevent. `--ignored` reaches libtest only after a `--`, and it
-    # is searched for across the whole flattened command, because the wrapping
-    # that separates it from `cargo test` is a matter of YAML spelling.
-    #
-    # Anything shlex cannot read as a command line is skipped rather than
-    # raised: an apostrophe in prose is not an unterminated quote.
-    for command in commands:
-        for occurrence in re.finditer(r"cargo\s+test\b.*", command):
-            try:
-                arguments = shlex.split(occurrence.group(0), comments=True)
-            except ValueError:
-                continue
-            if "--" in arguments and "--ignored" in arguments:
-                failures.append(
-                    f"{WORKFLOW} runs ignored tests through `cargo test` "
-                    f"outside {MANIFEST}: {occurrence.group(0).strip()}"
-                )
+    # exists to prevent. Read from the same executed commands as above, so the
+    # YAML wrapping, the shell operators, and Cargo's global options before the
+    # subcommand are all already resolved.
+    for tokens in executed:
+        arguments = cargo_test_arguments(tokens)
+        if arguments is not None and runs_ignored_tests(arguments):
+            failures.append(
+                f"{WORKFLOW} runs ignored tests through `cargo test` outside "
+                f"{MANIFEST}: {' '.join(tokens)}"
+            )
 
     targets = {match.group("target") for match in RUNS_ON.finditer(text)}
     if targets and targets != {"ubuntu-latest"}:
@@ -440,6 +446,61 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
         failures.append(f"Rust CI target changed from ubuntu-latest: {listing}")
 
     return failures
+
+
+def normalized_cargo_arguments(arguments: list[str]) -> list[str]:
+    """Split Cargo's attached option spellings into option and value.
+
+    Cargo accepts `--package=spec`, `-p=spec`, and bare `-pspec` alike, and
+    documentation uses all of them. Normalizing here lets every reader below
+    assume the separated form; without it an attached option reads as no option
+    at all, which is silence rather than disagreement.
+    """
+    normalized: list[str] = []
+    for argument in arguments:
+        if argument.startswith("--") and "=" in argument:
+            option, _, value = argument.partition("=")
+            normalized.extend((option, value))
+            continue
+        attached = next(
+            (
+                option
+                for option in ATTACHED_SHORT_OPTIONS
+                if argument.startswith(option) and len(argument) > len(option)
+            ),
+            None,
+        )
+        if attached is not None:
+            normalized.extend((attached, argument[len(attached) :].removeprefix("=")))
+            continue
+        normalized.append(argument)
+    return normalized
+
+
+def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
+    """Return one `cargo test` invocation's arguments, or `None` if it is not one.
+
+    Cargo takes global options before the subcommand — `cargo --locked test` is
+    as valid as `cargo test --locked` — so the subcommand is located rather
+    than assumed adjacent. Arguments come back normalized.
+    """
+    if not tokens or tokens[0].rsplit("/", 1)[-1] != "cargo":
+        return None
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-"):
+        if tokens[index] in CARGO_GLOBAL_VALUE_OPTIONS:
+            index += 1
+        index += 1
+    if index >= len(tokens) or tokens[index] != "test":
+        return None
+    return normalized_cargo_arguments(tokens[index + 1 :])
+
+
+def runs_ignored_tests(arguments: list[str]) -> bool:
+    """Return whether one `cargo test` argument list reaches libtest's `--ignored`."""
+    if "--" not in arguments:
+        return False
+    return "--ignored" in arguments[arguments.index("--") + 1 :]
 
 
 def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
@@ -459,12 +520,13 @@ def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
 
     found: list[tuple[int, list[str]]] = []
     for number, line in logical:
-        for match in re.finditer(r"cargo\s+test\b[^`]*", line):
+        for match in re.finditer(r"cargo\b[^`]*", line):
             try:
-                arguments = shlex.split(match.group(0))
+                tokens = shlex.split(match.group(0))
             except ValueError:
                 continue
-            if "--" not in arguments or "--ignored" not in arguments:
+            arguments = cargo_test_arguments(tokens)
+            if arguments is None or not runs_ignored_tests(arguments):
                 continue
             found.append((number, arguments))
     return found
@@ -484,19 +546,7 @@ def documentation_disagreements(
     packages = {suite.package for suite in suites}
     failures: list[tuple[int, str]] = []
     for line, arguments in documented_ignored_commands(text):
-        separator = arguments.index("--")
-        # Cargo accepts `--package=<spec>` and `--features=<list>` as readily
-        # as the separated spelling, and documentation uses both. Splitting the
-        # attached form here keeps the reader below to one shape; without it an
-        # attached option reads as no option at all, and a stale documented
-        # feature set slips past the comparison entirely.
-        cargo_arguments: list[str] = []
-        for argument in arguments[2:separator]:
-            if argument.startswith("-") and "=" in argument:
-                option, _, value = argument.partition("=")
-                cargo_arguments.extend((option, value))
-            else:
-                cargo_arguments.append(argument)
+        cargo_arguments = arguments[: arguments.index("--")]
         package = None
         features: set[str] = set()
         index = 0

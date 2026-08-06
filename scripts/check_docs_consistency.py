@@ -2676,22 +2676,45 @@ def target_required_features(package: Path) -> dict[Path, tuple[str, ...]]:
     """
     declared = declared_package(package)
     required: dict[Path, tuple[str, ...]] = {}
-    for table in CARGO_TARGET_TABLES:
+    for table, directory in zip(CARGO_TARGET_TABLES, CARGO_TARGET_DIRECTORIES):
         entries = declared.get(table)
         if not isinstance(entries, list):
             continue
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            relative = entry.get("path")
             features = entry.get("required-features")
-            if not isinstance(relative, str) or not isinstance(features, list):
+            if not isinstance(features, list):
                 continue
-            root = Path(os.path.normpath(package / relative))
+            root = declared_target_root(package, entry, directory)
+            if root is None:
+                continue
             required[root] = tuple(
                 feature for feature in features if isinstance(feature, str)
             )
     return required
+
+
+def declared_target_root(package: Path, entry: dict, directory: str) -> Path | None:
+    """Resolve one declared Cargo target's root file.
+
+    `path` is optional: a target table that only names its target still binds
+    to the conventional root Cargo infers, and Cargo still skips it when its
+    `required-features` are unmet. Reading only explicit paths would let the
+    inferred spelling escape the feature check entirely.
+    """
+    relative = entry.get("path")
+    if isinstance(relative, str):
+        candidate = Path(os.path.normpath(package / relative))
+        return candidate if candidate.is_file() else None
+    name = entry.get("name")
+    if not isinstance(name, str):
+        return None
+    candidates = (
+        package / directory / f"{name}.rs",
+        package / directory / name / "main.rs",
+    )
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def cargo_package_directories(root: Path) -> dict[str, Path]:

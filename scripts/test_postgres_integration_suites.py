@@ -29,12 +29,14 @@ from postgres_integration_suites import (
     ManifestError,
     Suite,
     archive_plan,
+    cargo_test_arguments,
     documentation_disagreements,
     documented_ignored_commands,
     invokes_reader,
     manifest_line,
     parse_suites,
     run_matrix,
+    runs_ignored_tests,
     simple_commands,
     workflow_disagreements,
     workflow_shell_commands,
@@ -388,6 +390,15 @@ class WorkflowAgreementTests(unittest.TestCase):
             [],
         )
 
+    def test_a_global_option_before_the_subcommand_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: cargo --locked test -p alpha --tests -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
     def test_a_folded_scalar_ignored_run_is_reported(self) -> None:
         # The shape the previous workflow used, and the one a reader is most
         # likely to reach for: no backslashes, the arguments simply wrapped.
@@ -608,6 +619,39 @@ class DocumentedCommandTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_concatenated_short_options_are_read(self) -> None:
+        # Cargo accepts `-pSPEC` and `-FFEATURES` with no separator at all.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test -ppa -Fother --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_cargo_global_options_precede_the_subcommand(self) -> None:
+        # `cargo --locked test` is as valid as `cargo test --locked`.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo --locked test -p pa --features other --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_a_valued_global_option_does_not_hide_the_subcommand(self) -> None:
+        arguments = cargo_test_arguments(
+            ["cargo", "--color", "always", "test", "-p", "x", "--", "--ignored"]
+        )
+
+        self.assertIsNotNone(arguments)
+        self.assertTrue(runs_ignored_tests(arguments or []))
+
+    def test_another_cargo_subcommand_is_not_a_test_run(self) -> None:
+        self.assertIsNone(cargo_test_arguments(["cargo", "build", "-p", "x"]))
 
     def test_attached_option_forms_are_read(self) -> None:
         # Cargo accepts `--package=<spec>`; documentation uses it. Reading only
