@@ -38,7 +38,9 @@ head, and creation transaction were verified through PR #415
 scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
-(`agent/delegation-persistence-schema`); the model-settings command fields,
+(`agent/delegation-persistence-schema`); the delegated await and peer-message
+transaction locks were verified through this PR
+(`agent/delegation-runtime-persistence-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
@@ -646,6 +648,15 @@ Locks per transaction, in acquisition order:
   approval-judge, tool-loop, and lifecycle-transition transactions from holding
   these rows in reverse order.
 
+- **Delegated await and peer-message transactions**: before taking any scheduler
+  or relationship lock, await locks its parent delivery session and message
+  locks its recipient session `FOR NO KEY UPDATE`. Each transaction next locks
+  the issuing session's `session_scheduler` row `FOR UPDATE`, then the exact
+  `session_delegation` row `FOR UPDATE`. Delivery-sequence allocation runs while
+  the recipient session lock is held. Message recording claims the global
+  `message_id` before inserting the relationship event; a concurrent claim loser
+  returns the typed message-identity collision without leaving a partial event.
+
 - **ReplaceSessionDefaults**: an unseen command locks its
   `session_current_defaults` pointer row `FOR UPDATE` before loading and
   preparing against the current epoch. The compare-and-set `UPDATE` on that
@@ -1058,25 +1069,27 @@ turn's `awaiting_child` phase; a background row cannot and instead requires the
 exact completed effect-free attempt and normalized registration receipt for its
 awaiting request. `session_message` is append-only, uniquely orders messages per
 relationship, and requires exact parent/child sender and recipient plus the
-sending tool request. `session_child_result` has at most one row per spawning
-request and carries exactly one returned-text, failed, stopped, or cancelled
-shape with child turn provenance for returned, failed, result-unavailable, and
-child-originated terminal outcomes, or one of the same exclusive
-parent-turn-command and parent-goal-command provenance arms for a policy-driven
-stop or cancellation. Delivery satellites bind messages/results to their exact
-semantic entries; no transcript query supplies result content. Every pending
-message and background result delivery additionally receives one positive
-recipient-wide `delivery_sequence` under the recipient session lock. That
-sequence is unique and gap-free per recipient across both kinds; relationship
-ordinals remain relationship-local evidence and never order two different
-relationships. Foreground results stay ordered by their exact awaiting request
-and do not consume an inbox sequence. Their semantic entry repeats that awaiting
-request as the ordinary logical tool-result correlation, so the unchanged
-proposal-order and single-result checks admit it as the `await_session` result
-without admitting a second result for the same request. Tool-batch outbox
-decoding and context-compaction evidence count that foreground correlation as
-one tool result; a background result has no tool-result correlation and counts
-as neither one.
+sending tool request. A concurrent global `message_id` claim loser is a typed
+message-identity collision, not an unclassified database failure.
+`session_child_result` has at most one row per spawning request and carries
+exactly one returned-text, failed, stopped, or cancelled shape with child turn
+provenance for returned, failed, result-unavailable, and child-originated
+terminal outcomes, or one of the same exclusive parent-turn-command and
+parent-goal-command provenance arms for a policy-driven stop or cancellation.
+Delivery satellites bind messages/results to their exact semantic entries; no
+transcript query supplies result content. Every pending message and background
+result delivery additionally receives one positive recipient-wide
+`delivery_sequence` under the recipient session lock. That sequence is unique
+and gap-free per recipient across both kinds; relationship ordinals remain
+relationship-local evidence and never order two different relationships.
+Foreground results stay ordered by their exact awaiting request and do not
+consume an inbox sequence. Their semantic entry repeats that awaiting request as
+the ordinary logical tool-result correlation, so the unchanged proposal-order
+and single-result checks admit it as the `await_session` result without
+admitting a second result for the same request. Tool-batch outbox decoding and
+context-compaction evidence count that foreground correlation as one tool
+result; a background result has no tool-result correlation and counts as neither
+one.
 
 `session_delegation_wake_turn_origin` distinguishes an idle-recipient wake from
 the delegated child's initial task. It binds the queued turn to one contiguous
