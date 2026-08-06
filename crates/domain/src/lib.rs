@@ -250,7 +250,8 @@ pub use session_delegation::{
     ParentTerminationAuthority, ParentTerminationCommandSource, ParentTerminationKind,
     RejectedDelegationTransition, SessionDelegation, SessionDelegationReconstitutionError,
     SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput,
-    TerminalChildTurn,
+    TerminalChildTurn, await_session_tool_name, send_session_message_tool_name,
+    spawn_session_tool_name,
 };
 pub use session_metadata::{
     PreparedReplaceSessionMetadata, ReconstitutedReplaceSessionMetadata, ReplaceSessionMetadata,
