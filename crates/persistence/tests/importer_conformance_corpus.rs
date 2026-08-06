@@ -12,7 +12,12 @@
 //! under the domain's fixed version-1 projection. The remaining fixtures drive
 //! their public edge converters directly.
 
-use std::{fmt::Write, str};
+use std::{
+    env,
+    fmt::Write,
+    path::{Path, PathBuf},
+    str,
+};
 
 use expect_test::expect_file;
 use signalbox_application::ImportedConversationConverter;
@@ -33,6 +38,10 @@ use signalbox_domain::{
     SessionConfigurationDefaults, SessionId, TranscriptAncestry,
 };
 use sqlx::types::Uuid;
+
+/// Golden directory shared by every `expect_file!` above, stated once so the
+/// anchor guard below can resolve it from both directions.
+const GOLDEN_DIRECTORY: &str = "fixtures/importer-conformance/golden";
 
 const CLAUDE_V1_TOOL_ROUND: &[u8] =
     include_bytes!("fixtures/importer-conformance/claude-code-v1-tool-round.jsonl");
@@ -959,4 +968,32 @@ fn s28_inv038_inv039_import_only_resume_and_fork_match_golden() {
         }
     );
     expect_file!["fixtures/importer-conformance/golden/adoption-modes.txt"].assert_eq(&rendered);
+}
+
+/// Guards the anchor every `expect_file!` above resolves against.
+///
+/// expect-test joins a relative golden path onto `CARGO_WORKSPACE_DIR`, and
+/// without that variable onto the topmost ancestor of `CARGO_MANIFEST_DIR`
+/// holding a `Cargo.toml` — a walk that escapes a git linked worktree created
+/// inside its origin checkout and silently reads the origin's goldens, so a
+/// corrupted golden inside the worktree fails nothing. `.cargo/config.toml`
+/// pins the variable to the checkout being compiled; this test fails if that
+/// pin is removed or stops taking effect.
+#[test]
+fn s28_goldens_resolve_inside_the_compiled_checkout() {
+    let workspace_anchored = PathBuf::from(
+        env::var_os("CARGO_WORKSPACE_DIR")
+            .expect("`.cargo/config.toml` sets CARGO_WORKSPACE_DIR for cargo-run processes"),
+    )
+    .join("crates/persistence/tests")
+    .join(GOLDEN_DIRECTORY)
+    .canonicalize()
+    .expect("the workspace-anchored golden directory exists");
+    let manifest_anchored = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(GOLDEN_DIRECTORY)
+        .canonicalize()
+        .expect("the manifest-anchored golden directory exists");
+
+    assert_eq!(workspace_anchored, manifest_anchored);
 }

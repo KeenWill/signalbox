@@ -1,0 +1,20 @@
+# Anchors expect-test's file resolution to the checkout being compiled.
+#
+# `expect_file!` golden paths, and the source rewrites `UPDATE_EXPECT=1`
+# performs on inline `expect![...]` literals, are resolved relative to
+# `CARGO_WORKSPACE_DIR` when it is set. When it is not set, expect-test falls
+# back to walking up from `CARGO_MANIFEST_DIR` and taking the *topmost*
+# ancestor that contains a `Cargo.toml`. A git linked worktree created inside
+# this checkout — `.claude/worktrees/<name>`, the layout the agent workflow
+# uses — has this checkout's root as such an ancestor, so that walk escapes the
+# worktree: goldens are compared against the outer checkout's files and inline
+# expectations are rewritten into the outer checkout's sources. Corrupting a
+# golden inside the worktree then does not fail that worktree's tests.
+#
+# `relative = true` resolves the value against the directory holding this
+# `.cargo` directory, which is the root of whichever checkout Cargo discovered
+# the file in, so each worktree anchors to itself. `force = true` keeps an
+# inherited value from the surrounding environment from reintroducing the
+# escape.
+[env]
+CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
