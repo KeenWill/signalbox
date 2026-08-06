@@ -1588,7 +1588,7 @@ async fn delegation_history_rejects_initial_task_deletion() -> Result<(), Box<dy
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_outcome_rejects_a_later_child_turn() -> Result<(), Box<dyn Error>> {
+async fn s18_inv010_delegation_outcome_rejects_a_later_child_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let later_turn = TurnId::from_uuid(Uuid::from_u128(DELEGATION_HISTORY_FIXTURE_SEED + 0x500));
