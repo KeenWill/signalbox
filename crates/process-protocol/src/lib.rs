@@ -4573,7 +4573,7 @@ impl<'de> Deserialize<'de> for TurnState {
                 reason,
                 provenance,
             } => {
-                if !delegation_terminal_outcome_reason_matches(outcome, reason)
+                if !delegation_terminal_outcome_reason_is_admissible(outcome, reason)
                     || !parent_delegation_provenance_has_cascade(&provenance)
                 {
                     return Err(serde::de::Error::custom(
@@ -4711,7 +4711,7 @@ impl TurnState {
             provenance,
             ..
         } = self
-            && (!delegation_terminal_outcome_reason_matches(*outcome, *reason)
+            && (!delegation_terminal_outcome_reason_is_admissible(*outcome, *reason)
                 || !parent_delegation_provenance_has_cascade(provenance))
         {
             return Err(FrameValidationError::TurnStateShape);
@@ -5510,19 +5510,29 @@ fn validate_delegation_session_event(
             provenance,
             ..
         } => {
-            *child_session_id != session_id
-                && matches!(
+            matches!(
+                reason,
+                DelegationReason::ParentStopped | DelegationReason::ParentCancelled
+            ) && if *child_session_id == session_id {
+                // A descendant cascade also addresses the terminalization to
+                // the child itself so that live child followers observe it.
+                // That row carries the parent's cascade provenance, so the
+                // provenance parent is a different session than this header.
+                matches!(
+                    outcome,
+                    DelegationOutcome::Stopped | DelegationOutcome::Cancelled
+                ) && delegation_provenance_parent(provenance)
+                    .is_some_and(|parent| parent != session_id)
+                    && parent_delegation_provenance_has_cascade(provenance)
+            } else {
+                matches!(
                     outcome,
                     DelegationOutcome::Stopped
                         | DelegationOutcome::Cancelled
                         | DelegationOutcome::AlreadyTerminal
                         | DelegationOutcome::ContinueRunning
-                )
-                && matches!(
-                    reason,
-                    DelegationReason::ParentStopped | DelegationReason::ParentCancelled
-                )
-                && parent_delegation_provenance_is_cascade(session_id, provenance)
+                ) && parent_delegation_provenance_is_cascade(session_id, provenance)
+            }
         }
         _ => true,
     };
@@ -5606,6 +5616,19 @@ fn parent_delegation_provenance_is_cascade(
     }
 }
 
+/// Reads the commanding parent session out of a cascade provenance.
+fn delegation_provenance_parent(provenance: &DelegationProvenance) -> Option<CanonicalUuid> {
+    match provenance {
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        } => Some(*parent_session_id),
+        _ => None,
+    }
+}
+
 fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -> bool {
     match provenance {
         DelegationProvenance::ParentTurnCommand {
@@ -5621,17 +5644,23 @@ fn parent_delegation_provenance_has_cascade(provenance: &DelegationProvenance) -
     }
 }
 
-fn delegation_terminal_outcome_reason_matches(
+/// Admits every terminal outcome a parent cascade can impose on a child.
+///
+/// A bound relationship carries its own termination policy, so the child
+/// outcome is not required to match the parent reason: a parent cancellation
+/// may map to a child `stop`, and a parent stop may map to a child `cancel`.
+/// All four crossed pairs are therefore valid, exactly as `process_read`
+/// projects them.
+fn delegation_terminal_outcome_reason_is_admissible(
     outcome: DelegationOutcome,
     reason: DelegationReason,
 ) -> bool {
     matches!(
-        (outcome, reason),
-        (DelegationOutcome::Stopped, DelegationReason::ParentStopped)
-            | (
-                DelegationOutcome::Cancelled,
-                DelegationReason::ParentCancelled
-            )
+        outcome,
+        DelegationOutcome::Stopped | DelegationOutcome::Cancelled
+    ) && matches!(
+        reason,
+        DelegationReason::ParentStopped | DelegationReason::ParentCancelled
     )
 }
 
@@ -8139,22 +8168,33 @@ mod tests {
                 "child_session_id": "00000000-0000-0000-0000-000000000002"
             })
         );
-        assert!(
-            serde_json::from_value::<TurnState>(serde_json::json!({
-                "type": "delegation_terminated",
-                "spawning_request_id": "00000000-0000-0000-0000-000000000004",
-                "outcome": "stopped",
-                "reason": "parent_cancelled",
-                "provenance": {
-                    "type": "parent_goal_command",
-                    "parent_session_id": "00000000-0000-0000-0000-000000000001",
-                    "goal_generation": "2",
-                    "command_id": "00000000-0000-0000-0000-000000000007",
-                    "descendant_scope": "parent_and_descendants"
-                }
-            }))
-            .is_err()
-        );
+        // A terminal delegated turn admits only a parent-policy reason and a
+        // stopped/cancelled outcome. Crossed pairs such as
+        // stopped/parent_cancelled are valid under a bound relationship's own
+        // termination policy and are covered by
+        // `inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy`;
+        // these two remain inadmissible on either half.
+        for (outcome, reason) in [
+            ("stopped", "child_completed"),
+            ("already_terminal", "parent_cancelled"),
+        ] {
+            assert!(
+                serde_json::from_value::<TurnState>(serde_json::json!({
+                    "type": "delegation_terminated",
+                    "spawning_request_id": "00000000-0000-0000-0000-000000000004",
+                    "outcome": outcome,
+                    "reason": reason,
+                    "provenance": {
+                        "type": "parent_goal_command",
+                        "parent_session_id": "00000000-0000-0000-0000-000000000001",
+                        "goal_generation": "2",
+                        "command_id": "00000000-0000-0000-0000-000000000007",
+                        "descendant_scope": "parent_and_descendants"
+                    }
+                }))
+                .is_err()
+            );
+        }
         Ok(())
     }
 
@@ -8192,6 +8232,59 @@ mod tests {
                 }
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_delegation_terminal_turn_state_round_trips_crossed_parent_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A bound relationship maps the parent verb through its own policy, so
+        // a parent cancellation may terminalize a child with `stop` and a
+        // parent stop may terminalize it with `cancel`. All four pairs must
+        // survive validation and round trip, matching what `process_read`
+        // projects.
+        for (outcome, reason) in [
+            (DelegationOutcome::Stopped, DelegationReason::ParentStopped),
+            (
+                DelegationOutcome::Stopped,
+                DelegationReason::ParentCancelled,
+            ),
+            (
+                DelegationOutcome::Cancelled,
+                DelegationReason::ParentStopped,
+            ),
+            (
+                DelegationOutcome::Cancelled,
+                DelegationReason::ParentCancelled,
+            ),
+        ] {
+            let state = TurnState::DelegationTerminated {
+                spawning_request_id: uuid(4),
+                outcome,
+                reason,
+                provenance: DelegationProvenance::ParentGoalCommand {
+                    parent_session_id: uuid(1),
+                    goal_generation: CanonicalU64::new(2),
+                    command_id: uuid(7),
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            };
+            let encoded = serde_json::to_value(&state)?;
+            assert_eq!(serde_json::from_value::<TurnState>(encoded)?, state);
+
+            // `ServerFrame::validate` runs the same predicate for every
+            // transcript read and initial follow snapshot.
+            let frame = ServerFrame::try_new(
+                request(1)?,
+                ServerMessage::TranscriptTurn {
+                    turn_id: uuid(1),
+                    acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
+                    state: state.clone(),
+                },
+            )?;
+            assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        }
         Ok(())
     }
 
@@ -8319,6 +8412,7 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::QueuedDelegated {
                     spawning_request_id: uuid(2),
                     parent_session_id: uuid(3),
@@ -8326,7 +8420,7 @@ mod tests {
                     content: InputContent::new(String::from("delegated task")),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued_delegated","spawning_request_id":"00000000-0000-0000-0000-000000000002","parent_session_id":"00000000-0000-0000-0000-000000000003","parent_turn_id":"00000000-0000-0000-0000-000000000004","content":"delegated task"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued_delegated","spawning_request_id":"00000000-0000-0000-0000-000000000002","parent_session_id":"00000000-0000-0000-0000-000000000003","parent_turn_id":"00000000-0000-0000-0000-000000000004","content":"delegated task"}}"#,
         )
     }
 
@@ -8338,22 +8432,23 @@ mod tests {
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(1),
                 acceptance_position: CanonicalU64::new(2),
+                model_settings: None,
                 state: TurnState::QueuedDelegationWake {
                     first_delivery_sequence: CanonicalU64::new(3),
                     through_delivery_sequence: CanonicalU64::new(5),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"3","through_delivery_sequence":"5"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","model_settings":null,"state":{"type":"queued_delegation_wake","first_delivery_sequence":"3","through_delivery_sequence":"5"}}"#,
         )
     }
 
     #[test]
     fn delegation_wake_queued_turn_rejects_invalid_delivery_ranges() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"0","through_delivery_sequence":"5"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","model_settings":null,"state":{"type":"queued_delegation_wake","first_delivery_sequence":"0","through_delivery_sequence":"5"}}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","state":{"type":"queued_delegation_wake","first_delivery_sequence":"5","through_delivery_sequence":"3"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"2","model_settings":null,"state":{"type":"queued_delegation_wake","first_delivery_sequence":"5","through_delivery_sequence":"3"}}}"#,
         );
     }
 
@@ -12069,6 +12164,129 @@ mod tests {
             },
             r#"{"type":"session_event","cursor":"5","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"child_lifecycle_disposition","spawning_request_id":"00000000-0000-0000-0000-000000000002","child_session_id":"00000000-0000-0000-0000-000000000003","outcome":"stopped","reason":"parent_stopped","provenance":{"type":"parent_turn_command","parent_session_id":"00000000-0000-0000-0000-000000000001","parent_turn_id":"00000000-0000-0000-0000-000000000007","command_id":"00000000-0000-0000-0000-000000000008","descendant_scope":"parent_and_descendants"}}}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn child_addressed_lifecycle_disposition_round_trips_for_a_child_follower()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A descendant cascade addresses the terminalization to the child
+        // itself so live child followers observe it. The header session is the
+        // child, and the provenance still names the commanding parent.
+        for (outcome, reason) in [
+            (DelegationOutcome::Stopped, DelegationReason::ParentStopped),
+            (
+                DelegationOutcome::Cancelled,
+                DelegationReason::ParentCancelled,
+            ),
+            (
+                DelegationOutcome::Stopped,
+                DelegationReason::ParentCancelled,
+            ),
+            (
+                DelegationOutcome::Cancelled,
+                DelegationReason::ParentStopped,
+            ),
+        ] {
+            let frame = ServerFrame::try_new(
+                request(1)?,
+                ServerMessage::SessionEvent {
+                    cursor: CanonicalU64::new(5),
+                    session_id: uuid(3),
+                    event: SessionEvent::ChildLifecycleDisposition {
+                        spawning_request_id: uuid(2),
+                        child_session_id: uuid(3),
+                        outcome,
+                        reason,
+                        provenance: DelegationProvenance::ParentTurnCommand {
+                            parent_session_id: uuid(1),
+                            parent_turn_id: uuid(7),
+                            command_id: uuid(8),
+                            descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                        },
+                    },
+                },
+            )?;
+            assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn child_addressed_lifecycle_disposition_rejects_non_terminal_and_self_authored_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Continue-running and already-terminal remain parent-addressed only:
+        // they report a child the cascade did not terminalize.
+        let child_addressed_continue = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(1),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::ContinueRunning,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+        );
+        // A child-addressed row must carry a foreign parent's authority; it can
+        // never name itself as the commanding parent.
+        let self_commanded = ServerFrame::try_new(
+            request(2)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(3),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                },
+            },
+        );
+        // The parent-alone scope carries no descendant authority either way.
+        let child_addressed_parent_alone = ServerFrame::try_new(
+            request(3)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(3),
+                event: SessionEvent::ChildLifecycleDisposition {
+                    spawning_request_id: uuid(2),
+                    child_session_id: uuid(3),
+                    outcome: DelegationOutcome::Stopped,
+                    reason: DelegationReason::ParentStopped,
+                    provenance: DelegationProvenance::ParentTurnCommand {
+                        parent_session_id: uuid(1),
+                        parent_turn_id: uuid(7),
+                        command_id: uuid(8),
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                },
+            },
+        );
+
+        assert_eq!(
+            child_addressed_continue,
+            Err(FrameValidationError::DelegationShape)
+        );
+        assert_eq!(self_commanded, Err(FrameValidationError::DelegationShape));
+        assert_eq!(
+            child_addressed_parent_alone,
+            Err(FrameValidationError::DelegationShape)
+        );
         Ok(())
     }
 
