@@ -93,7 +93,8 @@ const POSTGRES_POOL_CONNECTIONS: u32 = 8;
 const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 const FAMILY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_FAMILY";
 const SUMMARY_VARIABLE: &str = "SIGNALBOX_TOOL_EVAL_SUMMARY";
-const MODEL: &str = "gpt-5-nano";
+const DEFAULT_MODEL: &str = "gpt-5-nano";
+const GIT_MODEL: &str = "gpt-5-mini";
 const MAX_OUTPUT_TOKENS: u32 = 1_024;
 const CONTEXT_WINDOW_TOKENS: u32 = 200_000;
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -128,7 +129,7 @@ async fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult
 
 async fn run_selected_family() -> EvalResult {
     let family = EvalFamily::from_environment()?;
-    let database = EvalDatabase::start().await?;
+    let database = EvalDatabase::start(family.model()).await?;
     let forced_suite = family.build_suite()?;
     let forced = run_forced_tier(&database, &forced_suite).await?;
     drop(forced_suite);
@@ -223,6 +224,13 @@ impl EvalFamily {
             Self::Workspace => "workspace",
             Self::Web => "web",
             Self::Exec => "exec",
+        }
+    }
+
+    const fn model(self) -> &'static str {
+        match self {
+            Self::Git => GIT_MODEL,
+            Self::Workspace | Self::Web | Self::Exec => DEFAULT_MODEL,
         }
     }
 
@@ -850,7 +858,7 @@ struct EvalDatabase {
 }
 
 impl EvalDatabase {
-    async fn start() -> EvalResult<Self> {
+    async fn start(model: &str) -> EvalResult<Self> {
         let container = Postgres::default()
             .with_db_name(DATABASE_NAME)
             .with_user(DATABASE_USER)
@@ -880,7 +888,7 @@ impl EvalDatabase {
         let runtime_models =
             RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
                 target,
-                String::from(MODEL),
+                String::from(model),
                 MAX_OUTPUT_TOKENS,
                 CONTEXT_WINDOW_TOKENS,
             )?])?;
@@ -1180,8 +1188,9 @@ fn write_report(report: &FamilyReport) -> EvalResult {
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("the tool-eval summary path is missing"))?;
     let mut markdown = format!(
-        "## {} daemon tool eval — `{MODEL}`\n\n### Forced tier\n\n| Tool | Result | Calls observed | Tool result round-trips | Turn |\n| --- | --- | --- | ---: | --- |\n",
-        report.family.as_str()
+        "## {} daemon tool eval — `{}`\n\n### Forced tier\n\n| Tool | Result | Calls observed | Tool result round-trips | Turn |\n| --- | --- | --- | ---: | --- |\n",
+        report.family.as_str(),
+        report.family.model(),
     );
     for outcome in &report.forced {
         let target = outcome.target.as_deref().unwrap_or("missing target");
