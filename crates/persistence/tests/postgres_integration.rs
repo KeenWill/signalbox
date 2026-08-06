@@ -6503,8 +6503,8 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         (String::from("known_failed"), String::from("crash_lost"))
     );
 
-    let disposition: String = sqlx::query_scalar(
-        "SELECT terminal_disposition_kind
+    let (disposition, terminal_frontier_id): (String, Uuid) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_frontier_id
            FROM turn_lifecycle
           WHERE session_id = $1
             AND turn_id = $2",
@@ -6552,11 +6552,25 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         "an interrupt that consumed the batch makes a stale continuation hint no work"
     );
 
+    let cancellation_entry_id: Uuid = sqlx::query_scalar(
+        "SELECT semantic_entry_id
+           FROM semantic_transcript_entry
+          WHERE cancelled_turn_id = $1
+            AND payload_kind = 'turn_cancelled'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
     let cancellation_events = drain_cancellation_dispatches(&pool).await?;
-    assert_eq!(cancellation_events.len(), 1);
     assert_eq!(
-        cancellation_events[0].1, fixture.turn,
-        "tool-batch cancellation must remain deliverable after its producing call",
+        cancellation_events,
+        vec![(
+            fixture.session,
+            fixture.turn,
+            SemanticTranscriptEntryId::from_uuid(cancellation_entry_id),
+            ContextFrontierId::from_uuid(terminal_frontier_id),
+        )]
     );
 
     let follow_up = SubmitInputRepository::new(pool.clone())
@@ -21560,7 +21574,14 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         panic!("matching interrupt records its successor origin")
     };
     assert_eq!(applied.turn(), matching_successor_turn);
-    assert!(applied.applied_interrupt().is_some());
+    assert_eq!(
+        applied
+            .applied_interrupt()
+            .expect("matching interrupt retains proof")
+            .proof()
+            .predecessor(),
+        active_origin_turn
+    );
     let claimed: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM durable_command WHERE command_id = $1),
