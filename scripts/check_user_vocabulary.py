@@ -217,7 +217,7 @@ ALLOWLIST = (
             r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
             r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
             r"apps/signalboxd/tests/process_substrate[.]rs|"
-            r"crates/model-runtime-codex-cli/tests/live_smoke[.]rs|"
+            r"crates/model-runtime-(?:claude|codex)-cli/tests/live_smoke[.]rs|"
             r"docs/spec/(?:configuration-and-credentials|process-protocol|"
             r"runner-protocol)[.]md)$"
         ),
