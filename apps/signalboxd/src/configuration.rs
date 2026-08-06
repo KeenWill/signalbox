@@ -1368,9 +1368,11 @@ impl HubModelConfiguration {
 }
 
 #[cfg(test)]
+const EXAMPLE_EXEC_SUPERVISOR: &str = "/usr/local/bin/signalbox-exec-supervisor";
+
+#[cfg(test)]
 pub(crate) fn checked_in_example_configuration()
 -> Result<HubModelConfiguration, HubModelConfigurationError> {
-    const EXAMPLE_EXEC_SUPERVISOR: &str = "/usr/local/bin/signalbox-exec-supervisor";
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml");
     let content = fs::read_to_string(path).map_err(|_| HubModelConfigurationError::Read)?;
     let executable = std::env::current_exe().map_err(|_| HubModelConfigurationError::Read)?;
@@ -3936,6 +3938,8 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         let daemon_tools = configuration
             .daemon_tools()
             .expect("fixture tool mappings are complete");
+        let expected_exec_supervisor = std::fs::canonicalize(EXEC_SUPERVISOR_EXECUTABLE)
+            .expect("fixture supervisor path has a canonical target");
         assert_eq!(
             daemon_tools.workspace_root(),
             Path::new("/srv/signalbox/workspace")
@@ -3945,7 +3949,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(daemon_tools.git_identity().email(), GIT_AUTHOR_EMAIL);
         assert_eq!(
             daemon_tools.exec_supervisor_executable(),
-            Path::new(EXEC_SUPERVISOR_EXECUTABLE)
+            expected_exec_supervisor
         );
         assert_eq!(
             daemon_tools.github_egress_policy().admitted_origin(),
@@ -5361,7 +5365,10 @@ context_window_tokens = 200000
 mod checked_in_example {
     use std::path::{Path, PathBuf};
 
-    use super::{HubModelConfiguration, ModelAdapter, checked_in_example_configuration};
+    use super::{
+        EXAMPLE_EXEC_SUPERVISOR, HubModelConfiguration, ModelAdapter,
+        checked_in_example_configuration,
+    };
 
     fn example_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/signalboxd.example.toml")
@@ -5439,6 +5446,7 @@ mod checked_in_example {
             .replace(CLAUDE_EXECUTABLE_PLACEHOLDER, &executable)
             .replace(CLAUDE_BRIDGE_PLACEHOLDER, &executable)
             .replace(CODEX_EXECUTABLE_PLACEHOLDER, &executable)
+            .replace(EXAMPLE_EXEC_SUPERVISOR, &executable)
             .replace(WORKING_DIRECTORY_PLACEHOLDER, &working_directory)
     }
 

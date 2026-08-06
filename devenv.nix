@@ -49,6 +49,7 @@ let
   daemonHome = "${stateRoot}/home";
 
   daemonConfigFile = "${stateRoot}/signalboxd.toml";
+  daemonRuntimeConfigFile = "${daemonSocketDirectory}/signalboxd.toml";
   daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
   daemonBraveApiKeyFile = "${stateRoot}/brave-api-key";
 
@@ -411,36 +412,25 @@ in
       # registry and the ambient certificate variables to reach crates.io.
       # Only the daemon itself runs scrubbed.
       #
-      # The artifact path comes from Cargo's own build output rather than an
-      # assumed $target_dir/debug: a developer with `build.target` in their
-      # Cargo configuration, or CARGO_BUILD_TARGET in the environment — both
-      # inherited here, because this build is deliberately unscrubbed — gets
-      # the executable under $target_dir/<triple>/debug instead. Diagnostics
-      # still render to stderr; only the JSON artifact stream is captured.
-      daemon_executable="$(
-        cargo build --package signalboxd --bin signalboxd \
-          --message-format=json-render-diagnostics |
-          python3 -c "import json, sys; print([message['executable'] for message in map(json.loads, sys.stdin) if message.get('executable')][-1])"
-      )"
-
-      # Resolving the artifact says where Cargo put it, not whether this host
-      # can run it: a configured foreign target with a working cross toolchain
-      # builds successfully and only the exec below fails. Compare against the
-      # two layouts a host build produces — plain, and an explicitly named host
-      # target — and refuse anything else with an actionable message.
       target_directory="$(
         cargo metadata --no-deps --format-version 1 |
           python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])"
       )"
-      host_target="$(rustc -vV | sed -n 's/^host: //p')"
-      if [ "$daemon_executable" != "$target_directory/debug/signalboxd" ] \
-         && [ "$daemon_executable" != "$target_directory/$host_target/debug/signalboxd" ]; then
-        echo "dev instance: cargo built signalboxd for a target this host cannot" \
-             "run:" "$daemon_executable" >&2
-        echo "dev instance: unset build.target and CARGO_BUILD_TARGET, or set" \
-             "them to" "$host_target" >&2
-        exit 1
-      fi
+
+      # Resolve both separately packaged executables through Cargo's artifact
+      # stream. The shared resolver also refuses a configured foreign target
+      # rather than letting either later exec fail or select a stale host
+      # artifact from an assumed target/debug layout.
+      daemon_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalboxd signalboxd
+      )"
+      supervisor_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalbox-tools-exec signalbox-exec-supervisor
+      )"
 
       # Recreated here rather than in the provisioning task because the
       # runtime directory does not survive between runs. Mode 0700 is exact:
@@ -448,6 +438,38 @@ in
       # own runtime directory.
       mkdir -p ${shellArg daemonSocketDirectory}
       chmod 700 ${shellArg daemonSocketDirectory}
+
+      # The checked-in example carries an installation placeholder, while a
+      # dev instance seeded before the exec suite existed has no daemon_tools
+      # table. Materialize a runtime-only copy that resolves the placeholder or
+      # adds the missing dev-managed table. An explicitly configured table is
+      # preserved and remains subject to the ordinary fail-closed parser.
+      cp ${shellArg daemonConfigFile} ${shellArg daemonRuntimeConfigFile}
+      python3 -c ${shellArg ''
+        import json
+        import re
+        import sys
+        from pathlib import Path
+
+        config_path = Path(sys.argv[1])
+        supervisor = sys.argv[2]
+        content = config_path.read_text()
+        setting = f"exec_supervisor_executable = {json.dumps(supervisor)}"
+        placeholder = re.compile(
+            r'^exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"\r?$',
+            re.MULTILINE,
+        )
+        daemon_tools = re.compile(
+            r'^\[daemon_tools\][ \t]*(?:#.*)?\r?$',
+            re.MULTILINE,
+        )
+        if placeholder.search(content):
+            content = placeholder.sub(setting, content, count=1)
+        elif not daemon_tools.search(content):
+            content = f"{content.rstrip()}\n\n[daemon_tools]\n{setting}\n"
+        config_path.write_text(content)
+      ''} ${shellArg daemonRuntimeConfigFile} "$supervisor_executable"
+      chmod 600 ${shellArg daemonRuntimeConfigFile}
 
       # Deployment-owned credential channels: one file per secret. The launcher
       # always passes all three channels; naming a
@@ -466,7 +488,7 @@ in
       exec env ${scrub} \
         HOME=${shellArg daemonHome} \
         DATABASE_URL=${shellArg databaseUrl} \
-        SIGNALBOX_CONFIG_FILE=${shellArg daemonConfigFile} \
+        SIGNALBOX_CONFIG_FILE=${shellArg daemonRuntimeConfigFile} \
         SIGNALBOX_TEMPLATE_CONFIG_FILE=${shellArg daemonTemplateConfigFile} \
         ANTHROPIC_API_KEY_FILE="$key_file" \
         BRAVE_API_KEY_FILE="$search_key_file" \
