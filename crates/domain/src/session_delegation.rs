@@ -13,6 +13,21 @@ const SPAWN_SESSION_TOOL_NAME: &str = "spawn_session";
 const AWAIT_SESSION_TOOL_NAME: &str = "await_session";
 const SEND_SESSION_MESSAGE_TOOL_NAME: &str = "send_session_message";
 
+/// Returns the persisted model-facing child-spawn tool name.
+pub const fn spawn_session_tool_name() -> &'static str {
+    SPAWN_SESSION_TOOL_NAME
+}
+
+/// Returns the persisted model-facing child-result wait tool name.
+pub const fn await_session_tool_name() -> &'static str {
+    AWAIT_SESSION_TOOL_NAME
+}
+
+/// Returns the persisted model-facing bidirectional-message tool name.
+pub const fn send_session_message_tool_name() -> &'static str {
+    SEND_SESSION_MESSAGE_TOOL_NAME
+}
+
 /// Action applied to a bound child when its parent terminalizes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BoundChildAction {
