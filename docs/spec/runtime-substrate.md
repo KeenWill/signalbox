@@ -249,6 +249,16 @@ only after the complete upload. Why: without full-upload proof a refusal token
 cannot satisfy the completed-exchange precondition for the refusal disposition,
 so the adapter fails toward known failure rather than inventing evidence.
 
+Post-finish error records: once a stream has reported why generation stopped, a
+later error record that classifies as `Unrecognized` is a protocol violation
+rather than definitive provider evidence. Why: it supersedes the reported finish
+with no classifiable failure, and it would otherwise reach the caller wearing
+exactly the shape the refusal downgrade above produces — an HTTP 200 exchange,
+`Unrecognized`, and the same absent or fabricated native material — leaving a
+genuine failure indistinguishable from a decoded refusal. An error record that
+*does* classify still outranks the reported finish, because it carries
+information the finish does not.
+
 ## SSE framing
 
 `SseFraming` is a provider-agnostic incremental parser from transport byte
@@ -442,16 +452,14 @@ request in addition to that alternate target.
 
 The OpenAI adapter carries a gated live compatibility smoke
 (`.github/workflows/openai-smoke.yml`) that spends one real exchange against the
-cheapest model this repository's own OpenAI catalog records as carrying no
-reasoning control — `gpt-4.1-mini`, for the determinism reason given below — run
-through this crate's own `ModelRuntime` implementation with a small fixed prompt
-and no provider-side prompt caching: at one exchange per gated run a cache write
-is never amortized by a later read, so caching would raise the cost of the run
-it is meant to cheapen. Unlike the Codex CLI smoke, there is no locally
-installed executable and therefore no version to verify beforehand; the adapter
-targets the provider's stable public API directly, so spending the one exchange
-is the whole smoke rather than a second gate behind a credential-free version
-probe.
+cheapest model the provider currently advertises — `gpt-5-nano` — run through
+this crate's own `ModelRuntime` implementation with a small fixed prompt and no
+provider-side prompt caching: at one exchange per gated run a cache write is
+never amortized by a later read, so caching would raise the cost of the run it
+is meant to cheapen. Unlike the Codex CLI smoke, there is no locally installed
+executable and therefore no version to verify beforehand; the adapter targets
+the provider's stable public API directly, so spending the one exchange is the
+whole smoke rather than a second gate behind a credential-free version probe.
 
 The smoke asserts only the protocol surfaces a provider-side change would move:
 a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
@@ -489,16 +497,15 @@ requirements above therefore apply to the two decoded shapes, which reach the
 caller only after that chunk is consumed; the ceiling shape is held to the
 success status and its own finish token.
 
-The smoke's target is deliberately a non-reasoning model, which is a separate
-concern from that ceiling. A reasoning model spends hidden reasoning tokens
-against the same ceiling as visible content, and Chat Completions offers no
-control that caps them below it — `reasoning_effort` is a qualitative hint, so
-even its lowest setting leaves the worst case unbounded. Such a run can consume
-the entire budget before emitting any visible reply, so it proves less about the
-response envelope while costing the same. A target with no reasoning tier makes
-every token billed against the ceiling visible output, and the ceiling a pure
-cost cap. The operation therefore sets no explicit provider control, and the
-smoke's `ModelCapabilityCatalog` is correspondingly empty.
+Accepting that shape is what makes the smoke's reasoning-capable target safe as
+a required check. Hidden reasoning tokens bill against the same ceiling as
+visible content, and Chat Completions offers no control that caps them below it
+— `reasoning_effort` is a qualitative hint, so even its lowest setting leaves
+the worst case unbounded. No effort is pinned here: this repository's own OpenAI
+catalog records that the `"minimal"` effort is listed by no current model page
+and appears on no row, so pinning it would assert a capability the repository
+does not claim. The operation therefore sets no explicit provider control, and
+the smoke's `ModelCapabilityCatalog` is correspondingly empty.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
 the adapter crate or the workflow itself — an explicit exception to

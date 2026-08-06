@@ -69,44 +69,31 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 /// `.github/workflows/openai-smoke.yml`.
 const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 
-/// The cheapest model this repository's own OpenAI catalog records as having
-/// no reasoning control, so a compatibility run costs a small fraction of a
-/// cent *and* cannot truncate nondeterministically.
+/// The cheapest current OpenAI model, chosen so a compatibility run costs a
+/// small fraction of a cent. Owner-selected for this smoke.
 ///
-/// A `gpt-5`-family target always reasons: hidden reasoning tokens bill
-/// against the same `max_completion_tokens` ceiling as visible output, and no
-/// wire control caps them below that ceiling — `reasoning_effort` is a
-/// qualitative hint, not a token budget, so even its lowest setting leaves the
-/// worst case unbounded. Consuming the ceiling that way returns
-/// `finish_reason: "length"`, which this adapter deliberately refuses to
+/// This is a reasoning model, so hidden reasoning tokens bill against the same
+/// `max_completion_tokens` ceiling as visible output, and no wire control caps
+/// them below it — `reasoning_effort` is a qualitative hint, not a token
+/// budget. A run that spends the ceiling that way returns
+/// `finish_reason: "length"`, which this adapter deliberately declines to
 /// decode (`map_finish` in `src/response.rs`: OpenAI reuses `length` for both
 /// the requested output ceiling and the model's context limit, and the adapter
-/// will not guess which one occurred), so the exchange fails as
-/// `BoundaryLoss` — indistinguishable from a real compatibility break. A
-/// required, twice-daily paid check cannot carry that stochastic red, and a
-/// target with no reasoning tier removes the whole failure class structurally
-/// rather than lowering its odds. That also mirrors the Anthropic smoke, whose
-/// target spends no hidden reasoning either because extended thinking there is
-/// opt-in per request.
-///
-/// `gpt-4.1-mini` rather than its cheaper `nano` sibling: the model catalog in
-/// `config/signalboxd.example.toml` deliberately omits `gpt-4.1-nano` because
-/// the provider's deprecation summary retires it while its own model page
-/// carries no such notice, and that conflict is unresolved. A merge-gating
-/// check is the last place to depend on a target this repository has already
-/// decided it cannot vouch for; the price difference on a one-word exchange is
-/// far below a cent either way.
-const MODEL: &str = "gpt-4.1-mini";
+/// will not guess which one occurred). That outcome is *accepted* rather than
+/// designed away — see `require_decoded_response`, which recognizes the
+/// ceiling shape explicitly — so this target's reasoning tier cannot redden a
+/// required, twice-daily check.
+const MODEL: &str = "gpt-5-nano";
 
 /// A trivial prompt keeps the exchange to the smallest billable turn that
 /// still exercises the whole response envelope.
 const PROMPT: &str = "Reply with the single word: ready";
 
-/// A generous ceiling for a one-word reply, kept only as a cost cap. With a
-/// non-reasoning `MODEL` (see above) every token billed against this ceiling
-/// is visible output the prompt already bounds, so the ceiling is no longer
-/// load-bearing for determinism: it exists so a pathological run cannot spend
-/// more than a fraction of a cent.
+/// A generous ceiling for a one-word reply, kept as a cost cap. It is not the
+/// determinism guarantee: `MODEL` reasons, so this ceiling also bounds hidden
+/// reasoning tokens, and a run that exhausts it truncates. What keeps that
+/// from reddening the check is `require_decoded_response` accepting the
+/// resulting shape, not this number being large enough.
 const MAX_OUTPUT_TOKENS: u32 = 512;
 
 /// Bounds the one exchange well inside the workflow job's 10-minute budget.
@@ -123,7 +110,11 @@ const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// defaults. The capability catalog stays empty: it gates explicit provider
 /// controls (reasoning effort, fast mode, service tier) against an exact-target
 /// record, and this operation sets none of them, so an entry would only assert
-/// a capability this smoke never exercises.
+/// a capability this smoke never exercises. In particular no reasoning effort
+/// is pinned — this repository's own OpenAI catalog records that the
+/// `"minimal"` effort "is listed by no current model page and appears on no
+/// row" (`config/signalboxd.example.toml`), so pinning it would assert a
+/// capability the repository does not claim.
 fn openai_config() -> OpenAiConfig {
     let mut config = OpenAiConfig::new();
     config.exchange_timeout = EXCHANGE_TIMEOUT;

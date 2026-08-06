@@ -116,6 +116,20 @@ impl StreamDecoder {
             // with no HTTP status of its own it classifies by native code.
             let code = error.code_text();
             let kind = classify_error_envelope(0, code.as_deref(), error.error_type.as_deref());
+            if self.finish.is_some()
+                && kind == signalbox_model_runtime::ProviderErrorKind::Unrecognized
+            {
+                // The provider already reported why generation stopped, and
+                // this record names no failure the adapter can classify, so it
+                // supersedes that finish with nothing. Worse, it is then
+                // byte-identical to the refusal downgrade `execute` applies —
+                // an HTTP 200 exchange, `Unrecognized`, and no native material
+                // — which would let a genuine failure pass as a decoded
+                // refusal. A record that *does* classify still outranks the
+                // finish, because it carries information the finish does not.
+                return self
+                    .violation("unclassifiable error record follows the reported finish_reason");
+            }
             return StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
                 ProviderErrorEvidence {
                     exchange: self.exchange.clone(),
@@ -960,6 +974,34 @@ mod tests {
         assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
         assert_eq!(error.usage.input_tokens, Some(25));
         assert_eq!(error.usage.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn an_unclassifiable_error_after_the_finish_is_protocol_loss() {
+        // The sibling above keeps a *typed* error outranking the finish,
+        // because it carries information the finish does not. One that names
+        // no classifiable failure carries none, and would reach the caller
+        // wearing the exact shape `execute` gives a downgraded refusal — HTTP
+        // 200, `Unrecognized`, no native material — so a genuine failure could
+        // pass as a decoded refusal. It must stay a protocol violation.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: {\"error\":{}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("an unclassifiable post-finish error record is protocol loss");
+        };
+        assert_eq!(
+            loss.cause,
+            LossCause::StreamProtocolViolation {
+                detail: "unclassifiable error record follows the reported finish_reason"
+                    .to_string()
+            }
+        );
     }
 
     #[test]
