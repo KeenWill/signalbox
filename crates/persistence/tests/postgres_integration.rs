@@ -2208,8 +2208,8 @@ async fn delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s19_delegation_cascade_rejects_unrelated_disposition_source() -> Result<(), Box<dyn Error>>
-{
+async fn s19_inv010_delegation_cascade_rejects_unrelated_disposition_source()
+-> Result<(), Box<dyn Error>> {
     let spawn_arguments = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
