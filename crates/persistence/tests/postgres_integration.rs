@@ -1407,6 +1407,58 @@ async fn s17_inv010_inv012_wait_replay_rejects_cross_wired_stored_turn()
     Ok(())
 }
 
+/// S18 / INV-010 / INV-012: relationship reconstitution rejects stored spawn
+/// provenance carrying a field outside the tool-request variant.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_spawn_reconstitution_rejects_contradictory_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DROP CONSTRAINT session_delegation_event_provenance_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_delegation_event
+            SET provenance_goal_generation = 1
+          WHERE spawning_tool_request_id = $1
+            AND event_kind = 'spawned'",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("spawn reconstitution rejects contradictory provenance fields");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("spawn event provenance")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S17 / INV-010 / INV-012: background-wait replay authenticates the exact
 /// completed effect-free attempt and normalized registration receipt.
 #[tokio::test(flavor = "multi_thread")]
@@ -1508,6 +1560,146 @@ async fn s17_inv010_inv012_foreground_wait_replay_requires_exact_terminal_attemp
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Inconsistent("stored wait attempt")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: foreground-wait replay authenticates the delivery
+/// satellite required by an already-recorded child result.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_foreground_wait_replay_requires_result_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Foreground,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "WITH event AS (
+            INSERT INTO session_delegation_event
+                (spawning_tool_request_id, event_ordinal, event_kind,
+                 outcome_kind, reason_kind, provenance_kind,
+                 provenance_session_id, provenance_turn_id)
+            VALUES ($1, 2, 'outcome_recorded', 'child_failed',
+                    'child_execution_failed', 'child_turn', $2, $3)
+            RETURNING spawning_tool_request_id, event_ordinal, event_kind,
+                      outcome_kind
+         )
+         INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         SELECT spawning_tool_request_id, event_ordinal, event_kind,
+                outcome_kind, NULL FROM event",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.initial_turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("foreground replay requires its result-delivery satellite");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored wait delivery")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: background-wait replay rejects a delivery
+/// satellite cross-wired to a different recipient and missing its pending row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_background_wait_replay_requires_exact_result_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result DISABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery DISABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "WITH event AS (
+            INSERT INTO session_delegation_event
+                (spawning_tool_request_id, event_ordinal, event_kind,
+                 outcome_kind, reason_kind, provenance_kind,
+                 provenance_session_id, provenance_turn_id)
+            VALUES ($1, 2, 'outcome_recorded', 'child_failed',
+                    'child_execution_failed', 'child_turn', $2, $3)
+            RETURNING spawning_tool_request_id, event_ordinal, event_kind,
+                      outcome_kind
+         ), result AS (
+            INSERT INTO session_child_result
+                (spawning_tool_request_id, event_ordinal, event_kind,
+                 outcome_kind, content_text)
+            SELECT spawning_tool_request_id, event_ordinal, event_kind,
+                   outcome_kind, NULL FROM event
+         )
+         INSERT INTO session_child_result_delivery
+            (awaiting_tool_request_id, spawning_tool_request_id,
+             parent_session_id, delivery_sequence, delivery_kind)
+         VALUES ($4, $1, $2, 1, 'background_result')",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.initial_turn.into_uuid())
+    .bind(fixture.awaiting_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result ENABLE TRIGGER ALL;
+         ALTER TABLE session_child_result_delivery ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("background replay requires exact result-delivery satellites");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored wait delivery")
     );
 
     pool.close().await;
@@ -20086,8 +20278,9 @@ async fn s17_inv032_delegated_reconciliation_withholds_result_and_parent_deliver
     Ok(())
 }
 
-/// S17 / INV-032: a child terminal commit waits for its parent session before
-/// taking the relationship lock, matching descendant-cascade lock order.
+/// S17 / INV-010 / INV-032: a child terminal commit takes the canonical parent
+/// session before the child scheduler and relationship, matching peer-message
+/// and descendant-cascade lock order.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
@@ -20135,6 +20328,15 @@ async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
     sqlx::query("SET LOCAL lock_timeout = '250ms'")
         .execute(&mut *parent_lock)
         .await?;
+    let locked_child_scheduler: Uuid = sqlx::query_scalar(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(child.into_uuid())
+    .fetch_one(&mut *parent_lock)
+    .await?;
     let locked_request: Uuid = sqlx::query_scalar(
         "SELECT spawning_tool_request_id
            FROM session_delegation
@@ -20144,6 +20346,7 @@ async fn s17_inv032_delegated_terminal_result_locks_parent_before_relationship()
     .bind(spawning_request.into_uuid())
     .fetch_one(&mut *parent_lock)
     .await?;
+    assert_eq!(locked_child_scheduler, child.into_uuid());
     assert_eq!(locked_request, spawning_request.into_uuid());
     parent_lock.commit().await?;
     let committed = terminal.await??;

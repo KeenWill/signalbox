@@ -331,6 +331,7 @@ impl SessionDelegationRepository {
                 }
                 validate_wait_replay_attempt(&mut transaction, request.request(), dispatch, wait)
                     .await?;
+                validate_wait_replay_delivery(&mut transaction, wait).await?;
                 return Ok(RecordDelegationWaitOutcome::Recorded(
                     RecordedDelegationWait { wait },
                 ));
@@ -1219,6 +1220,86 @@ async fn load_wait_replay(
     .transpose()
 }
 
+async fn validate_wait_replay_delivery(
+    connection: &mut PgConnection,
+    wait: DelegationWait,
+) -> Result<(), SessionDelegationRepositoryError> {
+    let row = sqlx::query(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM session_child_result
+                 WHERE spawning_tool_request_id = $2
+            ) AS result_exists,
+            delivery.awaiting_tool_request_id AS delivery_awaiting_request_id,
+            delivery.spawning_tool_request_id AS delivery_spawning_request_id,
+            delivery.parent_session_id AS delivery_parent_session_id,
+            delivery.delivery_sequence,
+            delivery.delivery_kind,
+            pending.recipient_session_id AS pending_recipient_session_id,
+            pending.delivery_sequence AS pending_delivery_sequence,
+            pending.delivery_kind AS pending_delivery_kind
+           FROM (VALUES (1)) AS singleton(value)
+           LEFT JOIN session_child_result_delivery AS delivery
+             ON delivery.awaiting_tool_request_id = $1
+           LEFT JOIN session_pending_delivery AS pending
+             ON pending.recipient_session_id = delivery.parent_session_id
+            AND pending.delivery_sequence = delivery.delivery_sequence
+            AND pending.delivery_kind = delivery.delivery_kind",
+    )
+    .bind(tool_request_id_to_uuid(wait.awaiting_request()))
+    .bind(tool_request_id_to_uuid(wait.spawning_request()))
+    .fetch_one(connection)
+    .await?;
+    let result_exists: bool = required(&row, "result_exists")?;
+    let awaiting: Option<Uuid> = optional(&row, "delivery_awaiting_request_id")?;
+    let spawning: Option<Uuid> = optional(&row, "delivery_spawning_request_id")?;
+    let parent: Option<Uuid> = optional(&row, "delivery_parent_session_id")?;
+    let sequence: Option<Decimal> = optional(&row, "delivery_sequence")?;
+    let kind: Option<String> = optional(&row, "delivery_kind")?;
+    let pending_recipient: Option<Uuid> = optional(&row, "pending_recipient_session_id")?;
+    let pending_sequence: Option<Decimal> = optional(&row, "pending_delivery_sequence")?;
+    let pending_kind: Option<String> = optional(&row, "pending_delivery_kind")?;
+    let exact_header = awaiting == Some(tool_request_id_to_uuid(wait.awaiting_request()))
+        && spawning == Some(tool_request_id_to_uuid(wait.spawning_request()))
+        && parent == Some(session_id_to_uuid(wait.parent()));
+    let valid = match (result_exists, wait.mode()) {
+        (false, _) => {
+            awaiting.is_none()
+                && spawning.is_none()
+                && parent.is_none()
+                && sequence.is_none()
+                && kind.is_none()
+                && pending_recipient.is_none()
+                && pending_sequence.is_none()
+                && pending_kind.is_none()
+        }
+        (true, DelegationWaitMode::Foreground) => {
+            exact_header
+                && sequence.is_none()
+                && kind.is_none()
+                && pending_recipient.is_none()
+                && pending_sequence.is_none()
+                && pending_kind.is_none()
+        }
+        (true, DelegationWaitMode::Background) => {
+            let positive_sequence = sequence
+                .map(|value| decode_positive(value, "delivery_sequence"))
+                .transpose()?;
+            exact_header
+                && positive_sequence.is_some()
+                && kind.as_deref() == Some("background_result")
+                && pending_recipient == Some(session_id_to_uuid(wait.parent()))
+                && pending_sequence == sequence
+                && pending_kind == kind
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SessionDelegationCorruption::Inconsistent("stored wait delivery").into())
+    }
+}
+
 async fn find_relation_for_wait(
     connection: &mut PgConnection,
     request: &DelegationAwaitRequest,
@@ -1405,10 +1486,14 @@ fn validate_spawn_event(
     let session = session_id_from_uuid(required(row, "provenance_session_id")?);
     let turn = turn_id_from_uuid(required(row, "provenance_turn_id")?);
     let request = tool_request_id_from_uuid(required(row, "provenance_tool_request_id")?);
+    let goal_generation: Option<Decimal> = optional(row, "provenance_goal_generation")?;
+    let command: Option<Uuid> = optional(row, "provenance_command_id")?;
     if kind != "tool_request"
         || session != spawn.request().session()
         || turn != spawn.request().turn()
         || request != spawn.request().id()
+        || goal_generation.is_some()
+        || command.is_some()
     {
         return Err(SessionDelegationCorruption::Inconsistent("spawn event provenance").into());
     }
@@ -2218,8 +2303,8 @@ fn validate_message_provenance(
     let session = session_id_from_uuid(required(row, "provenance_session_id")?);
     let turn = turn_id_from_uuid(required(row, "provenance_turn_id")?);
     let tool_request = tool_request_id_from_uuid(required(row, "provenance_tool_request_id")?);
-    let goal_generation: Option<Decimal> = row.try_get("provenance_goal_generation")?;
-    let command: Option<Uuid> = row.try_get("provenance_command_id")?;
+    let goal_generation: Option<Decimal> = optional(row, "provenance_goal_generation")?;
+    let command: Option<Uuid> = optional(row, "provenance_command_id")?;
     if kind != "tool_request"
         || session != request.session()
         || turn != request.turn()
