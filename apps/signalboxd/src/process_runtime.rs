@@ -2446,6 +2446,11 @@ fn process_delegation_rejection_for_recipient(
                 ..
             },
         ) => RejectionDetail::DelegationMessageConflict { tool_request_id },
+        ProcessDelegationRequestRejection::MessageIdentityCollision { message } => {
+            RejectionDetail::DelegationMessageIdentityCollision {
+                message_id: wire_uuid(message.into_uuid()),
+            }
+        }
         ProcessDelegationRequestRejection::Operation(
             DelegationOperationRejection::RelationshipNotFound,
         ) => RejectionDetail::DelegationRelationNotFound {
@@ -13600,17 +13605,17 @@ mod tests {
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
-        FastModeOverlay, FastModeSupport, FrozenAliasDefinition, FrozenModelSelection, Goal,
-        GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
-        ModelCapabilities, ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
-        ModelSettingsPrecedence, ReasoningLevel, ReviewPass, ReviewPassAcceptedInputEvidence,
-        ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
-        ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
-        ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewWorkflowKind,
-        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
-        SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
+        AcceptedInputId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+        DurableCommandId, FastModeOverlay, FastModeSupport, FrozenAliasDefinition,
+        FrozenModelSelection, Goal, GoalStatement, GoalUserProvenance, ImportedConversation,
+        ImportedConversationFormat, ImportedConversationId, ImportedTranscriptEntryId, ModelAlias,
+        ModelCallId, ModelCapabilities, ModelChangeAdjustment, ModelSelectionRequest,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ReasoningLevel, ReviewPass,
+        ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId, ReviewPassKind,
+        ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome,
+        ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState, ReviewTargetId,
+        ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion,
+        SessionId, SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
         SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
         TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
     };
@@ -16487,6 +16492,29 @@ mod tests {
             ErrorDetail::rejected(RejectionDetail::DelegationDeliverySequenceExhausted {
                 recipient_session_id: recipient_id,
                 last: CanonicalU64::new(u64::MAX),
+            })
+        );
+    }
+
+    #[test]
+    fn message_identity_collision_preserves_the_minted_identity() {
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(13));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(14));
+        let request_id = CanonicalUuid::from_uuid(Uuid::from_u128(15));
+        let peer_id = CanonicalUuid::from_uuid(Uuid::from_u128(16));
+        let message = DelegationMessageId::from_uuid(Uuid::from_u128(17));
+        let error = process_delegation_rejection(
+            ProcessDelegationRequestRejection::MessageIdentityCollision { message },
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+
+        assert_eq!(
+            error.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationMessageIdentityCollision {
+                message_id: wire_uuid(message.into_uuid()),
             })
         );
     }

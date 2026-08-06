@@ -13,8 +13,8 @@ use signalbox_domain::{
     DelegationWait, DelegationWaitMode, DurableCommandId, GoalGeneration, ReconstitutedToolAttempt,
     SessionDelegation, SessionDelegationReconstitutionFailure,
     SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
-    ToolDispatchAuthority, ToolEffectClass, ToolRequestId, ToolResultContent, ToolResultText,
-    TurnId,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorKind,
+    ToolRequestId, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -160,6 +160,7 @@ pub enum ProcessDelegationRequestRejection {
     RequestNotInTurn,
     AwaitConflict,
     MessageConflict,
+    MessageIdentityCollision { message: DelegationMessageId },
     Operation(DelegationOperationRejection),
 }
 
@@ -435,6 +436,10 @@ impl SessionDelegationRepository {
     ) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            let persist_definitive_rejection = match dispatch {
+                DispatchSource::Issued(_) => false,
+                DispatchSource::Reconstitute => true,
+            };
             if !session_exists(&mut transaction, request.peer()).await? {
                 return Ok(RecordDelegationMessageOutcome::Rejected(
                     DelegationOperationRejection::RelationshipNotFound,
@@ -456,14 +461,6 @@ impl SessionDelegationRepository {
                 }
                 return Ok(RecordDelegationMessageOutcome::Recorded(Box::new(receipt)));
             }
-            let Some(spawning_request) =
-                find_relation_for_message(&mut transaction, &request).await?
-            else {
-                return Ok(RecordDelegationMessageOutcome::Rejected(
-                    DelegationOperationRejection::RelationshipNotFound,
-                ));
-            };
-            let relation = load_relation(&mut transaction, spawning_request).await?;
             let dispatch =
                 match resolve_dispatch(&mut transaction, request.request(), dispatch).await? {
                     ResolvedDelegationDispatch::Executable(dispatch) => *dispatch,
@@ -478,16 +475,32 @@ impl SessionDelegationRepository {
                     "send_session_message requires an external-effect attempt",
                 ));
             }
+            let Some(spawning_request) =
+                find_relation_for_message(&mut transaction, &request).await?
+            else {
+                return reject_message_operation(
+                    &mut transaction,
+                    &dispatch,
+                    DelegationOperationRejection::RelationshipNotFound,
+                    persist_definitive_rejection,
+                )
+                .await;
+            };
+            let relation = load_relation(&mut transaction, spawning_request).await?;
             let tool_request = request.request().id();
             let (_, event) = match relation.deliver_message(request, message, &dispatch) {
                 Ok(recorded) => recorded,
                 Err(error) => {
-                    return Ok(RecordDelegationMessageOutcome::Rejected(
+                    return reject_message_operation(
+                        &mut transaction,
+                        &dispatch,
                         DelegationOperationRejection::Transition {
                             spawning_request: error.spawning_request(),
                             failure: error.failure(),
                         },
-                    ));
+                        persist_definitive_rejection,
+                    )
+                    .await;
                 }
             };
             let stored_message =
@@ -501,9 +514,13 @@ impl SessionDelegationRepository {
             let Some(delivery_sequence) =
                 next_delivery_sequence_for_locked_session(&mut transaction, recipient).await?
             else {
-                return Ok(RecordDelegationMessageOutcome::Rejected(
+                return reject_message_operation(
+                    &mut transaction,
+                    &dispatch,
                     DelegationOperationRejection::DeliverySequenceExhausted,
-                ));
+                    persist_definitive_rejection,
+                )
+                .await;
             };
             if !insert_message_state(
                 &mut transaction,
@@ -515,9 +532,13 @@ impl SessionDelegationRepository {
             )
             .await?
             {
-                return Ok(RecordDelegationMessageOutcome::Rejected(
+                return reject_message_operation(
+                    &mut transaction,
+                    &dispatch,
                     DelegationOperationRejection::MessageIdentityCollision,
-                ));
+                    persist_definitive_rejection,
+                )
+                .await;
             }
             append_message_update(
                 &mut transaction,
@@ -668,6 +689,11 @@ impl SessionDelegationRepository {
             RecordDelegationMessageOutcome::Recorded(recorded) => {
                 ProcessDelegationOutcome::Applied((logical, recorded))
             }
+            RecordDelegationMessageOutcome::Rejected(
+                DelegationOperationRejection::MessageIdentityCollision,
+            ) => ProcessDelegationOutcome::Rejected(
+                ProcessDelegationRequestRejection::MessageIdentityCollision { message },
+            ),
             RecordDelegationMessageOutcome::Rejected(rejection) => {
                 ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
                     rejection,
@@ -774,10 +800,16 @@ async fn delegation_request_execution_state(
     batch: Option<&signalbox_domain::ToolBatch>,
 ) -> Result<DelegationRequestExecutionState, SessionDelegationRepositoryError> {
     if let Some(batch) = batch {
-        if batch
-            .awaiting_approval()
-            .is_some_and(|waiting| waiting.request() == request.id())
-            || (batch.approval(request.id()).is_none() && batch.attempt(request.id()).is_none())
+        let request_is_in_batch = batch
+            .requests()
+            .iter()
+            .any(|candidate| candidate.id() == request.id());
+        if request_is_in_batch
+            && (batch
+                .awaiting_approval()
+                .is_some_and(|waiting| waiting.request() == request.id())
+                || (batch.approval(request.id()).is_none()
+                    && batch.attempt(request.id()).is_none()))
         {
             return Ok(DelegationRequestExecutionState::AwaitingApproval);
         }
@@ -801,31 +833,38 @@ async fn delegation_request_execution_state(
             });
         }
     }
-    let (denied, closed, attempted): (bool, bool, bool) = sqlx::query_as(
+    let stored: StoredDelegationRequestExecutionState = sqlx::query_as(
         "SELECT
             EXISTS (
                 SELECT 1 FROM semantic_transcript_entry
                  WHERE tool_result_request_id = $1 AND payload_kind = 'tool_denied'
-            ),
+            ) AS denied,
             EXISTS (
                 SELECT 1 FROM semantic_transcript_entry
                  WHERE tool_result_request_id = $1
                    AND payload_kind = 'tool_closed_by_turn_end'
-            ),
-            EXISTS (SELECT 1 FROM tool_attempt WHERE request_id = $1)",
+            ) AS closed,
+            EXISTS (SELECT 1 FROM tool_attempt WHERE request_id = $1) AS attempted",
     )
     .bind(tool_request_id_to_uuid(request.id()))
     .fetch_one(&mut *connection)
     .await?;
-    Ok(if denied {
+    Ok(if stored.denied {
         DelegationRequestExecutionState::Denied
-    } else if closed {
+    } else if stored.closed {
         DelegationRequestExecutionState::Closed
-    } else if attempted {
+    } else if stored.attempted {
         DelegationRequestExecutionState::AttemptEnded
     } else {
         DelegationRequestExecutionState::Closed
     })
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredDelegationRequestExecutionState {
+    denied: bool,
+    closed: bool,
+    attempted: bool,
 }
 
 async fn session_exists(
@@ -873,6 +912,31 @@ fn complete_attempt(
                 "delegation receipt cannot end the current attempt",
             )
         })
+}
+
+async fn reject_message_operation(
+    connection: &mut PgConnection,
+    dispatch: &ToolDispatchAuthority,
+    rejection: DelegationOperationRejection,
+    persist_definitive_rejection: bool,
+) -> Result<RecordDelegationMessageOutcome, SessionDelegationRepositoryError> {
+    if persist_definitive_rejection {
+        let ended = dispatch
+            .attempt()
+            .clone()
+            .apply_terminal_observation(dispatch.executor_fence().bind(
+                ToolAttemptObservation::KnownFailed {
+                    error: ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                },
+            ))
+            .map_err(|_| {
+                SessionDelegationRepositoryError::InvalidTransition(
+                    "process delegation rejection cannot end the current attempt",
+                )
+            })?;
+        persist_ended_attempt(connection, &ended).await?;
+    }
+    Ok(RecordDelegationMessageOutcome::Rejected(rejection))
 }
 
 fn wait_receipt(wait: DelegationWait) -> Result<ToolResultText, SessionDelegationRepositoryError> {

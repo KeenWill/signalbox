@@ -862,6 +862,13 @@ accepting it as already committed; an absent or cross-wired attempt fails
 closed, and a failed reread retains the handoff for same-incarnation
 reconciliation without repeating the effect.
 
+Process-protocol execution of an in-flight peer-message attempt also closes the
+attempt as `KnownFailed` in the message transaction when persistence proves a
+definitive operation rejection and no message effect committed. Pre-execution
+identity, correlation, and non-executable-state rejections do not terminalize an
+attempt. A daemon-minted message identity collision is returned with that exact
+identity rather than retried under a replacement identity.
+
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a
 separator and admits those exact bytes as `DelegationContent`; `await_session`

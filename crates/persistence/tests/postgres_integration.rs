@@ -1061,13 +1061,17 @@ fn message_race_disposition(outcome: RecordDelegationMessageOutcome) -> MessageR
         RecordDelegationMessageOutcome::Rejected(
             DelegationOperationRejection::RelationshipNotFound,
         ) => panic!("message race lost its relationship"),
-        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::StaleDispatch) => {
+        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::StaleDispatch {
+            ..
+        }) => {
             panic!("message race lost its dispatch")
         }
         RecordDelegationMessageOutcome::Rejected(
             DelegationOperationRejection::DeliverySequenceExhausted,
         ) => panic!("message race exhausted its delivery sequence"),
-        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::Transition(_)) => {
+        RecordDelegationMessageOutcome::Rejected(DelegationOperationRejection::Transition {
+            ..
+        }) => {
             panic!("message race reached an invalid transition")
         }
     }
@@ -1602,6 +1606,69 @@ async fn s18_inv010_inv012_concurrent_message_identity_collision_is_typed()
             MessageRaceDisposition::IdentityCollision,
             MessageRaceDisposition::Recorded,
         ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-005 / INV-010: a definitive process-message collision retains the
+/// exact minted identity and terminalizes its executable attempt as known failed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv005_inv010_process_message_collision_terminalizes_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let second_seed = DELEGATION_REPOSITORY_MESSAGE_RACE_SECOND_SEED;
+    let first_fixture =
+        prepare_delegation_repository_fixture(&pool, first_seed, "background").await?;
+    let second_fixture =
+        prepare_delegation_repository_fixture(&pool, second_seed, "background").await?;
+    let _first_dispatch = repository_message_dispatch(&pool, first_fixture, first_seed).await?;
+    let _second_dispatch = repository_message_dispatch(&pool, second_fixture, second_seed).await?;
+    let message = DelegationMessageId::from_uuid(first_fixture.message_id);
+    let repository = SessionDelegationRepository::new(pool.clone());
+    let recorded = repository
+        .record_process_message(
+            second_fixture.parent,
+            second_fixture.parent_turn,
+            second_fixture.message_request,
+            second_fixture.child,
+            RAW_DELEGATED_MESSAGE.to_owned(),
+            message,
+        )
+        .await?;
+    let collision = repository
+        .record_process_message(
+            first_fixture.parent,
+            first_fixture.parent_turn,
+            first_fixture.message_request,
+            first_fixture.child,
+            RAW_DELEGATED_MESSAGE.to_owned(),
+            message,
+        )
+        .await?;
+    let attempt_state: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_attempt
+          WHERE request_id = $1",
+    )
+    .bind(first_fixture.message_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    let _ = process_message(recorded);
+    assert_eq!(
+        collision,
+        ProcessDelegationOutcome::Rejected(
+            ProcessDelegationRequestRejection::MessageIdentityCollision { message }
+        )
+    );
+    assert_eq!(
+        attempt_state,
+        (String::from("terminal"), Some(String::from("known_failed")))
     );
 
     pool.close().await;
