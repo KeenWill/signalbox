@@ -55,9 +55,19 @@ enum SnapshotCanvas: String {
     /// there is no scene lifecycle or window chrome in these renderings.
     static let safeAreaInsets = UIEdgeInsets.zero
 
+    /// Increased Contrast is a simulator setting, not a device model, so it
+    /// survives choosing the right simulator. It rewrites the system colors
+    /// and the materials, and it is pinned on the windows as well as on the
+    /// content because the backdrop resolves a system color too.
+    static let accessibilityContrast = UIAccessibilityContrast.normal
+
     /// Overrides every remaining trait a golden's pixels depend on. Interface
     /// style decides its colors and the content-size category its text
     /// metrics; both otherwise follow whatever the host application inherited.
+    /// Bold Text and Increased Contrast are pinned for the same reason and are
+    /// worse, being device state rather than device geometry: a run on the
+    /// pinned simulator model would still record a different golden with either
+    /// switched on.
     func overrideTraits(on controller: UIViewController) {
         controller.traitOverrides.horizontalSizeClass = horizontalSizeClass
         controller.traitOverrides.verticalSizeClass = .regular
@@ -65,6 +75,8 @@ enum SnapshotCanvas: String {
         controller.traitOverrides.displayScale = displayScale
         controller.traitOverrides.layoutDirection = .leftToRight
         controller.traitOverrides.preferredContentSizeCategory = .large
+        controller.traitOverrides.legibilityWeight = .regular
+        controller.traitOverrides.accessibilityContrast = Self.accessibilityContrast
     }
 
     /// Pins the appearance of a window whose pixels reach a golden.
@@ -73,9 +85,11 @@ enum SnapshotCanvas: String {
     /// windows are pinned separately: both fill themselves with the dynamic
     /// `.systemBackground`, and the backdrop's resolution is what the
     /// navigation chrome's glass materials sample. Only the interface style is
-    /// pinned here, because it is the only trait a flat fill resolves against.
+    /// pinned here, along with the contrast that decides which system color it
+    /// resolves to.
     func overrideTraits(on window: UIWindow) {
         window.overrideUserInterfaceStyle = Self.userInterfaceStyle
+        window.traitOverrides.accessibilityContrast = Self.accessibilityContrast
     }
 
     /// Pins the safe area the hosted content lays out against.
