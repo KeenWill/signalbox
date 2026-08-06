@@ -12,11 +12,12 @@ escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
 compatibility-smoke automation was verified through PR #333
 (`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
 probe, and pinned version were verified against the `0.146.0` executable through
-PR #321 (`renovate/openai-codex-0.x`). The `signalboxd` names this page states
-for the composition root, its telemetry, and the production
-`FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`); the Anthropic adapter's server-side
-`fallback`-block recognition was verified through PR #280
+PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
+workflow-self-change trigger were verified through PR #471
+(`agent/codex-smoke-schedule`). The `signalboxd` names this page states for the
+composition root, its telemetry, and the production `FileCredentialAccess` were
+verified through PR #258 (`agent/signalboxd-rename`); the Anthropic adapter's
+server-side `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
 ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
 persistence-repository families in the operator-failure inventory were verified
@@ -648,8 +649,9 @@ the response envelope decoding as a completed or refused terminal outcome — an
 nothing about answer quality. The workflow reports on every pull request without
 a path filter. GitHub independently withholds secrets from ordinary fork
 `pull_request` runs regardless of environment policy. Its secretless eligibility
-job then checks the complete pull request file list: no pin change is an
-immediate success; for a pin change it compares
+job then checks the complete pull request file list: no change to the CLI pin or
+to the workflow's own definition is an immediate success; a pull request that
+changes the pin, the workflow file, or both compares
 `github.event.pull_request.head.repo.full_name` with `github.repository`, fails
 a mismatch with a manual-dispatch instruction, and admits the live job only for
 a same-repository head. The credentialed job condition independently repeats
@@ -657,8 +659,12 @@ that comparison. A final always-running job folds the eligibility and
 conditional live results into the required check, so a skipped or failed
 required smoke cannot appear green; for a pull request that requires the smoke,
 the aggregate also repeats the same-repository comparison. Manual dispatch
-remains available, and a path-filtered push to `main` reruns the smoke after
-merge.
+remains available, a path-filtered push to `main` — gated on the pin manifest
+and the workflow file itself, so an edit to the workflow's own definition cannot
+land unexercised — reruns the smoke after merge, and a twice-daily schedule
+(13:00 and 01:00 UTC, drifting an hour under standard time — accepted) spends
+two further live exchanges a day as a paid provider-drift canary independent of
+any code change.
 
 The `codex-smoke` environment is configured for all branches because GitHub
 evaluates an environment used by `pull_request` against `GITHUB_REF`, which is

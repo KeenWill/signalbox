@@ -92,28 +92,40 @@ jobs:
           changed_paths="${RUNNER_TEMP}/codex-smoke-changed-files"
           git diff --no-renames --name-only -z \
             "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
-          tooling_changed=false
+          pin_changed=false
+          workflow_changed=false
           while IFS= read -r -d '' path; do
-            if [[ "${path}" == tooling/codex-cli/* \
-              || "${path}" == ".github/workflows/codex-smoke.yml" ]]; then
-              tooling_changed=true
-              break
+            if [[ "${path}" == tooling/codex-cli/* ]]; then
+              pin_changed=true
+            elif [[ "${path}" == ".github/workflows/codex-smoke.yml" ]]; then
+              workflow_changed=true
             fi
           done < "${changed_paths}"
-          if [[ "${tooling_changed}" != "true" ]]; then
+          if [[ "${pin_changed}" != "true" && "${workflow_changed}" != "true" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
             echo "Not applicable: neither tooling/codex-cli/** nor this workflow's own definition changed."
             exit 0
           fi
 
+          # Describe the actual changed-path shape rather than assuming a pin
+          # bump, so a workflow-only pull request never sees a Renovate-pin
+          # message unrelated to what it submitted.
+          if [[ "${pin_changed}" == "true" && "${workflow_changed}" == "true" ]]; then
+            change_description="the Codex CLI pin and this workflow's own definition"
+          elif [[ "${pin_changed}" == "true" ]]; then
+            change_description="the Codex CLI pin"
+          else
+            change_description="this workflow's own definition"
+          fi
+
           if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "::error::A fork changed the Codex CLI pin. Put the reviewed change on a trusted in-repository Renovate branch, then run: gh workflow run codex-smoke.yml --ref <trusted-renovate-branch>"
+            echo "::error::A fork changed ${change_description}. Put the reviewed change on a trusted in-repository branch, then run: gh workflow run codex-smoke.yml --ref <trusted-branch>"
             exit 1
           fi
 
           echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
-          echo "Compatibility smoke is required for this same-repository pin change."
+          echo "Compatibility smoke is required because this same-repository pull request changed ${change_description}."
 
   smoke:
     name: Codex live compatibility
