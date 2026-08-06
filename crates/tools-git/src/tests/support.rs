@@ -81,7 +81,8 @@ pub(super) const EMBEDDED_REPOSITORY_PATH: &str = "vendor";
 
 pub(super) const SUBMODULE_PATH: &str = "dependency";
 
-/// Creates an owner-readable, owner-writable FIFO at `path`.
+/// Creates a FIFO at `path` readable and writable only by the creating Unix
+/// user (mode 0o600).
 ///
 /// Every caller passes an absolute path, so resolving it against the process
 /// working directory is the same operation on every platform.
@@ -91,7 +92,8 @@ pub(super) fn create_fifo(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Creates an owner-readable, owner-writable FIFO at `path`.
+/// Creates a FIFO at `path` readable and writable only by the creating Unix
+/// user (mode 0o600).
 ///
 /// rustix omits `mkfifoat` on Apple targets, so this uses nix's `mkfifo`.
 /// Every caller passes an absolute path, so the two are equivalent.

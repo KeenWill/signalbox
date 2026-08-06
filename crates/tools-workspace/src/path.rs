@@ -562,7 +562,8 @@ fn entry_kind(file_type: FileType) -> WorkspaceEntryKind {
 mod tests {
     use super::*;
 
-    /// Creates an owner-readable, owner-writable FIFO at `path`.
+    /// Creates a FIFO at `path` readable and writable only by the creating
+    /// Unix user (mode 0o600).
     ///
     /// `path` is always absolute here, so resolving it against the process
     /// working directory is the same operation on every platform.
@@ -576,7 +577,8 @@ mod tests {
         Ok(())
     }
 
-    /// Creates an owner-readable, owner-writable FIFO at `path`.
+    /// Creates a FIFO at `path` readable and writable only by the creating
+    /// Unix user (mode 0o600).
     ///
     /// rustix omits `mkfifoat` on Apple targets, so this uses nix's `mkfifo`.
     /// `path` is always absolute here, so the two are equivalent.
