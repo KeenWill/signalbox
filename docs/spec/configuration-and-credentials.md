@@ -19,6 +19,9 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The credential billing-kind registry and versioned per-model rate catalog are
 verified against PR #389 (`agent/cost-accounting`).
 
+The rule binding one provider-model spelling to one adapter is verified against
+this PR (`agent/adapter-model-catalogs`).
+
 This page describes the implemented configuration and credential behavior of
 Signalbox, verified against the implementing stack through PR #217
 (`agent/credential-reference-total`). This includes signalboxd configuration
@@ -613,7 +616,10 @@ Each `[[models]]` entry defines one direct selection:
   [identity-and-commands](identity-and-commands.md) material.
 - `model_family` — exact key of one `[[adapter_mappings]]` entry.
 - `provider_model` — the exact provider-native model spelling; must be nonempty
-  and unpadded.
+  and unpadded. One spelling routes to exactly one adapter across the document:
+  declaring it under two families whose mappings name different adapters is a
+  typed startup failure, so a deployment serving one provider through two
+  surfaces gives each surface its own spelling.
 - `max_output_tokens` — required positive `u32` output-token ceiling.
 - `context_window_tokens` — required positive `u32` context ceiling, not smaller
   than `max_output_tokens`.
