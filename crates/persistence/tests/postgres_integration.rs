@@ -117,7 +117,7 @@ use signalbox_persistence::{
         DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
         ProcessDelegationRequestRejection, RecordDelegationMessageOutcome,
         RecordDelegationWaitOutcome, RecordedDelegationMessage, RecordedDelegationWait,
-        SessionDelegationRepository,
+        SessionDelegationCorruption, SessionDelegationRepository, SessionDelegationRepositoryError,
     },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
@@ -1077,6 +1077,24 @@ fn message_race_disposition(outcome: RecordDelegationMessageOutcome) -> MessageR
     }
 }
 
+fn delegation_corruption(error: SessionDelegationRepositoryError) -> SessionDelegationCorruption {
+    match error {
+        SessionDelegationRepositoryError::Corruption(corruption) => corruption,
+        SessionDelegationRepositoryError::Database(_) => {
+            panic!("expected typed delegation corruption, found database failure")
+        }
+        SessionDelegationRepositoryError::CommitAmbiguous(_) => {
+            panic!("expected typed delegation corruption, found commit ambiguity")
+        }
+        SessionDelegationRepositoryError::ToolLoop(_) => {
+            panic!("expected typed delegation corruption, found tool-loop failure")
+        }
+        SessionDelegationRepositoryError::InvalidTransition(_) => {
+            panic!("expected typed delegation corruption, found invalid transition")
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct BackgroundWaitAtomicityEvidence {
     wait_count: i64,
@@ -1333,6 +1351,53 @@ async fn s18_inv010_process_delegation_rejects_absent_session_first() -> Result<
     Ok(())
 }
 
+/// S17 / INV-010 / INV-012: replay validates every immutable wait-row
+/// correlation instead of deriving over malformed stored endpoint facts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_wait_replay_rejects_cross_wired_stored_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query("ALTER TABLE session_delegation_wait DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_delegation_wait
+            SET parent_turn_id = $1
+          WHERE awaiting_tool_request_id = $2",
+    )
+    .bind(Uuid::from_u128(seed + 0x700))
+    .bind(fixture.awaiting_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation_wait ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("cross-wired stored wait turn is corruption");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored wait row")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S17 / INV-005 / INV-032: foreground registration ends the physical await
 /// attempt and parks the same turn without retaining a live attempt.
 #[tokio::test(flavor = "multi_thread")]
@@ -1536,6 +1601,63 @@ async fn s17_inv032_delegation_repository_commits_message_and_wake_atomically()
     assert_eq!(evidence.update_count, 1);
     assert_eq!(evidence.wake_count, 1);
     assert_eq!(evidence.completed_attempt_count, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: message replay validates the direction-derived
+/// recipient and its pending-delivery correlation before returning a receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_message_replay_rejects_cross_wired_recipient()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE session_message_delivery DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_message_delivery
+            SET recipient_session_id = $1
+          WHERE message_id = $2",
+    )
+    .bind(fixture.parent.into_uuid())
+    .bind(fixture.message_id)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_message_delivery ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("cross-wired delivery recipient is corruption");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Missing("pending_recipient_session_id")
+    );
 
     pool.close().await;
     drop(container);
