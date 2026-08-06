@@ -186,34 +186,25 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$benchmark_status"
 
-  # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
-  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
-  # can execute isolated tests concurrently without sharing database state.
-  postgres-integration-suite:
-    name: postgres-integration (${{ matrix.suite }})
+  # Compiles every PostgreSQL integration suite once. Previously each suite
+  # compiled itself behind its own rust-cache key, so three large caches
+  # competed for the repository's shared cache allowance and evicted one
+  # another; an evicted key meant a full cold compile, and three of them could
+  # go cold at once. One key here is one cache entry to keep warm, and the
+  # shards below inherit the compiled binaries as artifacts instead of
+  # rebuilding them.
+  #
+  # A nextest archive carries the test binaries, the build-script output
+  # directories, and the linked search paths, which is everything the run job
+  # needs; it deliberately does not carry the source tree, so the run job
+  # checks the sources out and passes `--workspace-remap`.
+  postgres-integration-build:
+    name: postgres-integration (build)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: persistence
-            command: >-
-              cargo test --no-fail-fast -p signalbox-persistence
-              --features postgres-integration
-              --tests
-              -- --ignored --test-threads=4
-          - suite: signalboxd
-            command: >-
-              cargo test --no-fail-fast -p signalboxd
-              --tests
-              -- --ignored --test-threads=4
-          - suite: terminal-client
-            command: >-
-              cargo test --no-fail-fast -p signalbox-client
-              --tests
-              -- --ignored --test-threads=4
-              --skip terminal_client_completes_the_real_anthropic_path
+    # Generous by design: this job now absorbs all three suites' compilation,
+    # which a cold cache serializes into one runner instead of spreading it
+    # across three.
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -223,20 +214,154 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
-          key: postgres-integration-${{ matrix.suite }}
-      - name: Run ${{ matrix.suite }} integration tests
-        run: ${{ matrix.command }}
+          key: postgres-integration
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-nextest@0.9.143
+      # One archive per suite, each built with exactly the package selection
+      # and feature set its `cargo test` invocation used, so no suite links a
+      # dependency compiled under features it did not previously see. Only the
+      # persistence library is compiled twice for this — once with
+      # `postgres-integration` for its own suite and once without it as a
+      # dependency of the other two — which is the accepted cost of holding
+      # each suite's feature resolution unchanged.
+      - name: Archive the persistence suite
+        run: >-
+          cargo nextest archive -p signalbox-persistence
+          --features postgres-integration
+          --archive-file "$RUNNER_TEMP/persistence.tar.zst"
+      - name: Archive the signalboxd suite
+        run: >-
+          cargo nextest archive -p signalboxd
+          --archive-file "$RUNNER_TEMP/signalboxd.tar.zst"
+      - name: Archive the terminal-client suite
+        run: >-
+          cargo nextest archive -p signalbox-client
+          --archive-file "$RUNNER_TEMP/terminal-client.tar.zst"
+      # Uploaded as one artifact per suite so a shard downloads only the
+      # archive it runs from.
+      - name: Upload the persistence archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-persistence
+          path: ${{ runner.temp }}/persistence.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload the signalboxd archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-signalboxd
+          path: ${{ runner.temp }}/signalboxd.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload the terminal-client archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-terminal-client
+          path: ${{ runner.temp }}/terminal-client.tar.zst
+          if-no-files-found: error
+          retention-days: 1
 
-  # Preserve the existing required-check name while the suites run as a
-  # fail-fast-disabled matrix.
+  # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
+  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
+  # can execute isolated tests concurrently without sharing database state.
+  #
+  # Partition counts are proportional to each suite's ignored-test count and
+  # sum to six runners, matching the concurrency the previous three-suite
+  # matrix already asked for at its widest. Widening further would trade runner
+  # contention against a test slice that is already short.
+  postgres-integration-run:
+    name: >-
+      postgres-integration
+      (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
+    needs: postgres-integration-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: persistence
+            partition: 1
+            partitions: 3
+            filter: all()
+          - suite: persistence
+            partition: 2
+            partitions: 3
+            filter: all()
+          - suite: persistence
+            partition: 3
+            partitions: 3
+            filter: all()
+          - suite: signalboxd
+            partition: 1
+            partitions: 2
+            filter: all()
+          - suite: signalboxd
+            partition: 2
+            partitions: 2
+            filter: all()
+          # Translates the previous `--skip` argument. libtest matched that
+          # argument as a substring of the test path; nextest's `test()`
+          # predicate matches a substring by default, so the two select the
+          # same test.
+          - suite: terminal-client
+            partition: 1
+            partitions: 1
+            filter: not test(terminal_client_completes_the_real_anthropic_path)
+    steps:
+      # The archive holds no sources. Tests that read fixtures relative to
+      # their manifest directory need this checkout, which `--workspace-remap`
+      # points them at.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Download the ${{ matrix.suite }} archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: postgres-integration-archive-${{ matrix.suite }}
+          path: ${{ runner.temp }}/archive
+      # Flag for flag against the `cargo test` invocation this replaces:
+      # `--run-ignored only` is `-- --ignored`, `--test-threads 4` is
+      # `--test-threads=4`, `--no-fail-fast` is unchanged, and the archive
+      # fixes the package and feature selection at build time. nextest runs
+      # each test in its own process rather than on a shared thread pool, so
+      # four concurrent tests remains the cap.
+      - name: Run the ${{ matrix.suite }} partition
+        env:
+          SUITE: ${{ matrix.suite }}
+          PARTITION: ${{ matrix.partition }}
+          PARTITIONS: ${{ matrix.partitions }}
+          FILTER: ${{ matrix.filter }}
+        run: >-
+          cargo nextest run
+          --archive-file "$RUNNER_TEMP/archive/$SUITE.tar.zst"
+          --workspace-remap .
+          --partition "count:$PARTITION/$PARTITIONS"
+          --run-ignored only
+          --no-fail-fast
+          --test-threads 4
+          -E "$FILTER"
+
+  # Preserve the existing required-check name while the suites build once and
+  # run as a fail-fast-disabled partition matrix.
   postgres-integration:
     name: postgres-integration
     if: ${{ always() }}
-    needs: postgres-integration-suite
+    needs: [postgres-integration-build, postgres-integration-run]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Confirm every PostgreSQL integration suite passed
+      - name: Confirm every PostgreSQL integration partition passed
         env:
-          SUITE_RESULT: ${{ needs.postgres-integration-suite.result }}
-        run: test "$SUITE_RESULT" = success
+          BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
+          RUN_RESULT: ${{ needs.postgres-integration-run.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$RUN_RESULT" = success
