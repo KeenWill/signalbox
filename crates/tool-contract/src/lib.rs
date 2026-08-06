@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_uuid_text_rejects_alternate_and_malformed_spellings() {
+    fn canonical_uuid_text_rejects_alternate_spellings() {
         assert_eq!(
             decode_canonical_uuid("00000000-0000-0000-0000-00000000000A"),
             None
@@ -629,6 +629,10 @@ mod tests {
             decode_canonical_uuid("00000000000000000000000000000001"),
             None
         );
+    }
+
+    #[test]
+    fn canonical_uuid_text_rejects_malformed_syntax() {
         assert_eq!(decode_canonical_uuid("not-a-uuid"), None);
     }
 }

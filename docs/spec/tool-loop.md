@@ -835,12 +835,13 @@ the child's terminal result record. The executor never reads or returns the
 child transcript.
 
 Background await registration and peer-message append likewise end the physical
-attempt in the same transaction as their delegation effect. Their scheduling
-executor result is a distinct `DurableCompletion` disposition carrying the exact
-ended dispatch correlation, not an encoded result awaiting a second commit. The
-application authenticates that correlation against the ended attempt before
-accepting it as already committed; an absent or cross-wired attempt fails
-closed, and a failed reread retains the handoff for same-incarnation
+attempt in the same transaction as their delegation effect.
+
+Committed unimplemented: no present scheduling surface consumes the resulting
+`DurableCompletion` disposition. A future daemon scheduling integration must
+authenticate its exact dispatch correlation against the ended attempt before
+accepting the effect as already committed; absent or cross-wired evidence must
+fail closed, and a failed reread must retain the handoff for same-incarnation
 reconciliation without repeating the effect.
 
 The child's normal terminal completion transaction concatenates the definitive
