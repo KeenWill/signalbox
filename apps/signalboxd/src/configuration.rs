@@ -5225,6 +5225,19 @@ mod checked_in_example {
         assert_eq!(activated, "version = 1\n\n[compaction]\n");
     }
 
+    /// A commented model row that activation walks past would be catalog data
+    /// no test ever loads, so the example is written so that activation
+    /// consumes every one of them.
+    #[test]
+    fn activation_leaves_no_commented_model_row_behind() {
+        let document =
+            std::fs::read_to_string(example_path()).expect("the checked-in example is readable");
+
+        let activated = activated(&document);
+
+        assert!(!activated.contains("\n# [[models]]"));
+    }
+
     /// Every model row the example ships for a family it leaves commented out
     /// is catalog data an operator is invited to adopt by uncommenting it, so
     /// the whole activated document must satisfy the same fail-closed loader —
