@@ -250,15 +250,15 @@ only after the complete upload. Why: without full-upload proof a refusal token
 cannot satisfy the completed-exchange precondition for the refusal disposition,
 so the adapter fails toward known failure rather than inventing evidence.
 
-Post-finish error records: once a stream has reported why generation stopped, a
-later error record that classifies as `Unrecognized` is a protocol violation
-rather than definitive provider evidence. Why: it supersedes the reported finish
-with no classifiable failure, and it would otherwise reach the caller wearing
-exactly the shape the refusal downgrade above produces — an HTTP 200 exchange,
-`Unrecognized`, and the same absent or fabricated native material — leaving a
-genuine failure indistinguishable from a decoded refusal. An error record that
-*does* classify still outranks the reported finish, because it carries
-information the finish does not.
+Post-finish error records (Anthropic adapter): once its stream has reported why
+generation stopped, a later error record that classifies as `Unrecognized` is a
+protocol violation rather than definitive provider evidence. Why: it supersedes
+the reported finish with no classifiable failure, and it would otherwise reach
+the caller wearing exactly the shape the refusal downgrade above produces — an
+HTTP 200 exchange, `Unrecognized`, and the same absent or fabricated native
+material — leaving a genuine failure indistinguishable from a decoded refusal.
+An error record that *does* classify still outranks the reported finish, because
+it carries information the finish does not.
 
 ## SSE framing
 

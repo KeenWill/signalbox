@@ -162,6 +162,29 @@ impl StreamDecoder {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
     }
 
+    /// Whether an error classification names no failure at all, and so adds
+    /// nothing to an already-reported stop reason.
+    ///
+    /// Every variant is enumerated rather than compared for equality: this
+    /// decides whether a provider error outranks a reported finish, so a new
+    /// classification must fail to compile here and have its post-finish
+    /// precedence chosen deliberately.
+    fn names_no_classified_failure(kind: signalbox_model_runtime::ProviderErrorKind) -> bool {
+        use signalbox_model_runtime::ProviderErrorKind as Kind;
+        match kind {
+            Kind::Unrecognized => true,
+            Kind::CredentialRejected
+            | Kind::PermissionDenied
+            | Kind::InvalidRequest
+            | Kind::TargetNotFound
+            | Kind::RequestTooLarge
+            | Kind::RateLimited
+            | Kind::QuotaExhausted
+            | Kind::Overloaded
+            | Kind::ProviderInternal => false,
+        }
+    }
+
     fn parse<'a, T: serde::Deserialize<'a>>(
         &self,
         record: &'a SseRecord,
@@ -199,8 +222,7 @@ impl StreamDecoder {
             .as_deref()
             .map(classify_error_token)
             .unwrap_or(signalbox_model_runtime::ProviderErrorKind::Unrecognized);
-        if self.finish.is_some() && kind == signalbox_model_runtime::ProviderErrorKind::Unrecognized
-        {
+        if self.finish.is_some() && Self::names_no_classified_failure(kind) {
             // The provider already reported why generation stopped, and this
             // event names no failure the adapter can classify, so it supersedes
             // that stop reason with nothing. Worse, it is then indistinguishable
