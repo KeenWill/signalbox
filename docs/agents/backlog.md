@@ -45,13 +45,18 @@ Owns: persistence read paths, domain frontier materialization. Collides-with:
 turn machinery. The recorded post-model-call obligation: remove the quadratic
 frontier/projection loads.
 
-## OpenAI composition wiring [blocked-on: client stack merge] [size: S]
+## OpenAI composition wiring [delivered by the adapter-wiring pair and the catalog rows] [size: S]
 
 Owns: signalboxd configuration/composition, the model catalog example.
-Collides-with: `apps/signalboxd`. The merged OpenAI adapter is unreachable; the
-catalog admits only one provider.
+Collides-with: `apps/signalboxd`. The daemon composition wired the OpenAI and
+Claude Code CLI adapters on 2026-08-06 (`agent/wire-openai-adapter`,
+`agent/wire-claude-cli-adapter`), so no merged adapter is unreachable. The
+catalog example then gained `[[models]]` rows for the openai, codex, and
+claude_code families, so it no longer admits one provider only; those rows ship
+commented, because each of those families needs process configuration or a key
+file the checked-in example cannot carry.
 
-## Model catalog automation [blocked-on: OpenAI composition wiring; the wrapped-CLI drift-defense scaffolding] [size: S-M]
+## Model catalog automation [blocked-on: the wrapped-CLI drift-defense scaffolding] [size: S-M]
 
 Owns: a scheduled provider-listing watcher and the catalog-diff step that rides
 the wrapped-CLI pin-bump smoke, plus the PRs either one opens. Collides-with:
