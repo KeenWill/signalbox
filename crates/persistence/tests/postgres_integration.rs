@@ -1182,6 +1182,99 @@ async fn s17_inv010_inv012_wait_replay_rejects_cross_wired_stored_turn()
     Ok(())
 }
 
+/// S17 / INV-010 / INV-012: background-wait replay authenticates the exact
+/// completed effect-free attempt and normalized registration receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_background_wait_replay_requires_exact_terminal_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET result_text = '{}'
+          WHERE attempt_id = $1",
+    )
+    .bind(dispatch.attempt().attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("background wait replay requires its normalized terminal receipt");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored wait attempt")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S17 / INV-010 / INV-012: foreground-wait replay authenticates the exact
+/// effect-free attempt's typed child-wait terminal evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv010_inv012_foreground_wait_replay_requires_exact_terminal_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_FOREGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "foreground").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Foreground,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET wait_child_session_id = $1
+          WHERE attempt_id = $2",
+    )
+    .bind(fixture.parent.into_uuid())
+    .bind(dispatch.attempt().attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("foreground wait replay requires its exact child-wait evidence");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored wait attempt")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S18 / INV-010: relationship reconstitution rejects action payloads that a
 /// stored background policy is not permitted to carry.
 #[tokio::test(flavor = "multi_thread")]
@@ -1426,6 +1519,119 @@ async fn s17_inv010_inv012_message_replay_rejects_cross_wired_recipient()
     assert_eq!(
         delegation_corruption(error),
         SessionDelegationCorruption::Missing("pending_recipient_session_id")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: message replay authenticates the exact completed
+/// external-effect attempt and normalized durable receipt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_replay_requires_exact_terminal_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET result_text = '{}'
+          WHERE attempt_id = $1",
+    )
+    .bind(dispatch.attempt().attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("message replay requires its normalized terminal receipt");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("stored message attempt")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-010 / INV-012: message replay authenticates the complete stored
+/// tool-request provenance instead of trusting the request identifier alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_message_replay_requires_complete_tool_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_MESSAGE_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_message_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationMessageRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        RAW_DELEGATED_MESSAGE.to_owned(),
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository
+        .record_message(
+            request.clone(),
+            DelegationMessageId::from_uuid(fixture.message_id),
+            &dispatch,
+        )
+        .await?;
+    sqlx::query("ALTER TABLE session_delegation_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE session_delegation_event
+            SET provenance_turn_id = $1
+          WHERE provenance_tool_request_id = $2",
+    )
+    .bind(fixture.initial_turn.into_uuid())
+    .bind(fixture.message_request.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_message(
+            request,
+            DelegationMessageId::from_uuid(Uuid::from_u128(seed + 0x401)),
+            &dispatch,
+        )
+        .await
+        .expect_err("message replay requires exact tool-request provenance");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("message provenance")
     );
 
     pool.close().await;
