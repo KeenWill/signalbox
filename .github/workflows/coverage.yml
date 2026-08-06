@@ -95,12 +95,24 @@ jobs:
       # all of them below. Each suite continues on error and its outcome is
       # reported, so one failing suite yields a smaller number that says so
       # rather than no number at all.
+      # One test is skipped, and only here. The production exec runner launches
+      # its target through the workspace's own `signalbox-exec-supervisor`,
+      # which this job instruments; LLVM's profiling runtime sets
+      # `__LLVM_PROFILE_RT_INIT_ONCE` in that supervisor's environment, and the
+      # variable survives the exec into the target. A test asserting that a
+      # cleared environment holds exactly the one variable it was given
+      # therefore observes two. Both the assertion and the code under test are
+      # right; only the instrumented supervisor differs from the binary
+      # rust.yml runs. Skipping the one test it perturbs is honest — the
+      # exclusion is stated in the report — where leaving a permanently failed
+      # suite row would teach a reader to ignore that column.
       - name: Measure the workspace suite
         id: workspace
         continue-on-error: true
         run: >-
           cargo llvm-cov --no-report --no-fail-fast
           --workspace --all-targets --all-features
+          -- --skip production_runner_clears_ambient_environment_when_requested
       - name: Measure the persistence PostgreSQL suite
         id: persistence
         continue-on-error: true
@@ -165,6 +177,10 @@ jobs:
             echo '  tools-web smokes stay `--ignored`, and the whole-daemon and'
             echo '  real-provider terminal smokes are skipped by name above.'
             echo '- The Swift native client, which Xcode measures separately.'
+            echo '- One environment-clearing test in `signalbox-tools-exec`,'
+            echo '  which instrumenting its supervisor process perturbs. The'
+            echo '  workflow comment on the workspace step states why; rust.yml'
+            echo '  runs that test uninstrumented and gates on it.'
             echo '- Dedicated test files. cargo-llvm-cov excludes `tests/` and'
             echo '  `benches/` targets and `*tests.rs` modules from the report'
             echo '  by default, so test code is not counted as covered code.'
