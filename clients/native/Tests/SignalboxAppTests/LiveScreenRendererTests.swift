@@ -9,10 +9,12 @@ import XCTest
 /// pass.
 @MainActor
 final class LiveScreenRendererTests: XCTestCase {
-    /// The load lands after `minimumSettle`, so only the unchanged-rendering
-    /// gate can catch it; a renderer that merely waited a fixed minimum would
-    /// still return the pre-load frame.
-    func testRenderingWaitsForContentThatLoadsAfterTheMinimumSettle() async {
+    /// The screen is unchanged for the first 400ms and then loads, so the two
+    /// renderings a first match would accept exist long before the content
+    /// does. Only the floor outlasts them, which is what this pins: a renderer
+    /// that returned on the first pair of identical renderings would return the
+    /// pre-load frame.
+    func testRenderingWaitsPastAFirstStableMatchForContentThatIsStillLoading() async {
         let loadsLate = await LiveScreenRenderer.render(
             DelayedContentView(before: .red, after: .blue, delay: .milliseconds(400)),
             canvas: .compact
@@ -29,13 +31,18 @@ final class LiveScreenRendererTests: XCTestCase {
         )
     }
 
+    /// The counterpart: the floor is a floor and not the whole gate. The
+    /// timeout has to exceed `minimumSettle`, or no rendering is ever eligible
+    /// and the failure this expects would be reported for a static screen too,
+    /// leaving a renderer that stopped comparing pixels indistinguishable from
+    /// one that still does.
     func testRenderingFailsRatherThanReturnAFrameOfAScreenThatNeverSettles() async {
         XCTExpectFailure("a screen that never stops changing has no frame a golden can name")
 
         _ = await LiveScreenRenderer.render(
             ContinuouslyChangingView(),
             canvas: .compact,
-            timeout: .milliseconds(600)
+            timeout: LiveScreenRenderer.minimumSettle + .milliseconds(500)
         )
     }
 }

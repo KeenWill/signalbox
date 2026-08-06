@@ -39,16 +39,32 @@ enum SnapshotCanvas: String {
     /// golden a little over half the bytes.
     var displayScale: CGFloat { 2 }
 
+    /// Stated here for the same reason the scale is: a dynamic color resolves
+    /// against the trait collection of whatever it is set on, so an inherited
+    /// interface style would record a different golden on a dark-mode host.
+    static let userInterfaceStyle = UIUserInterfaceStyle.light
+
     /// Overrides every remaining trait a golden's pixels depend on. Interface
     /// style decides its colors and the content-size category its text
     /// metrics; both otherwise follow whatever the host application inherited.
     func overrideTraits(on controller: UIViewController) {
         controller.traitOverrides.horizontalSizeClass = horizontalSizeClass
         controller.traitOverrides.verticalSizeClass = .regular
-        controller.traitOverrides.userInterfaceStyle = .light
+        controller.traitOverrides.userInterfaceStyle = Self.userInterfaceStyle
         controller.traitOverrides.displayScale = displayScale
         controller.traitOverrides.layoutDirection = .leftToRight
         controller.traitOverrides.preferredContentSizeCategory = .large
+    }
+
+    /// Pins the appearance of a window whose pixels reach a golden.
+    ///
+    /// The traits above reach the hosted content and nothing above it, so the
+    /// windows are pinned separately: both fill themselves with the dynamic
+    /// `.systemBackground`, and the backdrop's resolution is what the
+    /// navigation chrome's glass materials sample. Only the interface style is
+    /// pinned here, because it is the only trait a flat fill resolves against.
+    func overrideTraits(on window: UIWindow) {
+        window.overrideUserInterfaceStyle = Self.userInterfaceStyle
     }
 
     private var horizontalSizeClass: UIUserInterfaceSizeClass {
@@ -87,6 +103,17 @@ enum LiveScreenRenderer {
     /// to fail, far too little to loosen the tolerance for. A second is past
     /// that transition on every run measured. A screen that is genuinely still
     /// changing is caught by the timeout below, not by this floor.
+    ///
+    /// This floor is also the gate's horizon, and stating it is the honest
+    /// cost: content that first arrives *after* it is indistinguishable from
+    /// content that never arrives, because two renderings of a screen that has
+    /// not started loading match exactly as well as two renderings of a
+    /// finished one. No purely temporal gate can separate them; only a screen
+    /// that reported its own readiness could, and that would be a readiness
+    /// protocol through every screen's view model rather than a property of
+    /// this renderer. Every scenario here is served by the in-memory harness,
+    /// which answers without a scheduled delay, so each one settles well inside
+    /// the floor; a scenario that did not would need that protocol first.
     nonisolated static let minimumSettle = Duration.milliseconds(1000)
 
     /// A screen still changing after this long is reported as a failure rather
@@ -107,7 +134,15 @@ enum LiveScreenRenderer {
         // which animates through intermediate frames unless this is off. Core
         // Animation's clock is stopped below as well, so a layer animation that
         // survives this holds one frame instead of never settling.
+        //
+        // Restored rather than left set: this is process-wide, the test bundle
+        // runs inside the host application, and only the snapshot suite is
+        // excluded from the blocking workflow. A renderer that left animations
+        // off would make every later test in the process depend on whether it
+        // had run first.
+        let animationsWereEnabled = UIView.areAnimationsEnabled
         UIView.setAnimationsEnabled(false)
+        defer { UIView.setAnimationsEnabled(animationsWereEnabled) }
 
         let content = UIHostingController(rootView: view)
         let host = UIViewController()
@@ -120,12 +155,14 @@ enum LiveScreenRenderer {
         // whatever the host happened to be showing. It extends past the canvas
         // by more than a blur radius on every side.
         let backdrop = UIWindow(windowScene: scene)
+        canvas.overrideTraits(on: backdrop)
         backdrop.frame = CGRect(origin: .zero, size: canvas.size).insetBy(dx: -200, dy: -200)
         backdrop.backgroundColor = .systemBackground
         backdrop.isOpaque = true
         backdrop.windowLevel = .normal + 1
         backdrop.isHidden = false
         let window = UIWindow(windowScene: scene)
+        canvas.overrideTraits(on: window)
         window.windowLevel = .normal + 2
         canvas.overrideTraits(on: content)
         host.view.backgroundColor = .systemBackground
