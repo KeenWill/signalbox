@@ -499,6 +499,10 @@ def cargo_subcommand_arguments(
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "cargo":
         return None
     index = 1
+    # `cargo +toolchain …` is rustup's selector, not an option; Cargo's own
+    # usage line spells it `cargo [+toolchain] [OPTIONS] [COMMAND]`.
+    if index < len(tokens) and tokens[index].startswith("+"):
+        index += 1
     while index < len(tokens) and tokens[index].startswith("-"):
         if tokens[index] in CARGO_GLOBAL_VALUE_OPTIONS:
             index += 1
@@ -580,8 +584,19 @@ def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
     return found
 
 
+def manifest_path_package(root: Path, relative: str) -> str | None:
+    """Return the package name one `--manifest-path` selects, if it names one."""
+    try:
+        declared = tomllib.loads((root / relative).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    package = declared.get("package")
+    name = package.get("name") if isinstance(package, dict) else None
+    return name if isinstance(name, str) else None
+
+
 def documentation_disagreements(
-    label: str, text: str, suites: tuple[Suite, ...]
+    label: str, text: str, suites: tuple[Suite, ...], root: Path = ROOT
 ) -> list[tuple[int, str]]:
     """Report documented ignored-test commands the manifest does not describe.
 
@@ -602,6 +617,13 @@ def documentation_disagreements(
             argument = cargo_arguments[index]
             if argument in ("-p", "--package") and index + 1 < len(cargo_arguments):
                 package = cargo_arguments[index + 1]
+                index += 2
+                continue
+            # A manifest path selects its own package as surely as `-p` does.
+            # `-p` wins if both appear, matching Cargo.
+            if argument == "--manifest-path" and index + 1 < len(cargo_arguments):
+                selected = manifest_path_package(root, cargo_arguments[index + 1])
+                package = package or selected
                 index += 2
                 continue
             if argument in ("--features", "-F") and index + 1 < len(cargo_arguments):

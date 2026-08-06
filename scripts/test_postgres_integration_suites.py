@@ -436,6 +436,16 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("--run-ignored only", failures[0])
 
+    def test_a_toolchain_selector_does_not_hide_the_subcommand(self) -> None:
+        # `cargo +toolchain …` is rustup's selector, not an option.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: cargo +1.95.0 test -p alpha --tests -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
     def test_the_include_ignored_spelling_is_reported(self) -> None:
         # libtest runs the ignored tests under `--include-ignored` too, so it
         # is as much an unmanifested run as `--ignored` is.
@@ -752,6 +762,39 @@ class DocumentedCommandTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("--no-default-features", failures[0][1])
+
+    def test_a_manifest_path_selects_its_package(self) -> None:
+        # `--manifest-path` selects a package as surely as `-p` does; reading
+        # only `-p` left the command unattributed and therefore unchecked.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pa").mkdir()
+            (root / "pa/Cargo.toml").write_text(
+                '[package]\nname = "pa"\nversion = "0.0.0"\n', encoding="utf-8"
+            )
+
+            failures = documentation_disagreements(
+                "AGENTS.md",
+                "`cargo test --manifest-path pa/Cargo.toml --features other"
+                " --tests -- --ignored`\n",
+                (suite(package="pa", features=("one",)),),
+                root,
+            )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_an_unreadable_manifest_path_selects_nothing(self) -> None:
+        self.assertEqual(
+            documentation_disagreements(
+                "AGENTS.md",
+                "`cargo test --manifest-path nowhere/Cargo.toml --tests"
+                " -- --ignored`\n",
+                (suite(package="pa"),),
+                Path("/nonexistent"),
+            ),
+            [],
+        )
 
     def test_attached_option_forms_are_read(self) -> None:
         # Cargo accepts `--package=<spec>`; documentation uses it. Reading only
