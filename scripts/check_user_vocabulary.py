@@ -158,13 +158,14 @@ ALLOWLIST = (
     Allowance(
         "GitHub repository GraphQL owner variables",
         re.compile(
-            r"^(?:crates/tools-github/src/lib[.]rs|"
+            r"^(?:apps/signalboxd/src/repo_watch_runtime[.]rs|"
+            r"crates/tools-github/src/lib[.]rs|"
             r"crates/tools-code-host/src/code_host/github[.]rs)$"
         ),
         re.compile(
             r"^query (?:PullRequestReviewThreads|ReviewThreads|Convergence|"
             r"ThreadInventory)\(\$owner: String!,|"
-            r"^\s*repository\(owner: \$owner, name: \$name\) \{\s*$"
+            r"^\s*repository\(owner: \$(?:namespace|owner), name: \$name\) \{\s*$"
         ),
     ),
     Allowance(

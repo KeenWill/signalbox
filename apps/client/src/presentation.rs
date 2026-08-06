@@ -3326,6 +3326,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id,
                     content: InputContent::new("queued user text".to_owned()),
@@ -3584,6 +3585,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: selected_turn,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::ToolReconciliationRequired {
                         terminal_frontier_id: selected_frontier,
                         terminal_attempt_id: wire_uuid(9),
@@ -4145,6 +4147,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: wire_uuid(1),
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: wire_uuid(10),
                         content: InputContent::new("transcript content".to_owned()),
@@ -4390,6 +4393,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id: wire_uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state,
             }],
         )

@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_application::{
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsTransaction,
 };
@@ -12,7 +13,8 @@ use signalbox_domain::{
     ReplaceSessionDefaultsAppliedResult, ReplaceSessionDefaultsReconstitutionFailure,
     ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId,
+    SessionConfigurationDefaultsVersion, SessionId, SessionModelSettingsChanged,
+    VersionedSessionConfigurationDefaults,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -21,16 +23,20 @@ use crate::{
         self, CommandKind, REPLACE_SESSION_DEFAULTS_KIND, RegistryCorruption,
         RegistryInspectionError,
     },
+    lock_inventory,
     mapping::{
         PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
         dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
-        session_id_to_uuid,
+        defaults_version_to_numeric, durable_command_id_to_uuid,
+        model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, model_settings_overlay_to_json, model_settings_to_json,
+        session_id_from_uuid, session_id_to_uuid,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
-const STORAGE_VERSION: i16 = 3;
+const STORAGE_VERSION: i16 = 4;
+pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 4;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -53,6 +59,16 @@ pub enum ReplaceSessionDefaultsHandlingOutcome {
     /// lock; the whole transaction rolled back and nothing — not even the
     /// command identity — was recorded.
     PromptRequiresStatedMember,
+}
+
+/// Result of admitting a replacement only when its expected version is stale.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReplaceSessionDefaultsRejectionOnlyOutcome {
+    /// The atomic boundary recorded or replayed the command's terminal result.
+    Handled(ReplaceSessionDefaultsHandlingOutcome),
+    /// The expected version was current under the session pointer lock, so
+    /// the command claim was rolled back without applying the placeholder.
+    CurrentVersionMatched,
 }
 
 /// A durable shape that cannot reconstruct one recorded replacement.
@@ -232,6 +248,39 @@ impl ReplaceSessionDefaultsRepository {
         command: ReplaceSessionDefaults,
         prompt_member: PromptMemberStatement,
     ) -> Result<ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepositoryError> {
+        match self
+            .handle_conditionally(command, prompt_member, false)
+            .await?
+        {
+            ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome) => Ok(outcome),
+            ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched => {
+                Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "unconditional replacement was not handled",
+                )
+                .into())
+            }
+        }
+    }
+
+    /// Records a stale-version result atomically but never applies the supplied
+    /// replacement if its expected version has become current.
+    pub async fn handle_rejection_only_where_prompt_member(
+        &self,
+        command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<ReplaceSessionDefaultsRejectionOnlyOutcome, ReplaceSessionDefaultsRepositoryError>
+    {
+        self.handle_conditionally(command, prompt_member, true)
+            .await
+    }
+
+    async fn handle_conditionally(
+        &self,
+        command: ReplaceSessionDefaults,
+        prompt_member: PromptMemberStatement,
+        rejection_only: bool,
+    ) -> Result<ReplaceSessionDefaultsRejectionOnlyOutcome, ReplaceSessionDefaultsRepositoryError>
+    {
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
 
@@ -244,11 +293,13 @@ impl ReplaceSessionDefaultsRepository {
                     ))?;
                 let outcome = existing_outcome(&command, &recorded);
                 transaction.rollback().await?;
-                return Ok(outcome);
+                return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome));
             }
             Some(CommandKind::CreateSession | CommandKind::CreateSessionFromImportedFrontier) => {
                 transaction.rollback().await?;
-                return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
+                return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
+                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
+                ));
             }
             Some(
                 CommandKind::ReplaceSessionMetadata
@@ -261,7 +312,9 @@ impl ReplaceSessionDefaultsRepository {
                 | CommandKind::UpdateSessionPlacement,
             ) => {
                 transaction.rollback().await?;
-                return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
+                return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
+                    ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id },
+                ));
             }
             None => {}
         }
@@ -310,10 +363,16 @@ impl ReplaceSessionDefaultsRepository {
                 }
             };
             transaction.rollback().await?;
-            return Ok(outcome);
+            return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome));
         }
 
-        let prepared = prepare_against_current(&mut transaction, command.clone()).await?;
+        lock_current_defaults_pointer(&mut transaction, command.session()).await?;
+        let (prepared, mut prior_defaults) =
+            prepare_against_current(&mut transaction, command.clone()).await?;
+        if rejection_only && matches!(prepared.result(), ReplaceSessionDefaultsResult::Applied(_)) {
+            transaction.rollback().await?;
+            return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched);
+        }
         let prepared = match prepared.result() {
             ReplaceSessionDefaultsResult::Applied(applied) => {
                 let updated = sqlx::query(
@@ -341,14 +400,14 @@ impl ReplaceSessionDefaultsRepository {
                         .await?
                     {
                         transaction.rollback().await?;
-                        return Ok(
+                        return Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(
                             ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember,
-                        );
+                        ));
                     }
                     insert_defaults_version(&mut transaction, applied).await?;
                     prepared.clone()
                 } else if updated == 0 {
-                    let rederived = prepare_against_current(&mut transaction, command).await?;
+                    let (rederived, _) = prepare_against_current(&mut transaction, command).await?;
                     if matches!(rederived.result(), ReplaceSessionDefaultsResult::Applied(_)) {
                         transaction.rollback().await?;
                         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -356,6 +415,7 @@ impl ReplaceSessionDefaultsRepository {
                         )
                         .into());
                     }
+                    prior_defaults = None;
                     rederived
                 } else {
                     transaction.rollback().await?;
@@ -369,12 +429,13 @@ impl ReplaceSessionDefaultsRepository {
         };
 
         let outcome = result_outcome(prepared.result());
-        insert_typed_record(&mut transaction, prepared).await?;
+        insert_typed_record(&mut transaction, &prepared).await?;
+        insert_model_settings_event(&mut transaction, &prepared, prior_defaults.as_ref()).await?;
         transaction
             .commit()
             .await
             .map_err(ReplaceSessionDefaultsRepositoryError::from_commit_failure)?;
-        Ok(outcome)
+        Ok(ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome))
     }
 
     /// Loads one complete replacement receipt, or `None` only for an unseen ID.
@@ -442,6 +503,20 @@ impl ReplaceSessionDefaultsTransaction for ReplaceSessionDefaultsRepository {
     }
 }
 
+/// Serializes preparation with every replacement that can move this session's
+/// current-defaults pointer. An absent row is left for domain preparation to
+/// classify as session-not-found or durable corruption.
+async fn lock_current_defaults_pointer(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
+    let _: Option<Decimal> = sqlx::query_scalar(lock_inventory::REPLACE_SESSION_DEFAULTS_CURRENT)
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&mut *connection)
+        .await?;
+    Ok(())
+}
+
 /// Reads whether the immutable expected epoch carries a prompt.
 ///
 /// Runs after the pointer compare-and-set in the same transaction, so the
@@ -470,12 +545,22 @@ async fn expected_epoch_carries_prompt(
 async fn prepare_against_current(
     connection: &mut PgConnection,
     command: ReplaceSessionDefaults,
-) -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsRepositoryError> {
+) -> Result<
+    (
+        PreparedReplaceSessionDefaults,
+        Option<VersionedSessionConfigurationDefaults>,
+    ),
+    ReplaceSessionDefaultsRepositoryError,
+> {
     match load_session_from_connection(connection, command.session()).await {
-        Ok(Some(session)) => command.prepare_against(&session).map_err(|_| {
-            ReplaceSessionDefaultsCorruption::Inconsistent("current session ownership").into()
-        }),
-        Ok(None) => Ok(command.prepare_session_not_found()),
+        Ok(Some(session)) => {
+            let prior_defaults = session.current_configuration_defaults().clone();
+            let prepared = command.prepare_against(&session).map_err(|_| {
+                ReplaceSessionDefaultsCorruption::Inconsistent("current session ownership")
+            })?;
+            Ok((prepared, Some(prior_defaults)))
+        }
+        Ok(None) => Ok((command.prepare_session_not_found(), None)),
         Err(SessionRepositoryError::Database(error)) => Err(error.into()),
         Err(SessionRepositoryError::Corruption(error)) => {
             Err(ReplaceSessionDefaultsCorruption::CurrentSession(error).into())
@@ -517,8 +602,8 @@ async fn insert_defaults_version(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, system_prompt)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+             dangerous_tool_auto_approval, system_prompt, model_settings)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(session_id_to_uuid(applied.session()))
     .bind(defaults_version_to_numeric(installed.version()))
@@ -534,6 +619,9 @@ async fn insert_defaults_version(
             .system_prompt()
             .map(signalbox_domain::SessionSystemPrompt::as_str),
     )
+    .bind(model_settings_to_json(
+        installed.defaults().model_settings(),
+    ))
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -541,7 +629,7 @@ async fn insert_defaults_version(
 
 async fn insert_typed_record(
     connection: &mut PgConnection,
-    prepared: PreparedReplaceSessionDefaults,
+    prepared: &PreparedReplaceSessionDefaults,
 ) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
     let command = prepared.command();
     let selection = encode_selection(command.replacement().model());
@@ -552,12 +640,13 @@ async fn insert_typed_record(
             (command_id, command_kind, storage_version, session_id,
              expected_current_version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             dangerous_tool_auto_approval, system_prompt, result_kind,
+             dangerous_tool_auto_approval, system_prompt,
+             replacement_model_settings, caller_model_settings, result_kind,
              rejection_kind, result_session_id,
              result_installed_version, result_expected_version,
              result_current_version)
          VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(REPLACE_SESSION_DEFAULTS_KIND)
@@ -578,6 +667,12 @@ async fn insert_typed_record(
             .system_prompt()
             .map(signalbox_domain::SessionSystemPrompt::as_str),
     )
+    .bind(model_settings_to_json(
+        command.replacement().model_settings(),
+    ))
+    .bind(model_settings_overlay_to_json(
+        command.caller_model_settings(),
+    ))
     .bind(encoded_result.result_kind)
     .bind(encoded_result.rejection_kind)
     .bind(session_id_to_uuid(encoded_result.session))
@@ -585,6 +680,67 @@ async fn insert_typed_record(
     .bind(encoded_result.expected_version)
     .bind(encoded_result.current_version)
     .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn insert_model_settings_event(
+    connection: &mut PgConnection,
+    prepared: &PreparedReplaceSessionDefaults,
+    prior: Option<&VersionedSessionConfigurationDefaults>,
+) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
+    let ReplaceSessionDefaultsResult::Applied(applied) = prepared.result() else {
+        return Ok(());
+    };
+    let Some(prior) = prior else {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "applied settings event prior defaults",
+        )
+        .into());
+    };
+    let command = prepared.command();
+    let Some(event) = SessionModelSettingsChanged::try_new(
+        command.session(),
+        command.command_id(),
+        prior.version(),
+        applied.installed().version(),
+        prior.defaults().model(),
+        applied.installed().defaults().model(),
+        prior.defaults().model_settings(),
+        applied.installed().defaults().model_settings(),
+        command.caller_model_settings(),
+        command.model_settings_adjustments().to_vec(),
+    ) else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO session_model_settings_changed
+            (session_id, command_id, prior_defaults_version,
+             installed_defaults_version, prior_model_settings,
+             installed_model_settings, caller_model_settings, adjustments)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(session_id_to_uuid(event.session()))
+    .bind(durable_command_id_to_uuid(event.command_id()))
+    .bind(defaults_version_to_numeric(event.prior_defaults_version()))
+    .bind(defaults_version_to_numeric(
+        event.installed_defaults_version(),
+    ))
+    .bind(model_settings_to_json(event.prior_settings()))
+    .bind(model_settings_to_json(event.installed_settings()))
+    .bind(model_settings_overlay_to_json(event.caller_override()))
+    .bind(crate::mapping::model_change_adjustments_to_json(
+        event.adjustments(),
+    ))
+    .execute(&mut *connection)
+    .await?;
+    crate::outbox::append(
+        connection,
+        crate::outbox::OutboxEvent::SessionModelSettingsChanged {
+            session: event.session(),
+            installed_defaults_version: event.installed_defaults_version(),
+        },
+    )
     .await?;
     Ok(())
 }
@@ -680,6 +836,8 @@ async fn load_from_connection(
             typed.model_alias_id AS command_alias_id,
             typed.dangerous_tool_auto_approval AS command_tool_auto_approval,
             typed.system_prompt AS command_system_prompt,
+            typed.replacement_model_settings AS command_model_settings,
+            typed.caller_model_settings,
             typed.result_kind,
             typed.rejection_kind,
             typed.result_session_id,
@@ -692,13 +850,32 @@ async fn load_from_connection(
             installed.direct_model_selection_id AS installed_direct_id,
             installed.model_alias_id AS installed_alias_id,
             installed.dangerous_tool_auto_approval AS installed_tool_auto_approval,
-            installed.system_prompt AS installed_system_prompt
+            installed.system_prompt AS installed_system_prompt,
+            installed.model_settings AS installed_model_settings,
+            prior.session_id AS prior_session_id,
+            prior.version AS prior_version,
+            prior.model_selection_kind AS prior_model_kind,
+            prior.direct_model_selection_id AS prior_direct_id,
+            prior.model_alias_id AS prior_alias_id,
+            prior.dangerous_tool_auto_approval AS prior_tool_auto_approval,
+            prior.system_prompt AS prior_system_prompt,
+            prior.model_settings AS prior_model_settings,
+            settings_event.command_id AS settings_event_command_id,
+            settings_event.prior_model_settings AS settings_event_prior_model_settings,
+            settings_event.installed_model_settings AS settings_event_installed_model_settings,
+            settings_event.caller_model_settings AS settings_event_caller_model_settings,
+            settings_event.adjustments AS model_settings_adjustments
          FROM durable_command AS command
          LEFT JOIN replace_session_defaults_command AS typed
            ON typed.command_id = command.command_id
          LEFT JOIN session_defaults_version AS installed
-           ON installed.session_id = typed.result_session_id
-          AND installed.version = typed.result_installed_version
+          ON installed.session_id = typed.result_session_id
+         AND installed.version = typed.result_installed_version
+         LEFT JOIN session_defaults_version AS prior
+           ON prior.session_id = typed.session_id
+          AND prior.version = typed.expected_current_version
+         LEFT JOIN session_model_settings_changed AS settings_event
+           ON settings_event.command_id = typed.command_id
          WHERE command.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -723,7 +900,48 @@ fn decode_complete(
         );
     }
 
-    let command = ReplaceSessionDefaults::new(
+    let settings_event_command: Option<Uuid> = row.try_get("settings_event_command_id")?;
+    let settings_event_prior: Option<Value> = row.try_get("settings_event_prior_model_settings")?;
+    let settings_event_installed: Option<Value> =
+        row.try_get("settings_event_installed_model_settings")?;
+    let settings_event_caller: Option<Value> =
+        row.try_get("settings_event_caller_model_settings")?;
+    let settings_event_adjustments: Option<Value> = row.try_get("model_settings_adjustments")?;
+    let (settings_event_values, adjustments) = match (
+        settings_event_command,
+        settings_event_prior,
+        settings_event_installed,
+        settings_event_caller,
+        settings_event_adjustments,
+    ) {
+        (None, None, None, None, None) => (None, Vec::new()),
+        (Some(event_command), Some(prior), Some(installed), Some(caller), Some(adjustments))
+            if event_command == durable_command_id_to_uuid(command_id) =>
+        {
+            let adjustments = model_change_adjustments_from_json(adjustments).map_err(|_| {
+                ReplaceSessionDefaultsCorruption::Inconsistent("settings adjustments")
+            })?;
+            (Some((prior, installed, caller)), adjustments)
+        }
+        _ => {
+            return Err(
+                ReplaceSessionDefaultsCorruption::Inconsistent("settings event shape").into(),
+            );
+        }
+    };
+    let command_caller_model_settings: Value = required(&row, "caller_model_settings")?;
+    let caller_model_settings =
+        model_settings_overlay_from_json(command_caller_model_settings.clone())
+            .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("caller model settings"))?;
+    if typed_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && caller_model_settings != signalbox_domain::ModelSettingsOverlay::inherit_all()
+    {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "storage version without caller model settings",
+        )
+        .into());
+    }
+    let command = ReplaceSessionDefaults::with_model_settings_adjustments(
         command_id,
         session_id_from_uuid(required(&row, "session_id")?),
         decode_ordinal(&row, "expected_current_version")?,
@@ -731,11 +949,16 @@ fn decode_complete(
             required(&row, "command_model_kind")?,
             row.try_get("command_direct_id")?,
             row.try_get("command_alias_id")?,
-            required(&row, "command_tool_auto_approval")?,
-            row.try_get("command_system_prompt")?,
-            typed_version,
+            StoredConfigurationFields {
+                dangerous_tool_auto_approval: required(&row, "command_tool_auto_approval")?,
+                system_prompt: row.try_get("command_system_prompt")?,
+                model_settings: required(&row, "command_model_settings")?,
+                storage_version: typed_version,
+            },
             "command model selection",
         )?,
+        caller_model_settings,
+        adjustments,
     );
     let result_kind: String = required(&row, "result_kind")?;
     let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
@@ -758,15 +981,62 @@ fn decode_complete(
                 ))?;
             let installed_session = session_id_from_uuid(required(&row, "installed_session_id")?);
             let installed_version = decode_ordinal(&row, "installed_version")?;
+            let installed_model_settings: Value = required(&row, "installed_model_settings")?;
             let installed_defaults = decode_selection(
                 required(&row, "installed_model_kind")?,
                 row.try_get("installed_direct_id")?,
                 row.try_get("installed_alias_id")?,
-                required(&row, "installed_tool_auto_approval")?,
-                row.try_get("installed_system_prompt")?,
-                typed_version,
+                StoredConfigurationFields {
+                    dangerous_tool_auto_approval: required(&row, "installed_tool_auto_approval")?,
+                    system_prompt: row.try_get("installed_system_prompt")?,
+                    model_settings: installed_model_settings.clone(),
+                    storage_version: typed_version,
+                },
                 "installed model selection",
             )?;
+            let prior_session = session_id_from_uuid(required(&row, "prior_session_id")?);
+            let prior_version = decode_ordinal(&row, "prior_version")?;
+            if prior_session != command.session()
+                || prior_version != command.expected_current_version()
+            {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings event prior defaults identity",
+                )
+                .into());
+            }
+            let prior_model_settings: Value = required(&row, "prior_model_settings")?;
+            let prior_defaults = decode_selection(
+                required(&row, "prior_model_kind")?,
+                row.try_get("prior_direct_id")?,
+                row.try_get("prior_alias_id")?,
+                StoredConfigurationFields {
+                    dangerous_tool_auto_approval: required(&row, "prior_tool_auto_approval")?,
+                    system_prompt: row.try_get("prior_system_prompt")?,
+                    model_settings: prior_model_settings.clone(),
+                    storage_version: typed_version,
+                },
+                "prior model selection",
+            )?;
+            if let Some((event_prior, event_installed, event_caller)) = &settings_event_values
+                && (event_prior != &prior_model_settings
+                    || event_installed != &installed_model_settings
+                    || event_caller != &command_caller_model_settings)
+            {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings event evidence",
+                )
+                .into());
+            }
+            let records_settings_change = prior_defaults.model() != installed_defaults.model()
+                || prior_defaults.model_settings() != installed_defaults.model_settings();
+            let requires_settings_event =
+                typed_version >= MODEL_SETTINGS_FROM_STORAGE_VERSION && records_settings_change;
+            if settings_event_values.is_some() != requires_settings_event {
+                return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+                    "settings change evidence",
+                )
+                .into());
+            }
             ReplaceSessionDefaultsReconstitutionInput::applied(
                 command,
                 result_session,
@@ -893,7 +1163,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ReplaceSessionDefaultsRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=3) {
+    if matches!(actual, 1..=4) {
         Ok(actual)
     } else {
         Err(ReplaceSessionDefaultsCorruption::Unsupported {
@@ -926,13 +1196,18 @@ fn decode_optional_ordinal(
         .transpose()
 }
 
+struct StoredConfigurationFields {
+    dangerous_tool_auto_approval: String,
+    system_prompt: Option<String>,
+    model_settings: Value,
+    storage_version: i16,
+}
+
 fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
-    dangerous_tool_auto_approval: String,
-    system_prompt: Option<String>,
-    storage_version: i16,
+    stored: StoredConfigurationFields,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ReplaceSessionDefaultsRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -949,16 +1224,16 @@ fn decode_selection(
             );
         }
     };
-    let dangerous_tool_auto_approval =
-        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
-            ReplaceSessionDefaultsRepositoryError::from(
-                ReplaceSessionDefaultsCorruption::Unsupported {
-                    field: "dangerous tool auto approval",
-                    value: dangerous_tool_auto_approval,
-                },
-            )
-        })?;
-    if storage_version == 1
+    let dangerous_tool_auto_approval = dangerous_tool_auto_approval_from_str(
+        &stored.dangerous_tool_auto_approval,
+    )
+    .ok_or_else(|| {
+        ReplaceSessionDefaultsRepositoryError::from(ReplaceSessionDefaultsCorruption::Unsupported {
+            field: "dangerous tool auto approval",
+            value: stored.dangerous_tool_auto_approval,
+        })
+    })?;
+    if stored.storage_version == 1
         && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
     {
         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
@@ -966,24 +1241,41 @@ fn decode_selection(
         )
         .into());
     }
-    if storage_version <= 2 && system_prompt.is_some() {
+    if stored.storage_version <= 2 && stored.system_prompt.is_some() {
         return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
             "pre-version-three system prompt",
         )
         .into());
     }
-    let system_prompt = system_prompt
+    let system_prompt = stored
+        .system_prompt
         .map(|value| {
             signalbox_domain::SessionSystemPrompt::try_new(value).map_err(|_| {
                 ReplaceSessionDefaultsCorruption::Inconsistent("system prompt admission")
             })
         })
         .transpose()?;
-    Ok(SessionConfigurationDefaults::complete(
+    let model_settings = model_settings_from_json(stored.model_settings)
+        .map_err(|_| ReplaceSessionDefaultsCorruption::Inconsistent("model settings"))?;
+    if stored.storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
+        && model_settings != signalbox_domain::ValidatedModelSettings::provider_defaults()
+    {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "storage version without model settings",
+        )
+        .into());
+    }
+    SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
-    ))
+        model_settings,
+    )
+    .ok_or_else(|| {
+        ReplaceSessionDefaultsRepositoryError::from(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "model settings validation selection",
+        ))
+    })
 }
 
 async fn inspect_registry(

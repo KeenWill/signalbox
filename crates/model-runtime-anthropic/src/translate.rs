@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationMessage, ConversationRole, DeliveryMode,
-    FastMode, MessagePart, ModelOperation, OpenAiServiceTier, PreparationFailure, ReasoningLevel,
-    ServiceTier, ToolChoice,
+    FastMode, MessagePart, ModelOperation, ModelSettings, OpenAiServiceTier, PreparationFailure,
+    ReasoningLevel, ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
@@ -77,7 +77,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .reasoning_level
         .map(anthropic_effort)
         .transpose()?;
-    let service_tier = anthropic_service_tier(operation, request_fast_mode)?;
+    let service_tier = anthropic_service_tier(&operation.settings, request_fast_mode)?;
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
         max_tokens: operation.settings.max_output_tokens,
@@ -114,14 +114,21 @@ fn anthropic_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFa
     }
 }
 
-fn anthropic_service_tier<C>(
-    operation: &ModelOperation<C>,
+/// Validates the complete settings combination enforced by this adapter.
+///
+/// Capability-set validation remains the caller's responsibility. This check
+/// owns cross-knob constraints that independent capability sets cannot state.
+pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    settings.reasoning_level.map(anthropic_effort).transpose()?;
+    anthropic_service_tier(settings, settings.fast_mode)?;
+    Ok(())
+}
+
+fn anthropic_service_tier(
+    settings: &ModelSettings,
     request_fast_mode: FastMode,
 ) -> Result<Option<&'static str>, PreparationFailure> {
-    match (
-        operation.settings.fast_mode,
-        operation.settings.service_tier,
-    ) {
+    match (settings.fast_mode, settings.service_tier) {
         (FastMode::Enabled, Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto))) => {
             Err(PreparationFailure::UnsupportedOperation {
                 detail: "Anthropic fast mode is incompatible with the auto service tier"
@@ -431,7 +438,7 @@ mod tests {
         ToolCallProposal, ToolChoice, ToolDefinition, ToolName, ToolResultRecord,
     };
 
-    use super::{build_request, build_request_with_fast_mode};
+    use super::{build_request, build_request_with_fast_mode, validate_model_settings};
 
     /// An operation whose correlation seed is the one knob; targets, one
     /// user-role message, and a 64-token ceiling are canonical.
@@ -689,7 +696,7 @@ mod tests {
         operation.settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::Auto));
 
         assert!(matches!(
-            build_request(&operation),
+            validate_model_settings(&operation.settings),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }

@@ -1750,6 +1750,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: first_turn,
                     acceptance_position: CanonicalU64::new(FIRST_POSITION),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                             FIRST_INPUT_IDENTITY,
@@ -1760,6 +1761,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(SECOND_TURN_IDENTITY)),
                     acceptance_position: CanonicalU64::new(SECOND_POSITION),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                             SECOND_INPUT_IDENTITY,
@@ -1794,6 +1796,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(ACCEPTANCE_POSITION),
+                model_settings: None,
                 state: TurnState::ActiveAwaitingToolApproval {
                     tool_request_id: first_request,
                 },
@@ -1805,6 +1808,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(ACCEPTANCE_POSITION),
+                model_settings: None,
                 state: TurnState::ActiveAwaitingToolApproval {
                     tool_request_id: second_request,
                 },

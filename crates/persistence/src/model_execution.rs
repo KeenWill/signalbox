@@ -5331,6 +5331,33 @@ async fn persist_reclassified_pending_steering(
     source_turn: TurnId,
     successors: &[ReclassifiedPendingSteeringTurn],
 ) -> Result<(), ModelCallRepositoryError> {
+    if successors.is_empty() {
+        return Ok(());
+    }
+    let model_settings_evidence_required: bool = sqlx::query_scalar(
+        "WITH RECURSIVE configuration_chain AS (
+            SELECT source.*
+              FROM queued_input_origin AS source
+             WHERE source.turn_id = $1
+               AND source.session_id = $2
+            UNION
+            SELECT ancestor.*
+              FROM configuration_chain AS current
+              JOIN queued_input_origin AS ancestor
+                ON ancestor.turn_id = current.source_configuration_turn_id
+               AND ancestor.session_id = current.session_id
+         )
+         SELECT model_settings_evidence_required
+           FROM configuration_chain
+          WHERE source_configuration_turn_id IS NULL",
+    )
+    .bind(turn_id_to_uuid(source_turn))
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing(
+        "reclassified source configuration root",
+    ))?;
     for successor in successors {
         let AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. } =
             successor.accepted_input().disposition()
@@ -5478,6 +5505,45 @@ async fn persist_reclassified_pending_steering(
         .await?
         .rows_affected();
         require_single(lifecycle_rows, "reclassified successor lifecycle")?;
+
+        let settings_rows = sqlx::query(
+            "INSERT INTO turn_model_settings_resolved
+                (accepted_input_id, turn_id, session_id, defaults_version,
+                 selected_direct_model_id, per_call_model_settings,
+                 resolved_model_settings, adjusted_from_selection_id, adjustments)
+             SELECT $2, $1, source.session_id, source.defaults_version,
+                    source.selected_direct_model_id, source.per_call_model_settings,
+                    source.resolved_model_settings, source.adjusted_from_selection_id,
+                    source.adjustments
+               FROM turn_model_settings_resolved AS source
+              WHERE source.turn_id = $4
+                AND source.session_id = $3",
+        )
+        .bind(turn_id_to_uuid(successor.turn()))
+        .bind(successor.accepted_input().id().into_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(source_turn))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        if settings_rows > 1 {
+            return Err(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Inconsistent("reclassified successor model settings"),
+            ));
+        }
+        if settings_rows == 0 && model_settings_evidence_required {
+            return Err(ModelCallCorruption::Missing("reclassified source model settings").into());
+        }
+        if settings_rows == 1 {
+            outbox::append(
+                connection,
+                OutboxEvent::TurnModelSettingsResolved {
+                    session,
+                    accepted_input: successor.accepted_input().id(),
+                },
+            )
+            .await?;
+        }
 
         outbox::append(
             connection,
@@ -6028,6 +6094,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositor
         }
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             ModelCallCorruption::Inconsistent("origin accepted-input identity").into()
+        }
+        SubmitInputRepositoryError::UnsupportedModelSetting(_) => {
+            ModelCallCorruption::Inconsistent("origin model settings").into()
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()
