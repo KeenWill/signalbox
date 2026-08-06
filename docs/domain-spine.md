@@ -1094,7 +1094,7 @@ pub enum DelegationProvenanceReconstitutionInput {
 
 pub enum DelegationMessageDirection { ParentToChild, ChildToParent }
 pub struct DelegationMessage { /* private */ }
-// sealed: SessionDelegation::deliver_message or checked stored request reconstitution
+// sealed: SessionDelegation::deliver_message or DelegationMessage::reconstitute
 impl DelegationMessage {
     pub fn reconstitute(
         request: &DelegationMessageRequest,
@@ -1144,7 +1144,7 @@ impl ChildWait {
     // accessors: awaiting_request(), spawning_request(), child()
 }
 pub struct DelegationWait { /* private */ }
-// sealed: SessionDelegation::register_wait or checked stored request reconstitution
+// sealed: SessionDelegation::register_wait or DelegationWait::reconstitute
 impl DelegationWait {
     pub fn reconstitute(
         relation: &SessionDelegation,
