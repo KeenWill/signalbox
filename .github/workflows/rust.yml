@@ -118,6 +118,8 @@ jobs:
           cache-on-failure: true
           key: workspace-tests
       - name: Run tests
+        env:
+          SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
         run: cargo test --no-fail-fast --workspace --all-targets --all-features
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
