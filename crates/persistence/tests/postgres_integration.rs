@@ -1543,14 +1543,12 @@ async fn inv032_message_delivery_admits_reverse_insert_order() -> Result<(), Box
     Ok(())
 }
 
-async fn prepared_delegation_with_wait_and_message(
+async fn prepared_delegation_with_wait(
     seed: u128,
 ) -> Result<(ContainerAsync<Postgres>, PgPool, RawDelegationFixture), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let fixture = prepare_canonical_raw_delegation(&pool, seed).await?;
+    let (container, pool, fixture) = prepared_recipient_delivery_fixture(seed).await?;
     let mut setup = pool.begin().await?;
-    insert_raw_delegation_with_update(&mut setup, fixture).await?;
-    insert_raw_wait_and_message_with_delivery(&mut setup, fixture).await?;
+    insert_raw_wait_with_update(&mut setup, fixture).await?;
     setup.commit().await?;
     Ok((container, pool, fixture))
 }
@@ -1560,7 +1558,7 @@ async fn prepared_delegation_with_wait_and_message(
 async fn s18_inv003_inv010_delegation_history_rejects_initial_task_deletion()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
-        prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
+        prepared_recipient_delivery_fixture(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let mut history = pool.begin().await?;
     sqlx::query(
         "ALTER TABLE session_delegation_initial_task
@@ -1607,7 +1605,7 @@ async fn s18_inv003_inv010_delegation_history_rejects_initial_task_deletion()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s18_inv010_delegation_outcome_rejects_a_later_child_turn() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
-        prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
+        prepared_delegation_with_wait(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let later_turn = TurnId::from_uuid(Uuid::from_u128(DELEGATION_HISTORY_FIXTURE_SEED + 0x500));
     let mut outcome = pool.begin().await?;
     sqlx::query(
@@ -1633,7 +1631,7 @@ async fn s18_inv010_delegation_outcome_rejects_a_later_child_turn() -> Result<()
         &mut outcome,
         fixture,
         later_turn,
-        DELEGATION_AFTER_MESSAGE_OUTCOME_ORDINAL,
+        DELEGATION_WAIT_ONLY_OUTCOME_ORDINAL,
     )
     .await?;
     let turn_error = outcome
@@ -1655,7 +1653,7 @@ async fn s18_inv010_delegation_outcome_rejects_a_later_child_turn() -> Result<()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv032_delegation_result_wake_requires_its_subject_shape() -> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
-        prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
+        prepared_recipient_delivery_fixture(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let wake_error = sqlx::query(
         "WITH header AS (
             INSERT INTO delegation_outbox_event(event_kind, storage_version, session_id)
