@@ -30,6 +30,7 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                   FROM turn_lifecycle
                  WHERE session_id = $1
                    AND state_kind = 'active'
+                   AND NOT delegation_runtime_terminal
             )";
 
 pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
@@ -70,6 +71,28 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
            FROM session_current_defaults
           WHERE session_id = $1
           FOR UPDATE";
+
+pub(crate) const DELEGATION_TERMINAL_RELATION: &str =
+    "SELECT task.spawning_tool_request_id, relation.parent_session_id
+       FROM session_delegation_initial_task AS task
+       JOIN session_delegation AS relation
+         ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+        AND relation.child_session_id = task.child_session_id
+      WHERE task.child_session_id = $1
+        AND task.turn_id = $2
+      FOR UPDATE OF relation";
+
+pub(crate) const DELEGATION_TERMINAL_RELATION_IDENTITY: &str =
+    "SELECT task.spawning_tool_request_id, relation.parent_session_id
+       FROM session_delegation_initial_task AS task
+       JOIN session_delegation AS relation
+         ON relation.spawning_tool_request_id = task.spawning_tool_request_id
+        AND relation.child_session_id = task.child_session_id
+      WHERE task.child_session_id = $1
+        AND task.turn_id = $2";
+
+pub(crate) const DELEGATION_TERMINAL_PARENT_SESSION: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
 
 pub(crate) const REPLACE_SESSION_METADATA: &str =
     "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";

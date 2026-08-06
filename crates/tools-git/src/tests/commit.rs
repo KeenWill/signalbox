@@ -7,7 +7,6 @@ use std::{
 };
 
 use git2::{Odb, Oid, Repository};
-use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::{GitCommitArguments, GitStageArguments, LocalOperation};
@@ -19,8 +18,8 @@ use crate::reference_lock::ReferenceLock;
 use crate::reference_read::resolve_pinned_reference_chain;
 use crate::tests::support::{
     AUTHOR_EMAIL, AUTHOR_NAME, CHANGED_CONTENT, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
-    MODEL_MESSAGE, TRACKED_PATH, commit_all, commit_rejects_reflog_without_wait, execute, identity,
-    packed_object_counts, raw_commit_with_tree,
+    MODEL_MESSAGE, TRACKED_PATH, commit_all, commit_rejects_reflog_without_wait, create_fifo,
+    execute, identity, packed_object_counts, raw_commit_with_tree,
 };
 
 #[test]
@@ -330,8 +329,7 @@ fn commit_rejects_a_reflog_fifo_without_blocking_or_advancing() {
     let branch_log = fixture.root().join(".git/logs").join(branch);
     let executor = fixture.executor();
     fs::remove_file(&branch_log).expect("fixture branch reflog removes");
-    mkfifoat(CWD, &branch_log, Mode::RUSR | Mode::WUSR)
-        .expect("fixture branch reflog FIFO constructs");
+    create_fifo(&branch_log).expect("fixture branch reflog FIFO constructs");
 
     let rejected_without_wait = commit_rejects_reflog_without_wait(executor, branch_log.clone());
 

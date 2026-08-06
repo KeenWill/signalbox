@@ -10,6 +10,7 @@ use std::{
     error::Error,
     fmt,
     future::Future,
+    num::NonZeroU64,
     sync::{Arc, Weak},
 };
 
@@ -19,7 +20,8 @@ use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
     AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
     ContextFrontierProjection, ContextFrontierProjectionFailure,
-    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DirectModelSelection,
+    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
@@ -90,6 +92,33 @@ pub enum ModelConversationMessage {
         /// Exact user-owned content.
         content: UserContent,
     },
+    /// Model-authored task injected into one delegated child's first turn.
+    DelegatedTask {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        parent_session: SessionId,
+        parent_turn: TurnId,
+        content: DelegationContent,
+    },
+    /// Immutable peer content injected into the exact recipient session.
+    DelegationMessage {
+        source: SemanticTranscriptEntryRef,
+        spawning_request: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        delivery_sequence: NonZeroU64,
+        content: DelegationContent,
+    },
+    /// Background child completion injected as a session event, not a tool result.
+    BackgroundDelegationResult {
+        source: SemanticTranscriptEntryRef,
+        awaiting_request: ToolRequestId,
+        spawning_request: ToolRequestId,
+        child: SessionId,
+        delivery_sequence: NonZeroU64,
+        outcome: DelegationOutcome,
+    },
     /// Exact assistant content rendered with the assistant role.
     Assistant {
         /// The source-qualified semantic entry being rendered.
@@ -151,6 +180,8 @@ pub enum ModelToolResultContent {
     },
     /// The turn ended before this request received a decision.
     ClosedByTurnEnd,
+    /// Exact typed terminal child outcome delivered to `await_session`.
+    Delegation(DelegationOutcome),
 }
 
 fn render_frontier_messages<'a>(
@@ -228,6 +259,66 @@ fn render_frontier_messages<'a>(
                     content,
                 });
             }
+            SemanticTranscriptEntryPayload::DelegatedTask {
+                spawning_request,
+                parent_session,
+                parent_turn,
+                content,
+            } => messages.push(ModelConversationMessage::DelegatedTask {
+                source,
+                spawning_request: *spawning_request,
+                parent_session: *parent_session,
+                parent_turn: *parent_turn,
+                content: content.clone(),
+            }),
+            SemanticTranscriptEntryPayload::DelegationMessage {
+                spawning_request,
+                message,
+                sender,
+                recipient,
+                delivery_sequence,
+                content,
+            } => messages.push(ModelConversationMessage::DelegationMessage {
+                source,
+                spawning_request: *spawning_request,
+                message: *message,
+                sender: *sender,
+                recipient: *recipient,
+                delivery_sequence: *delivery_sequence,
+                content: content.clone(),
+            }),
+            SemanticTranscriptEntryPayload::DelegationResult {
+                awaiting_request,
+                spawning_request,
+                child,
+                mode,
+                delivery_sequence,
+                outcome,
+            } => match (mode, delivery_sequence) {
+                (DelegationWaitMode::Foreground, None) => {
+                    messages.push(ModelConversationMessage::ToolResult {
+                        source,
+                        request: *awaiting_request,
+                        content: ModelToolResultContent::Delegation(outcome.as_ref().clone()),
+                    });
+                }
+                (DelegationWaitMode::Background, Some(delivery_sequence)) => {
+                    messages.push(ModelConversationMessage::BackgroundDelegationResult {
+                        source,
+                        awaiting_request: *awaiting_request,
+                        spawning_request: *spawning_request,
+                        child: *child,
+                        delivery_sequence: *delivery_sequence,
+                        outcome: outcome.as_ref().clone(),
+                    });
+                }
+                (DelegationWaitMode::Foreground, Some(_))
+                | (DelegationWaitMode::Background, None) => {
+                    return Err(ModelFrontierRenderingError::InvalidDelegationDelivery {
+                        entry: source,
+                    });
+                }
+            },
             SemanticTranscriptEntryPayload::AssistantText {
                 producing_call,
                 value,
@@ -298,7 +389,7 @@ fn render_frontier_messages<'a>(
                     ToolAttemptEnd::KnownFailed { error } => {
                         ModelToolResultContent::ExecutionError(error.clone())
                     }
-                    ToolAttemptEnd::Ambiguous => {
+                    ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => {
                         return Err(ModelFrontierRenderingError::UnrenderableToolResult {
                             entry: source,
                         });
@@ -497,6 +588,11 @@ pub enum ModelFrontierRenderingError {
         /// The absent source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    /// A stored delegation wait mode contradicted its delivery position.
+    InvalidDelegationDelivery {
+        /// Source-qualified delegation-result entry.
+        entry: SemanticTranscriptEntryRef,
+    },
     /// The complete durable frontier carries malformed summary provenance.
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
@@ -521,6 +617,9 @@ impl fmt::Display for ModelFrontierRenderingError {
             }
             Self::MissingProjectedEntry { .. } => {
                 formatter.write_str("context projection entry is missing from its frontier")
+            }
+            Self::InvalidDelegationDelivery { .. } => {
+                formatter.write_str("model frontier delegation delivery is inconsistent")
             }
             Self::InvalidContextProjection(_) => {
                 formatter.write_str("invalid context-compaction projection")
@@ -706,7 +805,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 
@@ -725,6 +824,8 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+    /// A newer logical terminal proof made the retained provider result inert.
+    DiscardedByLogicalTerminal,
 }
 
 /// Opaque same-incarnation evidence retained across a failed orchestration stage.
@@ -1373,6 +1474,9 @@ where
                             .commit_terminal_observation(retained_session, retained, tool_approvals)
                             .await;
                     }
+                    Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state: RetainedModelCallExecutionStateKind::TerminalObservation {
@@ -1651,12 +1755,13 @@ where
                 .commit_observation(session, observation.clone(), identities, next_turn)
                 .await
             {
-                Ok(outcome) => {
+                Ok(Some(outcome)) => {
                     report_model_call_terminalization(&outcome);
                     return Ok(ModelCallExecutionOutcome::ObservationCommitted(Box::new(
                         outcome,
                     )));
                 }
+                Ok(None) => return Ok(ModelCallExecutionOutcome::NoWork),
                 Err(error)
                     if error.operator_failure_class()
                         == OperatorFailureClass::IdentityCollision =>
@@ -2154,7 +2259,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Arc};
+    use std::{collections::VecDeque, num::NonZeroU64, sync::Arc};
 
     use expect_test::expect;
     use signalbox_domain::{
@@ -2186,6 +2291,150 @@ mod tests {
 
     fn credential_reference() -> ModelCallCredentialReference {
         ModelCallCredentialReference::new("fixture-provider-primary")
+    }
+
+    #[test]
+    fn delegation_task_message_and_background_result_render_as_typed_inputs() {
+        let child = identity(40, SessionId::from_uuid);
+        let parent = identity(41, SessionId::from_uuid);
+        let spawning_request = identity(42, ToolRequestId::from_uuid);
+        let awaiting_request = identity(43, ToolRequestId::from_uuid);
+        let message = identity(44, DelegationMessageId::from_uuid);
+        let parent_turn = identity(45, TurnId::from_uuid);
+        let child_turn = identity(46, TurnId::from_uuid);
+        let task_source = SemanticTranscriptEntryRef::from_source(
+            child,
+            identity(47, SemanticTranscriptEntryId::from_uuid),
+        );
+        let message_source = SemanticTranscriptEntryRef::from_source(
+            child,
+            identity(48, SemanticTranscriptEntryId::from_uuid),
+        );
+        let result_source = SemanticTranscriptEntryRef::from_source(
+            parent,
+            identity(49, SemanticTranscriptEntryId::from_uuid),
+        );
+        let task_content =
+            DelegationContent::try_new("delegated work".into()).expect("fixture task is valid");
+        let message_content =
+            DelegationContent::try_new("peer update".into()).expect("fixture message is valid");
+        let result_content =
+            DelegationContent::try_new("delivered result".into()).expect("fixture result is valid");
+        let outcome = DelegationOutcome::reconstitute(
+            signalbox_domain::DelegationOutcomeKind::ResultReturned,
+            Some(result_content),
+            signalbox_domain::DelegationOutcomeReason::ChildCompleted,
+            signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: child_turn,
+            },
+        )
+        .expect("fixture child outcome is correlated");
+        let task = SemanticTranscriptEntryPayload::DelegatedTask {
+            spawning_request,
+            parent_session: parent,
+            parent_turn,
+            content: task_content.clone(),
+        };
+        let peer_message = SemanticTranscriptEntryPayload::DelegationMessage {
+            spawning_request,
+            message,
+            sender: parent,
+            recipient: child,
+            delivery_sequence: NonZeroU64::MIN,
+            content: message_content.clone(),
+        };
+        let result = SemanticTranscriptEntryPayload::DelegationResult {
+            awaiting_request,
+            spawning_request,
+            child,
+            mode: DelegationWaitMode::Background,
+            delivery_sequence: Some(NonZeroU64::new(2).expect("two is positive")),
+            outcome: Box::new(outcome.clone()),
+        };
+
+        let rendered = render_frontier_messages(
+            [
+                (task_source, &task),
+                (message_source, &peer_message),
+                (result_source, &result),
+            ],
+            |_| None,
+            [],
+        )
+        .expect("typed delegation entries render without accepted-input evidence");
+
+        assert_eq!(
+            rendered.as_ref(),
+            &[
+                ModelConversationMessage::DelegatedTask {
+                    source: task_source,
+                    spawning_request,
+                    parent_session: parent,
+                    parent_turn,
+                    content: task_content,
+                },
+                ModelConversationMessage::DelegationMessage {
+                    source: message_source,
+                    spawning_request,
+                    message,
+                    sender: parent,
+                    recipient: child,
+                    delivery_sequence: NonZeroU64::MIN,
+                    content: message_content,
+                },
+                ModelConversationMessage::BackgroundDelegationResult {
+                    source: result_source,
+                    awaiting_request,
+                    spawning_request,
+                    child,
+                    delivery_sequence: NonZeroU64::new(2).expect("two is positive"),
+                    outcome,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn foreground_delegation_result_renders_as_await_tool_result() {
+        let parent = identity(50, SessionId::from_uuid);
+        let child = identity(51, SessionId::from_uuid);
+        let awaiting_request = identity(52, ToolRequestId::from_uuid);
+        let spawning_request = identity(53, ToolRequestId::from_uuid);
+        let source = SemanticTranscriptEntryRef::from_source(
+            parent,
+            identity(54, SemanticTranscriptEntryId::from_uuid),
+        );
+        let outcome = DelegationOutcome::reconstitute(
+            signalbox_domain::DelegationOutcomeKind::ChildFailed,
+            None,
+            signalbox_domain::DelegationOutcomeReason::ChildExecutionFailed,
+            signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
+                session: child,
+                turn: identity(55, TurnId::from_uuid),
+            },
+        )
+        .expect("fixture failure is correlated");
+        let result = SemanticTranscriptEntryPayload::DelegationResult {
+            awaiting_request,
+            spawning_request,
+            child,
+            mode: DelegationWaitMode::Foreground,
+            delivery_sequence: None,
+            outcome: Box::new(outcome.clone()),
+        };
+
+        let rendered = render_frontier_messages([(source, &result)], |_| None, [])
+            .expect("foreground delivery is one correlated tool result");
+
+        assert_eq!(
+            rendered.as_ref(),
+            &[ModelConversationMessage::ToolResult {
+                source,
+                request: awaiting_request,
+                content: ModelToolResultContent::Delegation(outcome),
+            }]
+        );
     }
 
     fn ready(request: PreparedModelCallRequest) -> PrepareModelCallOutcome {
@@ -2762,7 +3011,7 @@ mod tests {
             _observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<ModelCallTerminalOutcome, Self::Error>
+        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
@@ -2796,7 +3045,7 @@ mod tests {
             observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<ModelCallTerminalOutcome, Self::Error>
+        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {

@@ -14,14 +14,40 @@ use signalbox_domain::{
     MergeableState, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
     ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReactionSubject, ReasoningLevel,
     RepoWatchEventKindNameV1, ReviewState, ServiceTier, SessionConfigurationDefaultsVersion,
-    SessionId, SessionInputPosition, SessionPlacementEventKind, SettingOverlay,
-    ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
-    UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
+    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
+    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
 use crate::approval_judge::FailedApprovalJudgeDisposition;
+
+/// Closed session-creation cause discriminators stored in PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionCreationCauseStorageKind {
+    UserInitiated,
+    Delegated,
+}
+
+/// Encodes a session-creation cause as its closed PostgreSQL spelling.
+pub(crate) const fn session_creation_cause_to_str(value: &SessionCreationCause) -> &'static str {
+    match value {
+        SessionCreationCause::UserInitiated => "owner_initiated",
+        SessionCreationCause::Delegated { .. } => "delegated",
+    }
+}
+
+/// Decodes a closed session-creation cause discriminator from PostgreSQL.
+pub(crate) fn session_creation_cause_from_str(
+    value: &str,
+) -> Option<SessionCreationCauseStorageKind> {
+    match value {
+        "owner_initiated" => Some(SessionCreationCauseStorageKind::UserInitiated),
+        "delegated" => Some(SessionCreationCauseStorageKind::Delegated),
+        _ => None,
+    }
+}
 
 /// Closed approval-judge lifecycle states stored by PostgreSQL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,7 +332,7 @@ pub(crate) const fn goal_operation_to_str(value: &GoalUserAction) -> &'static st
     match value {
         GoalUserAction::Attach(_) => "attach",
         GoalUserAction::Resume(_) => "resume",
-        GoalUserAction::Stop => "stop",
+        GoalUserAction::Stop { .. } => "stop",
         GoalUserAction::Supersede(_) => "supersede",
     }
 }
@@ -1429,23 +1455,23 @@ mod tests {
         MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
         ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
         RepoWatchEventKindNameV1, ReviewState, ServiceTier, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition, SessionPlacementEventKind, SettingOverlay,
-        ToolApprovalPosture, ToolPermissionDefault, TurnId,
+        SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+        SettingOverlay, ToolApprovalPosture, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
-        PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, StoredModelSettingsError, accepted_input_id_from_uuid,
-        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
-        approval_judge_recommendation_to_str, approval_judge_state_from_str,
-        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
-        approval_judge_terminal_disposition_to_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
-        input_position_to_numeric, model_change_adjustments_from_json,
+        PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
+        StoredModelSettingsError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
+        approval_judge_state_from_str, approval_judge_state_to_str,
+        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
+        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
+        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
+        input_position_from_numeric, input_position_to_numeric, model_change_adjustments_from_json,
         model_change_adjustments_to_json, model_settings_from_json,
         model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
         plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
@@ -1456,7 +1482,8 @@ mod tests {
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
-        repo_watch_thread_state_to_str, session_id_from_uuid, session_id_to_uuid,
+        repo_watch_thread_state_to_str, session_creation_cause_from_str,
+        session_creation_cause_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         session_placement_rejection_from_str, session_placement_result_kind_from_str,
         session_placement_result_kind_to_str, tool_approval_posture_from_str,
@@ -1466,7 +1493,29 @@ mod tests {
     use crate::approval_judge::FailedApprovalJudgeDisposition;
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+    const DELEGATED_REQUEST_ID: u128 = 1;
     const UNKNOWN_DISCRIMINATOR: &str = "outside-closed-set";
+
+    #[test]
+    fn session_creation_cause_mapping_is_closed() {
+        assert_eq!(
+            session_creation_cause_from_str(session_creation_cause_to_str(
+                &SessionCreationCause::UserInitiated,
+            )),
+            Some(SessionCreationCauseStorageKind::UserInitiated)
+        );
+        assert_eq!(
+            session_creation_cause_from_str(session_creation_cause_to_str(
+                &SessionCreationCause::Delegated {
+                    spawning_request: signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(
+                        DELEGATED_REQUEST_ID,
+                    )),
+                },
+            )),
+            Some(SessionCreationCauseStorageKind::Delegated)
+        );
+        assert_eq!(session_creation_cause_from_str("unknown"), None);
+    }
 
     #[test]
     fn repository_watch_event_kind_mapping_is_closed() {

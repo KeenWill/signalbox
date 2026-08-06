@@ -995,11 +995,13 @@ impl OriginConfigurationReconstitutionInput {
             self.defaults_version,
             self.defaults,
         );
+        let model_override = if versioned.defaults().model() == self.requested_model {
+            ModelSelectionOverride::UseSessionDefault
+        } else {
+            ModelSelectionOverride::ReplaceWith(self.requested_model)
+        };
         let checked = versioned
-            .derive_request(
-                self.defaults_version,
-                ModelSelectionOverride::UseSessionDefault,
-            )
+            .derive_request(self.defaults_version, model_override)
             .ok()?;
         if checked.request().model() != self.requested_model {
             return None;
@@ -1779,6 +1781,33 @@ mod tests {
         .reconstitute();
 
         assert_eq!(reconstituted, None);
+    }
+
+    #[test]
+    fn stored_origin_configuration_restores_an_explicit_model_override() {
+        let current = current_defaults();
+        let requested = ModelSelectionRequest::Direct(direct(2));
+        let frozen = FrozenModelSelection::Direct(direct(2));
+        let expected = OriginConfiguration::freeze(
+            current
+                .derive_request(
+                    current.version(),
+                    ModelSelectionOverride::ReplaceWith(requested),
+                )
+                .expect("the exact defaults version derives an override"),
+            |_| None,
+        )
+        .expect("the direct override freezes");
+
+        let reconstituted = OriginConfigurationReconstitutionInput::new(
+            current.version(),
+            current.defaults().clone(),
+            requested,
+            frozen,
+        )
+        .reconstitute();
+
+        assert_eq!(reconstituted, Some(expected));
     }
 
     #[test]

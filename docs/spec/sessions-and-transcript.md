@@ -16,16 +16,19 @@ prompt was verified through PR #286 (`agent/session-system-prompt`); and the
 input-delivery surface and its user-reachable steering boundary were verified
 through PR #302 (`agent/mid-turn-steering`). The copy-on-create session-template
 provenance and creation mode were verified through PR #311
-(`agent/session-templates-spec`). The append-only context-compaction record and
-projection were verified through PR #312 (`agent/context-compaction-core`); the
-command path and canonical visible-range selection were verified through PR #314
-(`agent/context-compaction-protocol`). The runner placement-entry paragraphs are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. The imported-conversation record
-and converter are owned by [conversation-import](conversation-import.md). Where
-a law is cited as `INV-NNN`, the generated
-[invariant test index](../invariants.md) resolves it; where mechanics owned by
-another contract are summarized, the owning sibling page is linked inline.
+(`agent/session-templates-spec`). Delegated creation provenance and its durable
+mapping are the foundation proposal at the bottom of the delegation stack and
+become verified only with its implementing child pull requests. The append-only
+context-compaction record and projection were verified through PR #312
+(`agent/context-compaction-core`); the command path and canonical visible-range
+selection were verified through PR #314 (`agent/context-compaction-protocol`).
+The runner placement-entry paragraphs are the foundation proposal at the bottom
+of their implementing stack and become verified only with those child pull
+requests. The imported-conversation record and converter are owned by
+[conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
+where mechanics owned by another contract are summarized, the owning sibling
+page is linked inline.
 
 The path-scoped session-placement domain and persistence paragraphs were
 verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
@@ -42,9 +45,10 @@ A session is one durable, independently browsable conversation with its own
 records two required, independent, immutable creation facts, paired as
 `SessionCreationProvenance` (INV-003):
 
-- **Creation cause** — why the session exists. The only constructible variant in
-  this foundation slice is `UserInitiated`. Application, schedule, and
-  delegation causes are not represented as placeholders.
+- **Creation cause** — why the session exists. The constructible variants are
+  `UserInitiated` and `Delegated { spawning_request }`. The delegated variant is
+  produced only by the spawning-request path and fixes ancestry to `None`;
+  application and schedule causes are not represented as placeholders.
 - **Transcript ancestry** — where initial semantic context came from: `None`
   (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
   and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
@@ -55,11 +59,6 @@ records two required, independent, immutable creation facts, paired as
 
 Why: deriving one fact from the other would make ordinary forks look delegated
 and force delegated children to inherit transcripts.
-
-**Committed unimplemented functionality.** The delegation persistence slice in
-this stack introduces `Delegated { spawning_request }` with durable storage and
-fixes its ancestry independently to `None`. No present session-provenance value
-or persistence path exposes that delegated creation cause.
 
 Neither fact can be rewritten after creation, and later source-session activity
 cannot change a descendant's recorded ancestry (INV-030). The `session` table
@@ -949,13 +948,12 @@ edges of [model-call-execution](model-call-execution.md).
 ## Session delegation
 
 This section is the foundation proposal at the bottom of the session-delegation
-stack and becomes verified only with that stack's persistence, scheduling, and
-tool/client pull requests. A delegated child is a distinct, independently
-browsable session. The persistence slice introduces
-`SessionCreationCause::Delegated { spawning_request }` and stores the exact
-spawning `ToolRequestId`; `TranscriptAncestry` independently remains `None`.
-Delegation does not copy, reference, merge, or expose the parent transcript, and
-it does not widen the none-or-one ancestry baseline.
+stack and becomes verified only with that stack's scheduling and tool/client
+pull requests. A delegated child is a distinct, independently browsable session.
+Its `SessionCreationCause::Delegated` names the exact spawning `ToolRequestId`;
+its `TranscriptAncestry` is independently `None`. Delegation does not copy,
+reference, merge, or expose the parent transcript, and it does not widen the
+none-or-one ancestry baseline.
 
 The child copies the complete `SessionConfigurationDefaults` value from the
 immutable defaults epoch frozen to the parent turn that owns the spawning
@@ -965,6 +963,12 @@ defaults version one. It never reads the parent's current-defaults pointer for
 this choice, so replacement after parent-turn acceptance, including replacement
 while the spawn request awaits approval or execution, cannot change the child.
 Tool arguments supply no defaults field.
+
+The delegated-task turn nevertheless retains its parent's exact requested and
+frozen model configuration as turn-origin provenance. A direct override remains
+an override, and an alias retains both its frozen definition and selected direct
+model; reconstitution does not replace either form with the copied child default
+merely because both resolve to the same effective model.
 
 The checked spawn task becomes one `DelegatedTask` semantic entry in the child,
 referencing the exact spawning request and its parent session and turn. It is
@@ -1046,16 +1050,23 @@ scope; a turn interrupt additionally names its exact turn, while a goal stop
 names the exact goal generation and carries no turn. Raw identities cannot
 construct that authority, `parent_alone` authority cannot produce a child
 disposition, and the recorded outcome reason must match its command kind and
-scope. `ChildStopped` is produced only by a parent-policy stop; the existing
-proof-bearing failed, refused, and cancelled model-call turn candidates can name
-any turn origin, including the delegated-task origin, but do not fabricate a
-distinct stopped outcome from that evidence. Delivery appends a
-`DelegationResult` semantic entry only to the target parent, names the exact
-awaiting request that receives the result, and is idempotent by that awaiting
-request. The immutable child result remains keyed by the spawning request. A
-detached child may return after the parent has stopped or cancelled; the result
-remains durable and independently inspectable even when no parent turn can
-consume it.
+scope. Parent-policy stop and cancellation both terminalize the exact delegated
+child turn through its existing cancelled-turn lifecycle state and exact
+cancellation marker; the relationship outcome preserves whether the chosen
+policy action was `ChildStopped` or `ChildCancelled`. `ChildStopped` is produced
+only by a parent-policy stop; the existing proof-bearing failed, refused, and
+cancelled model-call turn candidates can name any turn origin, including the
+delegated-task origin, but do not fabricate a distinct stopped outcome from that
+evidence. Delivery appends a `DelegationResult` semantic entry only to the
+target parent, names the exact awaiting request that receives the result, and is
+idempotent by that awaiting request. A foreground delivery correlates that entry
+as the logical result of its still-open `await_session` request. A background
+delivery retains the awaiting request only as delegation provenance, without a
+tool-result correlation, because that request already completed with its
+registration receipt; the result instead arrives as wake content. The immutable
+child result remains keyed by the spawning request. A detached child may return
+after the parent has stopped or cancelled; the result remains durable and
+independently inspectable even when no parent turn can consume it.
 
 **Committed unimplemented functionality.** A spawned child defaults into its
 parent's directory. No present delegation or placement surface implements or
@@ -1082,11 +1093,10 @@ placement and this stack implements no placement logic.
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant text, tool-use/result references, completed-turn, steering, and
-  cancelled-turn semantic entries are implemented. The session-delegation stack
-  adds delegation-message and delegation-result entries. Refusal,
-  reconciliation, mismatch, accepted-risk, and approval-event variants remain
-  open.
+- Assistant text, tool-use/result references, completed-turn, steering,
+  cancelled-turn, delegated-task, delegation-message, and delegation-result
+  semantic entries are implemented. Refusal, reconciliation, mismatch,
+  accepted-risk, and approval-event variants remain open.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed storage versions 1 and 2 without one, so

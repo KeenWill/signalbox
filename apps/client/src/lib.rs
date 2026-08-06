@@ -27,18 +27,19 @@ use serde::{Deserialize, de::DeserializeOwned};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ConversationCursor,
     ConversationImportFormat, ConversationImportSource, ConversationOrigin,
-    ConversationOriginFilter, ConversationSummary, ErrorCode, ErrorDetail, FrameEncodeError,
-    GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-    MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES,
-    ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingsOverlay, ProtocolVersion,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
-    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
-    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent,
-    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
-    TurnState, decode_server_line, encode_client_line, encode_server_line,
+    ConversationOriginFilter, ConversationSummary, DescendantTerminationScope, ErrorCode,
+    ErrorDetail, FrameEncodeError, GoalHistoryEvent, GoalLifecycleState, InputContent,
+    InputDelivery, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
+    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
+    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
+    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
+    ReviewRunSnapshot, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
+    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
+    decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::AsyncReadExt as _;
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -632,6 +633,7 @@ async fn execute(
             turn_id,
             command_id,
             defaults_version,
+            descendants,
         } => {
             let input = input.ok_or(ClientError::Input("standard-input content was not read"))?;
             stop(
@@ -641,6 +643,7 @@ async fn execute(
                 turn_id,
                 command_id,
                 defaults_version,
+                descendants,
                 input,
             )
             .await
@@ -1934,11 +1937,13 @@ async fn goal(
         GoalCommand::Stop {
             session_id,
             command_id,
+            descendants,
         } => {
             goal_mutation(client, output, session_id, command_id, |command_id| {
                 ClientRequest::StopGoal {
                     command_id,
                     session_id,
+                    descendant_scope: descendant_scope(descendants),
                 }
             })
             .await
@@ -2752,6 +2757,10 @@ async fn reconcile(
 /// call cancels directly, an issued call first enters its durable
 /// cancellation-requested state — and the content becomes the
 /// immediate-successor turn this verb then follows to its own terminal.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the closed stop request keeps each recovery and scope input explicit"
+)]
 async fn stop(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
@@ -2759,6 +2768,7 @@ async fn stop(
     turn_id: Option<CanonicalUuid>,
     command_id: Option<CommandId>,
     defaults_version: Option<CanonicalU64>,
+    descendants: bool,
     content: String,
 ) -> Result<(), ClientError> {
     let (command_id, generated) = command_identity(command_id)?;
@@ -2783,6 +2793,7 @@ async fn stop(
         expected_active_turn,
         InputContent::new(content),
         defaults_version,
+        descendant_scope(descendants),
     )
     .await?;
 
@@ -3001,6 +3012,14 @@ async fn reconcile_turn(
     }
 }
 
+const fn descendant_scope(descendants: bool) -> DescendantTerminationScope {
+    if descendants {
+        DescendantTerminationScope::ParentAndDescendants
+    } else {
+        DescendantTerminationScope::ParentAlone
+    }
+}
+
 async fn stop_turn(
     client: &mut ProcessClient,
     command_id: CommandId,
@@ -3008,6 +3027,7 @@ async fn stop_turn(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     defaults_version: CanonicalU64,
+    descendant_scope: DescendantTerminationScope,
 ) -> Result<CanonicalUuid, ClientError> {
     let mut connection = client
         .mutation_request(ClientRequest::StopTurn {
@@ -3016,6 +3036,7 @@ async fn stop_turn(
             expected_active_turn_id,
             content,
             expected_defaults_version: defaults_version,
+            descendant_scope,
             model_settings: ModelSettingsOverlay::inherit_all(),
         })
         .await?;
@@ -3095,6 +3116,13 @@ async fn await_turn_terminal(
                         };
                         return Ok(terminal);
                     }
+                    if child_lifecycle_terminalization(&event, session_id) {
+                        let mut refreshed = transcript(client, session_id).await?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
+                            return Ok(terminal);
+                        }
+                    }
                     if wait_mode == TurnWaitMode::QueuedTurn && session_recovery_transition(&event)
                     {
                         let mut refreshed = transcript(client, session_id).await?;
@@ -3157,8 +3185,12 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
         TurnState::ActiveAwaitingModelCallRecovery { .. }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
         TurnState::Queued { .. }
+        | TurnState::QueuedDelegated { .. }
+        | TurnState::QueuedDelegationWake { .. }
+        | TurnState::DelegationTerminated { .. }
         | TurnState::ActiveRunning { .. }
         | TurnState::ActiveAwaitingToolApproval { .. }
+        | TurnState::ActiveAwaitingChild { .. }
         | TurnState::Completed { .. }
         | TurnState::Failed { .. }
         | TurnState::Refused { .. }
@@ -3166,6 +3198,25 @@ fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError>
         | TurnState::ReconciliationRequired { .. }
         | TurnState::ToolReconciliationRequired { .. } => Ok(()),
     }
+}
+
+/// Reports whether this event terminalizes the followed session's own turn as
+/// the child of a parent cascade.
+///
+/// A descendant cascade addresses its lifecycle disposition to the terminalized
+/// child as well as to the commanding parent, and the child-addressed row names
+/// the relationship rather than the child turn. A follower therefore cannot
+/// project the disposition onto its tracked turn directly; it re-reads
+/// authoritative turn state, where the retained delegated turn projects as
+/// `TurnState::DelegationTerminated`.
+fn child_lifecycle_terminalization(event: &SessionEvent, session_id: CanonicalUuid) -> bool {
+    matches!(
+        event,
+        SessionEvent::ChildLifecycleDisposition {
+            child_session_id,
+            ..
+        } if *child_session_id == session_id
+    )
 }
 
 fn session_recovery_transition(event: &SessionEvent) -> bool {
@@ -3214,13 +3265,17 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
         Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
+        Some(TurnState::DelegationTerminated { .. }) => Ok(Some(TurnTerminal::Cancelled)),
         Some(
             TurnState::ReconciliationRequired { .. } | TurnState::ToolReconciliationRequired { .. },
         ) => Ok(Some(TurnTerminal::ReconciliationRequired)),
         Some(
             TurnState::Queued { .. }
+            | TurnState::QueuedDelegated { .. }
+            | TurnState::QueuedDelegationWake { .. }
             | TurnState::ActiveRunning { .. }
-            | TurnState::ActiveAwaitingToolApproval { .. },
+            | TurnState::ActiveAwaitingToolApproval { .. }
+            | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
         Some(
             TurnState::ActiveAwaitingModelCallRecovery { .. }
@@ -3272,7 +3327,12 @@ fn terminal_event_state(
         | SessionEvent::TurnRefused { .. }
         | SessionEvent::TurnCancelled { .. }
         | SessionEvent::TurnReconciliationRequired { .. }
-        | SessionEvent::TurnToolReconciliationRequired { .. } => None,
+        | SessionEvent::TurnToolReconciliationRequired { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
+        | SessionEvent::ChildLifecycleDisposition { .. } => None,
     }
 }
 
@@ -3311,7 +3371,7 @@ async fn follow(
                     }
                     observed_cursor = cursor.value();
                     output.event(observed_cursor, session_id, &event)?;
-                    if let Some(selection) = terminal_snapshot_selection(&event) {
+                    if let Some(selection) = terminal_snapshot_selection(&event, session_id) {
                         let mut refreshed = transcript(client, session_id).await?;
                         output.terminal_material(
                             &mut refreshed,
@@ -3354,7 +3414,15 @@ async fn follow(
     }
 }
 
-fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection> {
+fn terminal_snapshot_selection(
+    event: &SessionEvent,
+    session_id: CanonicalUuid,
+) -> Option<SnapshotSelection> {
+    if child_lifecycle_terminalization(event, session_id) {
+        // The cascade names no terminal entry of its own, so the refresh it
+        // requires selects whatever material the child produced before it.
+        return Some(SnapshotSelection::All);
+    }
     match event {
         SessionEvent::TurnCompleted {
             turn_id,
@@ -3419,8 +3487,13 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ContextCompacted { .. }
+        | SessionEvent::ModelCallTransition { .. }
+        | SessionEvent::ChildSpawned { .. }
+        | SessionEvent::ChildWaiting { .. }
+        | SessionEvent::SessionMessage { .. }
+        | SessionEvent::ChildResult { .. }
         | SessionEvent::ToolApprovalDecided { .. }
-        | SessionEvent::ModelCallTransition { .. } => None,
+        | SessionEvent::ChildLifecycleDisposition { .. } => None,
     }
 }
 
@@ -4545,7 +4618,8 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
         ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-        ConversationSummary, EffectiveModelSettings, FastMode, FrameEncodeError,
+        ConversationSummary, DelegationOutcome, DelegationProvenance, DelegationReason,
+        DescendantTerminationScope, EffectiveModelSettings, FastMode, FrameEncodeError,
         GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
         ImportedSessionRelationship, ImportedSourceSpeaker, InputContent, InputDelivery,
         MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
@@ -4616,7 +4690,7 @@ mod tests {
         SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument,
         TurnTerminal, TurnWaitMode, await_turn_terminal, collect_import_paths, continue_imported,
         conversation_import_chunk_read_limit, conversations, create, decide,
-        decode_goal_mutation_receipt, import_conversation_file, imported,
+        decode_goal_mutation_receipt, descendant_scope, import_conversation_file, imported,
         model_call_recovery_transition, open_scanned_import_source,
         placement_update_receipt_matches, placement_update_rejection_matches, read_goal_text_file,
         read_import_file, read_input, read_review_json_file, read_system_prompt_file,
@@ -4628,7 +4702,27 @@ mod tests {
         source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
         terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
     };
-    use crate::{error::ClientError, presentation::Output};
+    use crate::{child_lifecycle_terminalization, error::ClientError, presentation::Output};
+
+    /// The session a follower reads. Only a delegation event addressed to this
+    /// exact session terminalizes the follower's own turn.
+    const FOLLOWED_SESSION_IDENTITY: u128 = 0x5e5;
+
+    fn followed_session() -> CanonicalUuid {
+        CanonicalUuid::from_uuid(Uuid::from_u128(FOLLOWED_SESSION_IDENTITY))
+    }
+
+    #[test]
+    fn s19_descendant_scope_follows_the_explicit_cli_choice() {
+        assert_eq!(
+            descendant_scope(false),
+            DescendantTerminationScope::ParentAlone
+        );
+        assert_eq!(
+            descendant_scope(true),
+            DescendantTerminationScope::ParentAndDescendants
+        );
+    }
 
     #[test]
     fn inv033_goal_history_replay_accepts_supersession_lineage() -> Result<(), ClientError> {
@@ -5530,26 +5624,32 @@ mod tests {
         let call = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let frontier = CanonicalUuid::from_uuid(Uuid::from_u128(3));
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::ToolBatchTransition {
-                turn_id: turn,
-                model_call_id: call,
-                state: ToolBatchState::Proposed {
-                    frontier_id: frontier,
+            terminal_snapshot_selection(
+                &SessionEvent::ToolBatchTransition {
+                    turn_id: turn,
+                    model_call_id: call,
+                    state: ToolBatchState::Proposed {
+                        frontier_id: frontier,
+                    },
                 },
-            }),
+                followed_session()
+            ),
             Some(SnapshotSelection::ToolBatchProposed {
                 turn_id: turn,
                 model_call_id: call,
             })
         );
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::ToolBatchTransition {
-                turn_id: turn,
-                model_call_id: call,
-                state: ToolBatchState::ResultsProjected {
-                    frontier_id: frontier,
+            terminal_snapshot_selection(
+                &SessionEvent::ToolBatchTransition {
+                    turn_id: turn,
+                    model_call_id: call,
+                    state: ToolBatchState::ResultsProjected {
+                        frontier_id: frontier,
+                    },
                 },
-            }),
+                followed_session()
+            ),
             Some(SnapshotSelection::ToolBatchResults {
                 turn_id: turn,
                 model_call_id: call,
@@ -5560,11 +5660,14 @@ mod tests {
     #[test]
     fn refused_terminal_event_requests_no_side_reread() {
         assert!(
-            terminal_snapshot_selection(&SessionEvent::TurnRefused {
-                turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            })
+            terminal_snapshot_selection(
+                &SessionEvent::TurnRefused {
+                    turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                },
+                followed_session()
+            )
             .is_none()
         );
     }
@@ -5578,7 +5681,7 @@ mod tests {
                 turn_id,
                 cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            }),
+            }, followed_session()),
             Some(SnapshotSelection::Cancelled {
                 turn_id: selected,
                 terminal_entry_id,
@@ -5591,11 +5694,14 @@ mod tests {
         let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
 
         assert!(
-            terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
-                turn_id,
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-            })
+            terminal_snapshot_selection(
+                &SessionEvent::TurnReconciliationRequired {
+                    turn_id,
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                    terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                },
+                followed_session()
+            )
             .is_none()
         );
     }
@@ -5607,16 +5713,63 @@ mod tests {
         let terminal_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
 
         assert_eq!(
-            terminal_snapshot_selection(&SessionEvent::TurnToolReconciliationRequired {
-                turn_id,
-                tool_attempt_id,
-                terminal_frontier_id,
-            }),
+            terminal_snapshot_selection(
+                &SessionEvent::TurnToolReconciliationRequired {
+                    turn_id,
+                    tool_attempt_id,
+                    terminal_frontier_id,
+                },
+                followed_session()
+            ),
             Some(SnapshotSelection::ToolReconciliation {
                 turn_id,
                 tool_attempt_id,
                 terminal_frontier_id,
             })
+        );
+    }
+
+    #[test]
+    fn child_addressed_cascade_disposition_requests_an_authoritative_reread() {
+        let event = SessionEvent::ChildLifecycleDisposition {
+            spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            child_session_id: followed_session(),
+            outcome: DelegationOutcome::Stopped,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                goal_generation: CanonicalU64::new(1),
+                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+
+        assert!(child_lifecycle_terminalization(&event, followed_session()));
+        assert_eq!(
+            terminal_snapshot_selection(&event, followed_session()),
+            Some(SnapshotSelection::All)
+        );
+    }
+
+    #[test]
+    fn parent_addressed_cascade_disposition_requests_no_reread() {
+        let event = SessionEvent::ChildLifecycleDisposition {
+            spawning_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            child_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+            outcome: DelegationOutcome::Stopped,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentGoalCommand {
+                parent_session_id: followed_session(),
+                goal_generation: CanonicalU64::new(1),
+                command_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        };
+
+        assert!(!child_lifecycle_terminalization(&event, followed_session()));
+        assert_eq!(
+            terminal_snapshot_selection(&event, followed_session()),
+            None
         );
     }
 
@@ -7227,26 +7380,25 @@ mod tests {
         let active_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
         let successor_turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(5));
         let command_id = CommandId::try_from_uuid(Uuid::from_u128(4))?;
-        let defaults_version = CanonicalU64::new(1);
         let content = InputContent::new(String::from("continue after the stop"));
-        let expected_content = content.clone();
+        let defaults_version = CanonicalU64::new(1);
+        let selected_scope = DescendantTerminationScope::ParentAndDescendants;
+        let expected_request = ClientRequest::StopTurn {
+            command_id,
+            session_id,
+            expected_active_turn_id: active_turn_id,
+            content: content.clone(),
+            expected_defaults_version: defaults_version,
+            descendant_scope: selected_scope,
+            model_settings: ModelSettingsOverlay::inherit_all(),
+        };
         let server = tokio::spawn(async move {
             let (stream, mut writer) = listener.accept().await?.0.into_split();
             let mut reader = BufReader::new(stream);
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line).await?;
             let request = decode_client_line(&line).map_err(io::Error::other)?;
-            assert_eq!(
-                request.request(),
-                &ClientRequest::StopTurn {
-                    command_id,
-                    session_id,
-                    expected_active_turn_id: active_turn_id,
-                    content: expected_content,
-                    expected_defaults_version: defaults_version,
-                    model_settings: ModelSettingsOverlay::inherit_all(),
-                }
-            );
+            assert_eq!(request.request(), &expected_request);
             let response = ServerFrame::try_new_for_version(
                 request.version(),
                 request.request_id(),
@@ -7273,6 +7425,7 @@ mod tests {
             active_turn_id,
             content,
             defaults_version,
+            selected_scope,
         )
         .await?;
         assert_eq!(accepted_successor, successor_turn_id);

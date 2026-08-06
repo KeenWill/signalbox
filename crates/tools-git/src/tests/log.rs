@@ -3,7 +3,6 @@
 use std::{collections::BTreeSet, fs};
 
 use git2::{ObjectType, Repository, Signature};
-use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::{GitLogArguments, LocalOperation};
@@ -14,7 +13,7 @@ use crate::limits::{MAX_SHALLOW_ENTRIES, MAX_WORKTREE_INSPECTIONS};
 use crate::tests::planting::{oversized_commit_object, plant_shallow_entries};
 use crate::tests::support::{
     AUTHOR_EMAIL, AUTHOR_NAME, CHANGED_CONTENT, Fixture, MODEL_MESSAGE, TRACKED_PATH, commit_all,
-    commit_with_parents, execute, identity, invalid_utf8_commit, long_author_email,
+    commit_with_parents, create_fifo, execute, identity, invalid_utf8_commit, long_author_email,
     long_author_name, plant_linear_history, raw_message_commit,
 };
 
@@ -44,7 +43,7 @@ fn log_rejects_a_fifo_head_without_blocking() {
     let executor = fixture.executor();
     let head_path = fixture.root().join(".git/HEAD");
     fs::remove_file(&head_path).expect("fixture HEAD removes");
-    mkfifoat(CWD, &head_path, Mode::RUSR | Mode::WUSR).expect("fixture HEAD FIFO constructs");
+    create_fifo(&head_path).expect("fixture HEAD FIFO constructs");
     let failure = executor.repository_authority.repository();
 
     assert!(matches!(failure, Err(LocalGitFailure::Repository)));
@@ -56,7 +55,7 @@ fn status_and_worktree_diff_reject_a_fifo_head_without_blocking() {
     let executor = fixture.executor();
     let head_path = fixture.root().join(".git/HEAD");
     fs::remove_file(&head_path).expect("fixture HEAD removes");
-    mkfifoat(CWD, &head_path, Mode::RUSR | Mode::WUSR).expect("fixture HEAD FIFO constructs");
+    create_fifo(&head_path).expect("fixture HEAD FIFO constructs");
     let failure = executor.repository_authority.repository();
 
     assert!(matches!(failure, Err(LocalGitFailure::Repository)));
