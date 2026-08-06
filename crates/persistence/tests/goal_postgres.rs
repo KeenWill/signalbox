@@ -20,14 +20,15 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureIdentities,
     AssistantText, CancelledModelCallTurnIdentities, CompletedModelCallIdentities,
-    ContextFrontierId, CreateSession, DeliveryRequest, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, FrozenAliasDefinition,
-    Goal, GoalCommandRejection, GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind,
-    GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement,
-    GoalUserAction, GoalUserCommand, GoalUserProvenance, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    PreparedCreateSession, ProviderModelIdentity, ReplaceSessionDefaults, ResolvedProviderTarget,
+    ContextCompactionId, ContextFrontierId, CreateSession, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, FrozenAliasDefinition, Goal, GoalCommandRejection,
+    GoalCommandResult, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
+    GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction, GoalUserCommand,
+    GoalUserProvenance, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelSelectionOverride, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices, PreparedCreateSession,
+    ProviderModelIdentity, ReplaceSessionDefaults, ResolvedProviderTarget,
     SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
     SubmitInputAppliedResult, SubmitInputResult, ToolRequestId, TranscriptAncestry, TurnAttemptId,
@@ -35,6 +36,10 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
+    context_compaction::{
+        ContextCompactionRepository, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
+    },
     create_session::CreateSessionRepository,
     goal::{
         GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
@@ -3233,6 +3238,129 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     assert_ne!(
         restarted_queued.turn(),
         TurnId::from_uuid(Uuid::from_u128(queued_bound_turn))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S18 / INV-015 / INV-032: a cascade-terminalized child releases its
+/// compaction boundary. The retained delegated turn stays physically active, so
+/// preparation must read runtime relevance rather than the physical state and
+/// must source the logical terminal's frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let parent = 0xfa00;
+    let bound_child = 0xfa01;
+    let bound_request = 0xfa10;
+    let bound_turn = 0xfa11;
+    let stop_command = 0xfa30;
+    let compaction_command = 0xfa40;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xfa01, parent, 0xfa21))
+        .await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation_fixture(0xfa02, bound_child, 0xfa22))
+        .await?;
+    insert_queued_delegation_fixture(
+        &pool,
+        DelegationFixture {
+            spawning_request: bound_request,
+            parent_session: parent,
+            parent_turn: 0xfa12,
+            child_session: bound_child,
+            child_turn: bound_turn,
+            task_entry: 0xfa13,
+            selection: 0xfa22,
+            policy_kind: "bound",
+            on_parent_stopped: Some("stop"),
+            on_parent_cancelled: Some("cancel"),
+        },
+    )
+    .await?;
+    let StartEligibleTurnOutcome::Activated(_) = StartEligibleTurnRepository::new(pool.clone())
+        .handle(session(bound_child), activation_identities(0xfa35))
+        .await?
+    else {
+        panic!("the bound child must activate before its parent stops");
+    };
+
+    let repository = GoalRepository::new(pool.clone());
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(0xfa29),
+                    session(parent),
+                    GoalUserAction::Attach(statement("stop the delegated descendants")),
+                ),
+                Some(turn_candidates(0xfa31)),
+                |_| None,
+            )
+            .await?,
+    );
+    assert_applied_command(
+        repository
+            .handle_user_command(
+                GoalUserCommand::new(
+                    command(stop_command),
+                    session(parent),
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+    let retained: (String, bool) = sqlx::query_as(
+        "SELECT state_kind, delegation_runtime_terminal
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .bind(Uuid::from_u128(bound_turn))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(retained, ("active".into(), true));
+
+    let outcome = ContextCompactionRepository::new(pool.clone())
+        .prepare(PrepareContextCompactionRequest {
+            command: command(compaction_command),
+            session: session(bound_child),
+            requested_through_position: None,
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(0xfa22)),
+            target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                Uuid::from_u128(0xfa41),
+            )),
+            credential_reference: String::from("cascade-compaction-test-provider"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(0xfa42)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xfa43)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xfa44)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(0xfa45)),
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = outcome else {
+        panic!("the logical terminal must release the child's compaction boundary");
+    };
+    let logical_terminal_frontier: Uuid = sqlx::query_scalar(
+        "SELECT terminal_frontier_id
+           FROM session_delegation_logical_terminal
+          WHERE child_session_id = $1",
+    )
+    .bind(Uuid::from_u128(bound_child))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        prepared.source_frontier(),
+        ContextFrontierId::from_uuid(logical_terminal_frontier)
     );
 
     pool.close().await;
