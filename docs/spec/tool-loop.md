@@ -834,6 +834,15 @@ cannot duplicate an external effect. The delivered tool result is copied from
 the child's terminal result record. The executor never reads or returns the
 child transcript.
 
+Background await registration and peer-message append likewise end the physical
+attempt in the same transaction as their delegation effect. Their scheduling
+executor result is a distinct `DurableCompletion` disposition carrying the exact
+ended dispatch correlation, not an encoded result awaiting a second commit. The
+application authenticates that correlation against the ended attempt before
+accepting it as already committed; an absent or cross-wired attempt fails
+closed, and a failed reread retains the handoff for same-incarnation
+reconciliation without repeating the effect.
+
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a
 separator and admits those exact bytes as `DelegationContent`; `await_session`
