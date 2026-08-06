@@ -2003,10 +2003,30 @@ BEGIN
            AND source_relation.child_session_id = checked.parent_session_id
            AND (checked.command_source_kind = 'goal_command'
                 OR source_task.turn_id = checked.parent_turn_id)
+           -- `delegation_cascade_expected_frontier` derives a nested edge's
+           -- effective parent kind from the recorded prior result on its source
+           -- edge, falling back to that edge's own effective kind. An
+           -- already-terminal source edge therefore carries the kind that
+           -- actually terminalized it, which is the earlier command's kind
+           -- whenever a second descendant-scoped command of the opposite kind
+           -- re-traverses the tree. Mirror that derivation exactly;
+           -- `require_delegation_cascade_disposition_count` already does.
            AND checked.termination_kind = CASE source_event.outcome_kind
                 WHEN 'child_stopped' THEN 'stopped'
                 WHEN 'child_cancelled' THEN 'cancelled'
-                WHEN 'already_terminal' THEN source_authority.termination_kind
+                WHEN 'already_terminal' THEN COALESCE(
+                    (
+                        SELECT CASE prior.outcome_kind
+                            WHEN 'child_stopped' THEN 'stopped'
+                            WHEN 'child_cancelled' THEN 'cancelled'
+                            ELSE source_authority.termination_kind
+                        END
+                          FROM session_child_result AS prior
+                         WHERE prior.spawning_tool_request_id =
+                                source_event.spawning_tool_request_id
+                    ),
+                    source_authority.termination_kind
+                )
            END
     ) THEN
         RAISE EXCEPTION 'nested delegation termination lacks its immediate parent outcome'
