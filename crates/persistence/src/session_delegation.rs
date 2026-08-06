@@ -10,11 +10,10 @@ use signalbox_domain::{
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationOutcome,
     DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenance,
     DelegationProvenanceReconstitutionInput, DelegationTransitionFailure, DelegationWait,
-    DelegationWaitMode, DescendantTerminationScope, DurableCommandId, GoalGeneration,
-    SessionDelegation, SessionDelegationReconstitutionFailure,
-    SessionDelegationReconstitutionInput, SessionId, ToolAttemptEnd, ToolAttemptObservation,
-    ToolDispatchAuthority, ToolEffectClass, ToolRequestId, ToolResultContent, ToolResultText,
-    TurnId,
+    DelegationWaitMode, DurableCommandId, GoalGeneration, SessionDelegation,
+    SessionDelegationReconstitutionFailure, SessionDelegationReconstitutionInput, SessionId,
+    ToolAttemptEnd, ToolAttemptObservation, ToolDispatchAuthority, ToolEffectClass, ToolRequestId,
+    ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -25,12 +24,17 @@ use crate::{
         DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION,
     },
     mapping::{
-        durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        DelegationPolicyStorageKind, bound_child_action_from_str,
+        delegation_message_direction_from_str, delegation_message_direction_to_str,
+        delegation_outcome_kind_from_str, delegation_outcome_reason_from_str,
+        delegation_policy_kind_from_str, delegation_wait_mode_from_str,
+        delegation_wait_mode_to_str, durable_command_id_from_uuid, session_id_from_uuid,
+        session_id_to_uuid, tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid,
+        turn_id_to_uuid,
     },
     tool_loop::{
         ToolLoopRepositoryError, load_active_batch_from_connection, load_request_by_id,
-        lock_tool_session, persist_ended_attempt,
+        load_requests_by_id, lock_tool_session, persist_ended_attempt,
     },
 };
 
@@ -213,6 +217,11 @@ impl SessionDelegationRepository {
             if let Some(spawning_request) =
                 load_wait_replay_subject(&mut transaction, request.request().id()).await?
             {
+                if dispatch.request() != request.request() {
+                    return Ok(RecordDelegationWaitOutcome::Rejected(
+                        DelegationOperationRejection::StaleDispatch,
+                    ));
+                }
                 let relation = load_relation(&mut transaction, spawning_request).await?;
                 let wait = DelegationWait::reconstitute(&relation, &request).ok_or(
                     SessionDelegationCorruption::Inconsistent("stored wait purpose"),
@@ -335,6 +344,11 @@ impl SessionDelegationRepository {
             }
             lock_tool_session(&mut transaction, request.request().session()).await?;
             if let Some(receipt) = load_message_replay(&mut transaction, &request).await? {
+                if dispatch.request() != request.request() {
+                    return Ok(RecordDelegationMessageOutcome::Rejected(
+                        DelegationOperationRejection::StaleDispatch,
+                    ));
+                }
                 return Ok(RecordDelegationMessageOutcome::Recorded(receipt));
             }
             let Some(spawning_request) =
@@ -502,7 +516,7 @@ fn message_receipt(
             "result": "session_message_sent",
             "tool_request_id": dispatch.request().id().as_uuid().to_string(),
             "message_id": receipt.message().as_uuid().to_string(),
-            "direction": encode_direction(receipt.direction()),
+            "direction": delegation_message_direction_to_str(receipt.direction()),
             "ordinal": receipt.ordinal().get(),
             "delivery_sequence": receipt.delivery_sequence().get(),
         })
@@ -567,10 +581,16 @@ async fn find_relation_for_message(
         .map_err(Into::into)
 }
 
+#[derive(Clone, Copy)]
+struct RelationEndpoints {
+    parent: SessionId,
+    child: SessionId,
+}
+
 async fn relation_endpoints(
     connection: &mut PgConnection,
     spawning_request: ToolRequestId,
-) -> Result<(SessionId, SessionId), SessionDelegationRepositoryError> {
+) -> Result<RelationEndpoints, SessionDelegationRepositoryError> {
     let row = sqlx::query(
         "SELECT parent_session_id, child_session_id
            FROM session_delegation
@@ -580,10 +600,10 @@ async fn relation_endpoints(
     .fetch_optional(connection)
     .await?
     .ok_or(SessionDelegationCorruption::Missing("delegation relation"))?;
-    Ok((
-        session_id_from_uuid(required(&row, "parent_session_id")?),
-        session_id_from_uuid(required(&row, "child_session_id")?),
-    ))
+    Ok(RelationEndpoints {
+        parent: session_id_from_uuid(required(&row, "parent_session_id")?),
+        child: session_id_from_uuid(required(&row, "child_session_id")?),
+    })
 }
 
 async fn load_relation(
@@ -644,6 +664,17 @@ async fn load_events(
     .bind(tool_request_id_to_uuid(spawn.request().id()))
     .fetch_all(&mut *connection)
     .await?;
+    let mut message_request_ids = Vec::new();
+    for row in &rows {
+        let kind: String = required(row, "event_kind")?;
+        if kind == "message_delivered" {
+            message_request_ids.push(tool_request_id_from_uuid(required(
+                row,
+                "provenance_tool_request_id",
+            )?));
+        }
+    }
+    let mut message_requests = load_requests_by_id(connection, &message_request_ids).await?;
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
         let ordinal = decode_ordinal(required(&row, "event_ordinal")?)?;
@@ -659,8 +690,8 @@ async fn load_events(
             "message_delivered" => {
                 let request_id =
                     tool_request_id_from_uuid(required(&row, "provenance_tool_request_id")?);
-                let request = load_request_by_id(connection, request_id)
-                    .await?
+                let request = message_requests
+                    .remove(&request_id)
                     .ok_or(SessionDelegationCorruption::Missing("message tool request"))?;
                 let direction = decode_direction(&required::<String>(&row, "direction")?)?;
                 let peer = match direction {
@@ -771,104 +802,74 @@ fn decode_outcome(row: &PgRow) -> Result<DelegationOutcome, SessionDelegationRep
 
 fn decode_policy(row: &PgRow) -> Result<ChildRelationshipPolicy, SessionDelegationRepositoryError> {
     let kind: String = required(row, "policy_kind")?;
-    match kind.as_str() {
-        "background" => Ok(ChildRelationshipPolicy::Background),
-        "bound" => Ok(ChildRelationshipPolicy::Bound {
+    match delegation_policy_kind_from_str(&kind) {
+        Some(DelegationPolicyStorageKind::Background) => Ok(ChildRelationshipPolicy::Background),
+        Some(DelegationPolicyStorageKind::Bound) => Ok(ChildRelationshipPolicy::Bound {
             on_parent_stopped: decode_action(&required::<String>(row, "on_parent_stopped")?)?,
             on_parent_cancelled: decode_action(&required::<String>(row, "on_parent_cancelled")?)?,
         }),
-        value => Err(SessionDelegationCorruption::Unsupported {
+        None => Err(SessionDelegationCorruption::Unsupported {
             field: "policy_kind",
-            value: value.to_owned(),
+            value: kind,
         }
         .into()),
     }
 }
 
 fn decode_action(value: &str) -> Result<BoundChildAction, SessionDelegationRepositoryError> {
-    match value {
-        "keep_running" => Ok(BoundChildAction::KeepRunning),
-        "stop" => Ok(BoundChildAction::Stop),
-        "cancel" => Ok(BoundChildAction::Cancel),
-        value => Err(SessionDelegationCorruption::Unsupported {
+    bound_child_action_from_str(value).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
             field: "bound_child_action",
             value: value.to_owned(),
         }
-        .into()),
-    }
+        .into()
+    })
 }
 
 fn decode_wait_mode(value: &str) -> Result<DelegationWaitMode, SessionDelegationRepositoryError> {
-    match value {
-        "foreground" => Ok(DelegationWaitMode::Foreground),
-        "background" => Ok(DelegationWaitMode::Background),
-        value => Err(SessionDelegationCorruption::Unsupported {
+    delegation_wait_mode_from_str(value).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
             field: "wait_mode",
             value: value.to_owned(),
         }
-        .into()),
-    }
+        .into()
+    })
 }
 
 fn decode_direction(
     value: &str,
 ) -> Result<DelegationMessageDirection, SessionDelegationRepositoryError> {
-    match value {
-        "parent_to_child" => Ok(DelegationMessageDirection::ParentToChild),
-        "child_to_parent" => Ok(DelegationMessageDirection::ChildToParent),
-        value => Err(SessionDelegationCorruption::Unsupported {
+    delegation_message_direction_from_str(value).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
             field: "direction",
             value: value.to_owned(),
         }
-        .into()),
-    }
-}
-
-const fn encode_direction(direction: DelegationMessageDirection) -> &'static str {
-    match direction {
-        DelegationMessageDirection::ParentToChild => "parent_to_child",
-        DelegationMessageDirection::ChildToParent => "child_to_parent",
-    }
+        .into()
+    })
 }
 
 fn decode_outcome_kind(
     value: &str,
 ) -> Result<DelegationOutcomeKind, SessionDelegationRepositoryError> {
-    match value {
-        "result_returned" => Ok(DelegationOutcomeKind::ResultReturned),
-        "child_failed" => Ok(DelegationOutcomeKind::ChildFailed),
-        "child_stopped" => Ok(DelegationOutcomeKind::ChildStopped),
-        "child_cancelled" => Ok(DelegationOutcomeKind::ChildCancelled),
-        "already_terminal" => Ok(DelegationOutcomeKind::AlreadyTerminal),
-        "continue_running" => Ok(DelegationOutcomeKind::ContinueRunning),
-        value => Err(SessionDelegationCorruption::Unsupported {
+    delegation_outcome_kind_from_str(value).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
             field: "outcome_kind",
             value: value.to_owned(),
         }
-        .into()),
-    }
+        .into()
+    })
 }
 
 fn decode_outcome_reason(
     value: &str,
 ) -> Result<DelegationOutcomeReason, SessionDelegationRepositoryError> {
-    match value {
-        "child_completed" => Ok(DelegationOutcomeReason::ChildCompleted),
-        "child_execution_failed" => Ok(DelegationOutcomeReason::ChildExecutionFailed),
-        "child_result_unavailable" => Ok(DelegationOutcomeReason::ChildResultUnavailable),
-        "child_cancelled" => Ok(DelegationOutcomeReason::ChildCancelled),
-        "parent_stopped_parent_and_descendants" => Ok(DelegationOutcomeReason::ParentStopped {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        }),
-        "parent_cancelled_parent_and_descendants" => Ok(DelegationOutcomeReason::ParentCancelled {
-            scope: DescendantTerminationScope::ParentAndDescendants,
-        }),
-        value => Err(SessionDelegationCorruption::Unsupported {
+    delegation_outcome_reason_from_str(value).ok_or_else(|| {
+        SessionDelegationCorruption::Unsupported {
             field: "reason_kind",
             value: value.to_owned(),
         }
-        .into()),
-    }
+        .into()
+    })
 }
 
 fn decode_ordinal(
@@ -911,17 +912,10 @@ async fn insert_wait(
     .bind(session_id_to_uuid(wait.parent()))
     .bind(turn_id_to_uuid(parent_turn))
     .bind(session_id_to_uuid(wait.child()))
-    .bind(encode_wait_mode(wait.mode()))
+    .bind(delegation_wait_mode_to_str(wait.mode()))
     .execute(connection)
     .await?;
     Ok(())
-}
-
-const fn encode_wait_mode(mode: DelegationWaitMode) -> &'static str {
-    match mode {
-        DelegationWaitMode::Foreground => "foreground",
-        DelegationWaitMode::Background => "background",
-    }
 }
 
 async fn append_wait_update(
@@ -948,7 +942,7 @@ async fn append_wait_update(
     .bind(tool_request_id_to_uuid(wait.spawning_request()))
     .bind(session_id_to_uuid(wait.child()))
     .bind(tool_request_id_to_uuid(wait.awaiting_request()))
-    .bind(encode_wait_mode(wait.mode()))
+    .bind(delegation_wait_mode_to_str(wait.mode()))
     .execute(connection)
     .await?;
     Ok(())
@@ -1122,7 +1116,7 @@ async fn insert_message_state(
     .bind(message.id().into_uuid())
     .bind(tool_request_id_to_uuid(spawning_request))
     .bind(Decimal::from(ordinal.get()))
-    .bind(encode_direction(message.direction()))
+    .bind(delegation_message_direction_to_str(message.direction()))
     .bind(message.content().as_str())
     .execute(&mut *connection)
     .await?
@@ -1321,11 +1315,11 @@ async fn load_message_replay(
 
 const fn message_recipient(
     direction: DelegationMessageDirection,
-    endpoints: (SessionId, SessionId),
+    endpoints: RelationEndpoints,
 ) -> SessionId {
     match direction {
-        DelegationMessageDirection::ParentToChild => endpoints.1,
-        DelegationMessageDirection::ChildToParent => endpoints.0,
+        DelegationMessageDirection::ParentToChild => endpoints.child,
+        DelegationMessageDirection::ChildToParent => endpoints.parent,
     }
 }
 
