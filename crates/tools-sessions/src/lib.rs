@@ -464,6 +464,11 @@ pub trait SessionDelegationPort: Send {
     type MessageDelivery: DelegationMessageDeliveryProjection;
 
     /// Creates or equally replays one delegated child and relationship.
+    ///
+    /// Before returning `Applied`, the port atomically persists the exact spawn
+    /// receipt and closes the supplied dispatch's physical attempt with that
+    /// receipt. Equal replay authenticates the same terminal attempt. A port
+    /// must never return `Applied` while the dispatched attempt remains open.
     fn spawn_session(
         &mut self,
         request: DelegatedSpawnRequest,
