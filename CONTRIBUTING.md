@@ -55,10 +55,11 @@ transport or deployment; they use the same distinct identities as the production
 design and assert durable state, not only a returned status or rendered screen.
 Prefer deterministic inputs: fixed clocks, seeded identifiers, scripted provider
 and runner fakes, bounded schedulers, and explicitly advanced streams. Tests
-that depend on real provider availability or timing are never the merge gate.
-Postgres is the test database for persistence behavior, using ephemeral
-containers; SQLite is not a substitute for transaction, constraint, locking, or
-recovery semantics.
+that depend on real provider availability or timing are never the merge gate,
+apart from the specific owner-approved compatibility smokes named under "Fake
+external boundaries" below. Postgres is the test database for persistence
+behavior, using ephemeral containers; SQLite is not a substitute for
+transaction, constraint, locking, or recovery semantics.
 
 Expected layers, each added with the first implementation of the behavior it
 covers:
@@ -78,10 +79,13 @@ covers:
   frontiers can be asserted; fake runners exercise approval binding, disconnect
   ambiguity, and fencing. Each real provider adapter additionally runs the same
   contract cases plus provider-specific parsing and provenance cases;
-  credentialed live-provider smoke tests may exist but are never the merge gate.
-  A production isolation or containment claim for a runner profile requires real
-  containment testing of that profile; fake-runner tests never substantiate an
-  isolation label.
+  credentialed live-provider smoke tests may exist but are never the merge gate,
+  except the specific owner-approved compatibility smokes carried by the Codex
+  CLI and Anthropic adapters, whose exact gated scope is recorded in each
+  adapter's own compatibility-smoke section of `docs/spec/runtime-substrate.md`
+  rather than restated here. A production isolation or containment claim for a
+  runner profile requires real containment testing of that profile; fake-runner
+  tests never substantiate an isolation label.
 - **Restart and recovery:** stop the daemon at named durability boundaries
   (before acceptance; after acceptance but before scheduling; after attempt
   creation but before send; after send but before outcome persistence; during

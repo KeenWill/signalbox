@@ -32,12 +32,14 @@ projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
 mappings and advisory exceptions are verified against PR #437
 (`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
 composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
-the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). This page
-covers the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the four provider
-adapters; and their credential boundaries. Layer-2 authorization and evidence
-classification ([model-call-execution](model-call-execution.md)), credential
-channels, delivery, and rotation discipline
+the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
+Anthropic compatibility smoke was verified through PR #465
+(`agent/anthropic-api-smoke`). This page covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the four provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -248,6 +250,16 @@ only after the complete upload. Why: without full-upload proof a refusal token
 cannot satisfy the completed-exchange precondition for the refusal disposition,
 so the adapter fails toward known failure rather than inventing evidence.
 
+Post-finish error records (Anthropic adapter): once its stream has reported why
+generation stopped, a later error record that classifies as `Unrecognized` is a
+protocol violation rather than definitive provider evidence. Why: it supersedes
+the reported finish with no classifiable failure, and it would otherwise reach
+the caller wearing exactly the shape the refusal downgrade above produces — an
+HTTP 200 exchange, `Unrecognized`, and the same absent or fabricated native
+material — leaving a genuine failure indistinguishable from a decoded refusal.
+An error record that *does* classify still outranks the reported finish, because
+it carries information the finish does not.
+
 ## SSE framing
 
 `SseFraming` is a provider-agnostic incremental parser from transport byte
@@ -436,6 +448,112 @@ prompt/cache-affecting `output_config` and same-target `speed` fields. A mapped
 fast serving identity consumes the fast toggle during preparation, so neither
 the `speed` field nor its beta header is emitted for the counting or generation
 request in addition to that alternate target.
+
+### Compatibility smoke
+
+The Anthropic adapter carries a gated live compatibility smoke
+(`.github/workflows/anthropic-smoke.yml`) that spends one real exchange against
+the cheapest model the provider currently advertises — `claude-haiku-4-5` — run
+through this crate's own `ModelRuntime` implementation with a small fixed prompt
+and no provider-side prompt caching: at one exchange per gated run a cache write
+is never amortized by a later read, so caching would raise the cost of the run
+it is meant to cheapen. Unlike the Codex CLI smoke, there is no locally
+installed executable and therefore no version to verify beforehand; the adapter
+targets the provider's stable public API directly, so spending the one exchange
+is the whole smoke rather than a second gate behind a credential-free version
+probe.
+
+The smoke asserts only the protocol surfaces a provider-side change would move:
+a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
+the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
+from that same 200 exchange, carrying `without_unproven_refusal`'s stable
+`native.error_token: "refusal"` discriminator — see the refusal-downgrade rule
+above; a raw `Refused` never leaves the adapter). That downgraded shape is
+accepted only when it carries exactly the fabricated native facts and no
+provider material, and the execution also observed a reported refusal stop
+reason: a mid-stream native error event inside a 200 SSE body reaches the caller
+as `Unrecognized` from the same status, and those two further facts are what a
+genuine streamed failure cannot present. Either accepted shape must carry
+provider-reported input usage present *and positive* (a request that reached the
+model always billed at least one input token). The smoke asserts nothing about
+answer quality. Output usage is held to a looser bar: present, not positive. A
+valid `Completed` response can legitimately report zero output tokens, and a
+downgraded refusal can be blocked before any completion token is produced, so
+both accepted shapes share one output usage-presence check without demanding it
+be nonzero.
+
+This smoke pins no explicit reasoning effort, and needs none. Extended reasoning
+is requested per operation — the adapter emits `output_config.effort` only when
+`ModelSettings.reasoning_level` is set explicitly, and this smoke never sets it
+— so the exchange spends no hidden reasoning tokens against the output ceiling.
+The ceiling is therefore a pure cost cap: every token billed against it is
+visible output that the fixed one-word prompt already bounds, and the exchange
+cannot truncate into the `BoundaryLoss` a required check could not distinguish
+from a real compatibility break.
+
+This smoke's required aggregate is merge-gating for a pull request that changes
+the adapter crate or the workflow itself — an explicit exception to
+`CONTRIBUTING.md`'s general testing-strategy default that a credentialed
+live-provider smoke is never the merge gate, extending the same accepted
+tradeoff already commissioned for the Codex CLI smoke's required check. Provider
+unavailability, rate limiting, or a misconfigured credential therefore reports
+as a temporary red rather than a verdict on the change's correctness; the
+accepted remedy is rerunning the smoke once the provider or environment
+recovers, not weakening the gate.
+
+The workflow reports on every pull request without a path filter. GitHub
+independently withholds secrets from ordinary fork `pull_request` runs
+regardless of environment policy. Its secretless eligibility job then checks the
+complete pull request file list: no change to the adapter crate or to the
+workflow's own definition is an immediate success; for a qualifying change it
+compares `github.event.pull_request.head.repo.full_name` with
+`github.repository`, fails a mismatch with a manual-dispatch instruction, and
+admits the live job only for a same-repository head. The credentialed job
+condition independently repeats that comparison. A final always-running job
+folds the eligibility and conditional live results into the required check, so a
+skipped or failed required smoke cannot appear green; for a pull request that
+requires the smoke, the aggregate also repeats the same-repository comparison.
+Manual dispatch remains available, and a path-filtered push to `main` — gated on
+the adapter crate and the workflow file itself, so an edit to the workflow's own
+definition cannot land unexercised — reruns the smoke after merge.
+
+A twice-daily schedule (`0 13 * * *` and `0 1 * * *` UTC) also triggers the
+workflow as a provider-drift canary between adapter-touching pull requests,
+spending one more real, paid exchange per run. A scheduled trigger is not a
+`pull_request` event, so the eligibility gate's non-`pull_request` branch marks
+it required unconditionally — the same branch a manual dispatch or a qualifying
+push takes — and the workflow-level concurrency group already falls back to the
+run id for a non-`pull_request` event, so each scheduled run keeps its own slot.
+GitHub only fires `schedule` events from a repository's default branch, so the
+schedule takes effect only once a change lands on `main`.
+
+The `anthropic-smoke` environment is configured for all branches, for the same
+reason the `codex-smoke` environment is: GitHub evaluates an environment used by
+`pull_request` against `GITHUB_REF`, the synthetic merge ref rather than the
+head branch. That setting admits fork and same-repository merge refs alike and
+supplies no security boundary. Forks are excluded, in order, by GitHub secret
+withholding and the three explicit repository-name comparisons above.
+
+The workflow's own concurrency is a single group keyed to the pull request ref
+(or the run id for every other event), so a run superseded only by a newer push
+to the same ref releases its slot, exactly as the Codex smoke's own
+workflow-level group does. There is deliberately no additional job-level group
+serializing the live exchange itself: a fixed inner group shared across every
+ref — which an earlier revision of this workflow carried — lets an unrelated
+smoke-required run evict this job's queued slot even though
+`cancel-in-progress: false` does not protect it, because GitHub keeps at most
+one running and one pending member per concurrency group and replaces the
+pending one when a third arrives. That would fail a required check that never
+tested its own head. A concurrent real exchange costs a small fraction of a
+cent; required-check integrity is worth more than serializing that spend.
+
+The credential (`ANTHROPIC_API_KEY`) is referenced only in the step that spends
+the exchange, scoped to that step's environment alone, never echoed and never
+passed in argv. The crate is compiled before that step runs, and the compiled
+test binary's path is captured from that credential-free build and invoked
+directly rather than through a second `cargo test`, so no build-freshness check
+— and therefore no build script or procedural macro — ever runs while the key is
+readable.
 
 ## Codex CLI provider adapter
 
