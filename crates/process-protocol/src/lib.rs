@@ -12745,7 +12745,7 @@ mod tests {
                 tool_request_id: ids.message_request,
                 message_id: ids.message,
                 direction: DelegationMessageDirection::ParentToChild,
-                ordinal: CanonicalU64::new(1),
+                ordinal: CanonicalU64::new(2),
                 delivery_sequence: CanonicalU64::new(0),
             },
         );
