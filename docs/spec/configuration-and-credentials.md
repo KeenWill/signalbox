@@ -533,9 +533,10 @@ The complete mapped composition also requires one `[daemon_tools]` table with
 exactly `exec_supervisor_executable`. The value is an absolute path to an
 existing file naming the separately packaged `signalbox-exec-supervisor`
 program. A missing table, unknown field, relative path, or path that is not a
-file is a sanitized configuration failure. Production passes that exact path to
-the execution suite, which pins the program during construction; the daemon
-never derives it from its own executable path.
+file is a sanitized configuration failure. Production resolves an admitted
+symlink to its canonical regular-file path and passes that canonical path to the
+execution suite, which pins the program during construction; the daemon never
+derives it from its own executable path.
 
 The root is opened once during tool construction and its pinned authority is
 cloned into both workspace suites. The local Git suite independently binds that

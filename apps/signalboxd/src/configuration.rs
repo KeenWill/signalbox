@@ -2091,7 +2091,12 @@ fn parse_daemon_tool_settings(
         required_string(table, "exec_supervisor_executable")
             .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?,
     );
-    if !executable.is_absolute() || !executable.is_file() {
+    if !executable.is_absolute() {
+        return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+    }
+    let executable = fs::canonicalize(executable)
+        .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+    if !executable.is_file() {
         return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
     }
     Ok(Some(executable))
@@ -4477,6 +4482,34 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&missing).err(),
             Some(HubModelConfigurationError::InvalidDaemonToolSettings)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_tool_process_settings_canonicalize_a_supervisor_symlink() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let supervisor_link = temporary.path().join("signalbox-exec-supervisor");
+        std::os::unix::fs::symlink(EXEC_SUPERVISOR_EXECUTABLE, &supervisor_link)
+            .expect("fixture supervisor symlink is created");
+        let linked = CONFIGURATION.replace(
+            EXEC_SUPERVISOR_EXECUTABLE,
+            supervisor_link
+                .to_str()
+                .expect("fixture path is UTF-8 representable"),
+        );
+        let expected = std::fs::canonicalize(&supervisor_link)
+            .expect("fixture supervisor symlink has a canonical target");
+
+        let configuration =
+            HubModelConfiguration::parse(&linked).expect("an absolute supervisor symlink is valid");
+
+        assert_eq!(
+            configuration
+                .daemon_tools()
+                .expect("mapped fixture has daemon tool settings")
+                .exec_supervisor_executable(),
+            expected
         );
     }
 
