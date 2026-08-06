@@ -458,21 +458,28 @@ a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
 from that same 200 exchange, carrying `without_unproven_refusal`'s stable
 `native.error_token: "refusal"` discriminator — see the refusal-downgrade rule
-above; a raw `Refused` never leaves the adapter) — either way with
+above; a raw `Refused` never leaves the adapter). That downgraded shape is
+accepted only when it carries exactly the fabricated native facts and no
+provider material, and the execution also observed a reported refusal stop
+reason: a mid-stream native error event inside a 200 SSE body reaches the caller
+as `Unrecognized` from the same status, and those two further facts are what a
+genuine streamed failure cannot present. Either accepted shape must carry
 provider-reported input usage present *and positive* (a request that reached the
-model always billed at least one input token) — and nothing about answer
-quality. Output usage is held to a looser bar: present, not positive. A valid
-`Completed` response can legitimately report zero output tokens, and a
+model always billed at least one input token). The smoke asserts nothing about
+answer quality. Output usage is held to a looser bar: present, not positive. A
+valid `Completed` response can legitimately report zero output tokens, and a
 downgraded refusal can be blocked before any completion token is produced, so
 both accepted shapes share one output usage-presence check without demanding it
 be nonzero.
 
-Unlike the OpenAI smoke, this smoke pins no explicit reasoning effort: Claude's
-extended-thinking budget is opt-in per request (a `thinking` block the adapter
-only emits when `ModelSettings.reasoning_level` is explicitly set), and this
-smoke never sets it, so `claude-haiku-4-5` never spends hidden reasoning tokens
-here in the first place — the deterministic-completion risk that the OpenAI
-adapter's always-on reasoning tier creates does not apply.
+This smoke pins no explicit reasoning effort, and needs none. Claude's
+extended-thinking budget is opt-in per request — the adapter emits a `thinking`
+block only when `ModelSettings.reasoning_level` is set explicitly, and this
+smoke never sets it — so the exchange spends no hidden reasoning tokens against
+the output ceiling. The ceiling is therefore a pure cost cap: every token billed
+against it is visible output that the fixed one-word prompt already bounds, and
+the exchange cannot truncate into the `BoundaryLoss` a required check could not
+distinguish from a real compatibility break.
 
 This smoke's required aggregate is merge-gating for a pull request that changes
 the adapter crate or the workflow itself — an explicit exception to
