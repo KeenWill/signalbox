@@ -16,11 +16,15 @@
 //! adapter's own types, with usage reported. It deliberately asserts nothing
 //! about answer quality.
 //!
-//! Streamed delivery: the operation requests `DeliveryMode::Streamed`,
-//! matching the only delivery mode production ever selects
-//! (`RuntimeModelCallProvider` in `crates/model-provider-runtime` sets it
-//! unconditionally), so this smoke exercises the deployed SSE decoder rather
-//! than the buffered path production never uses.
+//! Streamed delivery: the operation requests `DeliveryMode::Streamed`, which
+//! is what `RuntimeModelCallProvider` in `crates/model-provider-runtime` sets
+//! for ordinary model calls, generic over any adapter, so the one paid
+//! exchange lands on the SSE decoder that carries production's main traffic.
+//! It is not the *only* mode production selects: the approval-judge and
+//! context-compaction callers in that same crate set `DeliveryMode::Buffered`,
+//! and this smoke deliberately leaves that decoder to the adapter's offline
+//! buffered fixtures rather than spending a second credentialed exchange on a
+//! required, twice-daily check.
 //!
 //! No prompt caching: this smoke sends one small, fixed prompt and nothing
 //! else. At that volume a cache write costs more than it could ever recoup,
