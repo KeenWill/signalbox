@@ -52,6 +52,7 @@ def check(rule: str, files: dict[str, str]) -> subprocess.CompletedProcess:
 
 MODULE = "crates/example/src/lib.rs"
 APP = "apps/example/src/main.rs"
+TEST_TARGET = "crates/example/tests/end_to_end.rs"
 SWIFT = "clients/native/Sources/Example/Example.swift"
 MIGRATION = "crates/example/migrations/202601010001_first.sql"
 
@@ -75,6 +76,24 @@ class FileDocCommentTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn(SWIFT, result.stdout)
+
+    def test_integration_test_target_without_a_doc_comment_reports(self) -> None:
+        files = {MODULE: "//! Owned.\n", TEST_TARGET: "#[test]\nfn runs() {}\n"}
+
+        result = check("SR-1", files)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(TEST_TARGET, result.stdout)
+
+    def test_documented_integration_test_target_passes(self) -> None:
+        files = {
+            MODULE: "//! Owned.\n",
+            TEST_TARGET: "//! What this target proves.\n#[test]\nfn runs() {}\n",
+        }
+
+        result = check("SR-1", files)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 class CommentProvenanceTests(unittest.TestCase):
@@ -237,6 +256,61 @@ class AnonymousRowDecodingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_optional_tuple_binding_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub async fn load() {\n"
+            '    let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT a, b FROM t");\n'
+            "}\n"
+        )
+
+        result = check("SR-6", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MODULE, result.stdout)
+
+    def test_projection_through_a_tuple_alias_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "type OutboxSlotRow = (Uuid, i64);\n"
+            "pub async fn load() {\n"
+            '    let row: Option<OutboxSlotRow> = sqlx::query_as("SELECT a, b FROM t");\n'
+            "}\n"
+        )
+
+        result = check("SR-6", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("OutboxSlotRow", result.stdout)
+
+    def test_one_projection_matching_both_spellings_reports_once(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "type OutboxSlotRow = (Uuid, i64);\n"
+            "pub async fn load() {\n"
+            "    let row: Option<OutboxSlotRow> = "
+            'sqlx::query_as::<_, OutboxSlotRow>("SELECT a, b FROM t");\n'
+            "}\n"
+        )
+
+        result = check("SR-6", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout.count("SR-6 " + MODULE), 1, result.stdout)
+
+    def test_projection_through_a_record_alias_passes(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "type SlotRow = TurnFacts;\n"
+            "pub async fn load() {\n"
+            '    let row: Option<SlotRow> = sqlx::query_as("SELECT a AS turn_id FROM t");\n'
+            "}\n"
+        )
+
+        result = check("SR-6", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
 
 class StorageVersionThresholdTests(unittest.TestCase):
     def test_comparison_against_the_current_writer_version_reports(self) -> None:
@@ -286,6 +360,31 @@ class AppSqlTableAccessTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_app_ddl_naming_a_table_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            'pub const RESET: &str = "ALTER TABLE turn_lifecycle DROP CONSTRAINT c";\n'
+        )
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
+    def test_app_truncating_a_table_reports(self) -> None:
+        source = "//! Owned.\npub const CLEAR: &str = \"TRUNCATE turn_lifecycle\";\n"
+
+        result = check(
+            "SR-8",
+            {APP: source, MIGRATION: "CREATE TABLE turn_lifecycle (id uuid);\n"},
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("turn_lifecycle", result.stdout)
+
     def test_the_diagnostic_binary_is_excepted(self) -> None:
         source = (
             "//! Owned.\n"
@@ -325,6 +424,35 @@ class MigrationSupersessionTests(unittest.TestCase):
         result = check("SR-9", {MIGRATION: source})
 
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_one_comment_attributes_every_clause_of_its_statement(self) -> None:
+        source = (
+            "-- Supersedes the definitions in 202601010001_first.sql.\n"
+            "ALTER TABLE durable_command\n"
+            "    ADD COLUMN source_turn_id uuid,\n"
+            "    ALTER COLUMN defaults_version DROP NOT NULL,\n"
+            "    ALTER COLUMN requested_kind DROP NOT NULL,\n"
+            "    ALTER COLUMN frozen_kind DROP NOT NULL,\n"
+            "    DROP CONSTRAINT durable_command_defaults_version_positive,\n"
+            "    DROP CONSTRAINT durable_command_requested_kind_shape;\n"
+        )
+
+        result = check("SR-9", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_comment_bound_to_the_previous_statement_does_not_attribute(self) -> None:
+        source = (
+            "-- Supersedes the definition in 202601010001_first.sql.\n"
+            "CREATE INDEX durable_command_kind ON durable_command (command_kind);\n"
+            "ALTER TABLE durable_command\n"
+            "    DROP CONSTRAINT durable_command_kind_closed;\n"
+        )
+
+        result = check("SR-9", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MIGRATION, result.stdout)
 
     def test_disagreeing_lexical_and_numeric_order_reports(self) -> None:
         files = {

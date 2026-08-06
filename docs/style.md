@@ -414,8 +414,11 @@ can decide without type resolution. It runs in CI as a report-only step: it
 prints a per-rule count table and its findings, and cannot fail the workflow.
 Promotion to a blocking gate is a separate, deliberate step, taken per rule once
 that rule's count reaches zero — never as a side effect of a change that merely
-reduces a count. Until then the counts are a burndown baseline and review is
-still what enforces the conventions.
+reduces a count. A promoted rule gets a step of its own that runs the checker
+under `--rule`, so it blocks on itself alone; the report-only step keeps running
+every rule, because deleting its tolerance would gate on the rules still being
+burned down. Until then the counts are a burndown baseline and review is still
+what enforces the conventions.
 
 Each rule below names the convention it decides:
 

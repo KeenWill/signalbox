@@ -47,9 +47,12 @@ jobs:
       # Report-only. The tree still violates the conventions this checker
       # decides, so the step publishes per-rule counts and can never fail the
       # workflow or gate a merge. Promoting a rule to blocking is a deliberate
-      # later step taken once that rule's count reaches zero; dropping
-      # `continue-on-error` is the whole of it, and it is never a side effect of
-      # a change that merely reduces a count.
+      # later step taken once that rule's count reaches zero, and it adds a step
+      # of its own — `check_style_rules.py --rule SR-N`, with no
+      # `continue-on-error` — rather than removing the tolerance here: this
+      # invocation runs every rule, so dropping its tolerance would gate on the
+      # rules still being burned down and no rule could be promoted alone.
+      # Neither is ever a side effect of a change that merely reduces a count.
       - name: Check style rules (report only)
         continue-on-error: true
         run: |

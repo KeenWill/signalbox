@@ -9,9 +9,10 @@ the line, and the fact observed there.
 
 This checker is deliberately report-only while the tree still violates the
 conventions it just adopted. Promotion to a blocking gate is a separate,
-deliberate step: it happens once a rule's count reaches zero and the workflow
-step for it stops tolerating a failure, and never as a side effect of a change
-that merely reduces a count.
+deliberate step: once a rule's count reaches zero it gains a workflow step that
+runs `--rule` on it alone and tolerates no failure, while the report-only
+invocation goes on running every rule. Promotion is never a side effect of a
+change that merely reduces a count.
 
 Reliability over coverage. A rule appears here only when a text scan decides it
 with few enough false positives that a reader can trust a count without opening
@@ -58,9 +59,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Trees the rules below scan. `src` alone means production and its inline test
-# modules; test targets under `tests/` are governed by the testing style guide,
-# which owns how a test body reads.
+# modules; a rule that decides how a test body reads would be restating
+# `docs/agents/testing-style.md`, which owns that.
 RUST_SOURCE_GLOBS = ("crates/*/src/*.rs", "apps/*/src/*.rs")
+# SR-1 additionally scans them, because naming what a file owns is not a
+# statement about how its body reads: an integration-test target is a Rust
+# module, the guide states the rule without qualification, and a count that
+# skipped these could reach zero while the convention was still unmet.
+RUST_TEST_TARGET_GLOBS = ("crates/*/tests/*.rs", "apps/*/tests/*.rs")
 RUST_ALL_GLOBS = ("crates/*.rs", "apps/*.rs")
 SWIFT_SOURCE_GLOBS = ("clients/native/Sources/*.swift",)
 # Production code under `apps/` only. Whether the rule also binds the daemon's
@@ -259,7 +265,7 @@ class Repository:
 
 def check_file_doc_comments(repository: Repository) -> Iterator[Finding]:
     """A file states what it owns before it states anything else."""
-    for source in repository.sources(RUST_SOURCE_GLOBS):
+    for source in repository.sources((*RUST_SOURCE_GLOBS, *RUST_TEST_TARGET_GLOBS)):
         if not _opens_with(source.lines, "//!", skippable=("#![", "//")):
             yield Finding(
                 "SR-1", source.path, 1, "Rust module has no `//!` file doc comment"
@@ -448,23 +454,51 @@ def check_public_boolean_axes(repository: Repository) -> Iterator[Finding]:
 
 # --- SR-6: rows carry labels ------------------------------------------------
 
-ANONYMOUS_QUERY_AS = re.compile(r"query_as::<\s*_\s*,\s*\(")
-ANONYMOUS_ROW_BINDING = re.compile(
-    r"\blet\s+[A-Za-z0-9_]+\s*:\s*\([^;()]*,[^;()]*\)\s*=\s*sqlx::query_as"
+TUPLE_ALIAS = re.compile(
+    r"^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?type\s+([A-Za-z0-9_]+)\s*=\s*\(",
+    re.MULTILINE,
 )
+# Bounded to the line: the row type in a turbofish is written on one, and an
+# unbounded scan would run to the next `>` in the file and read an unrelated
+# name as this projection's.
+QUERY_AS_TURBOFISH = re.compile(r"query_as::<\s*_\s*,\s*([^>;\n]+)")
+QUERY_AS_BINDING = re.compile(
+    r"\blet\s+[A-Za-z0-9_]+\s*:\s*([^=;]+?)\s*=\s*sqlx::query_as"
+)
+IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 
 def check_anonymous_row_decoding(repository: Repository) -> Iterator[Finding]:
     """A projected row is a record with names, not a run of positions."""
     for source in repository.sources(RUST_SOURCE_GLOBS):
-        for pattern in (ANONYMOUS_QUERY_AS, ANONYMOUS_ROW_BINDING):
+        # A tuple hidden behind `type Row = (..)` is the same run of positions
+        # with a name on the outside, and the guide forbids it in the same
+        # sentence. Aliases are collected per file, which is where the alias and
+        # its `query_as` sit in every case this reports; an alias imported from
+        # another module needs a name resolver, not a scan.
+        aliases = {match.group(1) for match in TUPLE_ALIAS.finditer(source.code)}
+        reported: dict[int, str] = {}
+        for pattern in (QUERY_AS_TURBOFISH, QUERY_AS_BINDING):
             for match in pattern.finditer(source.code):
-                yield Finding(
-                    "SR-6",
-                    source.path,
-                    source.line_of(match.start()),
-                    "SQL row decoded as an anonymous tuple",
-                )
+                detail = _anonymous_row_shape(match.group(1), aliases)
+                if detail is None:
+                    continue
+                # One projection can match both spellings — an annotated
+                # binding whose call also carries a turbofish — and it is one
+                # finding.
+                reported.setdefault(source.line_of(match.start()), detail)
+        for line, detail in sorted(reported.items()):
+            yield Finding("SR-6", source.path, line, detail)
+
+
+def _anonymous_row_shape(annotation: str, aliases: set[str]) -> str | None:
+    """Name the anonymous shape a projection decodes into, if it is one."""
+    if "(" in annotation and "," in annotation:
+        return "SQL row decoded as an anonymous tuple"
+    for name in IDENTIFIER.findall(annotation):
+        if name in aliases:
+            return f"SQL row decoded as an anonymous tuple aliased `{name}`"
+    return None
 
 
 # --- SR-7: schema thresholds are their own constants ------------------------
@@ -494,8 +528,17 @@ def check_storage_version_thresholds(repository: Repository) -> Iterator[Finding
 CREATE_TABLE = re.compile(
     r"\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)", re.IGNORECASE
 )
+# Every SQL form that names a table, not only the ones a query uses: the rule
+# forbids naming a table at all, so a DDL statement admitted under `apps/` after
+# the count reached zero would otherwise never be reported. The two-word forms
+# precede the bare `truncate` so the alternation cannot stop at the verb.
 SQL_TABLE_REFERENCE = re.compile(
-    r"\b(?:from|join|into|update)\s+\"?([a-z_][a-z0-9_]*)\"?", re.IGNORECASE
+    r"\b(?:from|join|into|update"
+    r"|(?:alter|drop|create|truncate)\s+table"
+    r"|truncate)\s+"
+    r"(?:if\s+not\s+exists\s+|if\s+exists\s+|only\s+)?"
+    r"\"?([a-z_][a-z0-9_]*)\"?",
+    re.IGNORECASE,
 )
 
 
@@ -537,6 +580,31 @@ DROP_CONSTRAINT = re.compile(r"\bDROP\s+CONSTRAINT\b", re.IGNORECASE)
 SUPERSEDED_MIGRATION = re.compile(r"\b\d{8,}_[a-z0-9_]+")
 
 
+def _attributing_comments(lines: list[str], index: int) -> list[str]:
+    """The comments that can attribute the `DROP CONSTRAINT` on `index`.
+
+    The statement is the unit, not a fixed distance. One `ALTER TABLE` carries
+    as many clauses as it needs — six drops in a single statement exist in this
+    repository's own migrations — and a comment above the statement attributes
+    every one of them; a window measured in lines would instead demand the same
+    sentence copied beside each clause, which the guide does not ask for and
+    which no reader would want. The statement begins after the last line that
+    closed one, and a blank line bounds the attribution above it so a comment
+    belonging to something else is not read as this statement's.
+    """
+    start = index
+    while start > 0:
+        previous = lines[start - 1].strip()
+        if not previous or previous.endswith(";"):
+            break
+        start -= 1
+    return [
+        candidate.strip()
+        for candidate in lines[start:index]
+        if candidate.strip().startswith("--")
+    ]
+
+
 def check_migration_supersession(repository: Repository) -> Iterator[Finding]:
     """A re-issued constraint names the definition it replaces, and files sort."""
     paths = repository.files((MIGRATION_GLOB,))
@@ -546,15 +614,10 @@ def check_migration_supersession(repository: Repository) -> Iterator[Finding]:
         for index, line in enumerate(lines):
             if DROP_CONSTRAINT.search(line) is None:
                 continue
-            preceding = [
-                candidate.strip()
-                for candidate in lines[max(0, index - 4) : index]
-                if candidate.strip()
-            ]
-            comments = [
-                candidate for candidate in preceding if candidate.startswith("--")
-            ]
-            if any(SUPERSEDED_MIGRATION.search(comment) for comment in comments):
+            if any(
+                SUPERSEDED_MIGRATION.search(comment)
+                for comment in _attributing_comments(lines, index)
+            ):
                 continue
             yield Finding(
                 "SR-9",
