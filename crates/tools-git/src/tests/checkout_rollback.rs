@@ -9,7 +9,6 @@ use std::{
 };
 
 use git2::{Repository, RepositoryState};
-use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::GitBranchSwitchArguments;
@@ -22,8 +21,8 @@ use crate::rollback::{
 use crate::tests::planting::install_resolve_undo_extension;
 use crate::tests::support::{
     CHANGED_CONTENT, CONFLICT_OURS_CONTENT, FIX_BRANCH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE,
-    MODEL_MESSAGE, TARGET_CONTENT, TRACKED_PATH, commit_all, identity, index_extension,
-    install_deleted_conflict,
+    MODEL_MESSAGE, TARGET_CONTENT, TRACKED_PATH, commit_all, create_fifo, identity,
+    index_extension, install_deleted_conflict,
 };
 
 #[test]
@@ -220,7 +219,7 @@ fn branch_switch_rolls_back_after_target_reference_revalidation_fails() {
             || {
                 fs::rename(&target_reference, &retired_reference)
                     .expect("target reference retires after checkout");
-                mkfifoat(CWD, &target_reference, Mode::RUSR | Mode::WUSR)
+                create_fifo(&target_reference)
                     .expect("replacement target reference FIFO constructs");
             },
         )
@@ -345,7 +344,7 @@ fn branch_switch_rollback_preserves_a_concurrent_worktree_edit() {
                     .expect("concurrent worktree edit writes");
                 fs::rename(&target_reference, &retired_reference)
                     .expect("target reference retires after checkout");
-                mkfifoat(CWD, &target_reference, Mode::RUSR | Mode::WUSR)
+                create_fifo(&target_reference)
                     .expect("replacement target reference FIFO constructs");
             },
         )
@@ -403,7 +402,7 @@ fn branch_switch_rolls_back_unchanged_paths_when_another_path_becomes_a_symlink(
                     .expect("concurrent replacement symlink constructs");
                 fs::rename(&target_reference, &retired_reference)
                     .expect("target reference retires after checkout");
-                mkfifoat(CWD, &target_reference, Mode::RUSR | Mode::WUSR)
+                create_fifo(&target_reference)
                     .expect("replacement target reference FIFO constructs");
             },
         )
@@ -452,7 +451,7 @@ fn branch_switch_rollback_preserves_the_original_index_extensions() {
             || {
                 fs::rename(&target_reference, &retired_reference)
                     .expect("target reference retires after checkout");
-                mkfifoat(CWD, &target_reference, Mode::RUSR | Mode::WUSR)
+                create_fifo(&target_reference)
                     .expect("replacement target reference FIFO constructs");
             },
         )

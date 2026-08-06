@@ -20,7 +20,9 @@ use git2::{
     IndexAddOption, IndexEntry, IndexTime, ObjectFormat, ObjectType, Oid, Repository,
     RepositoryInitOptions, Signature, build::CheckoutBuilder,
 };
-use rustix::fs::{CWD, Mode, OFlags, mkfifoat, openat};
+#[cfg(not(target_vendor = "apple"))]
+use rustix::fs::mkfifoat;
+use rustix::fs::{CWD, Mode, OFlags, openat};
 use signalbox_tools_workspace::{
     LocalWorkspaceFileSystem, WorkspaceDirectoryRead, WorkspaceEntryKind, WorkspaceFileBytes,
     WorkspaceFileSystem, WorkspaceResolveError, WorkspaceRoot, WorkspaceRootError,
@@ -78,6 +80,31 @@ pub(super) const TWICE_RENAMED_TRACKED_PATH: &str = "twice-renamed.txt";
 pub(super) const EMBEDDED_REPOSITORY_PATH: &str = "vendor";
 
 pub(super) const SUBMODULE_PATH: &str = "dependency";
+
+/// Creates a FIFO at `path` readable and writable only by the creating Unix
+/// user (mode 0o600).
+///
+/// Every caller passes an absolute path, so resolving it against the process
+/// working directory is the same operation on every platform.
+#[cfg(not(target_vendor = "apple"))]
+pub(super) fn create_fifo(path: &Path) -> std::io::Result<()> {
+    mkfifoat(CWD, path, Mode::RUSR | Mode::WUSR)?;
+    Ok(())
+}
+
+/// Creates a FIFO at `path` readable and writable only by the creating Unix
+/// user (mode 0o600).
+///
+/// rustix omits `mkfifoat` on Apple targets, so this uses nix's `mkfifo`.
+/// Every caller passes an absolute path, so the two are equivalent.
+#[cfg(target_vendor = "apple")]
+pub(super) fn create_fifo(path: &Path) -> std::io::Result<()> {
+    nix::unistd::mkfifo(
+        path,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .map_err(|errno| std::io::Error::from_raw_os_error(errno as i32))
+}
 
 pub(super) struct Fixture {
     directory: TempDir,
@@ -873,7 +900,7 @@ pub(super) fn status_uses_bound_index_without_fifo_wait(
         .recv_timeout(Duration::from_secs(2))
         .expect("fixture index binds in time");
     fs::remove_file(&index_path).expect("repository index removes for fixture");
-    mkfifoat(CWD, &index_path, Mode::RUSR | Mode::WUSR).expect("replacement index FIFO constructs");
+    create_fifo(&index_path).expect("replacement index FIFO constructs");
     proceed_sender.send(()).expect("fixture continuation sends");
     match result_receiver.recv_timeout(Duration::from_secs(2)) {
         Ok(completed) => {
