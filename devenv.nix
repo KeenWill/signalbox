@@ -449,23 +449,21 @@ in
         import json
         import re
         import sys
+        import tomllib
         from pathlib import Path
 
         config_path = Path(sys.argv[1])
         supervisor = sys.argv[2]
         content = config_path.read_text()
+        document = tomllib.loads(content)
         setting = f"exec_supervisor_executable = {json.dumps(supervisor)}"
         placeholder = re.compile(
             r'^exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"\r?$',
             re.MULTILINE,
         )
-        daemon_tools = re.compile(
-            r'^\[daemon_tools\][ \t]*(?:#.*)?\r?$',
-            re.MULTILINE,
-        )
         if placeholder.search(content):
-            content = placeholder.sub(setting, content, count=1)
-        elif not daemon_tools.search(content):
+            content = placeholder.sub(lambda _: setting, content, count=1)
+        elif "daemon_tools" not in document:
             content = f"{content.rstrip()}\n\n[daemon_tools]\n{setting}\n"
         config_path.write_text(content)
       ''} ${shellArg daemonRuntimeConfigFile} "$supervisor_executable"
