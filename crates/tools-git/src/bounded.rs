@@ -99,14 +99,6 @@ pub(super) fn validate_checkout_tree_discovery(
     validate_tree_discovery_options(repository, root, false, false)
 }
 
-pub(super) fn validate_tree_discovery_with_symlinks(
-    repository: &Repository,
-    root: &git2::Tree<'_>,
-    allow_symlinks: bool,
-) -> Result<(), LocalGitFailure> {
-    validate_tree_discovery_options(repository, root, allow_symlinks, true)
-}
-
 fn validate_tree_discovery_options(
     repository: &Repository,
     root: &git2::Tree<'_>,
