@@ -106,13 +106,24 @@ impl RecordedDelegationMessage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DelegationOperationRejection {
     RelationshipNotFound,
-    StaleDispatch,
+    StaleDispatch {
+        state: DelegationRequestExecutionState,
+    },
     MessageIdentityCollision,
     DeliverySequenceExhausted,
     Transition {
         spawning_request: ToolRequestId,
         failure: DelegationTransitionFailure,
     },
+}
+
+/// Durable state explaining why a delegation request cannot execute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationRequestExecutionState {
+    AwaitingApproval,
+    Denied,
+    Closed,
+    AttemptEnded,
 }
 
 /// Typed precondition or durable-state rejection for one process request.
@@ -270,13 +281,15 @@ impl SessionDelegationRepository {
                 ));
             };
             let relation = load_relation(&mut transaction, spawning_request).await?;
-            let Some(dispatch) =
-                resolve_dispatch(&mut transaction, request.request(), dispatch).await?
-            else {
-                return Ok(RecordDelegationWaitOutcome::Rejected(
-                    DelegationOperationRejection::StaleDispatch,
-                ));
-            };
+            let dispatch =
+                match resolve_dispatch(&mut transaction, request.request(), dispatch).await? {
+                    ResolvedDelegationDispatch::Executable(dispatch) => *dispatch,
+                    ResolvedDelegationDispatch::NonExecutable(state) => {
+                        return Ok(RecordDelegationWaitOutcome::Rejected(
+                            DelegationOperationRejection::StaleDispatch { state },
+                        ));
+                    }
+                };
             let wait = match relation.register_wait(&request, &dispatch) {
                 Ok(wait) => wait,
                 Err(error) => {
@@ -390,13 +403,15 @@ impl SessionDelegationRepository {
                 ));
             };
             let relation = load_relation(&mut transaction, spawning_request).await?;
-            let Some(dispatch) =
-                resolve_dispatch(&mut transaction, request.request(), dispatch).await?
-            else {
-                return Ok(RecordDelegationMessageOutcome::Rejected(
-                    DelegationOperationRejection::StaleDispatch,
-                ));
-            };
+            let dispatch =
+                match resolve_dispatch(&mut transaction, request.request(), dispatch).await? {
+                    ResolvedDelegationDispatch::Executable(dispatch) => *dispatch,
+                    ResolvedDelegationDispatch::NonExecutable(state) => {
+                        return Ok(RecordDelegationMessageOutcome::Rejected(
+                            DelegationOperationRejection::StaleDispatch { state },
+                        ));
+                    }
+                };
             if dispatch.attempt().effect_class() != ToolEffectClass::ExternalEffect {
                 return Err(SessionDelegationRepositoryError::InvalidTransition(
                     "send_session_message requires an external-effect attempt",
@@ -644,48 +659,92 @@ async fn finish<T>(
     }
 }
 
-async fn dispatch_is_current(
-    connection: &mut PgConnection,
-    dispatch: &ToolDispatchAuthority,
-) -> Result<bool, SessionDelegationRepositoryError> {
-    let request = dispatch.request();
-    let Some(batch) =
-        load_active_batch_from_connection(connection, request.session(), request.turn()).await?
-    else {
-        return Ok(false);
-    };
-    Ok(batch
-        .resume_in_flight_dispatch(dispatch.attempt().attempt())
-        .is_ok_and(|stored| stored == *dispatch))
-}
-
 async fn resolve_dispatch(
     connection: &mut PgConnection,
     request: &signalbox_domain::ToolRequest,
     source: DispatchSource<'_>,
-) -> Result<Option<ToolDispatchAuthority>, SessionDelegationRepositoryError> {
-    match source {
-        DispatchSource::Issued(dispatch) => dispatch_is_current(connection, dispatch)
-            .await
-            .map(|current| current.then(|| dispatch.clone())),
-        DispatchSource::Reconstitute => {
-            let Some(batch) =
-                load_active_batch_from_connection(connection, request.session(), request.turn())
-                    .await?
-            else {
-                return Ok(None);
-            };
-            let Some(ReconstitutedToolAttempt::Current(attempt)) = batch.attempt(request.id())
-            else {
-                return Ok(None);
-            };
-            let dispatch = batch
-                .resume_in_flight_dispatch(attempt.attempt())
-                .ok()
-                .filter(|dispatch| dispatch.request() == request);
-            Ok(dispatch)
+) -> Result<ResolvedDelegationDispatch, SessionDelegationRepositoryError> {
+    let batch =
+        load_active_batch_from_connection(connection, request.session(), request.turn()).await?;
+    let executable = match (&source, batch.as_ref()) {
+        (DispatchSource::Issued(dispatch), Some(batch)) => batch
+            .resume_in_flight_dispatch(dispatch.attempt().attempt())
+            .ok()
+            .filter(|stored| stored == *dispatch),
+        (DispatchSource::Reconstitute, Some(batch)) => {
+            batch
+                .attempt(request.id())
+                .and_then(|attempt| match attempt {
+                    ReconstitutedToolAttempt::Current(attempt) => batch
+                        .resume_in_flight_dispatch(attempt.attempt())
+                        .ok()
+                        .filter(|dispatch| dispatch.request() == request),
+                    ReconstitutedToolAttempt::Ended(_) => None,
+                })
+        }
+        (DispatchSource::Issued(_), None) | (DispatchSource::Reconstitute, None) => None,
+    };
+    if let Some(dispatch) = executable {
+        return Ok(ResolvedDelegationDispatch::Executable(Box::new(dispatch)));
+    }
+    Ok(ResolvedDelegationDispatch::NonExecutable(
+        delegation_request_execution_state(connection, request, batch.as_ref()).await?,
+    ))
+}
+
+enum ResolvedDelegationDispatch {
+    Executable(Box<ToolDispatchAuthority>),
+    NonExecutable(DelegationRequestExecutionState),
+}
+
+async fn delegation_request_execution_state(
+    connection: &mut PgConnection,
+    request: &signalbox_domain::ToolRequest,
+    batch: Option<&signalbox_domain::ToolBatch>,
+) -> Result<DelegationRequestExecutionState, SessionDelegationRepositoryError> {
+    if let Some(batch) = batch {
+        if batch
+            .awaiting_approval()
+            .is_some_and(|waiting| waiting.request() == request.id())
+            || (batch.approval(request.id()).is_none() && batch.attempt(request.id()).is_none())
+        {
+            return Ok(DelegationRequestExecutionState::AwaitingApproval);
+        }
+        if batch
+            .approval(request.id())
+            .is_some_and(|approval| !approval.is_approved())
+        {
+            return Ok(DelegationRequestExecutionState::Denied);
+        }
+        if batch.attempt(request.id()).is_some() {
+            return Ok(DelegationRequestExecutionState::AttemptEnded);
         }
     }
+    let (denied, closed, attempted): (bool, bool, bool) = sqlx::query_as(
+        "SELECT
+            EXISTS (
+                SELECT 1 FROM semantic_transcript_entry
+                 WHERE tool_result_request_id = $1 AND payload_kind = 'tool_denied'
+            ),
+            EXISTS (
+                SELECT 1 FROM semantic_transcript_entry
+                 WHERE tool_result_request_id = $1
+                   AND payload_kind = 'tool_closed_by_turn_end'
+            ),
+            EXISTS (SELECT 1 FROM tool_attempt WHERE request_id = $1)",
+    )
+    .bind(tool_request_id_to_uuid(request.id()))
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(if denied {
+        DelegationRequestExecutionState::Denied
+    } else if closed {
+        DelegationRequestExecutionState::Closed
+    } else if attempted {
+        DelegationRequestExecutionState::AttemptEnded
+    } else {
+        DelegationRequestExecutionState::Closed
+    })
 }
 
 fn complete_attempt(

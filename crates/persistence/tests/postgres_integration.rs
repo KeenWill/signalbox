@@ -110,8 +110,9 @@ use signalbox_persistence::{
         SessionCredentialPin, SessionModelCredential, current_session_credential,
     },
     session_delegation::{
-        ProcessDelegationOutcome, ProcessDelegationRequestRejection, RecordDelegationWaitOutcome,
-        RecordedDelegationMessage, RecordedDelegationWait, SessionDelegationRepository,
+        DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
+        ProcessDelegationRequestRejection, RecordDelegationWaitOutcome, RecordedDelegationMessage,
+        RecordedDelegationWait, SessionDelegationRepository,
     },
     start_eligible_turn::{
         CommitActivationPreviewOutcome, StartEligibleTurnCorruption,
@@ -1015,8 +1016,17 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
     let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
-    repository_wait_dispatch(&pool, fixture, seed).await?;
     let repository = SessionDelegationRepository::new(pool.clone());
+    let ended = repository
+        .record_process_wait(
+            fixture.parent,
+            fixture.parent_turn,
+            fixture.awaiting_request,
+            fixture.child,
+            DelegationWaitMode::Background,
+        )
+        .await?;
+    repository_wait_dispatch(&pool, fixture, seed).await?;
     let (request, recorded) = process_wait(
         repository
             .record_process_wait(
@@ -1065,6 +1075,14 @@ async fn s17_inv032_delegation_repository_commits_background_wait_atomically()
 
     assert_eq!(recorded, replayed);
     assert_eq!(request, replayed_request);
+    assert_eq!(
+        ended,
+        ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::Operation(
+            DelegationOperationRejection::StaleDispatch {
+                state: DelegationRequestExecutionState::AttemptEnded,
+            },
+        ))
+    );
     assert_eq!(
         conflict,
         ProcessDelegationOutcome::Rejected(ProcessDelegationRequestRejection::AwaitConflict)

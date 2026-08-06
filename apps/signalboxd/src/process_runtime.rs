@@ -116,7 +116,8 @@ use signalbox_persistence::{
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
     session_delegation::{
-        DelegationOperationRejection, ProcessDelegationOutcome, ProcessDelegationRequestRejection,
+        DelegationOperationRejection, DelegationRequestExecutionState, ProcessDelegationOutcome,
+        ProcessDelegationRequestRejection,
     },
     session_metadata::{SessionMetadataRepository, SessionMetadataRepositoryError},
     session_placement::{SessionPlacementRepository, SessionPlacementRepositoryError},
@@ -2474,10 +2475,19 @@ fn process_delegation_rejection(
             peer_session_id,
         },
         ProcessDelegationRequestRejection::Operation(
-            DelegationOperationRejection::StaleDispatch,
+            DelegationOperationRejection::StaleDispatch { state },
         ) => RejectionDetail::DelegationToolRequestNotExecutable {
             tool_request_id,
-            state: WireDelegationToolRequestState::AttemptEnded,
+            state: match state {
+                DelegationRequestExecutionState::AwaitingApproval => {
+                    WireDelegationToolRequestState::AwaitingApproval
+                }
+                DelegationRequestExecutionState::Denied => WireDelegationToolRequestState::Denied,
+                DelegationRequestExecutionState::Closed => WireDelegationToolRequestState::Closed,
+                DelegationRequestExecutionState::AttemptEnded => {
+                    WireDelegationToolRequestState::AttemptEnded
+                }
+            },
         },
         ProcessDelegationRequestRejection::Operation(
             DelegationOperationRejection::Transition {
@@ -12632,11 +12642,12 @@ mod tests {
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
-        ErrorCode, ErrorDetail, FrameEncodeError, GoalLifecycleState, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ProtocolVersion, RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame,
-        ServerMessage, SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry,
-        TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
+        DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
+        FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
+        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ProtocolVersion,
+        RejectionDetail, ReviewFindingInput, ReviewSeverity, ServerFrame, ServerMessage,
+        SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -12734,7 +12745,10 @@ mod tests {
             ProcessImportedContentKind, ProcessImportedSourceSpeaker, ProcessReadError,
             ProcessReconciliationOperation, ProcessTranscriptEntry, ProcessTurnState,
         },
-        session_delegation::{DelegationOperationRejection, ProcessDelegationRequestRejection},
+        session_delegation::{
+            DelegationOperationRejection, DelegationRequestExecutionState,
+            ProcessDelegationRequestRejection,
+        },
     };
 
     #[derive(Clone, Debug, Default)]
@@ -15120,6 +15134,50 @@ context_window_tokens = 200000
             request_id,
             peer_id,
         );
+        let awaiting_approval = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AwaitingApproval,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let denied = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Denied,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let closed = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Closed,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
+        let attempt_ended = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::AttemptEnded,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
 
         assert_eq!(
             relationship.detail,
@@ -15138,6 +15196,34 @@ context_window_tokens = 200000
             message_conflict.detail,
             ErrorDetail::rejected(RejectionDetail::DelegationMessageConflict {
                 tool_request_id: request_id,
+            })
+        );
+        assert_eq!(
+            awaiting_approval.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::AwaitingApproval,
+            })
+        );
+        assert_eq!(
+            denied.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Denied,
+            })
+        );
+        assert_eq!(
+            closed.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Closed,
+            })
+        );
+        assert_eq!(
+            attempt_ended.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::AttemptEnded,
             })
         );
     }

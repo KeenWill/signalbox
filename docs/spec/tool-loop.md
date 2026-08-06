@@ -855,6 +855,11 @@ accepting it as already committed; a pending, absent, or cross-wired attempt
 fails closed, and a failed reread retains the evidence and dispatch permit for
 same-incarnation reconciliation without repeating the effect.
 
+If an await or message transaction's commit acknowledgement is ambiguous, the
+executor replays that exact immutable request before reporting failure. A
+committed first transaction returns its durable wait or completion, while an
+uncommitted first transaction applies the replay-idempotent effect once.
+
 The child's normal terminal completion transaction concatenates the definitive
 ordered `AssistantText` entries from its proof-bearing completed call without a
 separator and admits those exact bytes as `DelegationContent`; `await_session`
