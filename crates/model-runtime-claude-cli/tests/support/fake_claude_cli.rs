@@ -74,6 +74,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         success("end_turn", Some(fixtures::MODEL_RECONSTRUCTED_CREDENTIAL))?;
         return Ok(());
     }
+    if scenario == "version_drift" {
+        // The handshake is rejected on this first event, so nothing after it
+        // would be read.
+        system_init_with_version(
+            &arguments,
+            fixtures::SESSION_ID,
+            fixtures::MODEL,
+            fixtures::DRIFTED_VERSION,
+        )?;
+        return Ok(());
+    }
     system_init(&arguments)?;
     match scenario.as_str() {
         "normal_completion" => {
@@ -198,6 +209,20 @@ fn system_init_with_identity(
     session_id: &str,
     reported_model: &str,
 ) -> std::io::Result<()> {
+    system_init_with_version(
+        arguments,
+        session_id,
+        reported_model,
+        fixtures::SUPPORTED_VERSION,
+    )
+}
+
+fn system_init_with_version(
+    arguments: &[String],
+    session_id: &str,
+    reported_model: &str,
+    claude_code_version: &str,
+) -> std::io::Result<()> {
     let allowed = argument_after(arguments, "--allowedTools").unwrap_or_default();
     let tools = if allowed.is_empty() {
         Vec::new()
@@ -213,7 +238,7 @@ fn system_init_with_identity(
         "type": "system", "subtype": "init", "session_id": session_id,
         "tools": tools, "mcp_servers": [{"name": "signalbox_tools", "status": "connected"}],
         "model": model, "slash_commands": [], "skills": [], "plugins": [],
-        "claude_code_version": "2.1.220"
+        "claude_code_version": claude_code_version
     }))
 }
 
