@@ -53,6 +53,19 @@ const MODEL: &str = "gpt-5-nano";
 /// still exercises the whole response envelope.
 const PROMPT: &str = "Reply with the single word: ready";
 
+/// `gpt-5-nano` is a reasoning model: its hidden reasoning tokens are billed
+/// against the same `max_completion_tokens` ceiling as visible output, so a
+/// budget sized only for the trivial visible reply can still truncate. This
+/// must stay generous enough that a live run clears truncation — a
+/// finish_reason of `length` is not decoded as typed completion evidence by
+/// this adapter (see `map_finish` in `src/response.rs`: OpenAI reuses
+/// `length` for both the requested output ceiling and the model's context
+/// limit, and the adapter deliberately refuses to guess which one occurred
+/// rather than invent evidence), so a truncated exchange fails this smoke
+/// with `LossCause::ResponseUnintelligible` instead of asserting anything
+/// useful about the response contract.
+const MAX_OUTPUT_TOKENS: u32 = 512;
+
 #[tokio::test]
 #[ignore = "spends one real OpenAI exchange; run only from the gated compatibility smoke"]
 async fn the_openai_api_completes_one_exchange() {
@@ -71,7 +84,7 @@ async fn the_openai_api_completes_one_exchange() {
         RequestedTarget::new(MODEL),
         ResolvedTarget::new(MODEL),
         vec![ConversationMessage::user_text(PROMPT)],
-        ModelSettings::new(64),
+        ModelSettings::new(MAX_OUTPUT_TOKENS),
     );
 
     let prepared = require_prepared(
