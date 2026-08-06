@@ -586,6 +586,45 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertNotIn(f"| {skipped_invariant}", rendered)
         self.assertNotIn(f"| {also_skipped_invariant}", rendered)
 
+    def declare_gated_target(self, *features: str) -> None:
+        """Declare a package whose ignored test target requires `gated`."""
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname = "fixture"\nversion = "0.0.0"\n\n'
+            "[features]\ndefault = []\ngated = []\n\n"
+            "[[test]]\n"
+            'name = "gated"\n'
+            'path = "tests/gated.rs"\n'
+            'required-features = ["gated"]\n',
+            encoding="utf-8",
+        )
+        (self.root / "src/lib.rs").write_text("", encoding="utf-8")
+        target = self.root / "tests/gated.rs"
+        target.parent.mkdir()
+        target.write_text(
+            "#[test]\n#[ignore]\nfn inv_001_only_with_the_feature() {}\n",
+            encoding="utf-8",
+        )
+        rendered = ", ".join(f'"{feature}"' for feature in features)
+        write_suite_manifest(
+            self.root,
+            'name = "fixture"\n'
+            'package = "fixture"\n'
+            f"features = [{rendered}]\n"
+            "shards = 1\n",
+        )
+
+    def test_target_missing_its_required_features_is_not_enforcement(self) -> None:
+        # Cargo skips such a target and reports success, so crediting it would
+        # claim CI enforces an invariant nothing runs.
+        self.declare_gated_target()
+
+        self.assertNotIn("| INV-001", render_invariant_index(self.root))
+
+    def test_target_with_its_required_features_is_enforcement(self) -> None:
+        self.declare_gated_target("gated")
+
+        self.assertIn("| INV-001", render_invariant_index(self.root))
+
     def declare_fixture_package(self) -> None:
         """Give the fixture root one workspace package the manifest can name."""
         (self.root / "Cargo.toml").write_text(

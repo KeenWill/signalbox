@@ -609,6 +609,29 @@ class DocumentedCommandTests(unittest.TestCase):
             [],
         )
 
+    def test_attached_option_forms_are_read(self) -> None:
+        # Cargo accepts `--package=<spec>`; documentation uses it. Reading only
+        # the separated spelling would let a stale documented feature set pass
+        # as though the command named no package at all.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test --package=pa --features=other --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
+
+    def test_attached_option_forms_agree_when_they_match(self) -> None:
+        self.assertEqual(
+            documentation_disagreements(
+                "AGENTS.md",
+                "`cargo test --package=pa --features=one --tests -- --ignored`\n",
+                (suite(package="pa", features=("one",)),),
+            ),
+            [],
+        )
+
     def test_differing_features_disagree(self) -> None:
         failures = documentation_disagreements(
             "AGENTS.md",

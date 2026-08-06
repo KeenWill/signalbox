@@ -475,7 +475,18 @@ def documentation_disagreements(
     failures: list[tuple[int, str]] = []
     for line, arguments in documented_ignored_commands(text):
         separator = arguments.index("--")
-        cargo_arguments = arguments[2:separator]
+        # Cargo accepts `--package=<spec>` and `--features=<list>` as readily
+        # as the separated spelling, and documentation uses both. Splitting the
+        # attached form here keeps the reader below to one shape; without it an
+        # attached option reads as no option at all, and a stale documented
+        # feature set slips past the comparison entirely.
+        cargo_arguments: list[str] = []
+        for argument in arguments[2:separator]:
+            if argument.startswith("-") and "=" in argument:
+                option, _, value = argument.partition("=")
+                cargo_arguments.extend((option, value))
+            else:
+                cargo_arguments.append(argument)
         package = None
         features: set[str] = set()
         index = 0

@@ -2596,6 +2596,7 @@ class IgnoredTestRun:
     """One manifest suite that executes ignored tests in authoritative CI."""
 
     package: str
+    features: tuple[str, ...]
     selection: IgnoredTestSelection
 
 
@@ -2626,10 +2627,71 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
     return [
         IgnoredTestRun(
             package=suite.package,
+            features=suite.features,
             selection=IgnoredTestSelection(skips=tuple(sorted(suite.skip))),
         )
         for suite in postgres_integration_suites.load_suites(root)
     ]
+
+
+def declared_package(package: Path) -> dict:
+    """Read one package manifest, or an empty document if it cannot be read."""
+    try:
+        return tomllib.loads((package / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def enabled_package_features(package: Path, requested: tuple[str, ...]) -> set[str]:
+    """Return the features one suite actually enables for a package.
+
+    A suite names the features it adds; Cargo also enables `default` — no
+    invocation here passes `--no-default-features` — and every feature a
+    reachable feature turns on. Feature-to-feature edges are followed;
+    `dep:name` and `package/feature` entries enable something other than a
+    feature of this package and are not.
+    """
+    declared = declared_package(package).get("features")
+    table = declared if isinstance(declared, dict) else {}
+    enabled = set(requested)
+    if "default" in table:
+        enabled.add("default")
+    pending = list(enabled)
+    while pending:
+        for entry in table.get(pending.pop(), []):
+            if not isinstance(entry, str) or ":" in entry or "/" in entry:
+                continue
+            if entry not in enabled:
+                enabled.add(entry)
+                pending.append(entry)
+    return enabled
+
+
+def target_required_features(package: Path) -> dict[Path, tuple[str, ...]]:
+    """Map each explicitly declared Cargo target root to its required features.
+
+    Cargo skips a target whose `required-features` are not all enabled — it
+    builds nothing and reports success. A target skipped that way enforces
+    nothing, so the invariant index must not credit it.
+    """
+    declared = declared_package(package)
+    required: dict[Path, tuple[str, ...]] = {}
+    for table in CARGO_TARGET_TABLES:
+        entries = declared.get(table)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            relative = entry.get("path")
+            features = entry.get("required-features")
+            if not isinstance(relative, str) or not isinstance(features, list):
+                continue
+            root = Path(os.path.normpath(package / relative))
+            required[root] = tuple(
+                feature for feature in features if isinstance(feature, str)
+            )
+    return required
 
 
 def cargo_package_directories(root: Path) -> dict[str, Path]:
@@ -2673,7 +2735,11 @@ def ignored_test_selections_by_target(
         package = packages.get(run.package)
         if package is None:
             continue
+        enabled = enabled_package_features(package, run.features)
+        required = target_required_features(package)
         for target in cargo_test_roots(package):
+            if not set(required.get(target, ())) <= enabled:
+                continue
             selected.setdefault(target, set()).add(run.selection)
     return {
         target: tuple(sorted(selections, key=lambda selection: selection.skips))
