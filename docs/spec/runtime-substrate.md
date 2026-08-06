@@ -29,11 +29,14 @@ CLI redaction contract was verified through PR #316
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
 projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
 mappings and advisory exceptions are verified against PR #437
-(`agent/model-settings-adapters`). The OpenAI compatibility smoke was verified
-through PR #466 (`agent/openai-api-smoke`). This page covers the
-provider-neutral operation, observation, and evidence vocabulary; SSE framing;
-structured-output and tool decode; `ScriptedModel`; the four provider adapters;
-and their credential boundaries. Layer-2 authorization and evidence
+(`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
+composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
+the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The OpenAI
+compatibility smoke was verified through PR #466 (`agent/openai-api-smoke`).
+This page covers the provider-neutral operation, observation, and evidence
+vocabulary; SSE framing; structured-output and tool decode; `ScriptedModel`;
+the four provider adapters; and their credential boundaries. Layer-2
+authorization and evidence
 classification ([model-call-execution](model-call-execution.md)), credential
 channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -852,8 +855,10 @@ exception for this adapter. When an operation carries an explicit
 catalog-governed control, exact-target capability and mapping validation
 precedes the ambient-login reference check. A service tier is always rejected.
 
-The adapter crate does not compose itself into signalboxd and defines no
-provider-selection or configuration mapping.
+The crate itself still defines no provider-selection or configuration mapping.
+signalboxd composes it from the deployment-owned `claude_cli` adapter mapping
+and its three absolute process paths, described in
+[configuration-and-credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
 
 ## Credential-access boundary
 
@@ -874,8 +879,9 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
 - The production implementation is signalboxd's `FileCredentialAccess`: each
-  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
-  production `AnthropicRuntime`.
+  resolve rereads the key file named by `ANTHROPIC_API_KEY_FILE` or
+  `OPENAI_API_KEY_FILE` and feeds the production `AnthropicRuntime` or
+  `OpenAiRuntime`.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:

@@ -706,6 +706,7 @@ impl UpdateSessionPlacementRejection {
 ```rust
 pub enum SessionCreationCause {
     UserInitiated,
+    Delegated { spawning_request: ToolRequestId },
 }
 
 pub struct TranscriptFrontier { /* private */ }
@@ -732,6 +733,7 @@ pub enum TranscriptAncestry {
 pub struct SessionCreationProvenance { /* private */ }
 impl SessionCreationProvenance {
     pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
+    pub const fn delegated(spawning_request: ToolRequestId) -> Self;
     // accessors: cause(), ancestry()
 }
 
@@ -883,6 +885,8 @@ pub enum SessionReconstitutionFailure {
     PlacementSessionMismatch,
     CurrentPlacementVersionMismatch,
     ImportedSessionSeedUnavailable,
+    DelegatedAncestryMismatch,
+    DelegatedTemplateProvenance,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -908,6 +912,7 @@ impl PreparedCreateSession {
 
 pub enum CreateSessionPreparationFailure {
     TranscriptAncestryUnavailable,
+    DelegatedCreationRequiresSpawn,
 }
 
 pub struct CreateSessionPreparationError { /* private */ }
@@ -962,6 +967,7 @@ pub enum CreateSessionReconstitutionFailure {
     PlacementMismatch,
     DefaultsSessionMismatch,
     TranscriptAncestryUnavailable,
+    DelegatedCreationRequiresSpawn,
     DefaultsVersionIsNotFirst,
     DefaultsMismatch,
 }
@@ -1177,7 +1183,7 @@ impl SessionDelegation {
         authority: ParentTerminationAuthority,
     ) -> Result<Self, DelegationTransitionError>;
     // accessors: spawning_request(), parent(), child(), child_turn(), task(), policy(),
-    //   lifecycle(), events()
+    //   lifecycle(), events(), child_creation_provenance()
 }
 pub enum DelegationTransitionFailure {
     SameSession,
@@ -1330,6 +1336,7 @@ pub enum BoundedImportedSessionReconstitutionFailure {
     CurrentPlacementSessionMismatch,
     PlacementSessionMismatch,
     CurrentPlacementVersionMismatch,
+    DelegatedAncestryMismatch,
     AncestryNotImported,
     MissingSeedRecord,
     DuplicateSeedRecord,
@@ -1411,6 +1418,7 @@ pub enum ImportedSessionReconstitutionFailure {
     CurrentPlacementSessionMismatch,
     PlacementSessionMismatch,
     CurrentPlacementVersionMismatch,
+    DelegatedAncestryMismatch,
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
