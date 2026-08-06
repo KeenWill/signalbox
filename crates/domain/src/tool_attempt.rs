@@ -278,6 +278,13 @@ pub enum ToolAttemptEnd {
         /// The sole durable error authority.
         error: ToolExecutionError,
     },
+    /// A foreground delegation wait yielded until its exact child result arrives.
+    AwaitingChild {
+        /// The spawn request naming the child relationship.
+        spawning_request: crate::ToolRequestId,
+        /// The exact child whose typed result will satisfy the wait.
+        child: crate::SessionId,
+    },
     /// An external effect may have occurred without definitive evidence.
     Ambiguous,
 }
@@ -288,6 +295,7 @@ impl ToolAttemptEnd {
         match self {
             Self::Completed { .. } => ToolAttemptDisposition::Completed,
             Self::KnownFailed { .. } => ToolAttemptDisposition::KnownFailed,
+            Self::AwaitingChild { .. } => ToolAttemptDisposition::AwaitingChild,
             Self::Ambiguous => ToolAttemptDisposition::Ambiguous,
         }
     }
@@ -300,6 +308,8 @@ pub enum ToolAttemptDisposition {
     Completed,
     /// Definitive typed failure evidence exists.
     KnownFailed,
+    /// The attempt yielded to one durable foreground child wait.
+    AwaitingChild,
     /// External-effect outcome remains unresolved.
     Ambiguous,
 }

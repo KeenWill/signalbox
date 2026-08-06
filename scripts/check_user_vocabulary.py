@@ -278,7 +278,8 @@ ALLOWLIST = (
             r"202608020001_review_orchestration|"
             r"202608020002_review_orchestration_command_recovery|"
             r"202608020003_runner_wire_contract|"
-            r"202608020015_llm_delegated_tool_approval"
+            r"202608020015_llm_delegated_tool_approval|"
+            r"202608020018_session_delegation"
             r")[.]sql$"
         ),
         re.compile(

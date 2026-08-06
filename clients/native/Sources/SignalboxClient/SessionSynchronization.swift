@@ -1468,6 +1468,10 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       }
       if case .queued = turn.state {
         queuedTurnIDs.insert(turn.turnID)
+      } else if case .queuedDelegated = turn.state {
+        queuedTurnIDs.insert(turn.turnID)
+      } else if case .queuedDelegationWake = turn.state {
+        queuedTurnIDs.insert(turn.turnID)
       }
       priorAcceptancePosition = turn.acceptancePosition.rawValue
       turnCount = turnCount.addingReportingOverflow(1).partialValue
@@ -1679,8 +1683,10 @@ extension SignalboxTranscriptTurnState {
 
   fileprivate var snapshotModelCallOwnership: SignalboxSnapshotModelCallOwnership {
     switch self {
-    case .queued: return .impossible
+    case .queued, .queuedDelegated, .queuedDelegationWake: return .impossible
+    case .delegationTerminated: return .permitted
     case .unknown: return .permitted
+    case .activeAwaitingChild: return .permitted
     case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
@@ -1715,8 +1721,10 @@ extension SignalboxTranscriptTurnState {
         && terminalAttemptID == nil
     case .unknown(_, _, let decodingDiagnostic):
       return decodingDiagnostic != nil
-    case .queued, .activeRunning, .activeAwaitingModelCallRecovery,
-      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeRunning, .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval,
+      .activeAwaitingToolRecovery, .completed,
       .refused, .cancelled, .reconciliationRequired,
       .toolReconciliationRequired:
       return false
@@ -1727,13 +1735,19 @@ extension SignalboxTranscriptTurnState {
     switch self {
     case .queued(_, let content):
       return UInt(content.utf8.count)
+    case .queuedDelegated(_, _, _, let content):
+      return UInt(content.utf8.count)
+    case .queuedDelegationWake:
+      return 0
+    case .delegationTerminated:
+      return 0
     case .activeRunning(_, let currentModelCall): return currentModelCall?.state.retainedUTF8Bytes ?? 0
     case .failed(_, _, let terminalModelCall): return terminalModelCall?.retainedUTF8Bytes ?? 0
     case .unknown(let kind, let payload, let diagnostic):
       return UInt(kind.utf8.count).saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
-      .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
+    case .activeAwaitingChild, .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval, .activeAwaitingToolRecovery, .completed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return 0
     }
@@ -1849,6 +1863,11 @@ extension SignalboxTranscriptEntry {
       .toolDenied(_, let content),
       .toolClosed(_, let content):
       return UInt(content.utf8.count)
+    case .delegatedTask(_, _, _, let content),
+      .delegationMessage(_, _, _, _, _, _, let content):
+      return UInt(content.utf8.count)
+    case .delegationResult(_, _, _, _, _, _, let content, _, _):
+      return UInt(content?.utf8.count ?? 0)
     case .imported(_, _, let sourceSpeaker, let contentKind):
       return sourceSpeaker.retainedUTF8Bytes.saturatedAdding(contentKind.retainedUTF8Bytes)
     case .unknown(let kind, let payload, let diagnostic):
@@ -2077,7 +2096,10 @@ extension SignalboxTranscriptTurnState {
         kind: "transcript_turn.state.\(kind)",
         decodingDiagnostic: nil
       )
-    case .queued, .activeAwaitingModelCallRecovery, .activeAwaitingToolApproval,
+    case .queued, .queuedDelegated, .queuedDelegationWake, .delegationTerminated,
+      .activeAwaitingChild,
+      .activeAwaitingModelCallRecovery,
+      .activeAwaitingToolApproval,
       .activeAwaitingToolRecovery, .completed, .failed, .refused, .cancelled,
       .reconciliationRequired, .toolReconciliationRequired:
       return nil

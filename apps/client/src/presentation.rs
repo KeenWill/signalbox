@@ -8,16 +8,18 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_process_protocol::{
-    CanonicalUuid, CurrentModelCallState, FailedModelCallCause, FailedModelCallDisposition,
-    GoalBlockedProvenance, GoalBlockedReason, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    MAX_RATE_VERSION_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-    ModelCallDisposition, ModelCallState, ReviewDiffSide, ReviewFindingSnapshot,
-    ReviewFindingStatus, ReviewOrchestrationConcernStatus, ReviewOrchestrationSnapshot,
-    ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle, ReviewRunLifecycle,
-    ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject, ReviewWorkflow,
-    SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
+    BoundChildAction, CanonicalUuid, CurrentModelCallState, DelegationOutcome, DelegationPolicy,
+    DelegationProvenance, DelegationReason, DelegationWaitMode, DescendantTerminationScope,
+    FailedModelCallCause, FailedModelCallDisposition, GoalBlockedProvenance, GoalBlockedReason,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
+    ImportedSpeaker, ImportedTextPreview, MAX_RATE_VERSION_UTF8_BYTES, MetadataActor,
+    MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallState, ReviewDiffSide,
+    ReviewFindingSnapshot, ReviewFindingStatus, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassKind, ReviewPassLifecycle,
+    ReviewRunLifecycle, ReviewRunSnapshot, ReviewSeverity, ReviewTargetSnapshot,
+    ReviewTargetSubject, ReviewWorkflow, SessionEvent, ToolApprovalEventDecider,
+    ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, UsageProvenance,
 };
 
 use crate::{
@@ -1629,6 +1631,103 @@ impl<'a> Output<'a> {
                  turn={turn_id} operation=tool_attempt operation_id={tool_attempt_id} \
                  frontier={terminal_frontier_id}"
             ),
+            SessionEvent::ChildSpawned {
+                spawning_request_id,
+                child_session_id,
+                relationship,
+            } => match relationship {
+                DelegationPolicy::Background {} => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_child_spawned \
+                     spawning_request={spawning_request_id} child={child_session_id} \
+                     policy=background"
+                ),
+                DelegationPolicy::Bound {
+                    on_parent_stopped,
+                    on_parent_cancelled,
+                } => writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_child_spawned \
+                     spawning_request={spawning_request_id} child={child_session_id} \
+                     policy=bound on_parent_stopped={} on_parent_cancelled={}",
+                    bound_child_action(*on_parent_stopped),
+                    bound_child_action(*on_parent_cancelled)
+                ),
+            },
+            SessionEvent::ChildWaiting {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+                mode,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} delegation_child_waiting \
+                 spawning_request={spawning_request_id} child={child_session_id} \
+                 await_request={await_request_id} mode={}",
+                match mode {
+                    signalbox_process_protocol::DelegationWaitMode::Foreground => "foreground",
+                    signalbox_process_protocol::DelegationWaitMode::Background => "background",
+                }
+            ),
+            SessionEvent::ChildLifecycleDisposition {
+                spawning_request_id,
+                child_session_id,
+                outcome,
+                reason,
+                provenance,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} delegation_child_lifecycle_disposition \
+                 spawning_request={spawning_request_id} child={child_session_id} \
+                 outcome={} reason={} provenance={}",
+                delegation_outcome(*outcome),
+                delegation_reason(*reason),
+                delegation_provenance(provenance)
+            ),
+            SessionEvent::ChildResult {
+                spawning_request_id,
+                child_session_id,
+                outcome,
+                reason,
+                provenance,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_child_result \
+                     spawning_request={spawning_request_id} child={child_session_id} \
+                     outcome={} reason={} provenance={} content_present={}",
+                    delegation_outcome(*outcome),
+                    delegation_reason(*reason),
+                    delegation_provenance(provenance),
+                    content.is_some()
+                )?;
+                if let Some(content) = content {
+                    self.text(content)
+                } else {
+                    Ok(())
+                }
+            }
+            SessionEvent::SessionMessage {
+                spawning_request_id,
+                message_id,
+                sender_session_id,
+                recipient_session_id,
+                ordinal,
+                delivery_sequence,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} delegation_session_message \
+                     spawning_request={spawning_request_id} message={message_id} \
+                     sender={sender_session_id} recipient={recipient_session_id} \
+                     ordinal={} delivery_sequence={}",
+                    ordinal.value(),
+                    delivery_sequence.value()
+                )?;
+                self.text(content)
+            }
         }
     }
 
@@ -1688,6 +1787,43 @@ impl<'a> Output<'a> {
                 )?;
                 self.text(content.as_str())
             }
+            TurnState::QueuedDelegated {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=queued_delegated \
+                     spawning_request={spawning_request_id} \
+                     parent_session={parent_session_id} parent_turn={parent_turn_id}"
+                )?;
+                self.text(content.as_str())
+            }
+            TurnState::QueuedDelegationWake {
+                first_delivery_sequence,
+                through_delivery_sequence,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=queued_delegation_wake \
+                 deliveries={}-{}",
+                first_delivery_sequence.value(),
+                through_delivery_sequence.value()
+            ),
+            TurnState::DelegationTerminated {
+                spawning_request_id,
+                outcome,
+                reason,
+                provenance,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=delegation_terminated \
+                 spawning_request={spawning_request_id} outcome={} reason={} provenance={}",
+                delegation_outcome(*outcome),
+                delegation_reason(*reason),
+                delegation_provenance(provenance)
+            ),
             TurnState::ActiveRunning {
                 current_attempt_id,
                 current_model_call,
@@ -1718,6 +1854,16 @@ impl<'a> Output<'a> {
                 self.stdout,
                 "turn={turn_id} position={position} state=active_awaiting_tool_approval \
                  request={tool_request_id}"
+            ),
+            TurnState::ActiveAwaitingChild {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_child \
+                 request={await_request_id} spawning_request={spawning_request_id} \
+                 child={child_session_id}"
             ),
             TurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
@@ -1872,6 +2018,69 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::DelegatedTask {
+                spawning_request_id,
+                parent_session_id,
+                parent_turn_id,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "delegated_task spawning_request={spawning_request_id} \
+                 parent_session={parent_session_id} parent_turn={parent_turn_id} \
+                 content={} source={} entry={}",
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::DelegationMessage {
+                spawning_request_id,
+                message_id,
+                sender_session_id,
+                recipient_session_id,
+                ordinal,
+                delivery_sequence,
+                content,
+            }) => writeln!(
+                self.stdout,
+                "delegation_message spawning_request={spawning_request_id} message={message_id} \
+                 sender={sender_session_id} recipient={recipient_session_id} \
+                 ordinal={} delivery_sequence={} content={} source={} entry={}",
+                ordinal.value(),
+                delivery_sequence.value(),
+                self.render(content),
+                entry.source_session_id,
+                entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                await_request_id,
+                spawning_request_id,
+                child_session_id,
+                mode,
+                delivery_sequence,
+                outcome,
+                content,
+                reason,
+                provenance,
+            }) => writeln!(
+                self.stdout,
+                "delegation_result await_request={await_request_id} \
+                 spawning_request={spawning_request_id} child={child_session_id} mode={} \
+                 delivery_sequence={} outcome={} content={} reason={} provenance={} \
+                 source={} entry={}",
+                delegation_wait_mode(*mode),
+                delivery_sequence
+                    .map(|sequence| sequence.value().to_string())
+                    .unwrap_or_else(|| String::from("none")),
+                delegation_outcome(*outcome),
+                content
+                    .as_deref()
+                    .map(|value| self.render(value))
+                    .unwrap_or_else(|| String::from("none")),
+                delegation_reason(*reason),
+                delegation_provenance(provenance),
+                entry.source_session_id,
+                entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::ModelIdentityChanged {
                 turn_id,
                 defaults_version,
@@ -2077,6 +2286,14 @@ impl SnapshotSelection {
                     results.insert(*tool_request_id);
                     trailing_results.insert(*tool_request_id);
                 }
+                SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                    await_request_id,
+                    mode: DelegationWaitMode::Foreground,
+                    ..
+                }) => {
+                    results.insert(*await_request_id);
+                    trailing_results.insert(*await_request_id);
+                }
                 _ if self.includes_terminal_marker(&entry) => {
                     anchor_found = true;
                     terminal_results.clone_from(&trailing_results);
@@ -2179,6 +2396,17 @@ impl SnapshotSelection {
                 ),
             ) => context.requests.contains(tool_request_id),
             (
+                Self::ToolBatchResults { .. }
+                | Self::ToolReconciliation { .. }
+                | Self::Failed { .. }
+                | Self::Cancelled { .. },
+                SnapshotEntryKind::Marker(TranscriptEntry::DelegationResult {
+                    await_request_id,
+                    mode: DelegationWaitMode::Foreground,
+                    ..
+                }),
+            ) => context.requests.contains(await_request_id),
+            (
                 Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Marker(_),
             ) => self.includes_terminal_marker(entry),
@@ -2254,6 +2482,9 @@ impl SnapshotSelection {
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
+                    | TranscriptEntry::DelegatedTask { .. }
+                    | TranscriptEntry::DelegationMessage { .. }
+                    | TranscriptEntry::DelegationResult { .. }
                     | TranscriptEntry::AssistantToolUse { .. }
                     | TranscriptEntry::ToolExecutionResult { .. }
                     | TranscriptEntry::ToolDenied { .. }
@@ -2352,6 +2583,78 @@ const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
         FailedModelCallCause::Overloaded => "overloaded",
         FailedModelCallCause::ProviderInternal => "provider_internal",
         FailedModelCallCause::Unrecognized => "unrecognized",
+    }
+}
+
+const fn bound_child_action(action: BoundChildAction) -> &'static str {
+    match action {
+        BoundChildAction::KeepRunning => "keep_running",
+        BoundChildAction::Stop => "stop",
+        BoundChildAction::Cancel => "cancel",
+    }
+}
+
+const fn delegation_outcome(outcome: DelegationOutcome) -> &'static str {
+    match outcome {
+        DelegationOutcome::Returned => "returned",
+        DelegationOutcome::Failed => "failed",
+        DelegationOutcome::Stopped => "stopped",
+        DelegationOutcome::Cancelled => "cancelled",
+        DelegationOutcome::ContinueRunning => "continue_running",
+        DelegationOutcome::AlreadyTerminal => "already_terminal",
+    }
+}
+
+const fn delegation_reason(reason: DelegationReason) -> &'static str {
+    match reason {
+        DelegationReason::ChildCompleted => "child_completed",
+        DelegationReason::ChildExecutionFailed => "child_execution_failed",
+        DelegationReason::ChildResultUnavailable => "child_result_unavailable",
+        DelegationReason::ChildCancelled => "child_cancelled",
+        DelegationReason::ParentStopped => "parent_stopped",
+        DelegationReason::ParentCancelled => "parent_cancelled",
+    }
+}
+
+const fn delegation_wait_mode(mode: DelegationWaitMode) -> &'static str {
+    match mode {
+        DelegationWaitMode::Foreground => "foreground",
+        DelegationWaitMode::Background => "background",
+    }
+}
+
+fn delegation_provenance(provenance: &DelegationProvenance) -> String {
+    match provenance {
+        DelegationProvenance::ChildTurn {
+            child_session_id,
+            child_turn_id,
+        } => format!("child_turn:{child_session_id}:{child_turn_id}"),
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id,
+            parent_turn_id,
+            command_id,
+            descendant_scope,
+        } => format!(
+            "parent_turn_command:{parent_session_id}:{parent_turn_id}:{command_id}:{}",
+            descendant_scope_label(*descendant_scope)
+        ),
+        DelegationProvenance::ParentGoalCommand {
+            parent_session_id,
+            goal_generation,
+            command_id,
+            descendant_scope,
+        } => format!(
+            "parent_goal_command:{parent_session_id}:{}:{command_id}:{}",
+            goal_generation.value(),
+            descendant_scope_label(*descendant_scope)
+        ),
+    }
+}
+
+const fn descendant_scope_label(scope: DescendantTerminationScope) -> &'static str {
+    match scope {
+        DescendantTerminationScope::ParentAlone => "parent_alone",
+        DescendantTerminationScope::ParentAndDescendants => "parent_and_descendants",
     }
 }
 
@@ -2526,15 +2829,17 @@ mod tests {
     use expect_test::expect;
     use rust_decimal::Decimal;
     use signalbox_process_protocol::{
-        BillingRateVersion, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ContentFragment,
-        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
-        FailedModelCallDisposition, FailedTerminalModelCall, ImportedContentKind,
-        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, MetadataActor,
-        MetadataLastWriter, ModelCallCostLabel, ModelCallDollarCost, ModelCallState,
-        ModelCallTokenUsage, ReviewDiffSide, ReviewFindingInput, ReviewFindingSnapshot,
-        ReviewFindingStatus, ReviewSeverity, ReviewTargetSnapshot, ReviewTargetSubject,
-        ServerMessage, SessionEvent, ToolApprovalEventDecider, ToolApprovalEventDecision,
-        TranscriptEntry, TranscriptTextEntry, TurnState, UsageProvenance,
+        BillingRateVersion, BoundChildAction, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
+        ContentFragment, CurrentModelCall, CurrentModelCallState, DelegationOutcome,
+        DelegationPolicy, DelegationProvenance, DelegationReason, DelegationWaitMode,
+        DescendantTerminationScope, ErrorCode, ErrorDetail, FailedModelCallDisposition,
+        FailedTerminalModelCall, ImportedContentKind, ImportedSourceSpeaker, ImportedSpeaker,
+        ImportedTextPreview, InputContent, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ReviewDiffSide,
+        ReviewFindingInput, ReviewFindingSnapshot, ReviewFindingStatus, ReviewSeverity,
+        ReviewTargetSnapshot, ReviewTargetSubject, ServerMessage, SessionEvent,
+        ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
+        TurnState, UsageProvenance,
     };
     use uuid::Uuid;
 
@@ -3120,6 +3425,76 @@ mod tests {
     }
 
     #[test]
+    fn delegation_snapshot_renders_task_message_and_background_result() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(2),
+                    entry_id: wire_uuid(3),
+                    entry: TranscriptEntry::DelegatedTask {
+                        spawning_request_id: wire_uuid(4),
+                        parent_session_id: wire_uuid(1),
+                        parent_turn_id: wire_uuid(5),
+                        content: String::from("inspect the durable result"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(2),
+                    entry_id: wire_uuid(6),
+                    entry: TranscriptEntry::DelegationMessage {
+                        spawning_request_id: wire_uuid(4),
+                        message_id: wire_uuid(7),
+                        sender_session_id: wire_uuid(1),
+                        recipient_session_id: wire_uuid(2),
+                        ordinal: CanonicalU64::new(2),
+                        delivery_sequence: CanonicalU64::new(1),
+                        content: String::from("continue with the checked input"),
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(2),
+                    source_session_id: wire_uuid(1),
+                    entry_id: wire_uuid(8),
+                    entry: TranscriptEntry::DelegationResult {
+                        await_request_id: wire_uuid(9),
+                        spawning_request_id: wire_uuid(4),
+                        child_session_id: wire_uuid(2),
+                        mode: DelegationWaitMode::Background,
+                        delivery_sequence: Some(CanonicalU64::new(2)),
+                        outcome: DelegationOutcome::Returned,
+                        content: Some(String::from("checked result")),
+                        reason: DelegationReason::ChildCompleted,
+                        provenance: DelegationProvenance::ChildTurn {
+                            child_session_id: wire_uuid(2),
+                            child_turn_id: wire_uuid(10),
+                        },
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("delegation snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
+            delegated_task spawning_request=00000000-0000-0000-0000-000000000004 parent_session=00000000-0000-0000-0000-000000000001 parent_turn=00000000-0000-0000-0000-000000000005 content=inspect the durable result source=00000000-0000-0000-0000-000000000002 entry=00000000-0000-0000-0000-000000000003
+            delegation_message spawning_request=00000000-0000-0000-0000-000000000004 message=00000000-0000-0000-0000-000000000007 sender=00000000-0000-0000-0000-000000000001 recipient=00000000-0000-0000-0000-000000000002 ordinal=2 delivery_sequence=1 content=continue with the checked input source=00000000-0000-0000-0000-000000000002 entry=00000000-0000-0000-0000-000000000006
+            delegation_result await_request=00000000-0000-0000-0000-000000000009 spawning_request=00000000-0000-0000-0000-000000000004 child=00000000-0000-0000-0000-000000000002 mode=background delivery_sequence=2 outcome=returned content=checked result reason=child_completed provenance=child_turn:00000000-0000-0000-0000-000000000002:00000000-0000-0000-0000-00000000000a source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000008
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
     fn terminal_reread_excludes_material_from_later_buffered_events() {
         let selected_turn = wire_uuid(1);
         let selected_call = wire_uuid(2);
@@ -3391,6 +3766,39 @@ mod tests {
 
         expect![[r#"
             turn=00000000-0000-0000-0000-000000000001 position=1 state=active_running attempt=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 call_state=cancellation_requested
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn snapshot_renders_queued_delegated_origin() {
+        let rendered = render_snapshot_turn(TurnState::QueuedDelegated {
+            spawning_request_id: wire_uuid(2),
+            parent_session_id: wire_uuid(3),
+            parent_turn_id: wire_uuid(4),
+            content: InputContent::new(String::from("delegated task")),
+        });
+
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegated spawning_request=00000000-0000-0000-0000-000000000002 parent_session=00000000-0000-0000-0000-000000000003 parent_turn=00000000-0000-0000-0000-000000000004
+            delegated task
+            usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+            usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn snapshot_renders_queued_delegation_wake_range() {
+        let rendered = render_snapshot_turn(TurnState::QueuedDelegationWake {
+            first_delivery_sequence: CanonicalU64::new(3),
+            through_delivery_sequence: CanonicalU64::new(5),
+        });
+
+        expect![[r#"
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=queued_delegation_wake deliveries=3-5
             usage_total scope=session usage_provenance=reported terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
@@ -3870,6 +4278,66 @@ mod tests {
 
         expect![[r#"
             event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 operation=model_call operation_id=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_bound_child_policy() {
+        let rendered = render_event(SessionEvent::ChildSpawned {
+            spawning_request_id: wire_uuid(2),
+            child_session_id: wire_uuid(3),
+            relationship: DelegationPolicy::Bound {
+                on_parent_stopped: BoundChildAction::Stop,
+                on_parent_cancelled: BoundChildAction::Cancel,
+            },
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_spawned spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 policy=bound on_parent_stopped=stop on_parent_cancelled=cancel
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_returned_child_result_content() {
+        let rendered = render_event(SessionEvent::ChildResult {
+            spawning_request_id: wire_uuid(2),
+            child_session_id: wire_uuid(3),
+            outcome: DelegationOutcome::Returned,
+            content: Some(String::from("delivered result")),
+            reason: DelegationReason::ChildCompleted,
+            provenance: DelegationProvenance::ChildTurn {
+                child_session_id: wire_uuid(3),
+                child_turn_id: wire_uuid(4),
+            },
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_result spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 outcome=returned reason=child_completed provenance=child_turn:00000000-0000-0000-0000-000000000003:00000000-0000-0000-0000-000000000004 content_present=true
+            delivered result
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_parent_cascade_child_result_without_content() {
+        let rendered = render_event(SessionEvent::ChildResult {
+            spawning_request_id: wire_uuid(2),
+            child_session_id: wire_uuid(3),
+            outcome: DelegationOutcome::Stopped,
+            content: None,
+            reason: DelegationReason::ParentStopped,
+            provenance: DelegationProvenance::ParentTurnCommand {
+                parent_session_id: wire_uuid(1),
+                parent_turn_id: wire_uuid(4),
+                command_id: wire_uuid(5),
+                descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+            },
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_result spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 outcome=stopped reason=parent_stopped provenance=parent_turn_command:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000004:00000000-0000-0000-0000-000000000005:parent_and_descendants content_present=false
         "#]]
         .assert_eq(&rendered);
     }

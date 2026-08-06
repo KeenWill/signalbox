@@ -236,6 +236,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
   public let activeTurnID: SignalboxCanonicalUUID
   public let content: String
   public let expectedDefaultsVersion: SignalboxCanonicalUInt64
+  public let descendantScope: SignalboxDescendantTerminationScope
   public let modelSelection: SignalboxModelSelection
 
   public init(
@@ -244,6 +245,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     activeTurnID: SignalboxCanonicalUUID,
     content: String,
     expectedDefaultsVersion: SignalboxCanonicalUInt64,
+    descendantScope: SignalboxDescendantTerminationScope = .parentAlone,
     modelSelection: SignalboxModelSelection
   ) {
     self.commandID = commandID
@@ -251,6 +253,7 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
     self.activeTurnID = activeTurnID
     self.content = content
     self.expectedDefaultsVersion = expectedDefaultsVersion
+    self.descendantScope = descendantScope
     self.modelSelection = modelSelection
   }
 
@@ -260,7 +263,8 @@ public struct SignalboxPreparedTurnStop: Equatable, Sendable {
       sessionID: sessionID,
       expectedActiveTurnID: activeTurnID,
       content: content,
-      expectedDefaultsVersion: expectedDefaultsVersion
+      expectedDefaultsVersion: expectedDefaultsVersion,
+      descendantScope: descendantScope
     )
   }
 }
