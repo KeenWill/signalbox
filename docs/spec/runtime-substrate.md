@@ -6,15 +6,17 @@ This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime-claude-cli`, verified against the implementing stack
 through PR #183 (`agent/provider-call-security-parser`). The Claude Code CLI
 adapter implementation was verified through PR #320
-(`agent/claude-cli-adapter`). The Codex CLI adapter stack comprises PR #264
-(`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
-escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-compatibility-smoke automation was verified through PR #333
-(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
-probe, and pinned version were verified against the `0.146.0` executable through
-PR #321 (`renovate/openai-codex-0.x`). The `signalboxd` names this page states
-for the composition root, its telemetry, and the production
-`FileCredentialAccess` were verified through PR #258
+(`agent/claude-cli-adapter`); its derived version pin and gated compatibility
+smoke were verified through PR #468 (`agent/claude-cli-smoke`), including the
+credential-free version gate against the installed pinned executable. The Codex
+CLI adapter stack comprises PR #264 (`agent/codex-cli-wrap`) and PR #268
+(`agent/codex-cli-pin-smoke`); its escalation closeout is PR #317
+(`agent/escalation-closeout`). The Codex CLI compatibility-smoke automation was
+verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
+ambient-skill catalog probe, and pinned version were verified against the
+`0.146.0` executable through PR #321 (`renovate/openai-codex-0.x`). The
+`signalboxd` names this page states for the composition root, its telemetry, and
+the production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
