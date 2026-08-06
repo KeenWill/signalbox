@@ -88,8 +88,8 @@ fixtures, the same seam the golden capture scripts below use.
 
 The suite runs as a report-only step in CI, which uploads the reference, the
 failed rendering, and their difference as an artifact when a comparison fails.
-Re-record the goldens after an intended visual change and read the resulting
-diff before committing it:
+Re-record the goldens after an intended visual change; blessing them is governed
+by [testing style](../../docs/agents/testing-style.md#expect-tests), rule 11:
 
 ```bash
 scripts/record-snapshots.sh

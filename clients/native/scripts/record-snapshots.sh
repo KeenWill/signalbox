@@ -14,8 +14,8 @@ set -euo pipefail
 #     SIGNALBOX_NATIVE_SNAPSHOT_RECORD=missing scripts/record-snapshots.sh
 #
 # `all` (the default here) rewrites every golden; `missing` writes only the
-# ones that do not exist yet. Read the resulting diff before committing it —
-# a blessed rendering nobody looked at asserts nothing.
+# ones that do not exist yet. Blessing the result is governed by rule 11 of
+# docs/agents/testing-style.md.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
