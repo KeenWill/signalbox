@@ -62,10 +62,14 @@ from pathlib import Path
 # modules; a rule that decides how a test body reads would be restating
 # `docs/agents/testing-style.md`, which owns that.
 RUST_SOURCE_GLOBS = ("crates/*/src/*.rs", "apps/*/src/*.rs")
-# SR-1 additionally scans them, because naming what a file owns is not a
-# statement about how its body reads: an integration-test target is a Rust
-# module, the guide states the rule without qualification, and a count that
-# skipped these could reach zero while the convention was still unmet.
+# Scanned by the rules the guide states without qualification, and only those.
+# A rule reads test targets when its own text does: SR-1 says "every Rust
+# module" and SR-3 says "a name has one spelling per file", and the guide opens
+# by binding its two disciplines to "production and test code alike". SR-6 and
+# SR-8 say "production", and the description holds their test-target scope for
+# an owner ruling, so they stay on `src`. SR-4, SR-5, and SR-10 decide public
+# API, which a test target does not have, and a rule about how long a test body
+# runs would be `docs/agents/testing-style.md` restated.
 RUST_TEST_TARGET_GLOBS = ("crates/*/tests/*.rs", "apps/*/tests/*.rs")
 RUST_ALL_GLOBS = ("crates/*.rs", "apps/*.rs")
 SWIFT_SOURCE_GLOBS = ("clients/native/Sources/*.swift",)
@@ -311,18 +315,45 @@ PROCESS_CITATIONS = (
 )
 
 
+SQL_COMMENT = re.compile(r"--[^\n]*")
+SQL_STRING = re.compile(r"'(?:[^']|'')*'")
+
+
+def _sql_comments(text: str) -> Iterator[tuple[int, str]]:
+    """Yield each SQL line comment with the line it starts on.
+
+    String bodies are blanked first, preserving their newlines so every offset
+    still maps to its original line: a `--` inside a literal is data a migration
+    writes, not a comment a reader is being addressed by.
+    """
+    scrubbed = SQL_STRING.sub(
+        lambda match: re.sub(r"[^\n]", " ", match.group()), text
+    )
+    for match in SQL_COMMENT.finditer(scrubbed):
+        yield text.count("\n", 0, match.start()) + 1, text[match.start() : match.end()]
+
+
 def check_comment_provenance(repository: Repository) -> Iterator[Finding]:
     """A comment states a constraint; provenance belongs to git history."""
     patterns = (*RUST_ALL_GLOBS, *SWIFT_SOURCE_GLOBS)
-    for source in repository.sources(patterns):
-        for line, comment in source.comments:
+    commented: list[tuple[str, Iterator[tuple[int, str]]]] = [
+        (source.path, iter(source.comments)) for source in repository.sources(patterns)
+    ]
+    # A migration is code, and its comments address the same reader. They are
+    # where a durable bound's provenance is most tempting to write down and
+    # where a citation outlives the document it names longest.
+    for path in repository.files((MIGRATION_GLOB,)):
+        label = path.relative_to(repository.root).as_posix()
+        commented.append((label, _sql_comments(path.read_text(encoding="utf-8"))))
+    for path, comments in commented:
+        for line, comment in comments:
             for label, pattern in PROCESS_CITATIONS:
                 match = pattern.search(comment)
                 if match is None:
                     continue
                 yield Finding(
                     "SR-2",
-                    source.path,
+                    path,
                     line + comment.count("\n", 0, match.start()),
                     f"comment cites {label}: {match.group().strip()}",
                 )
@@ -344,7 +375,7 @@ def check_single_type_spelling(repository: Repository) -> Iterator[Finding]:
     crates — the one case where both spellings are load-bearing — does not
     report.
     """
-    for source in repository.sources(RUST_SOURCE_GLOBS):
+    for source in repository.sources((*RUST_SOURCE_GLOBS, *RUST_TEST_TARGET_GLOBS)):
         imported: dict[str, set[str]] = {}
         import_spans: list[tuple[int, int]] = []
         for statement in USE_STATEMENT.finditer(source.code):
@@ -503,9 +534,13 @@ def _anonymous_row_shape(annotation: str, aliases: set[str]) -> str | None:
 
 # --- SR-7: schema thresholds are their own constants ------------------------
 
+# Equality as well as ordering: the rule is that a stored version is compared
+# only against a named feature threshold, and `stored != STORAGE_VERSION` is the
+# comparison whose harm the rule states most exactly — advancing the writer
+# version turns every row written under the old one into corruption.
 STORAGE_VERSION_COMPARISON = re.compile(
-    r"(?:[<>]=?\s*STORAGE_VERSION"
-    r"|STORAGE_VERSION\s*[<>]=?[^=]"
+    r"(?:(?:[<>!=]=|[<>])\s*STORAGE_VERSION"
+    r"|STORAGE_VERSION\s*(?:[<>!=]=|[<>][^=])"
     r"|\.\.=?\s*STORAGE_VERSION)"
 )
 STORAGE_VERSION_TREES = ("crates/persistence/src/*.rs",)
@@ -669,9 +704,39 @@ PUBLIC_FUNCTION = re.compile(
 )
 
 
+# A trait method carries no `pub`: the trait's visibility is the method's. A
+# public trait's methods are public API, and a transposition at a call site
+# compiles there exactly as it would for a free function, so the rule reaches
+# them and the pattern above cannot.
+PUBLIC_TRAIT = re.compile(r"\bpub\s+(?:unsafe\s+)?trait\s+[A-Za-z0-9_]+")
+TRAIT_METHOD = re.compile(
+    r"\b(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"fn\s+([A-Za-z0-9_]+)\s*(?:<[^>({]*>)?\s*\("
+)
+
+
 def public_signatures(source: Source) -> Iterator[Signature]:
-    """Parse every `pub fn` signature in a file's code view."""
-    for match in PUBLIC_FUNCTION.finditer(source.code):
+    """Parse every publicly reachable function signature in a file."""
+    yield from _signatures(source, PUBLIC_FUNCTION)
+    for trait in PUBLIC_TRAIT.finditer(source.code):
+        opening = source.code.find("{", trait.end())
+        if opening == -1:
+            continue
+        closing = _matching_brace(source.code, opening)
+        if closing is None:
+            continue
+        yield from _signatures(source, TRAIT_METHOD, opening, closing)
+
+
+def _signatures(
+    source: Source,
+    pattern: re.Pattern[str],
+    start: int = 0,
+    end: int | None = None,
+) -> Iterator[Signature]:
+    for match in pattern.finditer(
+        source.code, start, len(source.code) if end is None else end
+    ):
         opening = source.code.index("(", match.end() - 1)
         closing = _matching_paren(source.code, opening)
         if closing is None:

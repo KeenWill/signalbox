@@ -113,6 +113,21 @@ class CommentProvenanceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("rule 4", result.stdout)
 
+    def test_migration_comment_citing_a_decision_log_entry_reports(self) -> None:
+        source = "-- Per the 2026-07-24 decision-log entry.\nALTER TABLE t ADD COLUMN c uuid;\n"
+
+        result = check("SR-2", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MIGRATION, result.stdout)
+
+    def test_a_date_inside_a_migration_string_literal_is_data(self) -> None:
+        source = "-- The pinned spelling below is the wire form.\nINSERT INTO t VALUES ('2026-07-24');\n"
+
+        result = check("SR-2", {MIGRATION: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
     def test_comment_stating_the_constraint_itself_passes(self) -> None:
         source = "//! Owned.\n// The seed is decorrelated from the acceptance ordinal.\npub fn run() {}\n"
 
@@ -162,6 +177,21 @@ class SingleTypeSpellingTests(unittest.TestCase):
         result = check("SR-3", {MODULE: source})
 
         self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_two_spellings_in_an_integration_test_target_report(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use signalbox_domain::SessionId;\n"
+            "#[test]\n"
+            "fn runs() {\n"
+            "    let _: signalbox_domain::SessionId = SessionId::new();\n"
+            "}\n"
+        )
+
+        result = check("SR-3", {MODULE: "//! Owned.\n", TEST_TARGET: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(TEST_TARGET, result.stdout)
 
 
 class FailureTypeRenderingTests(unittest.TestCase):
@@ -320,6 +350,26 @@ class StorageVersionThresholdTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("STORAGE_VERSION", result.stdout)
+
+    def test_inequality_against_the_current_writer_version_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub fn admits(stored: i16) -> bool {\n"
+            "    stored != STORAGE_VERSION\n"
+            "}\n"
+        )
+
+        result = check("SR-7", {"crates/persistence/src/session.rs": source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("STORAGE_VERSION", result.stdout)
+
+    def test_declaring_the_writer_version_is_not_a_comparison(self) -> None:
+        source = "//! Owned.\npub const STORAGE_VERSION: i16 = 5;\n"
+
+        result = check("SR-7", {"crates/persistence/src/session.rs": source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_comparison_against_a_named_threshold_passes(self) -> None:
         source = (
@@ -486,6 +536,31 @@ class AdjacentParameterTypeTests(unittest.TestCase):
         source = (
             "//! Owned.\n"
             "pub fn record(keys: HashMap<RunId, PassId>, seed: Seed) {}\n"
+        )
+
+        result = check("SR-10", {MODULE: source})
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_adjacent_same_typed_parameters_of_a_public_trait_method_report(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub trait WorkspaceFileSystem {\n"
+            "    fn read_directory(&self, max_entries: usize, max_inspections: usize);\n"
+            "}\n"
+        )
+
+        result = check("SR-10", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("read_directory", result.stdout)
+
+    def test_a_private_trait_method_is_not_public_api(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "trait WorkspaceFileSystem {\n"
+            "    fn read_directory(&self, max_entries: usize, max_inspections: usize);\n"
+            "}\n"
         )
 
         result = check("SR-10", {MODULE: source})

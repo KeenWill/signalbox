@@ -359,8 +359,12 @@ type or decoder mirroring a wire shape additionally names the wire discriminant
 it decodes, which makes a missing decoder visible by inspection.
 
 Every public item in the domain and application crates — including enum variants
-and public struct fields — carries a doc comment. This codifies a property those
-crates already hold by discipline rather than adding an obligation.
+and public struct fields — carries a doc comment. Most already do, but not all:
+`DelegationTransitionFailure` and `DelegationTransitionError` in
+`crates/domain/src/session_delegation.rs` are exported undocumented today. The
+outstanding items are a baseline to burn down, not a permitted exception, and
+`missing_docs` stays deferred until they are cleared — see the clean-gate rule
+under mechanical enforcement.
 
 Every arm of a tagged wire decoder in the native client names its complete
 admitted field set, through the shared rejection helper or a hand-written
