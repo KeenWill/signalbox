@@ -267,6 +267,9 @@ async fn prepare_raw_delegation(
         ],
     )
     .await?;
+    let [spawning_request, awaiting_request, message_request]: [ToolRequestId; 3] = requests
+        .try_into()
+        .expect("delegation fixture prepares exactly spawn, await, and message requests");
     let fixture = RawDelegationFixture {
         parent: parent.session,
         parent_turn: parent.turn,
@@ -274,9 +277,9 @@ async fn prepare_raw_delegation(
         child,
         initial_turn: TurnId::from_uuid(Uuid::from_u128(seed + 0x201)),
         initial_semantic_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x202)),
-        spawning_request: requests[0],
-        awaiting_request: requests[1],
-        message_request: requests[2],
+        spawning_request,
+        awaiting_request,
+        message_request,
         message_id: Uuid::from_u128(seed + 0x400),
     };
     insert_raw_delegation_tool_receipts(pool, fixture, seed).await?;
@@ -1554,7 +1557,8 @@ async fn prepared_delegation_with_wait_and_message(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_history_rejects_initial_task_deletion() -> Result<(), Box<dyn Error>> {
+async fn s18_inv003_inv010_delegation_history_rejects_initial_task_deletion()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, fixture) =
         prepared_delegation_with_wait_and_message(DELEGATION_HISTORY_FIXTURE_SEED).await?;
     let mut history = pool.begin().await?;
@@ -1562,6 +1566,19 @@ async fn delegation_history_rejects_initial_task_deletion() -> Result<(), Box<dy
         "ALTER TABLE session_delegation_initial_task
          DISABLE TRIGGER session_delegation_initial_task_is_append_only",
     )
+    .execute(&mut *history)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+         DISABLE TRIGGER semantic_transcript_entry_is_append_only",
+    )
+    .execute(&mut *history)
+    .await?;
+    sqlx::query(
+        "DELETE FROM semantic_transcript_entry
+          WHERE semantic_entry_id = $1",
+    )
+    .bind(fixture.initial_semantic_entry.into_uuid())
     .execute(&mut *history)
     .await?;
     sqlx::query(
@@ -1578,7 +1595,7 @@ async fn delegation_history_rejects_initial_task_deletion() -> Result<(), Box<dy
 
     assert_eq!(
         constraint_name(&history_error),
-        Some("semantic_transcript_entry_delegated_task_fk")
+        Some("session_delegation_initial_task_history")
     );
 
     pool.close().await;
@@ -1670,7 +1687,8 @@ async fn inv032_delegation_result_wake_requires_its_subject_shape() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_spawn_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
+async fn s18_inv003_inv010_delegation_spawn_purpose_requires_exact_json()
+-> Result<(), Box<dyn Error>> {
     let extra_spawn = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
@@ -1714,7 +1732,7 @@ async fn delegation_spawn_purpose_requires_exact_json() -> Result<(), Box<dyn Er
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
+async fn s18_inv010_delegation_message_purpose_requires_exact_json() -> Result<(), Box<dyn Error>> {
     let canonical_spawn = serde_json::json!({
         "relationship": { "kind": "background" },
         "task": RAW_DELEGATED_TASK,
