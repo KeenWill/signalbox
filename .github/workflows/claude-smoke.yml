@@ -1,0 +1,274 @@
+# Compatibility smoke for the Claude Code CLI wrapped by
+# crates/model-runtime-claude-cli. It installs the exact version pinned in
+# crates/model-runtime-claude-cli/package.json and spends one real,
+# cheapest-model exchange through the adapter, so a Renovate pin bump is proven
+# against the live CLI rather than assumed. The discipline it implements is
+# specified in the Claude Code CLI provider adapter section of
+# docs/spec/runtime-substrate.md.
+#
+# Owner setup, required before the live job can pass. Create the GitHub
+# environment `claude-smoke` (Repository → Settings → Environments) and give it
+# the secret `ANTHROPIC_API_KEY`. Until that environment exists the live job
+# cannot resolve its secret and the required aggregate stays red for any pull
+# request that changes the adapter crate.
+#
+# Owner decision, also required. The adapter clears the child environment and
+# forwards only an allowlist (`CLAUDE_ENVIRONMENT` in src/runtime.rs), which
+# deliberately excludes direct credential values and carries a unit test
+# asserting `ANTHROPIC_API_KEY` never reaches the child (INV-035). The step
+# below therefore places the key in the *test process* environment, and the
+# adapter drops it before spawning the CLI, so the exchange runs
+# unauthenticated. Closing that gap means deciding how the credential should
+# reach the CLI — extending the adapter's allowlist with an explicit
+# direct-credential variable, or writing a credential store under the
+# already-forwarded `CLAUDE_CONFIG_DIR` — and both change the adapter's
+# credential contract, so neither is taken here.
+#
+# Accepted trust boundary. The live exchange must execute the proposed
+# repository adapter code against the pinned CLI; that is the purpose of this
+# compatibility smoke. That repository-controlled test process runs with the
+# credential in its own environment. The workflow therefore trusts anyone with
+# write access to this repository, the same trust already required to push
+# executable code to main. It does not trust fork authors. First, GitHub
+# withholds secrets from ordinary fork pull_request runs regardless of
+# environment policy. Second, the secretless gate compares
+# github.event.pull_request.head.repo.full_name with github.repository and
+# rejects a changed fork before the credentialed job can start. Third, the
+# credentialed job condition repeats that comparison. The required aggregate
+# also refuses a smoke-required fork, so weakening one site is insufficient.
+#
+# The smoke remains bound to the claude-smoke environment, which must be
+# configured for all branches so main, manual, and synthetic pull-request merge
+# refs can enter. That availability setting admits fork and same-repository refs
+# alike and supplies no security boundary; the defenses above exclude forks.
+#
+# The credential is referenced only in the step that spends the exchange, as a
+# step-scoped environment value, and is never echoed, never passed in argv, and
+# never written to a file. npm lifecycle scripts are disabled, and repository
+# code is compiled and the credential-free real-CLI probe runs before any step
+# carries the credential. The later live test's access to its own environment is
+# intentional under the accepted same-repository-writer boundary above.
+name: Claude CLI smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "crates/model-runtime-claude-cli/**"
+
+# Superseded pull-request runs release their slots against the public
+# concurrency cap. Every other event takes a group of its own: sharing one
+# group would let a third run cancel a second still pending behind the first,
+# which `cancel-in-progress: false` does not prevent.
+concurrency:
+  group: >-
+    claude-cli-smoke-${{ github.event_name == 'pull_request'
+    && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  gate:
+    name: Claude smoke eligibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      smoke_required: ${{ steps.gate.outputs.smoke_required }}
+    steps:
+      - name: Check out the pull request head for path inspection
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Decide whether compatibility smoke is required
+        id: gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
+            echo "Compatibility smoke is required for ${GITHUB_EVENT_NAME}."
+            exit 0
+          fi
+
+          changed_paths="${RUNNER_TEMP}/claude-smoke-changed-files"
+          git diff --no-renames --name-only -z \
+            "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
+          adapter_changed=false
+          while IFS= read -r -d '' path; do
+            if [[ "${path}" == crates/model-runtime-claude-cli/* ]]; then
+              adapter_changed=true
+              break
+            fi
+          done < "${changed_paths}"
+          if [[ "${adapter_changed}" != "true" ]]; then
+            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
+            echo "Not applicable: crates/model-runtime-claude-cli/** did not change."
+            exit 0
+          fi
+
+          if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
+            echo "::error::A fork changed the Claude Code CLI adapter. Put the reviewed change on a trusted in-repository branch, then run: gh workflow run claude-smoke.yml --ref <trusted-branch>"
+            exit 1
+          fi
+
+          echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
+          echo "Compatibility smoke is required for this same-repository adapter change."
+
+  smoke:
+    name: Claude live compatibility
+    needs: gate
+    if: ${{ needs.gate.outputs.smoke_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      contents: read
+    # Repository → Settings → Environments → claude-smoke holds
+    # ANTHROPIC_API_KEY. Its all-branches availability setting is documented
+    # above and deliberately supplies no additional author-trust decision.
+    environment: claude-smoke
+    concurrency:
+      group: claude-smoke
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Keeps the CLI's own configuration and any login state inside the job's
+      # workspace instead of the runner home directory, so the cleanup step
+      # below can remove it and nothing survives into a later step. The adapter
+      # forwards this variable to the child as its credential home.
+      CLAUDE_CONFIG_DIR: ${{ github.workspace }}/.claude-smoke-home
+      SIGNALBOX_CLAUDE_SMOKE_EXECUTABLE: >-
+        ${{ github.workspace }}/crates/model-runtime-claude-cli/node_modules/.bin/claude
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner image ships Node, and the pinned package is a Node CLI, so
+      # no Node toolchain setup is needed. `npm ci` installs the lockfile's
+      # integrity-checked artifact exactly, with lifecycle scripts disabled so
+      # nothing package-authored runs as an implicit side effect of install.
+      #
+      # Unlike the Codex CLI, this package's launcher is a stub until its own
+      # installer places the platform-native binary, so a scripts-disabled
+      # install alone yields an executable that refuses to run. The installer
+      # therefore runs as its own named step: the same code either way, but
+      # invoked explicitly and reviewably rather than implicitly, and still
+      # before any step carries the credential.
+      - name: Install the pinned Claude Code CLI
+        run: npm ci --ignore-scripts --prefix crates/model-runtime-claude-cli
+      - name: Place the pinned CLI's platform-native binary
+        working-directory: crates/model-runtime-claude-cli
+        run: node node_modules/@anthropic-ai/claude-code/install.cjs
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: claude-smoke
+      # Compile the smoke test binary BEFORE any step carries the credential, so
+      # no repository build script or procedural macro executes while the API
+      # key is present in a step environment. The later test run is fresh and
+      # does not recompile.
+      - name: Build the smoke test binary
+        run: >-
+          cargo test --no-fail-fast -p signalbox-model-runtime-claude-cli
+          --test live_smoke --no-run
+      - name: Prepare the isolated CLI configuration directory
+        run: |
+          set -euo pipefail
+          mkdir -p "${CLAUDE_CONFIG_DIR}"
+          chmod 700 "${CLAUDE_CONFIG_DIR}"
+      - name: Run credential-free pre-spend probes
+        run: |
+          set -euo pipefail
+          test_name=the_pinned_claude_cli_pre_spend_contract_holds
+          result="${RUNNER_TEMP}/claude-smoke-pre-spend-result"
+          cargo test --color never --no-fail-fast \
+            -p signalbox-model-runtime-claude-cli --test live_smoke -- \
+            --ignored --exact "${test_name}" 2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one pre-spend test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
+      # The test repeats the pre-spend version gate immediately before the model
+      # operation, then spends exactly one exchange through the adapter. The
+      # credential is scoped to this step alone, is never echoed, and is never
+      # passed in argv: the CLI is expected to read it from the environment the
+      # adapter hands its child.
+      - name: Run one live exchange through the adapter
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional, and a plain variable rather than a secret because a model
+          # name is not sensitive. Which models a credential can address is
+          # account-scoped, so the environment may override the code default.
+          SIGNALBOX_CLAUDE_SMOKE_MODEL: ${{ vars.CLAUDE_SMOKE_MODEL }}
+        run: |
+          set -euo pipefail
+          test -n "${ANTHROPIC_API_KEY}" \
+            || { echo "the claude-smoke environment provides no API key"; exit 1; }
+          test_name=the_pinned_claude_cli_completes_one_exchange
+          result="${RUNNER_TEMP}/claude-smoke-live-result"
+          cargo test --color never --no-fail-fast \
+            -p signalbox-model-runtime-claude-cli --test live_smoke -- \
+            --ignored --exact "${test_name}" 2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
+      - name: Remove the CLI configuration directory
+        if: ${{ always() }}
+        run: rm -rf "${CLAUDE_CONFIG_DIR}"
+
+  required:
+    name: Claude smoke compatibility
+    needs: [gate, smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      GATE_RESULT: ${{ needs.gate.result }}
+      SMOKE_REQUIRED: ${{ needs.gate.outputs.smoke_required }}
+      SMOKE_RESULT: ${{ needs.smoke.result }}
+      HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      BASE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Report the binding result
+        run: |
+          set -euo pipefail
+          if [[ "${GATE_RESULT}" != "success" ]]; then
+            echo "The Claude smoke eligibility gate failed."
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${SMOKE_REQUIRED}" == "true" \
+            && "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "A fork pull request cannot use the credentialed Claude smoke."
+            exit 1
+          fi
+          if [[ "${SMOKE_REQUIRED}" == "true" && "${SMOKE_RESULT}" != "success" ]]; then
+            echo "The required Claude live compatibility smoke did not pass."
+            exit 1
+          fi
+          if [[ "${SMOKE_REQUIRED}" == "true" ]]; then
+            echo "The required Claude live compatibility smoke passed."
+          else
+            echo "Not applicable: the Claude Code CLI adapter did not change."
+          fi

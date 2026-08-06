@@ -679,10 +679,11 @@ unattended path for.
 ## Claude Code CLI provider adapter
 
 `signalbox-model-runtime-claude-cli` wraps the Claude Code print-mode JSONL
-protocol at the exact crate-local npm pin `2.1.220`. Preparation validates and
-renders the full `ModelOperation`, creates a private temporary MCP catalog and
-isolated settings files, and returns a one-shot capability without spawning
-Claude. Execution consumes it as one fresh Unix process using
+protocol at the exact version its crate-local npm manifest pins, from which the
+adapter build derives its exported supported-version constant. Preparation
+validates and renders the full `ModelOperation`, creates a private temporary MCP
+catalog and isolated settings files, and returns a one-shot capability without
+spawning Claude. Execution consumes it as one fresh Unix process using
 `--print --verbose --output-format=stream-json --no-session-persistence`; it
 passes the rendered frontier on stdin, selects the resolved model, and never
 resumes a CLI session. `SendCommenced` immediately precedes spawn and no
@@ -715,9 +716,9 @@ monitoring, notebook, notification, read/remote/report/scheduling/messaging,
 `Task*`, `ToolSearch`, web, workflow, and write); and `--allowedTools` contains
 only the qualified declared MCP names. `dontAsk` is used because no undeclared
 capability may become an interactive permission question. The initial event must
-also report no slash commands, skills, or plugins and must identify Claude Code
-`2.1.220`; any mismatch is stream-protocol boundary loss, not a relaxed
-invocation.
+also report no slash commands, skills, or plugins and must identify the pinned
+Claude Code version; any mismatch is stream-protocol boundary loss, not a
+relaxed invocation.
 
 The pinned stream establishes correlation and reported-model evidence through
 `system/init`. Assistant `text`, `thinking`, `redacted_thinking`, and `tool_use`
@@ -753,6 +754,71 @@ precedes the ambient-login reference check. A service tier is always rejected.
 
 The adapter crate does not compose itself into signalboxd and defines no
 provider-selection or configuration mapping.
+
+The wrapped CLI is an external program on its own release cadence, so the same
+three statements the Codex adapter binds must agree here too: the version pinned
+for installation, the version the adapter covers, and the version actually
+invoked.
+
+`crates/model-runtime-claude-cli/package.json` is the pin of record — an npm
+manifest naming the CLI's distribution package at an exact `major.minor.patch`
+version, with a committed lockfile so the installed artifact is
+integrity-checked. It is a Renovate-tracked manifest under the same policy as
+the Codex pin: no minimum-release-age gate and no automerge. The adapter build
+reads that manifest and derives its exported supported-version constant from the
+exact dependency value, so the manifest is the single source of truth and a
+Renovate change is mechanically complete. An unconditional offline test still
+rejects a range, tag, alias, prerelease, or any shape other than exactly three
+numeric components, and separately requires the committed lockfile to install
+the version the manifest pins — the build reads only the manifest, so a lockfile
+that disagreed would install an executable the adapter does not claim to
+support.
+
+The compatibility smoke is the second gate: one exchange against the cheapest
+model the smoke credential can address, run through this adapter with the real
+pinned executable. Which models a credential may address is account-scoped, so
+the model is a configured value with the cheapest advertised model as default.
+Before spending anything it asserts that the executable's reported version
+equals the derived supported version; an unreadable, unparsable, or mismatched
+version fails rather than skipping. That version gate also has a separate
+ignored, credential-free entry point so it can run locally before the gated
+workflow supplies a credential. The smoke requests no prompt caching: at one
+exchange per pin bump a cache write is never amortized by a later read, so
+caching would raise the cost of the run it is meant to cheapen.
+
+Unlike the Codex smoke, there are no credential-free capability probes before
+spend. The Claude Code CLI exposes no equivalent of a built-in feature registry
+or a prompt-input dump, so the invocation-isolation surfaces are proven inside
+the exchange instead: the adapter refuses a `system/init` that reports any slash
+command, skill, or plugin, or a tool inventory differing from the declared MCP
+surface. That is a weaker gate than the Codex one because it fails after spend
+rather than before it.
+
+The smoke then asserts only the protocol surfaces a version bump moves — the
+session identifier reaching the exchange facts, the reported model, the terminal
+usage counters, and the response envelope decoding as a completed or refused
+terminal outcome — and nothing about answer quality. Reaching a decoded response
+is itself the version-handshake evidence, because the adapter turns a
+`system/init` reporting a different version into stream-protocol boundary loss.
+The workflow reports on every pull request without a path filter, and its
+secretless eligibility job, the credentialed job condition, and the
+always-running required aggregate apply the same three repository-name
+comparisons and the same fork exclusions the Codex smoke section describes,
+against a path gate of `crates/model-runtime-claude-cli/**`. Manual dispatch
+remains available, and a path-filtered push to `main` reruns the smoke after
+merge.
+
+Installation differs from the Codex smoke in one respect. The Codex package
+ships its platform binary as an optional dependency and needs no lifecycle
+script, while this package's launcher is a stub until its own installer places
+the native binary. The workflow therefore keeps `npm ci --ignore-scripts` and
+runs that installer as its own named step, so the same package-authored code
+runs explicitly and reviewably rather than as an implicit side effect of
+installation, and still before any step carries a credential.
+
+How the smoke credential reaches the CLI is not settled.
+[Claude Code CLI smoke credential delivery](../open-questions.md#claude-code-cli-smoke-credential-delivery)
+owns that decision; until it closes, the live job cannot authenticate.
 
 ## Credential-access boundary
 
@@ -926,3 +992,6 @@ failures after staleness handling.
 - [Codex CLI fixture validation](../open-questions.md#codex-cli-fixture-validation)
   owns how a pin bump will prove that the recorded offline event-shape fixtures
   still represent the installed CLI.
+- [Claude Code CLI smoke credential delivery](../open-questions.md#claude-code-cli-smoke-credential-delivery)
+  owns how the Claude compatibility smoke's credential reaches the wrapped CLI
+  through the adapter's credential-free child-environment allowlist.

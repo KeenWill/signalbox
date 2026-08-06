@@ -219,6 +219,21 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
   as an enforced pin-bump gate; it does not block the existing mechanical pin or
   live compatibility gates.
 
+## Claude Code CLI smoke credential delivery
+
+- **How the compatibility-smoke credential reaches the wrapped CLI.** The
+  adapter clears the child environment and forwards only an allowlist that
+  deliberately carries no direct credential value, with an INV-035 test
+  asserting `ANTHROPIC_API_KEY` never reaches the child; the CLI is expected to
+  resolve its own login from the forwarded credential home. An
+  environment-scoped API key therefore reaches the smoke's test process but not
+  the CLI it spawns. Decide whether the adapter's allowlist gains an explicit
+  direct-credential variable — a deliberate narrowing of that contract, with the
+  accepted exposure recorded — or the workflow writes a credential store the CLI
+  reads under the already-forwarded credential home. Blocks the live Claude
+  compatibility smoke from authenticating; it blocks neither the derived pin nor
+  the credential-free version gate, both of which are in force.
+
 ## Model fallback and provenance
 
 - **Whether version one supports automatic fallback.** Leaning: none until an
