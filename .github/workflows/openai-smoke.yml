@@ -1,0 +1,191 @@
+# Compatibility smoke for the direct OpenAI Chat Completions API adapter in
+# crates/model-runtime-openai. It spends one real, cheapest-model exchange
+# through the adapter's own HTTP client, so a change to that crate is proven
+# against the live API rather than assumed. The discipline it implements is
+# specified in the OpenAI adapter section of docs/spec/runtime-substrate.md.
+#
+# Accepted trust boundary. The live exchange must execute the proposed
+# repository adapter code against the real OpenAI API; that is the purpose
+# of this compatibility smoke. That repository-controlled test process reads
+# the API key from the job environment. The workflow therefore trusts anyone
+# with write access to this repository, the same trust already required to
+# push executable code to main. It does not trust fork authors. First, GitHub
+# withholds secrets from ordinary fork pull_request runs regardless of
+# environment policy. Second, the secretless gate compares
+# github.event.pull_request.head.repo.full_name with github.repository and
+# rejects a changed fork before the credentialed job can start. Third, the
+# credentialed job condition repeats that comparison. The required aggregate
+# also refuses a smoke-required fork, so weakening one site is insufficient.
+#
+# The smoke remains bound to the openai-smoke environment, which is
+# configured for all branches so main, manual, and synthetic pull-request
+# merge refs can enter. That availability setting admits fork and
+# same-repository refs alike and supplies no security boundary; the defenses
+# above exclude forks.
+#
+# The credential is referenced only in the live-exchange step, injected into
+# that step's environment alone, and never echoed or passed in argv. The
+# repository code is compiled before the credential is read.
+#
+# Owner setup: Repository -> Settings -> Environments -> create an
+# `openai-smoke` environment holding a secret named OPENAI_API_KEY. The
+# live job cannot pass until that environment and secret exist.
+name: OpenAI smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "crates/model-runtime-openai/**"
+
+permissions: {}
+
+jobs:
+  gate:
+    name: OpenAI smoke eligibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      smoke_required: ${{ steps.gate.outputs.smoke_required }}
+    steps:
+      - name: Check out the pull request head for path inspection
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Decide whether compatibility smoke is required
+        id: gate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
+            echo "Compatibility smoke is required for ${GITHUB_EVENT_NAME}."
+            exit 0
+          fi
+
+          changed_paths="${RUNNER_TEMP}/openai-smoke-changed-files"
+          git diff --no-renames --name-only -z \
+            "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
+          crate_changed=false
+          while IFS= read -r -d '' path; do
+            if [[ "${path}" == crates/model-runtime-openai/* ]]; then
+              crate_changed=true
+              break
+            fi
+          done < "${changed_paths}"
+          if [[ "${crate_changed}" != "true" ]]; then
+            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
+            echo "Not applicable: crates/model-runtime-openai/** did not change."
+            exit 0
+          fi
+
+          if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
+            echo "::error::A fork changed the OpenAI adapter. Put the reviewed change on a trusted in-repository branch, then run: gh workflow run openai-smoke.yml --ref <trusted-branch>"
+            exit 1
+          fi
+
+          echo "smoke_required=true" >> "${GITHUB_OUTPUT}"
+          echo "Compatibility smoke is required for this same-repository adapter change."
+
+  smoke:
+    name: OpenAI live compatibility
+    needs: gate
+    if: ${{ needs.gate.outputs.smoke_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    permissions:
+      contents: read
+    # Repository → Settings → Environments → openai-smoke holds
+    # OPENAI_API_KEY. Its all-branches availability setting is documented
+    # above and deliberately supplies no additional author-trust decision.
+    environment: openai-smoke
+    concurrency:
+      group: openai-smoke
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+          key: openai-smoke
+      # Compile the smoke test binary before the credential is read anywhere
+      # in this job, so no repository build script or procedural macro
+      # executes while the API key is in scope.
+      - name: Build the smoke test binary
+        run: >-
+          cargo test --no-fail-fast -p signalbox-model-runtime-openai
+          --test live_smoke --no-run
+      # The key reaches only this step's environment — never argv, never
+      # echoed, never exported to an earlier or later step.
+      - name: Run one live exchange through the adapter
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${OPENAI_API_KEY}" \
+            || { echo "the openai-smoke environment provides no API key"; exit 1; }
+          test_name=the_openai_api_completes_one_exchange
+          result="${RUNNER_TEMP}/openai-smoke-live-result"
+          cargo test --color never --no-fail-fast \
+            -p signalbox-model-runtime-openai --test live_smoke -- \
+            --ignored --exact "${test_name}" 2>&1 | tee "${result}"
+          passed_count=$(sed -n \
+            's/^test result: ok\. \([0-9][0-9]*\) passed;.*/\1/p' \
+            "${result}")
+          if [[ "${passed_count}" != "1" ]]; then
+            echo "::error::Expected exactly one live smoke test to execute; libtest reported '${passed_count:-no passed count}'."
+            exit 1
+          fi
+
+  required:
+    name: OpenAI smoke compatibility
+    needs: [gate, smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      GATE_RESULT: ${{ needs.gate.result }}
+      SMOKE_REQUIRED: ${{ needs.gate.outputs.smoke_required }}
+      SMOKE_RESULT: ${{ needs.smoke.result }}
+      HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+      BASE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Report the binding result
+        run: |
+          set -euo pipefail
+          if [[ "${GATE_RESULT}" != "success" ]]; then
+            echo "The OpenAI smoke eligibility gate failed."
+            exit 1
+          fi
+          if [[ "${EVENT_NAME}" == "pull_request" \
+            && "${SMOKE_REQUIRED}" == "true" \
+            && "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+            echo "A fork pull request cannot use the credentialed OpenAI smoke."
+            exit 1
+          fi
+          if [[ "${SMOKE_REQUIRED}" == "true" && "${SMOKE_RESULT}" != "success" ]]; then
+            echo "The required OpenAI live compatibility smoke did not pass."
+            exit 1
+          fi
+          if [[ "${SMOKE_REQUIRED}" == "true" ]]; then
+            echo "The required OpenAI live compatibility smoke passed."
+          else
+            echo "Not applicable: the OpenAI adapter crate did not change."
+          fi
