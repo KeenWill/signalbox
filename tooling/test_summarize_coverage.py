@@ -8,7 +8,9 @@ isolation and deterministically, without a compile or an instrumented test run.
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,11 +18,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from summarize_coverage import (  # noqa: E402
     EXPORT_TYPE,
+    LATEST_MAIN,
+    MERGE_BASE,
     OUTSIDE_WORKSPACE,
+    Baseline,
     Counter,
+    Summary,
     aggregate_by_crate,
     crate_of,
     least_covered_files,
+    load_baseline,
     read_file_summaries,
     render,
     total_of,
@@ -50,6 +57,24 @@ def coverage_file(filename: str, *, lines: int, covered: int) -> dict:
 def export(*files: dict) -> dict:
     """One llvm-cov export document wrapping the given file entries."""
     return {"type": EXPORT_TYPE, "version": "2.0.1", "data": [{"files": list(files)}]}
+
+
+def baseline_of(*, lines: int, covered: int, label: str = MERGE_BASE) -> Baseline:
+    """One baseline whose only knob is the line percentage it carries."""
+    counter = Counter(count=lines, covered=covered)
+    return Baseline(
+        total=Summary(lines=counter, functions=counter, regions=counter),
+        label=label,
+        sha="abc1234",
+        date="2026-08-01T09:00:00Z",
+    )
+
+
+def written(directory: str, name: str, content: str) -> Path:
+    """Write one file for the loader to read, since the loader reads paths."""
+    path = Path(directory) / name
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 class CrateAttributionTests(unittest.TestCase):
@@ -200,6 +225,246 @@ class RenderTests(unittest.TestCase):
         report = render(document, REPO_ROOT, 0, "Rust coverage (report only)")
 
         self.assertNotIn("uncovered lines", report)
+
+
+class BaselineDeltaTests(unittest.TestCase):
+    def test_an_improvement_is_rendered_with_a_plus_sign(self) -> None:
+        """A delta is only readable with its sign, and the direction is the
+        whole reason the column exists."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertIn("+10.00 pp", report)
+
+    def test_a_regression_is_rendered_with_a_minus_sign(self) -> None:
+        """A drop reads as a drop. Nothing acts on it — this measurement
+        gates nothing — but a reader must be able to see it."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=40))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertIn("-10.00 pp", report)
+
+    def test_no_change_is_rendered_as_a_signed_zero(self) -> None:
+        """An unchanged percentage is a measurement, not a missing one, and
+        `+0.00 pp` says so where a blank cell would not."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=50))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertIn("+0.00 pp", report)
+
+    def test_the_unit_is_percentage_points_not_percent(self) -> None:
+        """The difference between two percentages is a percentage-point
+        difference; writing it as a percentage would misstate it."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertNotIn("+10.00%", report)
+
+    def test_a_merge_base_baseline_claims_the_delta_for_this_branch(self) -> None:
+        """A delta against the commit the branch left main at is the
+        branch's own doing, and the report says exactly that."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50, label=MERGE_BASE),
+        )
+
+        self.assertIn("merge-base of this branch with `main`", report)
+        self.assertIn("this branch's own doing", report)
+
+    def test_a_latest_main_baseline_disclaims_it(self) -> None:
+        """The fallback baseline is not the merge-base, so the delta is not
+        attributable to this branch alone. Rendering both the same way would
+        make an unattributable number read as an attributable one."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50, label=LATEST_MAIN),
+        )
+
+        self.assertIn("**not** this branch's merge-base", report)
+        self.assertIn("carry whatever else landed on `main` in between", report)
+
+    def test_the_baseline_commit_and_date_are_named(self) -> None:
+        """A baseline is only judgeable with its provenance: which commit it
+        measured, and how long ago it did."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertIn("`abc1234`", report)
+        self.assertIn("2026-08-01T09:00:00Z", report)
+
+    def test_the_partial_measurement_hazard_is_stated(self) -> None:
+        """Every measured suite in this workflow continues on error, so a
+        baseline run that lost one measured a smaller workspace. Two real
+        artifacts from this repository differ by 19 percentage points for
+        that reason alone, which is larger than any code change produces:
+        a reader who is not told will read it as one."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertIn("a baseline run that lost a suite measured less", report)
+
+
+class BaselineAbsenceTests(unittest.TestCase):
+    def test_an_unavailable_baseline_is_stated_with_its_reason(self) -> None:
+        """A silently missing delta reads as "no change" to anyone who saw
+        one last week, so the absence is stated and attributed."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline_unavailable="the artifact from run 42 has expired",
+        )
+
+        self.assertIn("No baseline to compare against: the artifact from run 42 has expired.", report)
+        self.assertNotIn(" pp", report)
+        self.assertNotIn("Δ vs baseline", report)
+
+    def test_a_caller_that_asked_for_no_baseline_gets_no_baseline_line(self) -> None:
+        """A push to main measures the tree that becomes the next baseline
+        and compares against nothing, so its report must be unchanged from
+        what it was before deltas existed."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        report = render(document, REPO_ROOT, 0, "Rust coverage (report only)")
+
+        self.assertNotIn("baseline", report.lower())
+        self.assertIn("| Measure | Covered | Total | Percent |", report)
+
+    def test_the_delta_column_appears_only_with_a_baseline(self) -> None:
+        """The table gains a column rather than a blank one: an empty
+        column would read as a measured zero."""
+        document = export(coverage_file("/repo/crates/domain/src/session.rs", lines=100, covered=60))
+
+        without = render(document, REPO_ROOT, 0, "Rust coverage (report only)")
+        with_baseline = render(
+            document,
+            REPO_ROOT,
+            0,
+            "Rust coverage (report only)",
+            baseline=baseline_of(lines=100, covered=50),
+        )
+
+        self.assertNotIn("Δ vs baseline", without)
+        self.assertIn("Δ vs baseline", with_baseline)
+
+
+class BaselineLoadingTests(unittest.TestCase):
+    def test_a_well_formed_baseline_loads_with_no_reason(self) -> None:
+        """The happy path is a total taken over the same file summaries the
+        current report is built from, so the two numbers are comparable."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(
+                directory,
+                "summary.json",
+                json.dumps(export(coverage_file("/repo/crates/domain/src/a.rs", lines=200, covered=50))),
+            )
+
+            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+
+        self.assertEqual(reason, "")
+        assert baseline is not None
+        self.assertEqual(baseline.total.lines.count, 200)
+        self.assertEqual(baseline.total.lines.covered, 50)
+
+    def test_a_baseline_that_is_not_json_reports_a_reason(self) -> None:
+        """A truncated download is the likeliest way a baseline goes wrong,
+        and it must cost the delta rather than the report."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", '{"type": "llvm.coverage.json.expo')
+
+            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_baseline_of_another_document_type_reports_a_reason(self) -> None:
+        """An artifact whose layout changed can hand back a file of the
+        right name and the wrong shape, which is not a crash."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps({"type": "cargo.metadata", "data": []}))
+
+            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_missing_baseline_file_reports_a_reason(self) -> None:
+        """An extraction that produced nothing leaves no file, and reading
+        one that is not there is an expected outcome here."""
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, reason = load_baseline(
+                Path(directory) / "absent.json", MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_baseline_measuring_nothing_is_refused(self) -> None:
+        """An empty counter reports as 100% covered by llvm-cov's own
+        convention, so an empty baseline would render every current number as
+        a large regression."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "summary.json", json.dumps(export()))
+
+            baseline, reason = load_baseline(path, MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z")
+
+        self.assertIsNone(baseline)
+        self.assertEqual(reason, "the baseline summary measured no lines")
 
 
 if __name__ == "__main__":

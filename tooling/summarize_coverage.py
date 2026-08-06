@@ -13,6 +13,13 @@ invocation that produces a well-formed report exits zero.
 Input is the `llvm.coverage.json.export` document `cargo llvm-cov report
 --json` writes. Only the file summaries are read, so the much larger per-region
 detail in the same document is ignored.
+
+A second such document can be supplied as `--baseline`, in which case the
+totals table also carries the signed difference against it. That difference is
+informational in exactly the sense the rest of this tool is: it is rendered, it
+is labelled with which baseline produced it, and nothing reads it back. An
+unreadable or missing baseline is reported in the body of the report and
+changes no exit code.
 """
 
 from __future__ import annotations
@@ -31,6 +38,17 @@ from pathlib import Path
 EXPORT_TYPE = "llvm.coverage.json.export"
 
 OUTSIDE_WORKSPACE = "(outside the workspace)"
+
+# The two baselines a caller can supply, which are not interchangeable. A
+# merge-base baseline was measured at the commit this branch left `main`, so a
+# delta against it is this branch's own doing. A latest-main baseline was
+# measured at whatever `main` most recently ran, so a delta against it also
+# carries every other change that landed in between. Rendering the same delta
+# without naming which one produced it would let an unattributable number read
+# as an attributable one, so the label is required whenever a baseline is.
+MERGE_BASE = "merge-base"
+LATEST_MAIN = "latest-main"
+BASELINE_LABELS = (MERGE_BASE, LATEST_MAIN)
 
 
 @dataclass
@@ -73,6 +91,21 @@ class Summary:
         self.lines.add(other.lines)
         self.functions.add(other.functions)
         self.regions.add(other.regions)
+
+
+@dataclass
+class Baseline:
+    """One earlier measurement the current one is reported against.
+
+    Carries the provenance beside the numbers on purpose: a delta whose
+    baseline is unnamed cannot be read, and the two labels this accepts mean
+    materially different things about what the delta is attributable to.
+    """
+
+    total: Summary
+    label: str
+    sha: str
+    date: str
 
 
 def read_counter(summary: dict, name: str) -> Counter:
@@ -162,6 +195,85 @@ def percent(counter: Counter) -> str:
     return f"{counter.percent:.2f}%"
 
 
+def delta(current: Counter, baseline: Counter) -> str:
+    """Render one signed difference between two coverage percentages.
+
+    The unit is percentage points, not percent: the difference between two
+    percentages is a percentage-point difference, and writing it with a `%`
+    would overstate or understate it by the ratio of the two denominators.
+    The sign is always shown, including on an exact zero, so a reader can tell
+    "measured, unchanged" from "not measured".
+    """
+    return f"{current.percent - baseline.percent:+.2f} pp"
+
+
+def load_baseline(path: Path, label: str, sha: str, date: str) -> tuple["Baseline | None", str]:
+    """Read a baseline export, or say why it cannot be read.
+
+    Every failure here returns a reason rather than raising: a baseline is an
+    optional convenience on a report-only measurement, and an unreadable one
+    must degrade the report to its absolute numbers instead of costing the
+    report. The reasons are distinguished because "the artifact was never
+    written" and "the artifact is not the document it claims to be" call for
+    different fixes.
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        total = total_of([summary for _, summary in read_file_summaries(document)])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        return None, f"the baseline summary could not be read ({error.__class__.__name__})"
+    # An export with no instrumented line is not a measurement to compare
+    # against; `Counter.percent` would report it as 100% covered and every
+    # delta below it as a large regression.
+    if total.lines.count == 0:
+        return None, "the baseline summary measured no lines"
+    return Baseline(total=total, label=label, sha=sha, date=date), ""
+
+
+def baseline_note(baseline: Baseline) -> list[str]:
+    """State which baseline the deltas are against, and what they include.
+
+    Hard-wrapped like the rest of this report's prose, with the two
+    interpolated values on a line of their own so a long SHA or timestamp
+    cannot leave one line three times the width of its neighbours.
+    """
+    measured = f"`{baseline.sha}`, measured {baseline.date}."
+    if baseline.label == MERGE_BASE:
+        provenance = [
+            "Compared against the merge-base of this branch with `main`:",
+            measured,
+            "The deltas below are this branch's own doing — every change on it",
+            "since that commit.",
+        ]
+    else:
+        provenance = [
+            "Compared against the most recent `main` push this workflow measured:",
+            measured,
+            "That is **not** this branch's merge-base, so the deltas below also",
+            "carry whatever else landed on `main` in between.",
+        ]
+    return provenance + [
+        "",
+        "They are percentage points, over a file set that differs from the",
+        "baseline's wherever a file was added or removed. Each measured suite",
+        "continues on error, so a baseline run that lost a suite measured less",
+        "of the workspace than this one did, and a delta of that size is that",
+        "and not a code change; the outcome table above is this run's alone.",
+    ]
+
+
+def baseline_unavailable_note(reason: str) -> list[str]:
+    """Say that there is no baseline, and why, rather than showing nothing.
+
+    A silently absent delta reads as "no change" to anyone who saw one on the
+    previous pull request, so the absence is stated with its cause.
+    """
+    return [
+        f"No baseline to compare against: {reason}.",
+        "The figures below are absolute; no delta is shown.",
+    ]
+
+
 def crate_rows(crates: dict[str, Summary]) -> list[str]:
     """Render one table row per crate, least-covered lines first.
 
@@ -209,7 +321,24 @@ def least_covered_files(files: list[tuple[str, Summary]], repo_root: Path, limit
     ]
 
 
-def render(document: dict, repo_root: Path, limit: int, title: str, preamble: str = "") -> str:
+def measure_row(name: str, current: Counter, baseline: "Counter | None") -> str:
+    """Render one totals row, with its delta column only when there is one."""
+    cells = [name, str(current.covered), str(current.count), percent(current)]
+    if baseline is not None:
+        cells.append(delta(current, baseline))
+    return "| " + " | ".join(cells) + " |"
+
+
+def render(
+    document: dict,
+    repo_root: Path,
+    limit: int,
+    title: str,
+    preamble: str = "",
+    *,
+    baseline: "Baseline | None" = None,
+    baseline_unavailable: str = "",
+) -> str:
     """Render the whole report, including its own honesty about what it omits.
 
     The caller supplies the preamble because what a number excludes is a
@@ -217,10 +346,18 @@ def render(document: dict, repo_root: Path, limit: int, title: str, preamble: st
     skipped — and only the caller knows that. It lands directly under the
     heading, ahead of the first figure, so no reader meets a percentage before
     meeting its denominator.
+
+    The baseline is optional in both directions, and its two absent cases are
+    not the same. A caller that never asked for one — a `main` push measuring
+    the tree that becomes the next baseline — passes neither argument and gets
+    exactly the report it got before. A caller that asked and could not get one
+    passes `baseline_unavailable` and gets that stated in place of the deltas.
+    Nothing here gates on a delta; the column is a column.
     """
     files = read_file_summaries(document)
     crates = aggregate_by_crate(files, repo_root)
     total = total_of(list(crates.values()))
+    baseline_total = None if baseline is None else baseline.total
 
     lines = [
         f"## {title}",
@@ -232,14 +369,31 @@ def render(document: dict, repo_root: Path, limit: int, title: str, preamble: st
     # separated from the paragraph above and the table below.
     if preamble.strip():
         lines.extend(["", *preamble.strip().splitlines()])
+    if baseline is not None:
+        lines.extend(["", *baseline_note(baseline)])
+    elif baseline_unavailable:
+        lines.extend(["", *baseline_unavailable_note(baseline_unavailable)])
+    header = ["Measure", "Covered", "Total", "Percent"]
+    alignment = ["---", "---:", "---:", "---:"]
+    if baseline_total is not None:
+        header.append("Δ vs baseline")
+        alignment.append("---:")
     lines.extend(
         [
             "",
-            "| Measure | Covered | Total | Percent |",
-            "| --- | ---: | ---: | ---: |",
-            f"| Lines | {total.lines.covered} | {total.lines.count} | {percent(total.lines)} |",
-            f"| Functions | {total.functions.covered} | {total.functions.count} | {percent(total.functions)} |",
-            f"| Regions | {total.regions.covered} | {total.regions.count} | {percent(total.regions)} |",
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(alignment) + " |",
+            measure_row("Lines", total.lines, None if baseline_total is None else baseline_total.lines),
+            measure_row(
+                "Functions",
+                total.functions,
+                None if baseline_total is None else baseline_total.functions,
+            ),
+            measure_row(
+                "Regions",
+                total.regions,
+                None if baseline_total is None else baseline_total.regions,
+            ),
             "",
             "### Per crate, least-covered first",
             "",
@@ -291,10 +445,55 @@ def main(argv: list[str]) -> int:
         default=None,
         help="Markdown file stating what this run measured, placed before the figures",
     )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="earlier llvm-cov JSON export to report the totals against",
+    )
+    parser.add_argument(
+        "--baseline-label",
+        choices=BASELINE_LABELS,
+        default=None,
+        help="which baseline --baseline is; required with it, because the two differ",
+    )
+    parser.add_argument(
+        "--baseline-sha",
+        default="",
+        help="commit the baseline was measured at",
+    )
+    parser.add_argument(
+        "--baseline-date",
+        default="",
+        help="when the baseline was measured, which is how stale a reader judges it",
+    )
+    parser.add_argument(
+        "--baseline-unavailable",
+        default="",
+        help="why there is no baseline, stated in the report in place of the deltas",
+    )
     arguments = parser.parse_args(argv)
+    # A mislabelled delta is worse than no delta, so the label is not defaulted
+    # to either value. This is a caller contract, not a runtime condition: the
+    # workflows below build both flags in one place.
+    if arguments.baseline is not None and arguments.baseline_label is None:
+        parser.error("--baseline requires --baseline-label")
 
     document = json.loads(arguments.json.read_text(encoding="utf-8"))
     preamble = "" if arguments.preamble is None else arguments.preamble.read_text(encoding="utf-8")
+    baseline: Baseline | None = None
+    unavailable = arguments.baseline_unavailable
+    if arguments.baseline is not None:
+        baseline, reason = load_baseline(
+            arguments.baseline,
+            arguments.baseline_label,
+            arguments.baseline_sha,
+            arguments.baseline_date,
+        )
+        # A baseline that was fetched and then turned out to be unreadable
+        # reports the reading failure, not whatever the fetcher had to say.
+        if baseline is None:
+            unavailable = reason
     sys.stdout.write(
         render(
             document,
@@ -302,6 +501,8 @@ def main(argv: list[str]) -> int:
             max(arguments.top_uncovered, 0),
             arguments.title,
             preamble,
+            baseline=baseline,
+            baseline_unavailable=unavailable,
         )
     )
     return 0

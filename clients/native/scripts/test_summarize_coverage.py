@@ -9,7 +9,9 @@ simulator.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -50,6 +52,24 @@ def target(name: str, *files: dict) -> dict:
 def report(*targets: dict) -> dict:
     """One xccov report document wrapping the given targets."""
     return {"targets": list(targets)}
+
+
+def baseline_of(*, executable: int, covered: int, label: str | None = None) -> object:
+    """One baseline whose only knob is the line percentage it carries."""
+    return summarize_coverage.Baseline(
+        covered=covered,
+        executable=executable,
+        label=summarize_coverage.MERGE_BASE if label is None else label,
+        sha="abc1234",
+        date="2026-08-01T09:00:00Z",
+    )
+
+
+def written(directory: str, name: str, content: str) -> Path:
+    """Write one file for the loader to read, since the loader reads paths."""
+    path = Path(directory) / name
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 class ProductSplitTests(unittest.TestCase):
@@ -147,6 +167,237 @@ class ReportOnlyTests(unittest.TestCase):
         rendered = summarize_coverage.render(document, REPOSITORY_ROOT, 0, "Native client coverage (report only)")
 
         self.assertIn("gates no merge", rendered)
+
+
+TITLE = "Native client coverage (report only)"
+
+
+def one_target_report(*, executable: int, covered: int) -> dict:
+    """One product target at a chosen coverage, which is all a delta needs."""
+    return report(
+        target("SignalboxNative.app", source_file("/repo/App.swift", executable=executable, covered=covered))
+    )
+
+
+class BaselineDeltaTests(unittest.TestCase):
+    def test_an_improvement_is_rendered_with_a_plus_sign(self) -> None:
+        """A delta is only readable with its sign, and the direction is the
+        whole reason it is rendered at all."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50),
+        )
+
+        self.assertIn("+10.00 pp", rendered)
+
+    def test_a_regression_is_rendered_with_a_minus_sign(self) -> None:
+        """A drop reads as a drop. Nothing acts on it — this measurement
+        gates nothing — but a reader must be able to see it."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=40),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50),
+        )
+
+        self.assertIn("-10.00 pp", rendered)
+
+    def test_no_change_is_rendered_as_a_signed_zero(self) -> None:
+        """An unchanged percentage is a measurement, not a missing one, and
+        `+0.00 pp` says so where a silent headline would not."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=50),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50),
+        )
+
+        self.assertIn("+0.00 pp", rendered)
+
+    def test_the_unit_is_percentage_points_not_percent(self) -> None:
+        """The difference between two percentages is a percentage-point
+        difference; writing it as a percentage would misstate it."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50),
+        )
+
+        self.assertNotIn("+10.00%", rendered)
+
+    def test_the_delta_excludes_test_bundles_exactly_as_the_total_does(self) -> None:
+        """A delta taken over a different denominator than the headline
+        would contradict the number it sits beside."""
+        document = report(
+            target("SignalboxNative.app", source_file("/repo/App.swift", executable=100, covered=60)),
+            target("Tests.xctest", source_file("/repo/Tests.swift", executable=900, covered=900)),
+        )
+
+        rendered = summarize_coverage.render(
+            document,
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50),
+        )
+
+        self.assertIn("**60.00%** of product lines covered (60/100)", rendered)
+        self.assertIn("+10.00 pp", rendered)
+
+    def test_a_merge_base_baseline_claims_the_delta_for_this_branch(self) -> None:
+        """A delta against the commit the branch left main at is the
+        branch's own doing, and the report says exactly that."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.MERGE_BASE),
+        )
+
+        self.assertIn("merge-base of this branch with `main`", rendered)
+        self.assertIn("this branch's own doing", rendered)
+
+    def test_a_latest_main_baseline_disclaims_it(self) -> None:
+        """The fallback baseline is not the merge-base, so the delta is not
+        attributable to this branch alone. Rendering both the same way would
+        make an unattributable number read as an attributable one."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50, label=summarize_coverage.LATEST_MAIN),
+        )
+
+        self.assertIn("**not** this branch's merge-base", rendered)
+        self.assertIn("carries whatever else landed on `main` in between", rendered)
+
+    def test_the_baseline_commit_and_date_are_named(self) -> None:
+        """Native coverage is measured on a main push only when that push
+        touched the native client, so a baseline can be far behind `main`.
+        The date is the only thing that tells a reader how far."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline=baseline_of(executable=100, covered=50),
+        )
+
+        self.assertIn("`abc1234`", rendered)
+        self.assertIn("2026-08-01T09:00:00Z", rendered)
+        self.assertIn("only when that push touched", rendered)
+
+
+class BaselineAbsenceTests(unittest.TestCase):
+    def test_an_unavailable_baseline_is_stated_with_its_reason(self) -> None:
+        """A silently missing delta reads as "no change" to anyone who saw
+        one last week, so the absence is stated and attributed."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60),
+            REPOSITORY_ROOT,
+            0,
+            TITLE,
+            baseline_unavailable="run 42 measured no native coverage",
+        )
+
+        self.assertIn("No baseline to compare against: run 42 measured no native coverage.", rendered)
+        self.assertNotIn(" pp", rendered)
+
+    def test_a_caller_that_asked_for_no_baseline_gets_no_baseline_line(self) -> None:
+        """A push to main measures the tree that becomes the next baseline
+        and compares against nothing, so its report must be unchanged from
+        what it was before deltas existed."""
+        rendered = summarize_coverage.render(
+            one_target_report(executable=100, covered=60), REPOSITORY_ROOT, 0, TITLE
+        )
+
+        self.assertNotIn("baseline", rendered.lower())
+        self.assertIn("**60.00%** of product lines covered (60/100).", rendered)
+
+
+class BaselineLoadingTests(unittest.TestCase):
+    def test_a_well_formed_baseline_loads_with_no_reason(self) -> None:
+        """The happy path totals the same product targets the current
+        report totals, so the two numbers are comparable."""
+        document = report(
+            target("SignalboxNative.app", source_file("/repo/App.swift", executable=200, covered=50)),
+            target("Tests.xctest", source_file("/repo/Tests.swift", executable=90, covered=90)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+            )
+
+        self.assertEqual(reason, "")
+        assert baseline is not None
+        self.assertEqual(baseline.executable, 200)
+        self.assertEqual(baseline.covered, 50)
+
+    def test_a_baseline_that_is_not_json_reports_a_reason(self) -> None:
+        """A truncated download is the likeliest way a baseline goes wrong,
+        and it must cost the delta rather than the report."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", '{"targets": [')
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_baseline_of_another_document_shape_reports_a_reason(self) -> None:
+        """An artifact whose layout changed can hand back a file of the
+        right name and the wrong shape, which is not a crash."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps({"targets": [{"name": "App.app"}]}))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_missing_baseline_file_reports_a_reason(self) -> None:
+        """An extraction that produced nothing leaves no file, and reading
+        one that is not there is an expected outcome here."""
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, reason = summarize_coverage.load_baseline(
+                Path(directory) / "absent.json",
+                summarize_coverage.MERGE_BASE,
+                "abc1234",
+                "2026-08-01T09:00:00Z",
+            )
+
+        self.assertIsNone(baseline)
+        self.assertIn("could not be read", reason)
+
+    def test_a_baseline_measuring_no_product_lines_is_refused(self) -> None:
+        """An empty target reports as fully covered by this tool's own
+        convention, so a test-bundles-only baseline would render every
+        current number as a large regression."""
+        document = report(target("Tests.xctest", source_file("/repo/Tests.swift", executable=10, covered=10)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = written(directory, "coverage.json", json.dumps(document))
+
+            baseline, reason = summarize_coverage.load_baseline(
+                path, summarize_coverage.MERGE_BASE, "abc1234", "2026-08-01T09:00:00Z"
+            )
+
+        self.assertIsNone(baseline)
+        self.assertEqual(reason, "the baseline report measured no product lines")
 
 
 if __name__ == "__main__":

@@ -77,6 +77,19 @@ jobs:
     # following the image's rolling default.
     runs-on: macos-latest
     timeout-minutes: 45
+    permissions:
+      # `actions: read` is what the baseline fetch below needs to list this
+      # workflow's own past runs on main and download one artifact from them.
+      # It is a read scope over this repository's Actions data and grants no
+      # write anywhere, which is why the fetch can live in the job that also
+      # builds and runs the simulator suite rather than needing a job of its
+      # own; the write token still lives only in
+      # publish-native-coverage-comment.
+      #
+      # `contents: read` is restated because a job-level permissions block sets
+      # every scope it omits to none, and the checkout below needs it.
+      actions: read
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,6 +126,161 @@ jobs:
           # unquoted YES is a YAML boolean that a parser may hand the step as
           # "true" instead, silently turning the measurement off.
           SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE: "YES"
+      # Fetches the number this pull request's number is reported against, from
+      # a `native-coverage` artifact an earlier main run left behind. Deliberately
+      # a copy of coverage.yml's step of the same name rather than a shared
+      # script: the two workflows already keep parallel copies of the
+      # comment-posting logic below, a script under `tooling/` would not be in
+      # either workflow's path filter, and this file's own scope gate would
+      # never validate a change to it.
+      #
+      # The one difference from coverage.yml is the candidate limit. A main push
+      # measures native coverage only when it touched `clients/native/**`, so
+      # most successful main runs of this workflow skipped swift-validate
+      # entirely and carry no artifact; the scan looks further back before
+      # giving up, and the report states the baseline's date so a reader can see
+      # how far back it had to go.
+      #
+      # Report-only in the strictest sense available. `set +e` undoes the `-e`
+      # the default shell adds, and every path out of the script below writes an
+      # `available=` output and exits zero, so an absent, expired, or unreadable
+      # baseline degrades the comment to the absolute numbers it already showed
+      # and can neither fail this step nor change what the job reports.
+      # `continue-on-error` is belt to that braces, covering a runner-level
+      # failure the script cannot catch.
+      #
+      # Pull requests only. A main push is the tree that becomes the next
+      # baseline, and comparing it against its predecessor would spend API calls
+      # on a job summary nobody reads for a delta.
+      #
+      # `gh`, `jq`, and `unzip` are all preinstalled on the macOS runner image,
+      # so nothing here installs a tool onto a runner whose minutes are the
+      # expensive ones.
+      - name: Fetch the main-branch native coverage baseline
+        id: baseline
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Must name this file. The runs endpoint is per-workflow, and a
+          # baseline from another workflow's artifact would be a different
+          # measurement wearing this one's label.
+          WORKFLOW_FILE: swift.yml
+          ARTIFACT_NAME: native-coverage
+          SUMMARY_FILE: coverage.json
+          CANDIDATE_LIMIT: 30
+        run: |
+          # A failing command here must fall through to a stated reason rather
+          # than end the step: the reason is the product when the baseline is
+          # not.
+          set +e
+
+          # A directory of its own, never the report directory the upload step
+          # below publishes: a baseline extracted in there would be republished
+          # inside the next run's baseline.
+          baseline_dir="$RUNNER_TEMP/native-coverage-baseline"
+          mkdir -p "$baseline_dir"
+
+          unavailable() {
+            {
+              echo 'available=false'
+              echo "reason=$1"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          available() {
+            {
+              echo 'available=true'
+              echo "label=$1"
+              echo "sha=$2"
+              echo "date=$3"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # The merge-base is what makes a delta this branch's own. The compare
+          # endpoint reports it without the deep history this shallow checkout
+          # does not have; `per_page=1` truncates the file list it also returns
+          # and nothing here reads. An error leaves it empty, which the
+          # selection below treats as "no merge-base run", not as a failure.
+          if ! merge_base="$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/main...$HEAD_SHA?per_page=1" \
+            --jq '.merge_base_commit.sha')"; then
+            merge_base=''
+          fi
+
+          # Successful pushes to main only, and both halves of that matter. A
+          # pull-request run measured a synthetic merge commit that never
+          # landed. A run that ended red lost something its per-suite
+          # `continue-on-error` could not absorb, so its report covers a
+          # smaller workspace than a green one, and a delta against it would be
+          # that gap rather than a code change. When no green main run exists,
+          # the comment says so, which is itself the readout worth having.
+          if ! runs="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/$WORKFLOW_FILE/runs?branch=main&event=push&status=success&per_page=100")"; then
+            unavailable "the list of \`main\` runs of this workflow could not be read"
+          fi
+
+          # The merge-base run first when there is one, then the most recent
+          # runs, each tagged with which of the two it is. The label travels
+          # with the number from here to the rendered sentence.
+          candidates="$(printf '%s' "$runs" | jq -r \
+            --arg sha "$merge_base" --argjson cap "$CANDIDATE_LIMIT" '
+              ([.workflow_runs[] | select(.head_sha == $sha)] | first) as $exact
+              | [ $exact | select(. != null) | {label: "merge-base", run: .} ]
+                + ([.workflow_runs[]
+                    | select($exact == null or .id != $exact.id)
+                    | {label: "latest-main", run: .}][0:$cap])
+              | .[]
+              | [.label, (.run.id | tostring), .run.head_sha, .run.created_at]
+              | @tsv')"
+
+          # The first candidate's reason is the one reported: it is the run a
+          # reader would have expected to be the baseline, so why it was not is
+          # the answer they want.
+          reason=''
+          while IFS=$'\t' read -r label run_id run_sha run_date; do
+            # An empty candidate list still feeds this loop one blank line.
+            [ -n "$run_id" ] || continue
+
+            artifact="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+              | jq -r --arg name "$ARTIFACT_NAME" '
+                  [.artifacts[] | select(.name == $name)] | first
+                  | if . == null then "" else "\(.id)\t\(.expired)" end')"
+            if [ -z "$artifact" ]; then
+              [ -n "$reason" ] || reason="run $run_id measured no native coverage"
+              continue
+            fi
+            IFS=$'\t' read -r artifact_id expired <<<"$artifact"
+            if [ "$expired" = 'true' ]; then
+              [ -n "$reason" ] || reason="the artifact from run $run_id has expired"
+              continue
+            fi
+
+            if ! gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+              > "$baseline_dir/artifact.zip"; then
+              [ -n "$reason" ] || reason="the artifact from run $run_id could not be downloaded"
+              continue
+            fi
+            # Only the machine-readable report is extracted; the rendered
+            # Markdown beside it in the same artifact is the previous run's
+            # comment, which nothing here reads.
+            unzip -o -q "$baseline_dir/artifact.zip" "$SUMMARY_FILE" -d "$baseline_dir" || true
+            rm -f "$baseline_dir/artifact.zip"
+            if [ ! -s "$baseline_dir/$SUMMARY_FILE" ]; then
+              [ -n "$reason" ] || reason="the artifact from run $run_id holds no \`$SUMMARY_FILE\`"
+              continue
+            fi
+
+            available "$label" "$run_sha" "$run_date"
+          done <<<"$candidates"
+
+          if [ -z "$reason" ]; then
+            unavailable "no successful \`main\` run of this workflow was found"
+          fi
+          unavailable "$reason (up to the $CANDIDATE_LIMIT most recent successful \`main\` runs were examined)"
       # Report only, and structurally incapable of gating: it never fails the
       # job, and it runs even when the tests failed, because a partial
       # measurement still names untested code. No step compares the reported
@@ -138,8 +306,34 @@ jobs:
           # and the head is what a reader recognises.
           MEASURED_SHA: ${{ github.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # All empty on a push to main, where the step above does not run:
+          # that report is rendered exactly as it was before there were deltas,
+          # which is also what makes it a clean baseline for the next one.
+          BASELINE_AVAILABLE: ${{ steps.baseline.outputs.available }}
+          BASELINE_REASON: ${{ steps.baseline.outputs.reason }}
+          BASELINE_LABEL: ${{ steps.baseline.outputs.label }}
+          BASELINE_SHA: ${{ steps.baseline.outputs.sha }}
+          BASELINE_DATE: ${{ steps.baseline.outputs.date }}
+          BASELINE_SUMMARY: ${{ runner.temp }}/native-coverage-baseline/coverage.json
         run: |
-          clients/native/scripts/report-coverage.sh >> "$GITHUB_STEP_SUMMARY"
+          # Built in one place so a delta can never be rendered without the
+          # label saying which baseline produced it; the summarizer refuses the
+          # pair split apart. The positional parameters carry them because an
+          # empty array is not portable to expand, and this must expand to
+          # nothing at all on a push to main. report-coverage.sh forwards them
+          # verbatim to the summarizer and reads none of them itself.
+          if [ "$BASELINE_AVAILABLE" = 'true' ]; then
+            set -- --baseline "$BASELINE_SUMMARY" \
+              --baseline-label "$BASELINE_LABEL" \
+              --baseline-sha "$BASELINE_SHA" \
+              --baseline-date "$BASELINE_DATE"
+          elif [ -n "$BASELINE_REASON" ]; then
+            set -- --baseline-unavailable "$BASELINE_REASON"
+          else
+            set --
+          fi
+
+          clients/native/scripts/report-coverage.sh "$@" >> "$GITHUB_STEP_SUMMARY"
 
           report_dir="$SIGNALBOX_NATIVE_COVERAGE_OUTPUT_DIR"
           {

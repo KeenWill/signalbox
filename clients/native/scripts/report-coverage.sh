@@ -11,6 +11,12 @@
 #
 # The result bundle only carries coverage when the run that produced it set
 # SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE=YES.
+#
+# Every argument is forwarded verbatim to summarize-coverage.py, which is how
+# CI hands it a --baseline to report the total against. This script stays
+# ignorant of those flags on purpose: what a baseline is and where it came from
+# is the workflow's business, and a local run passes none and gets the report it
+# always got.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,7 +39,7 @@ mkdir -p "$OUTPUT_DIR"
 xcrun xccov view --report --json "$RESULT_BUNDLE_PATH" >"$OUTPUT_DIR/coverage.json"
 xcrun xccov view --report "$RESULT_BUNDLE_PATH" >"$OUTPUT_DIR/coverage.txt"
 
-python3 "$ROOT/scripts/summarize-coverage.py" "$OUTPUT_DIR/coverage.json" \
+python3 "$ROOT/scripts/summarize-coverage.py" "$OUTPUT_DIR/coverage.json" "$@" \
 	>"$OUTPUT_DIR/report.md"
 
 cat "$OUTPUT_DIR/report.md"
