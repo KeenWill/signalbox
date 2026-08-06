@@ -45,6 +45,7 @@ mod goal_mode;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
+mod repo_watch_runtime;
 mod review_orchestration_runtime;
 pub mod runner_protocol_runtime;
 mod session_template_configuration;
@@ -55,6 +56,7 @@ pub mod usage_limits;
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
     FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelBillingRates,
+    RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
 };
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use conversation_introspection::{
@@ -69,6 +71,9 @@ pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use repo_watch_runtime::{
+    RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError,
+};
 pub use session_template_configuration::{
     ResolvedSessionTemplate, SessionTemplateConfiguration, SessionTemplateConfigurationError,
 };

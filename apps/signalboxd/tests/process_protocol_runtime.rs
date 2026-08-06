@@ -65,10 +65,12 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
     ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-    ConversationSummary, CurrentModelCallState, ErrorCode, GoalHistoryEvent, GoalLifecycleState,
-    ImportedContentKind, ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker,
-    ImportedTextPreview, InputContent, InputDelivery, MetadataActor, ModelSelection,
-    ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    ConversationSummary, CurrentModelCallState, EffectiveModelSettings, ErrorCode, FastMode,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
+    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
     ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
     ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
     ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
@@ -76,8 +78,8 @@ use signalbox_process_protocol::{
     ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
     ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
     ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, decode_server_line, encode_client_line,
+    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
@@ -142,6 +144,7 @@ model_family = "anthropic"
 provider_model = "fixture-model"
 max_output_tokens = 256
 context_window_tokens = 200000
+reasoning_levels = ["low"]
 
 [[models]]
 selection_id = "00000000-0000-0000-0000-000000000004"
@@ -157,6 +160,10 @@ selection_id = "00000000-0000-0000-0000-000000000001"
 
 [[aliases]]
 alias_id = "7fde05bc-b4c3-44f7-8a87-748814c80191"
+selection_id = "00000000-0000-0000-0000-000000000001"
+
+[[aliases]]
+alias_id = "540ce009-c2ec-4a04-b823-c411ea189778"
 selection_id = "00000000-0000-0000-0000-000000000001"
 "#;
 
@@ -363,6 +370,62 @@ fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SessionCreatedFacts {
+    session_id: CanonicalUuid,
+    model_settings: ModelSettingsSnapshot,
+}
+
+#[track_caller]
+fn session_created_facts(message: &ServerMessage) -> SessionCreatedFacts {
+    match message {
+        ServerMessage::SessionCreated {
+            session_id,
+            model_settings,
+        } => SessionCreatedFacts {
+            session_id: *session_id,
+            model_settings: *model_settings,
+        },
+        message => panic!("fixture expected session-created receipt, got {message:?}"),
+    }
+}
+
+fn provider_default_model_settings() -> ModelSettingsSnapshot {
+    ModelSettingsSnapshot {
+        precedence: ModelSettingsPrecedence {
+            per_call: ModelSettingsOverlay::inherit_all(),
+            session: ModelSettingsOverlay::inherit_all(),
+            profile: ModelSettingsOverlay::inherit_all(),
+            global_default: ModelSettingsOverlay::inherit_all(),
+        },
+        effective: EffectiveModelSettings {
+            reasoning_level: None,
+            fast_mode: FastMode::Disabled,
+            service_tier: None,
+        },
+        reasoning_source: None,
+        fast_mode_source: None,
+        service_tier_source: None,
+        validated_for_selection_id: None,
+    }
+}
+
+fn primary_direct_selection_id() -> CanonicalUuid {
+    CanonicalUuid::from_uuid(Uuid::from_u128(1))
+}
+
+fn next_direct_selection_id() -> CanonicalUuid {
+    CanonicalUuid::from_uuid(Uuid::from_u128(4))
+}
+
+fn low_reasoning_override() -> ModelSettingsOverlay {
+    ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    }
+}
+
 #[derive(Debug)]
 struct FixedImportIds {
     conversations: VecDeque<ImportedConversationId>,
@@ -543,6 +606,14 @@ impl RunningRuntime {
     }
 
     async fn restart(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.restart_with_model_configuration(MODEL_CONFIGURATION)
+            .await
+    }
+
+    async fn restart_with_model_configuration(
+        &mut self,
+        configuration: &str,
+    ) -> Result<usize, Box<dyn Error>> {
         self.shutdown.send(true)?;
         timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
 
@@ -555,7 +626,7 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let model_configuration = HubModelConfiguration::parse(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         let runtime = ProcessRuntime::new_with_templates(
             listener,
@@ -616,15 +687,45 @@ async fn create_alias_session_with(
             ClientRequest::CreateSession {
                 command_id: command()?,
                 initial_model_selection: ModelSelection::Alias { alias_id },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement,
             },
         )
         .await?;
     match connection.response().await?.message() {
-        ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+        ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
         message => Err(io::Error::other(format!(
             "unexpected create-session fixture response: {message:?}"
+        ))
+        .into()),
+    }
+}
+
+async fn create_direct_session_with_settings(
+    connection: &mut Connection,
+    selection_id: CanonicalUuid,
+    model_settings: ModelSettingsOverlay,
+) -> Result<(CanonicalUuid, ModelSettingsSnapshot), Box<dyn Error>> {
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSession {
+                command_id: command()?,
+                initial_model_selection: ModelSelection::Direct { selection_id },
+                model_settings,
+                system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
+            },
+        )
+        .await?;
+    match response_within(connection).await?.message() {
+        ServerMessage::SessionCreated {
+            session_id,
+            model_settings,
+        } => Ok((*session_id, *model_settings)),
+        message => Err(io::Error::other(format!(
+            "unexpected direct create-session response: {message:?}"
         ))
         .into()),
     }
@@ -781,6 +882,7 @@ async fn create_session_rejects_a_model_absent_from_the_static_mapping()
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: unknown_selection,
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
                 placement: SessionPlacement::Pathless {},
             },
@@ -810,6 +912,7 @@ async fn submit_first_input(
                 session_id,
                 content: InputContent::new(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -820,6 +923,7 @@ async fn submit_first_input(
             accepted_input_id,
             acceptance_position,
             turn_id,
+            ..
         } if *submitted_session == session_id && acceptance_position.value() == 1 => {
             Ok((*accepted_input_id, *turn_id))
         }
@@ -849,6 +953,27 @@ async fn accepted_successor_turn(
         message => {
             Err(io::Error::other(format!("unexpected accepted-input response: {message:?}")).into())
         }
+    }
+}
+
+async fn accepted_successor_model_settings(
+    connection: &mut Connection,
+    session_id: CanonicalUuid,
+    acceptance: u64,
+) -> Result<ModelSettingsSnapshot, Box<dyn Error>> {
+    match response_within(connection).await?.message() {
+        ServerMessage::InputSubmitted {
+            session_id: accepted_session,
+            acceptance_position,
+            model_settings,
+            ..
+        } if *accepted_session == session_id && acceptance_position.value() == acceptance => {
+            Ok(*model_settings)
+        }
+        message => Err(io::Error::other(format!(
+            "unexpected accepted-input settings response: {message:?}"
+        ))
+        .into()),
     }
 }
 
@@ -1403,6 +1528,7 @@ fn transcript_turn_projection(message: &ServerMessage) -> (CanonicalUuid, u64, T
             turn_id,
             acceptance_position,
             state,
+            ..
         } => (*turn_id, acceptance_position.value(), state.clone()),
         message => panic!("fixture expected transcript-turn projection, got {message:?}"),
     }
@@ -1472,6 +1598,94 @@ struct InputAcceptedEventFacts {
     content: InputContent,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct TurnModelSettingsResolvedEventFacts {
+    cursor: u64,
+    session_id: CanonicalUuid,
+    accepted_input_id: CanonicalUuid,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SessionModelSettingsChangedEventFacts {
+    session_id: CanonicalUuid,
+    prior_defaults_version: u64,
+    installed_defaults_version: u64,
+    installed_settings: ModelSettingsSnapshot,
+    caller_override: ModelSettingsOverlay,
+    adjustments: Vec<ModelChangeAdjustment>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SessionDefaultsReplacedFacts {
+    defaults_version: CanonicalU64,
+    installed_settings: ModelSettingsSnapshot,
+}
+
+#[track_caller]
+fn session_defaults_replaced_facts(message: &ServerMessage) -> SessionDefaultsReplacedFacts {
+    match message {
+        ServerMessage::SessionDefaultsReplaced {
+            defaults_version,
+            model_settings,
+            ..
+        } => SessionDefaultsReplacedFacts {
+            defaults_version: *defaults_version,
+            installed_settings: *model_settings,
+        },
+        message => panic!("fixture expected defaults-replaced receipt, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn session_model_settings_changed_event_facts(
+    message: &ServerMessage,
+) -> SessionModelSettingsChangedEventFacts {
+    match message {
+        ServerMessage::SessionEvent {
+            session_id,
+            event:
+                SessionEvent::SessionModelSettingsChanged {
+                    prior_defaults_version,
+                    installed_defaults_version,
+                    installed_settings,
+                    caller_override,
+                    adjustments,
+                    ..
+                },
+            ..
+        } => SessionModelSettingsChangedEventFacts {
+            session_id: *session_id,
+            prior_defaults_version: prior_defaults_version.value(),
+            installed_defaults_version: installed_defaults_version.value(),
+            installed_settings: *installed_settings,
+            caller_override: *caller_override,
+            adjustments: adjustments.clone(),
+        },
+        message => panic!("fixture expected session-settings change event, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn turn_model_settings_resolved_event_facts(
+    message: &ServerMessage,
+) -> TurnModelSettingsResolvedEventFacts {
+    match message {
+        ServerMessage::SessionEvent {
+            cursor,
+            session_id,
+            event:
+                SessionEvent::TurnModelSettingsResolved {
+                    accepted_input_id, ..
+                },
+        } => TurnModelSettingsResolvedEventFacts {
+            cursor: cursor.value(),
+            session_id: *session_id,
+            accepted_input_id: *accepted_input_id,
+        },
+        message => panic!("fixture expected turn-settings resolution event, got {message:?}"),
+    }
+}
+
 #[track_caller]
 fn input_accepted_event_facts(message: &ServerMessage) -> InputAcceptedEventFacts {
     match message {
@@ -1501,6 +1715,14 @@ fn protocol_error_code(message: &ServerMessage) -> ErrorCode {
     match message {
         ServerMessage::Error { code, .. } => *code,
         message => panic!("fixture expected protocol error, got {message:?}"),
+    }
+}
+
+#[track_caller]
+fn protocol_error_detail(message: &ServerMessage) -> Option<RejectionDetail> {
+    match message {
+        ServerMessage::Error { detail, .. } => detail.value(),
+        message => panic!("fixture expected protocol error detail, got {message:?}"),
     }
 }
 
@@ -1892,6 +2114,7 @@ async fn s28_continuation_names_the_selectable_position_range() -> Result<(), Bo
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -1935,6 +2158,7 @@ async fn s28_continuation_names_an_absent_imported_conversation() -> Result<(), 
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -1948,6 +2172,76 @@ async fn s28_continuation_names_an_absent_imported_conversation() -> Result<(), 
         detail.value(),
         Some(RejectionDetail::ImportedConversationNotFound {
             imported_conversation_id: absent,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-012: the imported wire address resolves against the immutable
+/// aggregate before settings admission, so an absent conversation and an
+/// out-of-range position each win over an explicit setting the selected model
+/// cannot support.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv012_imported_address_precedes_settings_validation() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let absent = CanonicalUuid::from_uuid(Uuid::from_u128(0x28f0));
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: absent,
+                through_position: CanonicalU64::new(1),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: low_reasoning_override(),
+            },
+        )
+        .await?;
+    let missing_conversation = response_within(&mut connection).await?.message().clone();
+
+    connection
+        .request(
+            2,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id: command()?,
+                imported_conversation_id: fixture.conversation,
+                through_position: CanonicalU64::new(999_999),
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: low_reasoning_override(),
+            },
+        )
+        .await?;
+    let out_of_range = response_within(&mut connection).await?.message().clone();
+
+    assert_eq!(
+        protocol_error_code(&missing_conversation),
+        ErrorCode::Rejected
+    );
+    assert_eq!(
+        protocol_error_detail(&missing_conversation),
+        Some(RejectionDetail::ImportedConversationNotFound {
+            imported_conversation_id: absent,
+        })
+    );
+    assert_eq!(protocol_error_code(&out_of_range), ErrorCode::Rejected);
+    assert_eq!(
+        protocol_error_detail(&out_of_range),
+        Some(RejectionDetail::ImportedFrontierPositionOutOfRange {
+            imported_conversation_id: fixture.conversation,
+            requested_position: CanonicalU64::new(999_999),
+            last_position: fixture.last_position,
         })
     );
 
@@ -2078,6 +2372,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
             selection_id: replacement_selection,
         },
         dangerous_tool_auto_approval: false,
+        model_settings: ModelSettingsOverlay::inherit_all(),
         system_prompt: SystemPromptMember::present(None),
     };
 
@@ -2093,6 +2388,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -2109,6 +2405,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                 selection_id: replacement_selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -2126,6 +2423,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
                     selection_id: CanonicalUuid::from_uuid(Uuid::from_u128(999)),
                 },
                 dangerous_tool_auto_approval: false,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
             },
         )
@@ -3021,6 +3319,7 @@ async fn s28_submit_accepts_imported_session_continuation() -> Result<(), Box<dy
                 session_id,
                 content: InputContent::new(String::from("native continuation")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3048,6 +3347,7 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
                 session_id,
                 content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3173,6 +3473,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 session_id,
                 content: InputContent::new(String::from("work while the ambiguity is unresolved")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3196,6 +3497,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3326,6 +3628,7 @@ async fn connection_reconciles_the_parked_turn(
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after the wedge")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3359,6 +3662,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: unparked_turn_id,
                 content: InputContent::new(String::from("names no parked turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3380,6 +3684,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3395,6 +3700,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("the decision is already recorded")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3429,6 +3735,7 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
         expected_active_turn_id: parked_turn_id,
         content: InputContent::new(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -3443,6 +3750,51 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
     assert_eq!(
         replayed_turn_id, successor_turn_id,
         "an equal reconciliation retry returns its recorded successor, never a refusal"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-053: reconciliation records the explicit per-call contribution
+/// with the successor origin instead of dropping it at the daemon boundary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, parked_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    park_turn_on_ambiguous_model_call(&runtime.pool, session_id).await?;
+    let requested = low_reasoning_override();
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::ReconcileTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: parked_turn_id,
+                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                expected_defaults_version: CanonicalU64::new(1),
+                model_settings: requested,
+            },
+        )
+        .await?;
+    let settings = accepted_successor_model_settings(&mut connection, session_id, 2).await?;
+
+    assert_eq!(settings.precedence.per_call, requested);
+    assert_eq!(
+        settings.effective.reasoning_level,
+        Some(ReasoningLevel::Low)
+    );
+    assert_eq!(settings.reasoning_source, Some(ModelSettingSource::PerCall));
+    assert_eq!(
+        settings.validated_for_selection_id,
+        Some(primary_direct_selection_id())
     );
 
     drop(connection);
@@ -3474,6 +3826,7 @@ async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decis
         expected_active_turn_id: parked_turn_id,
         content: InputContent::new(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     let mut first = Connection::connect(runtime.socket()).await?;
     let mut second = Connection::connect(runtime.socket()).await?;
@@ -3517,6 +3870,7 @@ async fn s04_reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Bo
                 expected_active_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xB3)),
                 content: InputContent::new(String::from("names no session")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -3539,6 +3893,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
     let content = "queued input".to_owned();
+    let expected_snapshot_cursor = 3;
     let (accepted_input, turn) =
         submit_first_input(&mut connection, session_id, content.clone()).await?;
 
@@ -3549,7 +3904,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
     let start = response_within(&mut connection).await?;
     assert_eq!(
         transcript_snapshot_start_cursor(start.message(), session_id),
-        2
+        expected_snapshot_cursor
     );
     let queued_turn = response_within(&mut connection).await?;
     let (projected_turn, projected_position, projected_state) =
@@ -3570,7 +3925,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
         transcript_snapshot_end_facts(end.message()),
         TranscriptSnapshotEndFacts {
             session_id,
-            cursor: 2,
+            cursor: expected_snapshot_cursor,
             turn_count: 1,
             entry_count: 0,
         }
@@ -3611,6 +3966,7 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
                 session_id,
                 content: second_content.clone(),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -3644,9 +4000,15 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
         }
     );
 
+    let settings_followed = response_within(&mut follow).await?;
+    let settings_event = turn_model_settings_resolved_event_facts(settings_followed.message());
+    assert!(settings_event.cursor > follow_cursor);
+    assert_eq!(settings_event.session_id, session_id);
+    assert_eq!(settings_event.accepted_input_id, second_accepted_input);
+
     let followed = response_within(&mut follow).await?;
     let event = input_accepted_event_facts(followed.message());
-    assert!(event.cursor > follow_cursor);
+    assert!(event.cursor > settings_event.cursor);
     assert_eq!(event.session_id, session_id);
     assert_eq!(event.accepted_input_id, second_accepted_input);
     assert_eq!(event.acceptance_position, second_position);
@@ -4104,6 +4466,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(successor_content.clone()),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4153,6 +4516,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4187,6 +4551,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 expected_active_turn_id: stopped_turn_id,
                 content: InputContent::new(String::from("a second distinct stop")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4224,6 +4589,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 expected_active_turn_id: unstarted_turn_id,
                 content: InputContent::new(String::from("names no active turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4248,6 +4614,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 expected_active_turn_id: unstarted_turn_id,
                 content: InputContent::new(String::from("names a stale turn")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4282,6 +4649,7 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
         expected_active_turn_id: stopped_turn_id,
         content: InputContent::new(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
+        model_settings: ModelSettingsOverlay::inherit_all(),
     };
     connection
         .request_version(ProtocolVersion::One, 3, decision.clone())
@@ -4296,6 +4664,50 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
     assert_eq!(
         replayed_turn_id, successor_turn_id,
         "an equal stop retry returns its recorded successor"
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-053: stopping a turn records the explicit per-call contribution
+/// with the successor origin instead of dropping it at the daemon boundary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, stopped_turn_id) =
+        submit_first_input(&mut connection, session_id, String::from("first request")).await?;
+    activate_turn(&runtime.pool, SessionId::from_uuid(session_id.into_uuid())).await?;
+    let requested = low_reasoning_override();
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            3,
+            ClientRequest::StopTurn {
+                command_id: command()?,
+                session_id,
+                expected_active_turn_id: stopped_turn_id,
+                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                expected_defaults_version: CanonicalU64::new(1),
+                model_settings: requested,
+            },
+        )
+        .await?;
+    let settings = accepted_successor_model_settings(&mut connection, session_id, 2).await?;
+
+    assert_eq!(settings.precedence.per_call, requested);
+    assert_eq!(
+        settings.effective.reasoning_level,
+        Some(ReasoningLevel::Low)
+    );
+    assert_eq!(settings.reasoning_source, Some(ModelSettingSource::PerCall));
+    assert_eq!(
+        settings.validated_for_selection_id,
+        Some(primary_direct_selection_id())
     );
 
     drop(connection);
@@ -4330,6 +4742,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("stop during the approval wait")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4388,6 +4801,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 expected_active_turn_id: parked_turn_id,
                 content: InputContent::new(String::from("continue after the denied round")),
                 expected_defaults_version: CanonicalU64::new(1),
+                model_settings: ModelSettingsOverlay::inherit_all(),
             },
         )
         .await?;
@@ -4402,6 +4816,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 session_id,
                 content: InputContent::new(String::from("ordinary later work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -4685,6 +5100,7 @@ async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reus
                 session_id,
                 content: InputContent::new(String::from("claims a submit identity")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -4833,6 +5249,7 @@ async fn submit_queued_input(
                 session_id,
                 content: InputContent::new(content.to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
                     expected_active_turn_id,
                 }),
@@ -4887,6 +5304,7 @@ async fn s08_steering_without_an_active_turn_is_a_typed_rejection() -> Result<()
                 session_id,
                 content: InputContent::new(String::from("steer no turn")),
                 expected_defaults_version: None,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
                     expected_active_turn_id,
                 }),
@@ -5002,16 +5420,15 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 initial_model_selection: ModelSelection::Direct {
                     selection_id: selection,
                 },
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(Some(prompt.clone())),
                 placement: SessionPlacement::Pathless {},
             },
         )
         .await?;
-    let ServerMessage::SessionCreated { session_id } =
-        *response_within(&mut connection).await?.message()
-    else {
-        panic!("prompted creation must return its session");
-    };
+    let created = session_created_facts(response_within(&mut connection).await?.message());
+    let session_id = created.session_id;
+    assert_eq!(created.model_settings, provider_default_model_settings());
 
     connection
         .request_version(
@@ -5032,6 +5449,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: Some(prompt.clone()),
         }
     );
@@ -5050,6 +5468,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                     selection_id: selection,
                 },
                 dangerous_tool_auto_approval: false,
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 system_prompt: SystemPromptMember::present(None),
             },
         )
@@ -5063,6 +5482,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: SystemPromptMember::present(None),
         }
     );
@@ -5086,6 +5506,7 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
                 selection_id: selection,
             },
             dangerous_tool_auto_approval: false,
+            model_settings: provider_default_model_settings(),
             system_prompt: Some(prompt),
         }
     );
@@ -5118,6 +5539,496 @@ async fn s34_inv012_inv033_inv046_process_runtime_carries_the_session_system_pro
         protocol_error_code(response_within(&mut connection).await?.message()),
         ErrorCode::NotFound
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-051: an explicit unsupported replacement value is a typed caller
+/// error even when changing models would have adjusted an inherited value.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv051_model_change_rejects_an_explicit_unsupported_setting()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let requested_reasoning = ReasoningLevel::Low;
+    let requested = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(requested_reasoning),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        requested,
+    )
+    .await?;
+
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: requested,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let error = response_within(&mut connection).await?.message().clone();
+
+    assert_eq!(protocol_error_code(&error), ErrorCode::Rejected);
+    assert_eq!(
+        protocol_error_detail(&error),
+        Some(RejectionDetail::UnsupportedReasoningLevel {
+            selection_id: next_direct_selection_id(),
+            requested: requested_reasoning,
+        })
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-052 / INV-053: defaults replacement carries the prior session
+/// layer across a model change, clears an inherited incompatible value, and
+/// emits the exact automatic adjustment as durable follower evidence.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv052_inv053_model_change_clamps_inherited_session_settings()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let requested_reasoning = ReasoningLevel::Low;
+    let caller_session_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(requested_reasoning),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let (session_id, created_settings) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        caller_session_settings,
+    )
+    .await?;
+    let mut follow =
+        attach_empty_follower(runtime.socket(), ProtocolVersion::One, 10, session_id).await?;
+
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: next_direct_selection_id(),
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let replacement =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+    let defaults_version = replacement.defaults_version;
+    let installed_settings = replacement.installed_settings;
+    let event =
+        session_model_settings_changed_event_facts(response_within(&mut follow).await?.message());
+
+    assert_eq!(
+        created_settings.effective.reasoning_level,
+        Some(requested_reasoning)
+    );
+    assert_eq!(defaults_version.value(), 2);
+    assert_eq!(installed_settings.effective.reasoning_level, None);
+    assert_eq!(
+        installed_settings.precedence.session.reasoning_level,
+        SettingOverlay::ProviderDefault
+    );
+    assert_eq!(
+        installed_settings.validated_for_selection_id,
+        Some(next_direct_selection_id())
+    );
+    assert_eq!(event.session_id, session_id);
+    assert_eq!(event.prior_defaults_version, 1);
+    assert_eq!(event.installed_defaults_version, defaults_version.value());
+    assert_eq!(event.installed_settings, installed_settings);
+    assert_eq!(event.caller_override, ModelSettingsOverlay::inherit_all());
+    assert_eq!(
+        event.adjustments,
+        [ModelChangeAdjustment::ReasoningLevelCleared {
+            from: requested_reasoning,
+        }]
+    );
+
+    drop(follow);
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / INV-012: an equal explicit-creation replay is decided from its
+/// durable command before the current deployment revalidates model settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_inv012_create_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let command_id = command()?;
+    let requested_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSession {
+                command_id,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
+            },
+        )
+        .await?;
+    let applied = session_created_facts(response_within(&mut connection).await?.message());
+    drop(connection);
+
+    let configuration_without_reasoning =
+        MODEL_CONFIGURATION.replace("reasoning_levels = [\"low\"]\n", "");
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_reasoning)
+        .await?;
+    let mut replay_connection = Connection::connect(runtime.socket()).await?;
+    replay_connection
+        .request(
+            2,
+            ClientRequest::CreateSession {
+                command_id,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                system_prompt: SystemPromptMember::present(None),
+                placement: SessionPlacement::Pathless {},
+            },
+        )
+        .await?;
+    let replayed = session_created_facts(response_within(&mut replay_connection).await?.message());
+
+    assert_eq!(replayed, applied);
+
+    drop(replay_connection);
+    runtime.stop().await
+}
+
+/// S28 / INV-012: an equal imported-continuation replay is decided from its
+/// durable command before the current deployment revalidates model settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_inv012_imported_session_replays_after_capability_removal() -> Result<(), Box<dyn Error>>
+{
+    let mut runtime = RunningRuntime::start().await?;
+    let fixture = ImportedInspectionFixture::insert(&runtime.pool).await?;
+    let command_id = command()?;
+    let requested_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            1,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id,
+                imported_conversation_id: fixture.conversation,
+                through_position: fixture.last_position,
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+            },
+        )
+        .await?;
+    let applied = session_created_facts(response_within(&mut connection).await?.message());
+    drop(connection);
+
+    let configuration_without_reasoning =
+        MODEL_CONFIGURATION.replace("reasoning_levels = [\"low\"]\n", "");
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_reasoning)
+        .await?;
+    let mut replay_connection = Connection::connect(runtime.socket()).await?;
+    replay_connection
+        .request(
+            2,
+            ClientRequest::CreateSessionFromImportedFrontier {
+                command_id,
+                imported_conversation_id: fixture.conversation,
+                through_position: fixture.last_position,
+                relationship: signalbox_process_protocol::ImportedSessionRelationship::Resume,
+                initial_model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+            },
+        )
+        .await?;
+    let replayed = session_created_facts(response_within(&mut replay_connection).await?.message());
+
+    assert_eq!(replayed, applied);
+
+    drop(replay_connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-012: an equal defaults-replacement replay returns its durable
+/// result before the current deployment revalidates model settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_defaults_replacement_replays_after_capability_removal()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    let command_id = command()?;
+    let requested_settings = ModelSettingsOverlay {
+        reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+        fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+        service_tier: SettingOverlay::Inherit,
+    };
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let applied =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+    drop(connection);
+
+    let configuration_without_reasoning =
+        MODEL_CONFIGURATION.replace("reasoning_levels = [\"low\"]\n", "");
+    let _recovered_turn_count = runtime
+        .restart_with_model_configuration(&configuration_without_reasoning)
+        .await?;
+    let mut replay_connection = Connection::connect(runtime.socket()).await?;
+    replay_connection
+        .request(
+            3,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: requested_settings,
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let replayed =
+        session_defaults_replaced_facts(response_within(&mut replay_connection).await?.message());
+
+    assert_eq!(replayed, applied);
+
+    drop(replay_connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-012: a stale replacement records and replays its authoritative
+/// version mismatch before current capability validation can reject settings.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_stale_defaults_replacement_precedes_settings_validation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let expected_version = CanonicalU64::new(1);
+    let current_version = CanonicalU64::new(2);
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id: command()?,
+                session_id,
+                expected_defaults_version: expected_version,
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let applied =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+    let stale = ClientRequest::ReplaceSessionDefaults {
+        command_id: command()?,
+        session_id,
+        expected_defaults_version: expected_version,
+        model_selection: ModelSelection::Direct {
+            selection_id: next_direct_selection_id(),
+        },
+        model_settings: ModelSettingsOverlay {
+            reasoning_level: SettingOverlay::Value(ReasoningLevel::Low),
+            fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+            service_tier: SettingOverlay::Inherit,
+        },
+        dangerous_tool_auto_approval: false,
+        system_prompt: SystemPromptMember::present(None),
+    };
+    let expected_rejection = RejectionDetail::DefaultsVersionMismatch {
+        session_id,
+        expected: expected_version,
+        current: current_version,
+    };
+
+    connection.request(3, stale.clone()).await?;
+    let first = rejected_detail(response_within(&mut connection).await?.message());
+    connection.request(4, stale).await?;
+    let replayed = rejected_detail(response_within(&mut connection).await?.message());
+
+    assert_eq!(applied.defaults_version, current_version);
+    assert_eq!(first, expected_rejection);
+    assert_eq!(replayed, expected_rejection);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-012: an unknown replacement selection is the read-only catalog
+/// error even when the same frame names an epoch the session has not reached,
+/// and it leaves the command identity available for the corrected request.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_unknown_replacement_model_precedes_defaults_version_mismatch()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let (session_id, _) = create_direct_session_with_settings(
+        &mut connection,
+        primary_direct_selection_id(),
+        ModelSettingsOverlay::inherit_all(),
+    )
+    .await?;
+    let command_id = command()?;
+    let unknown_selection = CanonicalUuid::from_uuid(Uuid::from_u128(0xffff));
+
+    connection
+        .request(
+            2,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(2),
+                model_selection: ModelSelection::Direct {
+                    selection_id: unknown_selection,
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let unknown = response_within(&mut connection).await?.message().clone();
+
+    assert_eq!(protocol_error_code(&unknown), ErrorCode::InvalidRequest);
+    assert_eq!(protocol_error_detail(&unknown), None);
+
+    connection
+        .request(
+            3,
+            ClientRequest::ReplaceSessionDefaults {
+                command_id,
+                session_id,
+                expected_defaults_version: CanonicalU64::new(1),
+                model_selection: ModelSelection::Direct {
+                    selection_id: primary_direct_selection_id(),
+                },
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                dangerous_tool_auto_approval: false,
+                system_prompt: SystemPromptMember::present(None),
+            },
+        )
+        .await?;
+    let corrected =
+        session_defaults_replaced_facts(response_within(&mut connection).await?.message());
+
+    assert_eq!(corrected.defaults_version, CanonicalU64::new(2));
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S37 / INV-012: an absent session reaches the durable replacement boundary
+/// before compatibility validation and replays its recorded terminal result.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s37_inv012_absent_defaults_replacement_precedes_settings_validation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let absent_session_id = CanonicalUuid::from_uuid(Uuid::from_u128(0x3701));
+    let replacement = ClientRequest::ReplaceSessionDefaults {
+        command_id: command()?,
+        session_id: absent_session_id,
+        expected_defaults_version: CanonicalU64::new(1),
+        model_selection: ModelSelection::Direct {
+            selection_id: next_direct_selection_id(),
+        },
+        model_settings: low_reasoning_override(),
+        dangerous_tool_auto_approval: false,
+        system_prompt: SystemPromptMember::present(None),
+    };
+    let expected = RejectionDetail::SessionNotFound {
+        session_id: absent_session_id,
+    };
+
+    connection.request(1, replacement.clone()).await?;
+    let first = rejected_detail(response_within(&mut connection).await?.message());
+    connection.request(2, replacement).await?;
+    let replayed = rejected_detail(response_within(&mut connection).await?.message());
+
+    assert_eq!(first, expected);
+    assert_eq!(replayed, expected);
 
     drop(connection);
     runtime.stop().await
@@ -5331,6 +6242,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
                 session_id,
                 content: InputContent::new(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -5716,6 +6628,7 @@ async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
                     "scheduler race successor remains singular",
                 )),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -5810,6 +6723,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
                 session_id,
                 content: InputContent::new(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -5955,6 +6869,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
                 session_id,
                 content: InputContent::new(oversized_suffix),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
         )
@@ -6556,7 +7471,7 @@ impl ReviewRuntimeDriver {
             )
             .await?;
         match response_within(&mut self.connection).await?.message() {
-            ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+            ServerMessage::SessionCreated { session_id, .. } => Ok(*session_id),
             message => Err(io::Error::other(format!(
                 "unexpected review-template session response: {message:?}"
             ))
@@ -6578,6 +7493,7 @@ impl ReviewRuntimeDriver {
                     session_id: session,
                     content: InputContent::new(format!("review pass fixture {seed}")),
                     expected_defaults_version: Some(CanonicalU64::new(1)),
+                    model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: None,
                 },
             )

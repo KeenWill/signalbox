@@ -24,13 +24,14 @@ use signalbox_model_runtime::{
     validate_provider_json_nesting,
 };
 
+use signalbox_model_runtime::ModelCapabilityCatalog;
 use signalbox_model_runtime::{CredentialAccess, CredentialValue, redact_evidence};
 
 use crate::config::OpenAiConfig;
 use crate::response::{StopSequences, decode_buffered_response};
 use crate::status::{classify_error, classify_error_envelope};
 use crate::stream::{StreamDecoder, StreamStep};
-use crate::translate::build_request;
+use crate::translate::build_request_with_fast_mode;
 use crate::wire::ErrorEnvelope;
 
 /// The OpenAI Chat Completions adapter.
@@ -44,6 +45,7 @@ pub struct OpenAiRuntime<A> {
     completions_url: Url,
     credentials: A,
     sse_record_limit: usize,
+    model_capabilities: ModelCapabilityCatalog,
 }
 
 /// An opaque, one-shot OpenAI request capability prepared per
@@ -79,6 +81,7 @@ impl<A> std::fmt::Debug for OpenAiRuntime<A> {
             .field("completions_url", &self.completions_url)
             .field("credentials", &"[redacted]")
             .field("sse_record_limit", &self.sse_record_limit)
+            .field("model_capabilities", &self.model_capabilities)
             .finish()
     }
 }
@@ -248,16 +251,49 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             completions_url,
             credentials,
             sse_record_limit: config.sse_record_limit,
+            model_capabilities: config.model_capabilities,
         })
     }
 
     async fn prepare_request<C: Clone + Send + Sync>(
         &self,
-        operation: ModelOperation<C>,
+        mut operation: ModelOperation<C>,
         cancellation: &mut CancellationSignal,
     ) -> PreparationOutcome<C, OpenAiPreparedRequest<C>> {
         let correlation = operation.correlation.clone();
-        let wire_request = match build_request(&operation) {
+        let capabilities = match self
+            .model_capabilities
+            .validate_explicit(&operation.resolved_target, &operation.settings)
+        {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::UnsupportedOperation {
+                        detail: error.to_string(),
+                    },
+                };
+            }
+        };
+        let mut request_fast_mode = operation.settings.fast_mode;
+        if let Some(capabilities) = capabilities {
+            let (target, effective_request_fast_mode) = match capabilities
+                .effective_target(&operation.resolved_target, operation.settings.fast_mode)
+            {
+                Ok(application) => application,
+                Err(error) => {
+                    return PreparationOutcome::Failed {
+                        correlation,
+                        failure: PreparationFailure::UnsupportedOperation {
+                            detail: error.to_string(),
+                        },
+                    };
+                }
+            };
+            operation.resolved_target = target.clone();
+            request_fast_mode = effective_request_fast_mode;
+        }
+        let wire_request = match build_request_with_fast_mode(&operation, request_fast_mode) {
             Ok(request) => request,
             Err(failure) => {
                 return PreparationOutcome::Failed {

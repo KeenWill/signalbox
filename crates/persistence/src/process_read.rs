@@ -7,21 +7,26 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_domain::{
-    AcceptedInputId, ContextFrontierId, DirectModelSelection, ImportedConversationId,
-    ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
-    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision, SessionReadScopeRefusal,
-    ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId, ToolDecisionRationale,
-    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, VersionedSessionPlacement,
+    AcceptedInputId, ContextFrontierId, DirectModelSelection, FrozenAliasDefinition,
+    FrozenModelSelection, ImportedConversationId, ImportedSourceAttestation,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
+    ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, SessionReadScopeDecision,
+    SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision, ToolAttemptId,
+    ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
+    TurnModelSettingsResolved, VersionedSessionPlacement,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     conversation_import_codec::decode_content,
     mapping::{
-        ToolApprovalDecisionSourceStorageKind, durable_command_id_from_uuid, session_id_from_uuid,
-        session_id_to_uuid, tool_approval_decision_source_from_str,
+        ToolApprovalDecisionSourceStorageKind, defaults_version_from_numeric,
+        durable_command_id_from_uuid, model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, session_id_from_uuid, session_id_to_uuid,
+        tool_approval_decision_source_from_str,
     },
 };
 
@@ -160,11 +165,20 @@ fn decode_session_defaults_value(
                 .map_err(|_| ProcessReadCorruption::Inconsistent("system prompt admission"))
         })
         .transpose()?;
-    Ok(signalbox_domain::SessionConfigurationDefaults::complete(
+    let model_settings = row
+        .try_get::<Option<serde_json::Value>, _>("model_settings")?
+        .ok_or(ProcessReadCorruption::Missing("model_settings"))?;
+    let model_settings = model_settings_from_json(model_settings)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("model settings"))?;
+    signalbox_domain::SessionConfigurationDefaults::complete_with_model_settings(
         model,
         dangerous_tool_auto_approval,
         system_prompt,
-    ))
+        model_settings,
+    )
+    .ok_or_else(|| {
+        ProcessReadCorruption::Inconsistent("model settings validation selection").into()
+    })
 }
 
 /// One repeatable-read session-summary cursor that owns at most one decoded row.
@@ -454,6 +468,7 @@ pub struct ProcessTranscriptTurn {
     turn: TurnId,
     acceptance_position: u64,
     state: ProcessTurnState,
+    model_settings: Option<TurnModelSettingsResolved>,
 }
 
 /// Exact token fields for one terminal model call.
@@ -590,6 +605,12 @@ impl ProcessTranscriptTurn {
     /// Returns the authoritative lifecycle state.
     pub const fn state(&self) -> &ProcessTurnState {
         &self.state
+    }
+
+    /// Returns complete frozen settings evidence when the turn was committed
+    /// after settings persistence became available.
+    pub const fn model_settings(&self) -> Option<&TurnModelSettingsResolved> {
+        self.model_settings.as_ref()
     }
 }
 
@@ -1304,7 +1325,8 @@ impl ProcessReadRepository {
                 selected_defaults.direct_model_selection_id,
                 selected_defaults.model_alias_id,
                 selected_defaults.dangerous_tool_auto_approval,
-                selected_defaults.system_prompt
+                selected_defaults.system_prompt,
+                selected_defaults.model_settings
                FROM session AS session_row
                LEFT JOIN session_current_defaults AS current_defaults
                  ON current_defaults.session_id = session_row.session_id
@@ -2183,6 +2205,7 @@ async fn load_next_transcript_turn(
     sqlx::query(
         "SELECT
             turn.turn_id,
+            turn.session_id AS turn_session_id,
             turn.acceptance_position,
             turn.origin_accepted_input_id,
             turn.state_kind,
@@ -2208,6 +2231,31 @@ async fn load_next_transcript_turn(
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
             accepted.content_text AS accepted_content,
+            accepted.model_settings_override AS accepted_model_settings_override,
+            settings.accepted_input_id AS settings_accepted_input_id,
+            settings.turn_id AS settings_turn_id,
+            settings.session_id AS settings_session_id,
+            settings.defaults_version AS settings_defaults_version,
+            settings.selected_direct_model_id AS settings_selected_direct_id,
+            settings.per_call_model_settings AS settings_per_call_model_settings,
+            settings.resolved_model_settings AS settings_resolved_model_settings,
+            settings.adjusted_from_selection_id AS settings_adjusted_from_selection_id,
+            settings.adjustments AS settings_adjustments,
+            configuration_origin.defaults_version AS origin_defaults_version,
+            configuration_origin.requested_model_kind AS origin_requested_model_kind,
+            configuration_origin.requested_direct_model_selection_id
+                AS origin_requested_direct_id,
+            configuration_origin.requested_model_alias_id AS origin_requested_alias_id,
+            configuration_origin.frozen_model_kind AS origin_frozen_model_kind,
+            configuration_origin.frozen_direct_model_selection_id AS origin_frozen_direct_id,
+            configuration_origin.frozen_model_alias_id AS origin_frozen_alias_id,
+            configuration_origin.frozen_alias_selected_direct_id
+                AS origin_frozen_alias_selected_direct_id,
+            configuration_origin.model_settings_evidence_required
+                AS origin_model_settings_evidence_required,
+            origin_accepted.model_settings_override
+                AS origin_model_settings_override,
+            origin_defaults.model_settings AS origin_defaults_model_settings,
             current_call.model_call_id AS current_model_call_id,
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
@@ -2217,6 +2265,36 @@ async fn load_next_transcript_turn(
            LEFT JOIN accepted_input AS accepted
              ON accepted.accepted_input_id = turn.origin_accepted_input_id
             AND accepted.session_id = turn.session_id
+           LEFT JOIN turn_model_settings_resolved AS settings
+             ON settings.accepted_input_id = turn.origin_accepted_input_id
+            AND settings.turn_id = turn.turn_id
+            AND settings.session_id = turn.session_id
+           LEFT JOIN LATERAL (
+                WITH RECURSIVE configuration_chain AS (
+                    SELECT queued.*
+                      FROM queued_input_origin AS queued
+                     WHERE queued.accepted_input_id = turn.origin_accepted_input_id
+                       AND queued.turn_id = turn.turn_id
+                       AND queued.session_id = turn.session_id
+                    UNION
+                    SELECT source.*
+                      FROM configuration_chain AS current
+                      JOIN queued_input_origin AS source
+                        ON source.turn_id = current.source_configuration_turn_id
+                       AND source.session_id = current.session_id
+                )
+                SELECT *
+                  FROM configuration_chain
+                 WHERE source_configuration_turn_id IS NULL
+           ) AS configuration_origin ON TRUE
+           LEFT JOIN accepted_input AS origin_accepted
+             ON origin_accepted.accepted_input_id =
+                configuration_origin.accepted_input_id
+            AND origin_accepted.session_id = configuration_origin.session_id
+            AND origin_accepted.origin_turn_id = configuration_origin.turn_id
+           LEFT JOIN session_defaults_version AS origin_defaults
+             ON origin_defaults.session_id = configuration_origin.session_id
+            AND origin_defaults.version = configuration_origin.defaults_version
            LEFT JOIN model_call AS current_call
              ON current_call.turn_attempt_id = turn.current_attempt_id
             AND current_call.turn_id = turn.turn_id
@@ -2283,6 +2361,173 @@ fn decode_database_count(
     u64::try_from(count).map_err(|_| ProcessReadCorruption::InvalidOrdinal(field).into())
 }
 
+fn decode_transcript_model_selection(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+) -> Result<ModelSelectionRequest, ProcessReadError> {
+    match (kind.as_str(), direct, alias) {
+        ("direct", Some(selection), None) => Ok(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(selection),
+        )),
+        ("alias", None, Some(alias)) => {
+            Ok(ModelSelectionRequest::Alias(ModelAlias::from_uuid(alias)))
+        }
+        ("direct" | "alias", _, _) => {
+            Err(ProcessReadCorruption::Inconsistent("turn requested model shape").into())
+        }
+        _ => Err(ProcessReadCorruption::Unsupported {
+            field: "turn requested model kind",
+            value: kind,
+        }
+        .into()),
+    }
+}
+
+fn decode_transcript_frozen_model(
+    kind: String,
+    direct: Option<Uuid>,
+    alias: Option<Uuid>,
+    alias_selected: Option<Uuid>,
+) -> Result<FrozenModelSelection, ProcessReadError> {
+    match (kind.as_str(), direct, alias, alias_selected) {
+        ("direct", Some(selection), None, None) => Ok(FrozenModelSelection::Direct(
+            DirectModelSelection::from_uuid(selection),
+        )),
+        ("frozen_alias", None, Some(alias), Some(selected)) => {
+            Ok(FrozenModelSelection::FrozenAlias {
+                alias: ModelAlias::from_uuid(alias),
+                definition: FrozenAliasDefinition::selecting(DirectModelSelection::from_uuid(
+                    selected,
+                )),
+            })
+        }
+        ("direct" | "frozen_alias", _, _, _) => {
+            Err(ProcessReadCorruption::Inconsistent("turn frozen model shape").into())
+        }
+        _ => Err(ProcessReadCorruption::Unsupported {
+            field: "turn frozen model kind",
+            value: kind,
+        }
+        .into()),
+    }
+}
+
+fn requested_from_transcript_frozen(selection: &FrozenModelSelection) -> ModelSelectionRequest {
+    match selection {
+        FrozenModelSelection::Direct(selection) => ModelSelectionRequest::Direct(*selection),
+        FrozenModelSelection::FrozenAlias { alias, .. } => ModelSelectionRequest::Alias(*alias),
+    }
+}
+
+fn decode_transcript_turn_model_settings(
+    row: &PgRow,
+    turn: TurnId,
+    accepted_input: AcceptedInputId,
+) -> Result<Option<TurnModelSettingsResolved>, ProcessReadError> {
+    let stored_accepted: Option<Uuid> = row.try_get("settings_accepted_input_id")?;
+    let stored_turn: Option<Uuid> = row.try_get("settings_turn_id")?;
+    let stored_session: Option<Uuid> = row.try_get("settings_session_id")?;
+    let stored_defaults: Option<Decimal> = row.try_get("settings_defaults_version")?;
+    let stored_selected: Option<Uuid> = row.try_get("settings_selected_direct_id")?;
+    let stored_per_call: Option<Value> = row.try_get("settings_per_call_model_settings")?;
+    let stored_settings: Option<Value> = row.try_get("settings_resolved_model_settings")?;
+    let stored_adjustments: Option<Value> = row.try_get("settings_adjustments")?;
+    let absent = stored_accepted.is_none()
+        && stored_turn.is_none()
+        && stored_session.is_none()
+        && stored_defaults.is_none()
+        && stored_selected.is_none()
+        && stored_per_call.is_none()
+        && stored_settings.is_none()
+        && stored_adjustments.is_none();
+    if absent {
+        let evidence_required: bool = required(row, "origin_model_settings_evidence_required")?;
+        return if evidence_required {
+            Err(ProcessReadCorruption::Missing("turn model settings evidence").into())
+        } else {
+            Ok(None)
+        };
+    }
+    let (Some(stored_accepted), Some(stored_turn), Some(stored_session), Some(stored_defaults)) = (
+        stored_accepted,
+        stored_turn,
+        stored_session,
+        stored_defaults,
+    ) else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_selected) = stored_selected else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_per_call) = stored_per_call else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_settings) = stored_settings else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let Some(stored_adjustments) = stored_adjustments else {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings shape").into());
+    };
+    let turn_session: Uuid = required(row, "turn_session_id")?;
+    if AcceptedInputId::from_uuid(stored_accepted) != accepted_input
+        || TurnId::from_uuid(stored_turn) != turn
+        || stored_session != turn_session
+    {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings identity").into());
+    }
+    let defaults_version = defaults_version_from_numeric(stored_defaults)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("turn model settings version"))?;
+    let origin_defaults = defaults_version_from_numeric(required(row, "origin_defaults_version")?)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("turn origin defaults version"))?;
+    let requested = decode_transcript_model_selection(
+        required(row, "origin_requested_model_kind")?,
+        row.try_get("origin_requested_direct_id")?,
+        row.try_get("origin_requested_alias_id")?,
+    )?;
+    let frozen = decode_transcript_frozen_model(
+        required(row, "origin_frozen_model_kind")?,
+        row.try_get("origin_frozen_direct_id")?,
+        row.try_get("origin_frozen_alias_id")?,
+        row.try_get("origin_frozen_alias_selected_direct_id")?,
+    )?;
+    let per_call = model_settings_overlay_from_json(stored_per_call)
+        .map_err(|_| ProcessReadCorruption::Inconsistent("turn per-call model settings"))?;
+    let origin_per_call =
+        model_settings_overlay_from_json(required(row, "origin_model_settings_override")?)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn accepted model settings"))?;
+    if defaults_version != origin_defaults
+        || requested != requested_from_transcript_frozen(&frozen)
+        || frozen.selected_direct().into_uuid() != stored_selected
+        || per_call != origin_per_call
+    {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings origin").into());
+    }
+    let event = TurnModelSettingsResolved::try_new(
+        accepted_input,
+        turn,
+        defaults_version,
+        frozen,
+        per_call,
+        model_settings_from_json(stored_settings)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn resolved model settings"))?,
+        row.try_get::<Option<Uuid>, _>("settings_adjusted_from_selection_id")?
+            .map(DirectModelSelection::from_uuid),
+        model_change_adjustments_from_json(stored_adjustments)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn model setting adjustments"))?,
+    )
+    .ok_or(ProcessReadCorruption::Inconsistent(
+        "turn model settings evidence",
+    ))?;
+    let origin_defaults =
+        model_settings_from_json(required(row, "origin_defaults_model_settings")?)
+            .map_err(|_| ProcessReadCorruption::Inconsistent("turn defaults model settings"))?;
+    if !crate::model_settings_resolution::matches_defaults(&event, origin_defaults) {
+        return Err(ProcessReadCorruption::Inconsistent("turn model settings defaults").into());
+    }
+    Ok(Some(event))
+}
+
 fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
@@ -2305,6 +2550,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     {
         return Err(ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into());
     }
+    let model_settings = decode_transcript_turn_model_settings(row, turn, origin_accepted_input)?;
     let state_kind: String = required(row, "state_kind")?;
     let start_lineage_kind: Option<String> = row.try_get("start_lineage_kind")?;
     let immediate_predecessor: Option<Uuid> = row.try_get("immediate_predecessor_turn_id")?;
@@ -2474,6 +2720,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             turn: ProcessTranscriptTurn {
                 turn,
                 acceptance_position,
+                model_settings,
                 state: ProcessTurnState::ActiveAwaitingToolApproval {
                     request: ToolRequestId::from_uuid(request),
                 },
@@ -2522,6 +2769,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             turn: ProcessTranscriptTurn {
                 turn,
                 acceptance_position,
+                model_settings,
                 state: ProcessTurnState::ActiveAwaitingToolRecovery {
                     ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
                     recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
@@ -2563,6 +2811,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             turn: ProcessTranscriptTurn {
                 turn,
                 acceptance_position,
+                model_settings,
                 state: ProcessTurnState::ActiveRunning {
                     current_attempt: TurnAttemptId::from_uuid(attempt),
                     current_model_call: None,
@@ -2600,6 +2849,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             turn: ProcessTranscriptTurn {
                 turn,
                 acceptance_position,
+                model_settings,
                 state: ProcessTurnState::ReconciliationRequired {
                     terminal_frontier: ContextFrontierId::from_uuid(frontier),
                     terminal_attempt: TurnAttemptId::from_uuid(attempt),
@@ -2873,6 +3123,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         turn: ProcessTranscriptTurn {
             turn,
             acceptance_position,
+            model_settings,
             state,
         },
         start_lineage,

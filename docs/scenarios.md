@@ -21,7 +21,7 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Start an empty conversation from a terminal and make it
   available on every client.
 - **Durable commands:**
-  `CreateSession(cause: user_initiated, ancestry: none, initial_model_selection_defaults)`
+  `CreateSession(cause: user_initiated, ancestry: none, initial_configuration_defaults)`
   establishes defaults version one.
   `SubmitInput(delivery: start_when_no_active_turn, ...)` resolves its model
   request against that exact version and atomically persists the accepted input,
@@ -63,7 +63,7 @@ INV-tagged test names and attached doc comments.
 - **User intent:** Receive a responsive answer while retaining an authoritative
   final transcript.
 - **Durable commands:** Accept input and create a turn with frozen direct or
-  alias model-selection configuration, provider defaults, and disabled
+  alias model-selection configuration, resolved model settings, and disabled
   retry/fallback; activate it and create a turn attempt; freeze a context
   frontier; resolve and pin the exact model target; only then create a model
   call; finally commit the complete ordered assistant-text and logical
@@ -1162,6 +1162,41 @@ INV-tagged test names and attached doc comments.
   than empty successful results.
 - **Required invariants:** INV-008, INV-012, INV-050.
 - **Remaining questions:** None.
+
+## S37 — Change model and session settings
+
+- **User intent:** Choose a supported reasoning level, fast mode, or service
+  tier for a session or one new turn without relying on a provider to repair an
+  incompatible request.
+- **Durable commands:** Creation establishes the first complete settings
+  snapshot from global, model-profile, and session layers.
+  `ReplaceSessionDefaults` carries a provenance-preserving settings override and
+  compare-and-sets the complete next epoch. Origin-producing `SubmitInput`
+  carries an optional per-call override and freezes one complete effective
+  value. Steering inherits its source turn and carries no override.
+- **State transitions:** An explicit unsupported value rejects before command
+  effects or provider preparation. A model-change-induced incompatibility uses
+  the greatest supported reasoning level no higher than the prior level, or the
+  lowest supported level when none is lower; it disables fast mode or clears
+  service tier, then records the exact adjustment. Alias retargeting applies the
+  same rule at input acceptance. A declared fast serving target is authorized
+  lineage; no undeclared target or suffix is.
+- **Transient updates:** None. Capability discovery is a read-only projection;
+  settings, provenance, and adjustments are durable facts.
+- **Owning component:** Domain owns setting values, precedence, compatibility,
+  and adjustment events; daemon configuration owns model capabilities and copied
+  global/profile layers; Postgres owns epochs and origin records; the process
+  protocol exposes the catalog and commands; provider adapters own exhaustive
+  translations.
+- **Failure behavior:** Explicit unsupported reasoning, fast, service-tier, or
+  adapter-specific combinations remain distinct typed invalid requests. Missing
+  or contradictory capability declarations reject configuration. A provider
+  CLI's silent clamp, open effort string, or dropped tier is never validation.
+- **Required invariants:** INV-008, INV-012, INV-014, INV-051, INV-052, INV-053,
+  INV-054.
+- **Remaining questions:** Context compaction and the other settings listed in
+  [model and session settings](spec/model-session-settings.md#open-edges) remain
+  outside this scenario.
 
 ## Coverage note
 

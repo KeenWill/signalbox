@@ -1520,8 +1520,13 @@ impl EffectiveConfiguration {
         model: FrozenModelSelection,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
     ) -> Self;
+    pub fn with_model_settings(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        model_settings: ValidatedModelSettings,
+    ) -> Option<Self>;
     // accessors: model(), parameters(), known_provider_failure_retry(), model_fallback(),
-    // dangerous_tool_auto_approval()
+    // dangerous_tool_auto_approval(), model_settings()
 }
 
 pub struct SessionConfigurationDefaultsVersion(/* private u64 */);
@@ -1562,7 +1567,13 @@ impl SessionConfigurationDefaults {
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
         system_prompt: Option<SessionSystemPrompt>,
     ) -> Self;
-    // accessors: model(), dangerous_tool_auto_approval(), system_prompt()
+    pub fn complete_with_model_settings(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        system_prompt: Option<SessionSystemPrompt>,
+        model_settings: ValidatedModelSettings,
+    ) -> Option<Self>;
+    // accessors: model(), dangerous_tool_auto_approval(), system_prompt(), model_settings()
 }
 
 pub struct VersionedSessionConfigurationDefaults { /* private */ }
@@ -1573,6 +1584,12 @@ impl VersionedSessionConfigurationDefaults {
         &self,
         expected: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
+    ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
+    pub fn derive_request_with_model_settings(
+        &self,
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        per_call_model_settings: ModelSettingsOverlay,
     ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
     // accessors: version(), defaults()
 }
@@ -1588,7 +1605,7 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest { /* private */ }
 // sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
 impl ConfigurationRequest {
-    // accessors: model(), dangerous_tool_auto_approval()
+    // accessors: model(), dangerous_tool_auto_approval(), model_settings(), per_call_model_settings()
 }
 
 pub struct VersionCheckedConfigurationRequest { /* private */ }
@@ -1608,8 +1625,26 @@ impl OriginConfiguration {
     pub fn freeze(
         checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-    ) -> Result<Self, UnknownModelAlias>;
-    // accessors: requested(), session_defaults_version(), effective()
+    ) -> Result<Self, OriginModelSettingsError>;
+    pub fn freeze_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<Self, OriginModelSettingsError>;
+    pub fn reconstitute_with_model_settings(
+        checked: VersionCheckedConfigurationRequest,
+        frozen_model: FrozenModelSelection,
+        stored_settings: ValidatedModelSettings,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
+    // accessors: requested(), session_defaults_version(), effective(),
+    // model_settings_adjusted_from(), model_settings_adjustments()
+}
+
+pub enum OriginModelSettingsError {
+    UnknownAlias(UnknownModelAlias),
+    MissingCapabilities { selection: DirectModelSelection },
+    Unsupported(UnsupportedModelSetting),
 }
 
 pub struct OriginConfigurationReconstitutionInput { /* private */ }
@@ -1624,7 +1659,7 @@ impl OriginConfigurationReconstitutionInput {
 }
 
 pub struct UnknownModelAlias { /* private */ }
-// sealed: Err of OriginConfiguration::freeze
+// sealed: OriginModelSettingsError::UnknownAlias
 impl UnknownModelAlias {
     // accessors: alias()
 }
@@ -1632,6 +1667,230 @@ impl UnknownModelAlias {
 pub enum TurnConfigurationProvenance {
     ExplicitOrigin(OriginConfiguration),
     InheritedForReclassifiedSteering(SteeringBinding),
+}
+```
+
+## domain: model_settings
+
+```rust
+pub enum ReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+pub enum FastMode { Disabled, Enabled }
+
+pub enum FastModeOverlay { Inherit, Value(FastMode) }
+
+pub enum AnthropicServiceTier { Auto, StandardOnly }
+
+pub enum OpenAiServiceTier { Auto, Default, Flex, Scale, Priority, Fast }
+
+pub enum CodexCliServiceTier { Default, Priority, Flex }
+
+pub enum ServiceTier {
+    Anthropic(AnthropicServiceTier),
+    OpenAi(OpenAiServiceTier),
+    CodexCli(CodexCliServiceTier),
+}
+
+pub enum SettingOverlay<T> {
+    Inherit,
+    ProviderDefault,
+    Value(T),
+}
+
+pub struct ModelSettingsOverlay { /* private */ }
+impl ModelSettingsOverlay {
+    pub const fn inherit_all() -> Self;
+    pub const fn new(
+        reasoning_level: SettingOverlay<ReasoningLevel>,
+        fast_mode: FastModeOverlay,
+        service_tier: SettingOverlay<ServiceTier>,
+    ) -> Self;
+    pub const fn from_effective(settings: EffectiveModelSettings) -> Self;
+    // accessors: reasoning_level(), fast_mode(), service_tier()
+}
+
+pub struct EffectiveModelSettings { /* private */ }
+impl EffectiveModelSettings {
+    pub const fn provider_defaults() -> Self;
+    pub const fn new(
+        reasoning_level: Option<ReasoningLevel>,
+        fast_mode: FastMode,
+        service_tier: Option<ServiceTier>,
+    ) -> Self;
+    // accessors: reasoning_level(), fast_mode(), service_tier()
+}
+
+pub enum ModelSettingSource { PerCall, Session, Profile, GlobalDefault }
+
+pub struct ResolvedModelSettings { /* private */ }
+// sealed: ModelSettingsPrecedence::resolve or ValidatedModelSettings::resolved
+impl ResolvedModelSettings {
+    // accessors: effective(), reasoning_source(), fast_mode_source(), service_tier_source()
+}
+
+pub struct ValidatedModelSettings { /* private */ }
+// sealed: provider_defaults, reconstitute, ModelCapabilities::validate_precedence,
+// or ModelCapabilities::validate_model_change via AdjustedModelSettings::settings
+// and AdjustedModelSettings::into_parts
+impl ValidatedModelSettings {
+    pub const fn provider_defaults() -> Self;
+    pub fn reconstitute(
+        precedence: ModelSettingsPrecedence,
+        effective: EffectiveModelSettings,
+        reasoning_source: Option<ModelSettingSource>,
+        fast_mode_source: Option<ModelSettingSource>,
+        service_tier_source: Option<ModelSettingSource>,
+        validated_for: Option<DirectModelSelection>,
+    ) -> Option<Self>;
+    // accessors: precedence(), resolved(), effective(), validated_for()
+}
+
+pub struct ModelSettingsPrecedence { /* private */ }
+impl ModelSettingsPrecedence {
+    pub const fn provider_defaults() -> Self;
+    pub const fn new(
+        per_call: ModelSettingsOverlay,
+        session: ModelSettingsOverlay,
+        profile: ModelSettingsOverlay,
+        global_default: ModelSettingsOverlay,
+    ) -> Self;
+    pub const fn with_per_call(self, per_call: ModelSettingsOverlay) -> Self;
+    pub fn resolve(self) -> ResolvedModelSettings;
+    // accessors: per_call(), session(), profile(), global_default()
+}
+
+pub enum FastModeSupport {
+    Unsupported,
+    RequestControl,
+    AlternateTarget(ResolvedProviderTarget),
+}
+
+pub struct ModelCapabilities { /* private */ }
+impl ModelCapabilities {
+    pub const fn new(
+        reasoning_levels: BTreeSet<ReasoningLevel>,
+        fast_mode: FastModeSupport,
+        service_tiers: BTreeSet<ServiceTier>,
+    ) -> Self;
+    pub fn validate_explicit(
+        &self,
+        selection: DirectModelSelection,
+        overlay: ModelSettingsOverlay,
+    ) -> Result<(), UnsupportedModelSetting>;
+    pub fn validate_precedence(
+        &self,
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+    ) -> Result<ValidatedModelSettings, UnsupportedModelSetting>;
+    pub fn adjust_for_model_change(
+        &self,
+        inherited: EffectiveModelSettings,
+    ) -> CompatibleModelSettings;
+    pub fn validate_model_change(
+        &self,
+        selection: DirectModelSelection,
+        precedence: ModelSettingsPrecedence,
+        caller_overlay: ModelSettingsOverlay,
+    ) -> Result<AdjustedModelSettings, UnsupportedModelSetting>;
+    pub fn serving_target(
+        &self,
+        selected: ResolvedProviderTarget,
+        fast_mode: FastMode,
+    ) -> Option<ResolvedProviderTarget>;
+    // accessors: reasoning_levels(), fast_mode(), service_tiers()
+}
+
+pub enum UnsupportedModelSetting {
+    ReasoningLevel { selection: DirectModelSelection, requested: ReasoningLevel },
+    FastMode { selection: DirectModelSelection },
+    ServiceTier { selection: DirectModelSelection, requested: ServiceTier },
+}
+
+pub enum ModelChangeAdjustment {
+    ReasoningLevelClamped { from: ReasoningLevel, to: ReasoningLevel },
+    ReasoningLevelCleared { from: ReasoningLevel },
+    FastModeDisabled,
+    ServiceTierCleared { from: ServiceTier },
+}
+
+pub struct CompatibleModelSettings { /* private */ }
+// sealed: ModelCapabilities::adjust_for_model_change
+impl CompatibleModelSettings {
+    pub fn into_parts(self) -> (EffectiveModelSettings, Box<[ModelChangeAdjustment]>);
+    // accessors: effective(), adjustments()
+}
+
+pub struct AdjustedModelSettings { /* private */ }
+// sealed: ModelCapabilities::validate_model_change
+impl AdjustedModelSettings {
+    pub fn into_parts(self) -> (ValidatedModelSettings, Box<[ModelChangeAdjustment]>);
+    // accessors: settings(), adjustments()
+}
+
+pub struct SessionModelSettingsChanged { /* private */ }
+impl SessionModelSettingsChanged {
+    pub fn try_new(
+        session: SessionId,
+        command_id: DurableCommandId,
+        prior_defaults_version: SessionConfigurationDefaultsVersion,
+        installed_defaults_version: SessionConfigurationDefaultsVersion,
+        prior_model: ModelSelectionRequest,
+        installed_model: ModelSelectionRequest,
+        prior_settings: ValidatedModelSettings,
+        installed_settings: ValidatedModelSettings,
+        caller_override: ModelSettingsOverlay,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
+    // accessors: session(), command_id(), prior_defaults_version(),
+    // installed_defaults_version(), prior_model(), installed_model(), prior_settings(),
+    // installed_settings(), caller_override(), adjustments()
+}
+
+pub struct TurnModelSettingsResolved { /* private */ }
+impl TurnModelSettingsResolved {
+    pub fn try_new(
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selection: FrozenModelSelection,
+        per_call_override: ModelSettingsOverlay,
+        settings: ValidatedModelSettings,
+        adjusted_from_selection: Option<DirectModelSelection>,
+        adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Option<Self>;
+    // accessors: accepted_input(), turn(), defaults_version(), selection(),
+    // per_call_override(), settings(), adjusted_from_selection(), adjustments()
+}
+
+pub struct ModelCapabilityDefinition { /* private */ }
+impl ModelCapabilityDefinition {
+    pub const fn new(
+        selection: DirectModelSelection,
+        capabilities: ModelCapabilities,
+    ) -> Self;
+    // accessors: selection(), capabilities()
+}
+
+pub struct ModelCapabilityCatalog { /* private */ }
+impl ModelCapabilityCatalog {
+    pub fn try_from_definitions(
+        definitions: impl IntoIterator<Item = ModelCapabilityDefinition>,
+    ) -> Result<Self, ModelCapabilityCatalogError>;
+    pub fn resolve(&self, selection: DirectModelSelection) -> Option<&ModelCapabilities>;
+    pub fn iter(&self) -> impl Iterator<Item = (DirectModelSelection, &ModelCapabilities)>;
+}
+
+pub enum ModelCapabilityCatalogError {
+    DuplicateSelection { selection: DirectModelSelection },
 }
 ```
 
@@ -1686,7 +1945,12 @@ impl PerInputConfigurationChoices {
         expected_session_defaults_version: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
     ) -> Self;
-    // accessors: expected_session_defaults_version(), model()
+    pub const fn with_model_settings(
+        expected_session_defaults_version: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+        model_settings: ModelSettingsOverlay,
+    ) -> Self;
+    // accessors: expected_session_defaults_version(), model(), model_settings()
 }
 
 pub enum DeliveryRequest {
@@ -1757,12 +2021,29 @@ impl SubmitInput {
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_when_no_active_turn_with_model_settings(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     pub fn prepare_with_active_turn(
         self,
         scheduling: &AcceptedInputSchedulingProjection,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn_with_model_settings(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+        capabilities: &ModelCapabilityCatalog,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
 }
@@ -1786,6 +2067,7 @@ impl SubmitInputAppliedResult {
 pub struct SubmitInputTurnOriginAppliedResult { /* private */ }
 // sealed: SubmitInput preparation or checked applied reconstitution
 impl SubmitInputTurnOriginAppliedResult {
+    pub fn model_settings_event(&self) -> Option<TurnModelSettingsResolved>;
     // accessors: accepted_input(), session(), turn(), disposition(),
     // queue_order(), acceptance_position(), origin_configuration(),
     // applied_interrupt()
@@ -1866,6 +2148,7 @@ pub enum SubmitInputPreparationFailure {
     },
     ActiveTurnProjectionMissing,
     InterruptQueueOrderInvalid,
+    ModelSettingsResolution(OriginModelSettingsError),
 }
 
 pub struct GoalTurnOriginConstructionInput {
@@ -3192,7 +3475,7 @@ impl PreparedSteeringConsumption {
 }
 pub struct PreparedModelCallRequest { /* private */ }
 // accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
-// call(), frontier_entries(), origin_content()
+// model_settings(), call(), frontier_entries(), origin_content()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -4319,16 +4602,32 @@ built from its candidate, crate-internally.
 ```rust
 pub struct ReplaceSessionDefaults { /* private */ }
 impl ReplaceSessionDefaults {
-    pub const fn new(
+    pub fn new(
         command_id: DurableCommandId,
         session: SessionId,
         expected_current_version: SessionConfigurationDefaultsVersion,
         replacement: SessionConfigurationDefaults,
     ) -> Self;
+    pub fn with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+    ) -> Self;
+    pub fn with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+    ) -> Self;
     pub const fn prepare_session_not_found(self) -> PreparedReplaceSessionDefaults;
     pub fn prepare_against(self, current: &Session)
         -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
-    // accessors: command_id(), session(), expected_current_version(), replacement()
+    // accessors: command_id(), session(), expected_current_version(), replacement(),
+    // caller_model_settings(), model_settings_adjustments()
 }
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
@@ -5701,8 +6000,25 @@ impl ReplaceSessionDefaultsRequest {
         replacement: SessionConfigurationDefaults,
         prompt_member: PromptMemberStatement,
     ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn try_new_with_model_settings_adjustments(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+        caller_model_settings: ModelSettingsOverlay,
+        model_settings_adjustments: Vec<ModelChangeAdjustment>,
+        prompt_member: PromptMemberStatement,
+    ) -> Result<Self, InvalidDurableCommandId>;
     // accessors: command_id(), session(), expected_current_version(), replacement(),
-    // prompt_member()
+    // caller_model_settings(), model_settings_adjustments(), prompt_member()
 }
 
 pub enum PromptMemberStatement {
@@ -5736,6 +6052,287 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
         &mut self,
         request: ReplaceSessionDefaultsRequest,
     ) -> Result<ReplaceSessionDefaultsOutcome, Transaction::Error>;
+}
+```
+
+## application: repo_watch
+
+```rust
+pub trait RepoWatchEventIdGenerator {
+    fn next_event_id(&mut self) -> RepoWatchEventId;
+}
+
+pub struct UuidV7RepoWatchEventIdGenerator;
+
+pub enum RepoWatchPullRequestLifecycle {
+    Open,
+    Closed,
+    Merged,
+}
+
+pub struct RepoWatchCheckCompletionGeneration { /* private */ }
+impl RepoWatchCheckCompletionGeneration {
+    pub fn try_new(value: String) -> Result<Self, RepoWatchCheckCompletionGenerationError>;
+    // accessors: as_str()
+}
+
+pub struct RepoWatchCheckCompletionGenerationError;
+
+pub struct RepoWatchCheckSuiteObservation { /* private */ }
+impl RepoWatchCheckSuiteObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        outcome: ChecksOutcome,
+    ) -> Self;
+    // accessors: id(), completion_generation(), outcome()
+}
+
+pub struct RepoWatchCheckRunObservation { /* private */ }
+impl RepoWatchCheckRunObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        name: CheckRunName,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), completion_generation(), name(), conclusion()
+}
+
+pub struct RepoWatchReviewObservation { /* private */ }
+impl RepoWatchReviewObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        reviewer: RepoWatchAuthorLogin,
+        state: Option<ReviewState>,
+        commit: CommitSha,
+    ) -> Self;
+    // accessors: id(), reviewer(), state(), commit()
+}
+
+pub enum RepoWatchThreadState {
+    Open,
+    Resolved,
+}
+
+pub struct RepoWatchThreadObservation { /* private */ }
+impl RepoWatchThreadObservation {
+    pub const fn new(thread: ReviewThreadId, state: RepoWatchThreadState) -> Self;
+    // accessors: thread(), state()
+}
+
+pub struct RepoWatchReactionObservation { /* private */ }
+impl RepoWatchReactionObservation {
+    pub const fn new(
+        subject: ReactionSubject,
+        reactor: RepoWatchAuthorLogin,
+        content: ReactionContent,
+    ) -> Self;
+    // accessors: subject(), reactor(), content()
+}
+
+pub struct RepoWatchPullRequestStateInput {
+    pub context: PullRequestEventContext,
+    pub lifecycle: RepoWatchPullRequestLifecycle,
+    pub mergeable_state: MergeableState,
+    pub completed_check_suites: Vec<RepoWatchCheckSuiteObservation>,
+    pub completed_check_runs: Vec<RepoWatchCheckRunObservation>,
+    pub reviews: Vec<RepoWatchReviewObservation>,
+    pub threads: Vec<RepoWatchThreadObservation>,
+    pub reactions: Vec<RepoWatchReactionObservation>,
+}
+
+pub struct RepoWatchPullRequestState { /* private */ }
+impl RepoWatchPullRequestState {
+    pub fn try_new(
+        input: RepoWatchPullRequestStateInput,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    // accessors: context(), lifecycle(), mergeable_state(), completed_check_suites(),
+    // completed_check_runs(), reviews(), threads(), reactions()
+}
+
+pub struct RepoWatchWorkflowRunObservation { /* private */ }
+impl RepoWatchWorkflowRunObservation {
+    pub const fn new(
+        id: GitHubObjectId,
+        workflow_id: GitHubObjectId,
+        attempt: RepoWatchWorkflowRunAttempt,
+        branch: BranchName,
+        workflow: WorkflowName,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), workflow_id(), attempt(), branch(), workflow(), conclusion()
+}
+
+pub struct RepoWatchBranchHead { /* private */ }
+impl RepoWatchBranchHead {
+    pub const fn new(branch: BranchName, head: CommitSha) -> Self;
+    // accessors: branch(), head()
+}
+
+pub struct RepoWatchRepositoryStateInput {
+    pub pull_requests: Vec<RepoWatchPullRequestState>,
+    pub workflow_runs: Vec<RepoWatchWorkflowRunObservation>,
+    pub branch_heads: Vec<RepoWatchBranchHead>,
+}
+
+pub struct RepoWatchRepositoryState { /* private */ }
+impl RepoWatchRepositoryState {
+    pub fn try_new(
+        input: RepoWatchRepositoryStateInput,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    // accessors: pull_requests(), workflow_runs(), branch_heads()
+}
+
+pub struct RepoWatchObservation { /* private */ }
+impl RepoWatchObservation {
+    pub fn new(
+        signal_reviewers: Vec<RepoWatchAuthorLogin>,
+        state: RepoWatchRepositoryState,
+    ) -> Self;
+    // accessors: signal_reviewers(), state()
+}
+
+pub enum RepoWatchRepositoryStateError {
+    DuplicatePullRequest(PullRequestNumber),
+    DuplicateCheckSuite(GitHubObjectId),
+    DuplicateCheckRun(GitHubObjectId),
+    DuplicateReview(GitHubObjectId),
+    DuplicateThread(ReviewThreadId),
+    DuplicateWorkflow { branch: BranchName, workflow_id: GitHubObjectId },
+    DuplicateBranchHead(BranchName),
+}
+
+pub struct RepoWatchDifferError(/* private */);
+
+pub fn derive_repo_watch_events(
+    repository: &RepositorySlug,
+    previous: Option<&RepoWatchObservation>,
+    current: &RepoWatchObservation,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> Result<Vec<RepoWatchEvent>, RepoWatchDifferError>;
+
+pub struct RepoWatchResolvedTemplate { /* private */ }
+impl RepoWatchResolvedTemplate {
+    pub const fn new(
+        provenance: SessionTemplateProvenance,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    // accessors: provenance(), defaults()
+}
+
+pub trait RepoWatchTemplateResolver {
+    fn resolve_repo_watch_template(
+        &self,
+        name: &SessionTemplateName,
+    ) -> Option<RepoWatchResolvedTemplate>;
+}
+
+pub enum RepoWatchSingletonKey {
+    PullRequest { repository: RepositorySlug, number: PullRequestNumber },
+    Stack { repository: RepositorySlug, root_pull_request: PullRequestNumber },
+    Rule,
+    Repository { repository: RepositorySlug },
+}
+
+pub struct RepoWatchPreparedDispatchAction { /* private */ }
+impl RepoWatchPreparedDispatchAction {
+    // accessors: action(), prepared_session()
+    pub fn into_parts(
+        self,
+    ) -> (
+        RepoWatchActionV1,
+        PreparedCreateSession,
+        SubmitInput,
+        AcceptedInputId,
+        TurnId,
+        SemanticTranscriptEntryId,
+        ContextFrontierId,
+    );
+}
+
+pub enum RepoWatchRuleEvaluation {
+    NotMatched {
+        event: RepoWatchEvent,
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+    },
+    Matched {
+        dispatch_id: RepoWatchDispatchId,
+        event: RepoWatchEvent,
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+        singleton: RepoWatchSingletonKey,
+        cooldown: std::time::Duration,
+        actions: Box<[RepoWatchPreparedDispatchAction]>,
+    },
+}
+
+pub enum RepoWatchRuleEvaluationOutcome {
+    Inactive,
+    NotMatched,
+    Occupied,
+    Cooldown,
+    Dispatched {
+        dispatch_id: RepoWatchDispatchId,
+        sessions: Box<[SessionId]>,
+    },
+    Replayed {
+        dispatch_id: RepoWatchDispatchId,
+        sessions: Box<[SessionId]>,
+    },
+}
+
+pub trait RepoWatchDispatchTransaction {
+    type Error;
+    async fn handle_repo_watch_evaluation(
+        &mut self,
+        evaluation: RepoWatchRuleEvaluation,
+    ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error>;
+}
+
+pub trait RepoWatchDispatchIdGenerator {
+    fn next_dispatch_id(&mut self) -> RepoWatchDispatchId;
+    fn next_command_id(&mut self) -> DurableCommandId;
+    fn next_session_id(&mut self) -> SessionId;
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
+    fn next_turn_id(&mut self) -> TurnId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+}
+
+pub struct UuidV7RepoWatchDispatchIdGenerator;
+
+pub enum RepoWatchDispatchPreparationError {
+    Context(RepoWatchDispatchContextError),
+    UnknownTemplate(SessionTemplateName),
+    SessionPreparation,
+    InvalidSingletonTarget,
+}
+
+pub struct RepoWatchDispatchService<Ids, Transaction> { /* private */ }
+impl<Ids, Transaction> RepoWatchDispatchService<Ids, Transaction> {
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self;
+}
+impl<Ids: RepoWatchDispatchIdGenerator, Transaction: RepoWatchDispatchTransaction>
+    RepoWatchDispatchService<Ids, Transaction>
+{
+    pub async fn evaluate(
+        &mut self,
+        event: RepoWatchEvent,
+        rule: &RepoWatchRule,
+        observation: &RepoWatchObservation,
+        templates: &impl RepoWatchTemplateResolver,
+        context: UserContent,
+    ) -> Result<
+        RepoWatchRuleEvaluationOutcome,
+        RepoWatchDispatchServiceError<Transaction::Error>,
+    >;
+}
+
+pub enum RepoWatchDispatchServiceError<TransactionError> {
+    Preparation(RepoWatchDispatchPreparationError),
+    Transaction(TransactionError),
 }
 ```
 
@@ -7674,6 +8271,12 @@ impl GitHubObjectId {
     pub const fn get(self) -> u64;
 }
 
+pub struct RepoWatchWorkflowRunAttempt(/* private NonZeroU64 */);
+impl RepoWatchWorkflowRunAttempt {
+    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn get(self) -> u64;
+}
+
 pub struct RepoWatchPattern(/* private String */);
 impl RepoWatchPattern {
     pub const MAX_UTF8_BYTES: usize;
@@ -7936,6 +8539,7 @@ pub enum RepoWatchActionV1 {
 
 pub enum RepoWatchRuleValidationError {
     NoActions,
+    SubsecondCooldown,
     BranchEventWithPullRequestSingleton { scope: RepoWatchSingletonScope },
     TemplateNotDeclared { template: SessionTemplateName },
     TemplateRejectsContext {
@@ -7944,6 +8548,11 @@ pub enum RepoWatchRuleValidationError {
     },
 }
 // implements Error.
+
+pub struct RepoWatchRuleContentDigest(/* private [u8; 32] */);
+impl RepoWatchRuleContentDigest {
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
 
 pub struct RepoWatchRule { /* private */ }
 impl RepoWatchRule {
@@ -7959,8 +8568,8 @@ impl RepoWatchRule {
         &self,
         declarations: &[RepoWatchTemplateContextDeclaration],
     ) -> Result<(), RepoWatchRuleValidationError>;
-    // accessors: id(), version(), matcher(), actions(), singleton_per(),
-    //   cooldown()
+    pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    // accessors: id(), version(), matcher(), actions(), singleton_per(), cooldown()
 }
 ```
 
@@ -8776,13 +9385,14 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session                                    | 22                   |
 | domain: session_delegation                         | 31                   |
 | domain: imported_session                           | 18                   |
-| domain: configuration                              | 23                   |
+| domain: configuration                              | 24                   |
+| domain: model_settings                             | 25                   |
 | domain: accepted_input                             | 5                    |
 | domain: delivery_request                           | 2                    |
 | domain: user_content                               | 4                    |
 | domain: submit_input                               | 32                   |
 | domain: queue_order                                | 5 (+1 free fn)       |
-| domain: repo_watch                                 | 47                   |
+| domain: repo_watch                                 | 49                   |
 | domain: turn_lifecycle                             | 10                   |
 | domain: turn_eligibility                           | 29                   |
 | domain: turn_attempt                               | 13                   |
@@ -8803,7 +9413,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: review_workflow                            | 83 (+1 free fn)      |
 | domain: session_metadata                           | 15                   |
 | domain: runner                                     | 63                   |
-| **signalbox-domain total**                         | **710 (+7 free fn)** |
+| **signalbox-domain total**                         | **738 (+7 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)    |
 | application: conversation_import                   | 12 (incl. 4 traits)  |
 | application: create_session                        | 8 (incl. 2 traits)   |
@@ -8815,6 +9425,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop                             | 23 (incl. 5 traits)  |
 | application: operator_failure                      | 2 (incl. 1 trait)    |
 | application: replace_session_defaults              | 5 (incl. 1 trait)    |
+| application: repo_watch                            | 33 (incl. 4 traits)  |
 | application: review_orchestration                  | 37 (incl. 2 traits)  |
 | application: review_workflow                       | 9 (incl. 2 traits)   |
 | application: session_metadata                      | 12 (incl. 4 traits)  |
@@ -8824,4 +9435,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate                    | 2                    |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)   |
-| **signalbox-application total**                    | **205**              |
+| **signalbox-application total**                    | **238**              |
