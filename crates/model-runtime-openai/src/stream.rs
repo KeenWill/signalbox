@@ -17,10 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
-    LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
-    ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence, SseRecord,
-    StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    validate_provider_json_nesting,
+    LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+    ProviderErrorEvidence, ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence,
+    SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolName, validate_provider_json_nesting,
 };
 
 use crate::response::{StopSequences, convert_usage, map_finish};
@@ -116,24 +116,30 @@ impl StreamDecoder {
             // with no HTTP status of its own it classifies by native code.
             let code = error.code_text();
             let kind = classify_error_envelope(0, code.as_deref(), error.error_type.as_deref());
-            if self.finish.is_some() && Self::names_no_classified_failure(kind) {
+            let native = error.into_native_facts();
+            if self.finish.is_some() && native == NativeErrorFacts::default() {
                 // The provider already reported why generation stopped, and
-                // this record names no failure the adapter can classify, so it
-                // supersedes that finish with nothing. Worse, it is then
-                // byte-identical to the refusal downgrade `execute` applies —
-                // an HTTP 200 exchange, `Unrecognized`, and no native material
-                // — which would let a genuine failure pass as a decoded
-                // refusal. A record that *does* classify still outranks the
-                // finish, because it carries information the finish does not.
+                // this record carries no native material at all, so it
+                // supersedes that finish with nothing a caller could act on.
+                // It is also byte-identical to the refusal downgrade `execute`
+                // applies — an HTTP 200 exchange, `Unrecognized`, and empty
+                // native facts — which would let a genuine failure pass as a
+                // decoded refusal.
+                //
+                // Keyed on the native material rather than the classification:
+                // an error whose type or code is merely *unfamiliar* still
+                // classifies `Unrecognized`, but it carries diagnostics worth
+                // keeping and cannot be confused with the downgrade, so it
+                // stays definitive provider evidence.
                 return self
-                    .violation("unclassifiable error record follows the reported finish_reason");
+                    .violation("contentless error record follows the reported finish_reason");
             }
             return StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
                 ProviderErrorEvidence {
                     exchange: self.exchange.clone(),
                     reported_model: self.reported_model.clone(),
                     kind,
-                    native: error.into_native_facts(),
+                    native,
                     usage: self.usage,
                 },
             )));
@@ -361,10 +367,11 @@ impl StreamDecoder {
                     // legitimately exhaust the output ceiling partway through a
                     // tool call, so `length` is then an observed fact about the
                     // response rather than a contradiction: the buffered
-                    // decoder keeps it in exactly that case (see
-                    // `ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material`
-                    // in `response.rs`), and a finish observed before a stream
-                    // loss must survive in `finish_reported`.
+                    // decoder keeps it in exactly that case, and a finish
+                    // observed before a stream loss must survive in
+                    // `finish_reported`. Both rules are stated in the
+                    // unrecognized-finish paragraph of the runtime-substrate
+                    // specification, which owns this behavior.
                     //
                     // It does change *which* violation this is, though. A tool
                     // call opened here may have emitted no observation at all —
@@ -445,29 +452,6 @@ impl StreamDecoder {
 
     fn violation(&self, detail: impl Into<String>) -> StreamStep {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
-    }
-
-    /// Whether an error classification names no failure at all, and so adds
-    /// nothing to an already-reported finish.
-    ///
-    /// Every variant is enumerated rather than compared for equality: this
-    /// decides whether a provider error outranks a reported finish, so a new
-    /// classification must fail to compile here and have its post-finish
-    /// precedence chosen deliberately.
-    fn names_no_classified_failure(kind: signalbox_model_runtime::ProviderErrorKind) -> bool {
-        use signalbox_model_runtime::ProviderErrorKind as Kind;
-        match kind {
-            Kind::Unrecognized => true,
-            Kind::CredentialRejected
-            | Kind::PermissionDenied
-            | Kind::InvalidRequest
-            | Kind::TargetNotFound
-            | Kind::RequestTooLarge
-            | Kind::RateLimited
-            | Kind::QuotaExhausted
-            | Kind::Overloaded
-            | Kind::ProviderInternal => false,
-        }
     }
 
     fn apply_reported_model<C: Clone>(
@@ -1046,6 +1030,16 @@ mod tests {
         }
     }
 
+    /// Whether any tool-argument fragment reached the sink. Named because the
+    /// case that uses it is *about* this fact being absent, and a search
+    /// spelled inline would put the discriminator in the test body.
+    #[track_caller]
+    fn tool_argument_delta_observed(observations: &[Observation<String>]) -> bool {
+        observations.iter().any(|observation| {
+            matches!(observation.fact, ObservationFact::ToolArgumentsDelta { .. })
+        })
+    }
+
     /// The `StreamProtocolViolation` cause carrying `detail`, spelled once so
     /// each case names only the detail it is about.
     fn protocol_violation(detail: &str) -> LossCause {
@@ -1126,10 +1120,7 @@ mod tests {
         ]);
 
         assert!(
-            !observations.iter().any(|observation| matches!(
-                observation.fact,
-                ObservationFact::ToolArgumentsDelta { .. }
-            )),
+            !tool_argument_delta_observed(&observations),
             "a tool call opened with no argument fragment emits no delta"
         );
         let loss = expect_boundary_loss(terminal);
@@ -1160,7 +1151,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unclassifiable_error_after_the_finish_is_protocol_loss() {
+    fn an_unfamiliar_but_described_error_after_the_finish_stays_definitive() {
+        // Classification alone is the wrong test: an error whose type is
+        // merely unfamiliar still classifies `Unrecognized`, but it carries
+        // diagnostics a caller wants and cannot be confused with the refusal
+        // downgrade, which fabricates no native material at all.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: {\"error\":{\"type\":\"teapot_error\",\"message\":\"short and stout\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("an error carrying native material stays definitive evidence");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unrecognized);
+        assert_eq!(error.native.message, Some("short and stout".to_string()));
+    }
+
+    #[test]
+    fn a_contentless_error_after_the_finish_is_protocol_loss() {
         // The sibling above keeps a *typed* error outranking the finish,
         // because it carries information the finish does not. One that names
         // no classifiable failure carries none, and would reach the caller
@@ -1179,7 +1191,7 @@ mod tests {
 
         assert_eq!(
             loss.cause,
-            protocol_violation("unclassifiable error record follows the reported finish_reason")
+            protocol_violation("contentless error record follows the reported finish_reason")
         );
     }
 

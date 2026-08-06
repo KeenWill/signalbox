@@ -262,14 +262,16 @@ contradiction, and the buffered decoder retains it in exactly that case — the
 two decoders must not disagree about the same response.
 
 Post-finish error records (OpenAI adapter): once its stream has reported why
-generation stopped, a later error record that classifies as `Unrecognized` is a
+generation stopped, a later error record carrying no native material at all is a
 protocol violation rather than definitive provider evidence. Why: it supersedes
-the reported finish with no classifiable failure, and it would otherwise reach
-the caller wearing exactly the shape the refusal downgrade above produces — an
-HTTP 200 exchange, `Unrecognized`, and the same absent or fabricated native
-material — leaving a genuine failure indistinguishable from a decoded refusal.
-An error record that *does* classify still outranks the reported finish, because
-it carries information the finish does not.
+the reported finish with nothing a caller could act on, and it would otherwise
+reach the caller wearing exactly the shape the refusal downgrade above produces
+— an HTTP 200 exchange, `Unrecognized`, and empty native facts — leaving a
+genuine failure indistinguishable from a decoded refusal. An error record
+carrying any native material still outranks the reported finish, even when its
+type or code is unfamiliar and it therefore classifies as `Unrecognized`: it
+carries diagnostics the finish does not, and cannot be mistaken for the
+downgrade.
 
 ## SSE framing
 

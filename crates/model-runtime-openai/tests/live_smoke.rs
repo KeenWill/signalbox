@@ -296,13 +296,15 @@ fn require_decoded_response(
     observations: &[Observation<String>],
 ) -> DecodedResponse {
     match evidence {
-        TerminalEvidence::Completed(completed) => DecodedResponse {
-            exchange: completed.exchange,
-            usage: completed.usage,
-            usage_is_final: true,
-        },
+        TerminalEvidence::Completed(completed) if !proposes_tool_calls(&completed.finish) => {
+            DecodedResponse {
+                exchange: completed.exchange,
+                usage: completed.usage,
+                usage_is_final: true,
+            }
+        }
         TerminalEvidence::ProviderError(error)
-            if error.kind == ProviderErrorKind::Unrecognized
+            if is_the_refusal_downgrade_kind(error.kind)
                 && error.exchange.http_status == Some(200)
                 && error.native == NativeErrorFacts::default()
                 && refusal_finish_observed(observations) =>
@@ -330,7 +332,8 @@ fn require_decoded_response(
         // is named rather than caught by a wildcard, so a future
         // `TerminalEvidence` variant fails to compile here instead of
         // silently inheriting this panic path.
-        rejected @ (TerminalEvidence::Refused(_)
+        rejected @ (TerminalEvidence::Completed(_)
+        | TerminalEvidence::Refused(_)
         | TerminalEvidence::ProviderError(_)
         | TerminalEvidence::CancellationConfirmed(_)
         | TerminalEvidence::ProvenUnsent(_)
@@ -400,6 +403,46 @@ fn stopped_at_the_output_ceiling(finish: Option<&FinishReason>) -> bool {
             | FinishReason::Refusal,
         )
         | None => false,
+    }
+}
+
+/// Whether a completion stopped to propose tool calls. This operation declares
+/// no tools, so that finish means the provider volunteered a capability nobody
+/// requested — the same anomaly the ceiling arm rejects on its own path, and
+/// just as unacceptable when the response is otherwise well formed.
+///
+/// `CompletionFinish` is enumerated rather than compared, so a new finish
+/// forces this acceptance policy to be reconsidered instead of defaulting to
+/// "fine".
+fn proposes_tool_calls(finish: &CompletionFinish) -> bool {
+    match finish {
+        CompletionFinish::ToolUse => true,
+        CompletionFinish::EndTurn
+        | CompletionFinish::MaxOutputTokens
+        | CompletionFinish::ContextWindowExceeded
+        | CompletionFinish::StopSequence { .. }
+        | CompletionFinish::Unrecognized { .. } => false,
+    }
+}
+
+/// Whether an error classification is the one the refusal downgrade produces.
+///
+/// `ProviderErrorKind` is enumerated rather than compared for equality: this
+/// gates whether a provider error is accepted at all on a merge-gating check,
+/// so a new classification must fail to compile here rather than silently
+/// inherit the rejection path.
+fn is_the_refusal_downgrade_kind(kind: ProviderErrorKind) -> bool {
+    match kind {
+        ProviderErrorKind::Unrecognized => true,
+        ProviderErrorKind::CredentialRejected
+        | ProviderErrorKind::PermissionDenied
+        | ProviderErrorKind::InvalidRequest
+        | ProviderErrorKind::TargetNotFound
+        | ProviderErrorKind::RequestTooLarge
+        | ProviderErrorKind::RateLimited
+        | ProviderErrorKind::QuotaExhausted
+        | ProviderErrorKind::Overloaded
+        | ProviderErrorKind::ProviderInternal => false,
     }
 }
 
@@ -850,6 +893,25 @@ mod require_decoded_response_tests {
         loss.exchange = exchange(500);
 
         let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_unsolicited_tool_use_completion_panics() {
+        // A well-formed completion is not automatically an acceptable one:
+        // this operation declares no tools, so stopping to propose them means
+        // the provider offered a capability nobody asked for.
+        let _ = require_decoded_response(
+            TerminalEvidence::Completed(CompletionEvidence {
+                exchange: exchange(200),
+                message_id: None,
+                reported_model: None,
+                finish: CompletionFinish::ToolUse,
+                content: Vec::new(),
+                usage: usage(),
+            }),
+            &[],
+        );
     }
 
     #[test]
