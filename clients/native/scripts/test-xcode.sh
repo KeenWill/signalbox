@@ -58,6 +58,15 @@ if [[ -n "${SIGNALBOX_NATIVE_SKIP_TESTING:-}" ]]; then
 	done
 fi
 
+# Opt-in so an ordinary local run pays nothing for a measurement it did not
+# ask for: instrumentation makes the build and the test pass slower, and the
+# only consumer is report-coverage.sh, which reads the result bundle this run
+# leaves behind. CI's Swift job sets this and then reports; nothing anywhere
+# compares the resulting percentage against a threshold.
+if [[ "${SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE:-NO}" == "YES" ]]; then
+	CMD+=(-enableCodeCoverage YES)
+fi
+
 CMD+=(test)
 
 mkdir -p "$(dirname "$RESULT_BUNDLE_PATH")"
