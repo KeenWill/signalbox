@@ -32,23 +32,25 @@ PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
 posture storage were verified through PR #420 (`agent/approval-judge-storage`);
 the approval-judge lifecycle transactions were verified through this PR
 (`agent/approval-judge-execution-support`); the approval-decision outbox is
-verified against this implementing change; and the session-placement event,
-current head, and creation transaction were verified through PR #415
-(`agent/scoped-visibility-creation`); the exact stop-command descendant scopes,
-delegated transcript origins, foreground-result closure, pre-outbox cascade
-locks, and typed delegation wake origins were verified through this PR
-(`agent/delegation`); the model-settings command fields, immutable evidence,
-snapshot projection, and typed outbox records were verified through this PR
-(`agent/model-settings-persistence`); the defaults-replacement pointer-lock
-admission is verified through this PR (`agent/model-settings-execution`). This
-page covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+verified against this implementing change; the session-placement event, current
+head, and creation transaction were verified through PR #415
+(`agent/scoped-visibility-creation`); and the exact stop-command descendant
+scopes, delegated transcript origins, foreground-result closure, pre-outbox
+cascade locks, typed delegation wake origins, and exact delegation update and
+wake obligations were verified through this PR
+(`agent/delegation-persistence-schema`); the model-settings command fields,
+immutable evidence, snapshot projection, and typed outbox records were verified
+through this PR (`agent/model-settings-persistence`); the defaults-replacement
+pointer-lock admission is verified through this PR
+(`agent/model-settings-execution`). This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant enforcement lives in
 INV-tagged tests; this page cites tags resolved through the generated
@@ -1121,17 +1123,19 @@ reads join the proof to its exact outcome event and expose the typed logical
 terminal state. This proposal is accepted with the implementing stack's merge.
 
 The scheduler sweep treats a deliverable foreground result, an undelivered
-background result, and a pending message inbox as durable hints. Result/message
-commit also writes a parent- or recipient-scoped `delegation_wake` outbox event
-in the same transaction. When a foreground wait is registered after its result
-and original wake already committed, the wait transaction writes a fresh result
-wake keyed by the awaiting request and ordered after the wait update. The
-ordinary nudge remains best effort and the durable predicate is authoritative
-after restart. A foreground hit does not try to activate a new turn: it locks
-and reconstitutes the exact `awaiting_child` tool batch, consumes the matching
-typed result into a `DelegationResult` semantic entry, and reopens the same turn
-under a fresh continued turn attempt. The tool loop then performs its ordinary
-serialized continuation from that checked frontier.
+background result, and a pending message inbox as durable hints. Every result
+and message commit also writes exactly one distinct parent- or recipient-scoped
+`delegation_wake` outbox event in the same transaction. A consumer may ignore
+the nudge while that session is already active. When a foreground wait is
+registered after its result and original wake already committed, the wait
+transaction writes a fresh result wake keyed by the awaiting request and ordered
+after the wait update. The ordinary nudge remains best effort and the durable
+predicate is authoritative after restart. A foreground hit does not try to
+activate a new turn: it locks and reconstitutes the exact `awaiting_child` tool
+batch, consumes the matching typed result into a `DelegationResult` semantic
+entry, and reopens the same turn under a fresh continued turn attempt. The tool
+loop then performs its ordinary serialized continuation from that checked
+frontier.
 
 ## Transactional outbox
 
@@ -1206,12 +1210,16 @@ the family.
 
 Every client-observable delegation transition appends its corresponding typed
 update record in the transaction that commits the relationship, wait,
-disposition, result, or message. A result or message that makes dormant work
-runnable appends a distinct `delegation_wake` record in that same transaction;
-the internal wake subject does not stand in for the client-visible result or
-message update. A guarded transition that changes no durable state appends no
-update. State without its promised update, or an update without its state, is
-therefore unrepresentable.
+disposition, result, or message. Spawn, waiting, other lifecycle, and result
+updates go only to the parent stream, and message updates only to the payload
+recipient. A stopped or cancelled lifecycle disposition caused by a parent
+cascade is emitted on both the parent and child streams. Every result and
+message appends exactly one distinct `delegation_wake` record for that same
+recipient in the same transaction, even when the recipient is already active and
+may ignore the nudge; the internal wake subject does not stand in for the
+client-visible result or message update. A guarded transition that changes no
+durable state appends no update. State without its promised update, or an update
+without its state, is therefore unrepresentable.
 
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` triggers on both headers allocate `last_sequence + 1` by
