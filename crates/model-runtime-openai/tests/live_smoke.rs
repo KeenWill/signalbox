@@ -10,15 +10,22 @@
 //! change actually breaks: `POST /v1/chat/completions` still accepts the
 //! request the adapter builds, and its response still decodes as a completed
 //! outcome, or as the adapter's downgraded-refusal `ProviderError` shape
-//! (buffered delivery cannot prove a refusal arrived only after the complete
-//! upload, so `OpenAiRuntime::execute` never returns a raw `Refused` — see
-//! `require_decoded_response` below), through the adapter's own types, with
-//! usage reported. It deliberately asserts nothing about answer quality.
+//! (this transport exposes no independent proof that a response arrived only
+//! after the complete request was sent, so `OpenAiRuntime::execute` never
+//! returns a raw `Refused` — see `require_decoded_response` below), through
+//! the adapter's own types, with usage reported. It deliberately asserts
+//! nothing about answer quality.
 //!
 //! This adapter is now wired into signalboxd alongside the Anthropic adapter
 //! (`agent/wire-openai-adapter`); this smoke still validates the crate
 //! directly through its own `ModelRuntime` implementation, not through the
 //! daemon composition root.
+//!
+//! Streamed delivery: the operation requests `DeliveryMode::Streamed`,
+//! matching the only delivery mode production ever selects
+//! (`RuntimeModelCallProvider` in `crates/model-provider-runtime` sets it
+//! unconditionally, generic over any adapter), so this smoke exercises the
+//! deployed SSE decoder rather than the buffered path production never uses.
 //!
 //! No prompt caching: this smoke sends one small, fixed prompt and nothing
 //! else. At that volume a cache write costs more than it could ever recoup,
@@ -38,6 +45,7 @@
 )]
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 #[cfg(test)]
 use signalbox_model_runtime::{
@@ -47,7 +55,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
-    CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts,
+    CredentialAccessFailure, CredentialReference, CredentialValue, DeliveryMode, ExchangeFacts,
     ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition, ModelOperation,
     ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, ReasoningLevel,
     RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
@@ -98,12 +106,25 @@ const MAX_OUTPUT_TOKENS: u32 = 512;
 /// capabilities before it will honor it.
 const REASONING_LEVEL: ReasoningLevel = ReasoningLevel::Minimal;
 
+/// Bounds the one exchange well inside the workflow job's 10-minute budget.
+/// `OpenAiConfig::new()`'s own default (10 minutes) leaves no headroom for
+/// dependency setup and compilation ahead of it in that same job: if the
+/// provider ever stalls near the adapter's default, GitHub's job timeout
+/// fires first and kills the job before the adapter's own typed timeout
+/// evidence can be produced. A trivial one-word exchange healthy enough to
+/// prove compatibility completes in seconds; two minutes is generous slack,
+/// not a tight bound.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
 /// Declares `MODEL`'s exact-target capabilities so the adapter's preparation
 /// gate honors the explicit `REASONING_LEVEL` control below (an operation
 /// carrying an explicit provider control validates against the exact target
-/// record; an absent record fails preparation with `UnknownTarget`).
+/// record; an absent record fails preparation with `UnknownTarget`), and
+/// applies this smoke's timeout policy on top of the adapter's documented
+/// defaults.
 fn openai_config() -> OpenAiConfig {
     let mut config = OpenAiConfig::new();
+    config.exchange_timeout = EXCHANGE_TIMEOUT;
     config.model_capabilities =
         ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
             ResolvedTarget::new(MODEL),
@@ -127,7 +148,7 @@ async fn the_openai_api_completes_one_exchange() {
 
     let mut settings = ModelSettings::new(MAX_OUTPUT_TOKENS);
     settings.reasoning_level = Some(REASONING_LEVEL);
-    let operation = ModelOperation::new(
+    let mut operation = ModelOperation::new(
         "openai-smoke".to_string(),
         credential_reference,
         RequestedTarget::new(MODEL),
@@ -135,6 +156,10 @@ async fn the_openai_api_completes_one_exchange() {
         vec![ConversationMessage::user_text(PROMPT)],
         settings,
     );
+    // Matches the only delivery mode production ever selects (see the module
+    // doc comment); a buffered exchange here would prove nothing about the
+    // deployed SSE decoder.
+    operation.delivery = DeliveryMode::Streamed;
 
     let prepared = require_prepared(
         runtime
@@ -204,14 +229,26 @@ struct DecodedResponse {
 /// its caller: a fully buffered request exposes no independent proof that the
 /// response arrived only after the complete upload, so `execute`
 /// unconditionally downgrades a decoded refusal into
-/// `ProviderError { kind: Unrecognized, .. }` from the same HTTP 200 exchange
-/// before returning (`without_unproven_refusal`, runtime.rs:616,628-646; the
-/// "Refusal downgrade" rule in `docs/spec/runtime-substrate.md`). Matching the
-/// dead `Refused` arm here would make this smoke fail a correctly decoded
-/// refusal, so this recognizes what the adapter actually returns instead. The
-/// `http_status == 200` guard keeps this arm from also swallowing a genuine
-/// unrecognized 4xx/5xx provider error, which the assertions below must still
-/// fail on.
+/// `ProviderError { kind: Unrecognized, native: { error_token: None, .. }, .. }`
+/// from the same HTTP 200 exchange before returning (`without_unproven_refusal`,
+/// runtime.rs:616,628-646; the "Refusal downgrade" rule in
+/// `docs/spec/runtime-substrate.md`). Matching the dead `Refused` arm here
+/// would make this smoke fail a correctly decoded refusal, so this recognizes
+/// what the adapter actually returns instead. The `http_status == 200` guard
+/// keeps this arm from also swallowing a genuine unrecognized 4xx/5xx
+/// provider error, which the assertions below must still fail on.
+///
+/// Unlike the Anthropic smoke, this guard cannot also require a stable
+/// `native.error_token` discriminator: `without_unproven_refusal` here always
+/// sets `error_token: None` (the refusal came from `finish_reason` or
+/// `message.refusal`, never a native error-envelope token — see runtime.rs),
+/// so there is no per-cause token to distinguish this shape from a
+/// hypothetical future HTTP-200 `Unrecognized` provider error reached some
+/// other way. Today `exchange()`'s branching only reaches `ProviderError` for
+/// a *non*-200 status through `finish_error`, so `kind == Unrecognized &&
+/// http_status == 200` is already unique to the refusal downgrade — the same
+/// structural fact the Anthropic guard also relies on, just without an
+/// available second signal to assert defensively alongside it.
 #[track_caller]
 fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
@@ -469,19 +506,19 @@ mod require_decoded_response_tests {
 mod assert_well_formed_response_tests {
     use super::*;
 
-    fn decoded(
-        http_status: u16,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-    ) -> DecodedResponse {
+    /// The well-formed baseline every test perturbs by exactly one named
+    /// field, per docs/agents/testing-style.md rule 4 — never three
+    /// same-typed positional knobs a reader must cross-reference against a
+    /// definition to tell apart.
+    fn well_formed() -> DecodedResponse {
         DecodedResponse {
             exchange: ExchangeFacts {
-                http_status: Some(http_status),
+                http_status: Some(200),
                 ..ExchangeFacts::default()
             },
             usage: TokenUsage {
-                input_tokens,
-                output_tokens,
+                input_tokens: Some(3),
+                output_tokens: Some(1),
                 ..TokenUsage::default()
             },
         }
@@ -489,26 +526,32 @@ mod assert_well_formed_response_tests {
 
     #[test]
     fn positive_usage_passes() {
-        assert_well_formed_response(&decoded(200, Some(3), Some(1)));
+        assert_well_formed_response(&well_formed());
     }
 
     #[test]
     fn present_zero_output_tokens_passes() {
         // The exact edge both accept paths can legitimately report: a
         // present-but-zero output count is not a positivity requirement.
-        assert_well_formed_response(&decoded(200, Some(3), Some(0)));
+        let mut decoded = well_formed();
+        decoded.usage.output_tokens = Some(0);
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
     #[should_panic(expected = "documented success status")]
     fn non_200_status_panics() {
-        assert_well_formed_response(&decoded(500, Some(3), Some(1)));
+        let mut decoded = well_formed();
+        decoded.exchange.http_status = Some(500);
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
     #[should_panic(expected = "input usage")]
     fn missing_input_tokens_panics() {
-        assert_well_formed_response(&decoded(200, None, Some(1)));
+        let mut decoded = well_formed();
+        decoded.usage.input_tokens = None;
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
@@ -516,13 +559,17 @@ mod assert_well_formed_response_tests {
     fn zero_input_tokens_panics() {
         // Unlike output, input tokens must be positive: a request that
         // reached the model always billed at least one.
-        assert_well_formed_response(&decoded(200, Some(0), Some(1)));
+        let mut decoded = well_formed();
+        decoded.usage.input_tokens = Some(0);
+        assert_well_formed_response(&decoded);
     }
 
     #[test]
     #[should_panic(expected = "output usage")]
     fn missing_output_tokens_panics() {
-        assert_well_formed_response(&decoded(200, Some(3), None));
+        let mut decoded = well_formed();
+        decoded.usage.output_tokens = None;
+        assert_well_formed_response(&decoded);
     }
 }
 
