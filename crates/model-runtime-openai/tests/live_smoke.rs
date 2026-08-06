@@ -316,7 +316,7 @@ fn require_decoded_response(
         TerminalEvidence::BoundaryLoss(loss)
             if loss.exchange.http_status == Some(200)
                 && loss.reported_model.is_some()
-                && !tool_activity_observed(observations)
+                && is_the_output_ceiling_violation(&loss.cause)
                 && stopped_at_the_output_ceiling(loss.finish_reported.as_ref()) =>
         {
             DecodedResponse {
@@ -403,28 +403,32 @@ fn stopped_at_the_output_ceiling(finish: Option<&FinishReason>) -> bool {
     }
 }
 
-/// Whether this execution observed any tool material. This smoke declares no
-/// tools, so any is anomalous — and it matters specifically for the ceiling
-/// shape: the decoder legitimately keeps a `length` finish when a *tool-bearing*
-/// request truncates mid-call (the buffered decoder does the same), so the
-/// evidence alone cannot say whether the truncation was the benign kind this
-/// smoke accepts or a provider volunteering tools nobody asked for. The
-/// observations can.
-fn tool_activity_observed(observations: &[Observation<String>]) -> bool {
-    observations
-        .iter()
-        .any(|observation| match &observation.fact {
-            ObservationFact::ToolArgumentsDelta { .. } | ObservationFact::ToolCallProposed(_) => {
-                true
-            }
-            ObservationFact::SendCommenced
-            | ObservationFact::ExchangeEstablished(_)
-            | ObservationFact::ProviderModelReported(_)
-            | ObservationFact::TextDelta { .. }
-            | ObservationFact::ThinkingDelta { .. }
-            | ObservationFact::UsageReported(_)
-            | ObservationFact::FinishReported(_) => false,
-        })
+/// The violation detail the decoder reports for a `length` finish on a stream
+/// that opened no tool call. This smoke declares no tools, so the decoder's
+/// tool-aware variant of the same violation means the provider volunteered
+/// something nobody asked for, and must not pass as an ordinary truncation.
+const OUTPUT_CEILING_VIOLATION: &str = "stream carries an unrecognized finish_reason";
+
+/// Whether this loss is the plain output-ceiling stop rather than some other
+/// protocol violation that reached the same evidence variant.
+///
+/// Keyed on the cause rather than the observations because neither of the two
+/// alternatives works: the finish token is legitimately retained when a
+/// tool-bearing request truncates mid-call, so it cannot separate the cases,
+/// and a tool call that opens without an argument fragment emits no
+/// observation at all. `LossCause` is enumerated rather than matched loosely,
+/// so a new cause forces this merge-gating decision to be reconsidered.
+fn is_the_output_ceiling_violation(cause: &LossCause) -> bool {
+    match cause {
+        LossCause::StreamProtocolViolation { detail } => detail == OUTPUT_CEILING_VIOLATION,
+        LossCause::CancellationRequested
+        | LossCause::TimedOut(_)
+        | LossCause::TransportFailed(_)
+        | LossCause::ResponseBodyLost(_)
+        | LossCause::ResponseUnintelligible { .. }
+        | LossCause::UnexpectedHttpStatus
+        | LossCause::StreamEndedWithoutTerminalMarker { .. } => false,
+    }
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
@@ -850,50 +854,29 @@ mod require_decoded_response_tests {
 
     #[test]
     #[should_panic(expected = "returned no decoded response")]
-    fn an_output_ceiling_finish_with_observed_tool_material_panics() {
+    fn an_output_ceiling_finish_after_a_tool_call_opened_panics() {
         // The decoder keeps `length` when a tool-bearing request truncates
-        // mid-call, so this shape is indistinguishable from the benign ceiling
-        // stop in the evidence alone. This smoke declares no tools, so tool
-        // material in the observations means the provider volunteered
-        // something nobody asked for, and that must not pass.
-        let observations = vec![Observation {
-            correlation: "call-1".to_string(),
-            fact: ObservationFact::ToolArgumentsDelta {
-                index: 0,
-                fragment: "{\"city\":".to_string(),
-            },
-        }];
+        // mid-call, so the finish token cannot separate that from the benign
+        // ceiling stop; it records the difference in the cause instead. This
+        // smoke declares no tools, so the tool-aware variant means the
+        // provider volunteered something nobody asked for.
+        let mut loss = stopped_at_ceiling();
+        loss.cause = LossCause::StreamProtocolViolation {
+            detail: "stream carries an unrecognized finish_reason after a tool call opened"
+                .to_string(),
+        };
 
-        let _ = require_decoded_response(
-            TerminalEvidence::BoundaryLoss(stopped_at_ceiling()),
-            &observations,
-        );
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 
     #[test]
-    fn an_output_ceiling_finish_with_ordinary_observations_is_accepted() {
-        // The negative half: text and usage observations are what a healthy
-        // truncated answer produces, and must not be read as tool material.
-        let observations = vec![
-            Observation {
-                correlation: "call-1".to_string(),
-                fact: ObservationFact::TextDelta {
-                    index: 0,
-                    text: "ready".to_string(),
-                },
-            },
-            Observation {
-                correlation: "call-1".to_string(),
-                fact: ObservationFact::UsageReported(usage()),
-            },
-        ];
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_output_ceiling_finish_from_another_loss_cause_panics() {
+        // Same status, model, and token, but the stream died some other way.
+        let mut loss = stopped_at_ceiling();
+        loss.cause = LossCause::UnexpectedHttpStatus;
 
-        let decoded = require_decoded_response(
-            TerminalEvidence::BoundaryLoss(stopped_at_ceiling()),
-            &observations,
-        );
-
-        assert!(!decoded.usage_is_final);
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
     }
 
     #[test]

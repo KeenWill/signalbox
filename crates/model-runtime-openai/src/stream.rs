@@ -116,9 +116,7 @@ impl StreamDecoder {
             // with no HTTP status of its own it classifies by native code.
             let code = error.code_text();
             let kind = classify_error_envelope(0, code.as_deref(), error.error_type.as_deref());
-            if self.finish.is_some()
-                && kind == signalbox_model_runtime::ProviderErrorKind::Unrecognized
-            {
+            if self.finish.is_some() && Self::names_no_classified_failure(kind) {
                 // The provider already reported why generation stopped, and
                 // this record names no failure the adapter can classify, so it
                 // supersedes that finish with nothing. Worse, it is then
@@ -367,7 +365,22 @@ impl StreamDecoder {
                     // `ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material`
                     // in `response.rs`), and a finish observed before a stream
                     // loss must survive in `finish_reported`.
+                    //
+                    // It does change *which* violation this is, though. A tool
+                    // call opened here may have emitted no observation at all —
+                    // `ToolArgumentsDelta` needs a non-empty fragment and
+                    // `ToolCallProposed` needs `finalize_tools`, which this
+                    // return precedes — so the cause is the only place that
+                    // fact can survive for a caller who cares whether tools
+                    // were involved.
+                    let opened_tool_calls =
+                        !self.tool_builders.is_empty() || !self.completed_tools.is_empty();
                     self.finish = Some(finish);
+                    if opened_tool_calls {
+                        return self.violation(
+                            "stream carries an unrecognized finish_reason after a tool call opened",
+                        );
+                    }
                     return self.violation("stream carries an unrecognized finish_reason");
                 }
                 if !self.refusal_text.is_empty() {
@@ -432,6 +445,29 @@ impl StreamDecoder {
 
     fn violation(&self, detail: impl Into<String>) -> StreamStep {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
+    }
+
+    /// Whether an error classification names no failure at all, and so adds
+    /// nothing to an already-reported finish.
+    ///
+    /// Every variant is enumerated rather than compared for equality: this
+    /// decides whether a provider error outranks a reported finish, so a new
+    /// classification must fail to compile here and have its post-finish
+    /// precedence chosen deliberately.
+    fn names_no_classified_failure(kind: signalbox_model_runtime::ProviderErrorKind) -> bool {
+        use signalbox_model_runtime::ProviderErrorKind as Kind;
+        match kind {
+            Kind::Unrecognized => true,
+            Kind::CredentialRejected
+            | Kind::PermissionDenied
+            | Kind::InvalidRequest
+            | Kind::TargetNotFound
+            | Kind::RequestTooLarge
+            | Kind::RateLimited
+            | Kind::QuotaExhausted
+            | Kind::Overloaded
+            | Kind::ProviderInternal => false,
+        }
     }
 
     fn apply_reported_model<C: Clone>(
@@ -1063,6 +1099,45 @@ mod tests {
             Some(FinishReason::Unrecognized {
                 provider_token: "length".to_string()
             })
+        );
+        // The token survives, but the cause records that tools were involved —
+        // the only channel that fact has, since neither observation fires on
+        // this path.
+        assert_eq!(
+            loss.cause,
+            protocol_violation(
+                "stream carries an unrecognized finish_reason after a tool call opened"
+            )
+        );
+    }
+
+    #[test]
+    fn a_tool_call_start_without_arguments_still_marks_the_ceiling_loss() {
+        // The residual the observation-based check cannot see: a tool call
+        // that opens with an id and name but no argument fragment emits
+        // nothing, so only the cause can carry it.
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"probe\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        assert!(
+            !observations.iter().any(|observation| matches!(
+                observation.fact,
+                ObservationFact::ToolArgumentsDelta { .. }
+            )),
+            "a tool call opened with no argument fragment emits no delta"
+        );
+        let loss = expect_boundary_loss(terminal);
+        assert_eq!(
+            loss.cause,
+            protocol_violation(
+                "stream carries an unrecognized finish_reason after a tool call opened"
+            )
         );
     }
 
