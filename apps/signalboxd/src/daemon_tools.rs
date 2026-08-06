@@ -1774,7 +1774,7 @@ mod tests {
         assert_eq!(called["result"]["content"][0]["type"], "text");
         assert_eq!(
             called["result"]["content"][0]["text"],
-            signalbox_model_runtime_claude_cli::CLAUDE_MCP_TOOL_ACKNOWLEDGEMENT
+            "Signalbox recorded this tool proposal for external execution."
         );
         assert!(!target.exists());
     }

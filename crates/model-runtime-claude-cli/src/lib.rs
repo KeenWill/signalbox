@@ -21,7 +21,6 @@ mod status;
 mod translate;
 mod wire;
 
-pub use bridge::TOOL_ACKNOWLEDGEMENT as CLAUDE_MCP_TOOL_ACKNOWLEDGEMENT;
 pub use config::ClaudeCliConfig;
 pub use runtime::{
     ClaudeCliConstructionError, ClaudeCliPreparedRequest, ClaudeCliRuntime,
