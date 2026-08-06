@@ -316,6 +316,7 @@ fn require_decoded_response(
         TerminalEvidence::BoundaryLoss(loss)
             if loss.exchange.http_status == Some(200)
                 && loss.reported_model.is_some()
+                && !tool_activity_observed(observations)
                 && stopped_at_the_output_ceiling(loss.finish_reported.as_ref()) =>
         {
             DecodedResponse {
@@ -381,12 +382,49 @@ const OUTPUT_CEILING_FINISH_TOKEN: &str = "length";
 
 /// Whether the stream ended because generation reached an output bound rather
 /// than because the protocol broke.
+///
+/// `FinishReason` is enumerated rather than wildcarded: this helper gates a
+/// merge-gating check, so a new finish variant must fail to compile here and be
+/// considered instead of silently classifying as "not the ceiling".
 fn stopped_at_the_output_ceiling(finish: Option<&FinishReason>) -> bool {
-    matches!(
-        finish,
-        Some(FinishReason::Unrecognized { provider_token })
-            if provider_token == OUTPUT_CEILING_FINISH_TOKEN
-    )
+    match finish {
+        Some(FinishReason::Unrecognized { provider_token }) => {
+            provider_token == OUTPUT_CEILING_FINISH_TOKEN
+        }
+        Some(
+            FinishReason::EndTurn
+            | FinishReason::MaxOutputTokens
+            | FinishReason::ContextWindowExceeded
+            | FinishReason::StopSequence { .. }
+            | FinishReason::ToolUse
+            | FinishReason::Refusal,
+        )
+        | None => false,
+    }
+}
+
+/// Whether this execution observed any tool material. This smoke declares no
+/// tools, so any is anomalous — and it matters specifically for the ceiling
+/// shape: the decoder legitimately keeps a `length` finish when a *tool-bearing*
+/// request truncates mid-call (the buffered decoder does the same), so the
+/// evidence alone cannot say whether the truncation was the benign kind this
+/// smoke accepts or a provider volunteering tools nobody asked for. The
+/// observations can.
+fn tool_activity_observed(observations: &[Observation<String>]) -> bool {
+    observations
+        .iter()
+        .any(|observation| match &observation.fact {
+            ObservationFact::ToolArgumentsDelta { .. } | ObservationFact::ToolCallProposed(_) => {
+                true
+            }
+            ObservationFact::SendCommenced
+            | ObservationFact::ExchangeEstablished(_)
+            | ObservationFact::ProviderModelReported(_)
+            | ObservationFact::TextDelta { .. }
+            | ObservationFact::ThinkingDelta { .. }
+            | ObservationFact::UsageReported(_)
+            | ObservationFact::FinishReported(_) => false,
+        })
 }
 
 /// Asserts a decoded response is well-formed under the compatibility-smoke
@@ -808,6 +846,54 @@ mod require_decoded_response_tests {
         loss.exchange = exchange(500);
 
         let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(loss), &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn an_output_ceiling_finish_with_observed_tool_material_panics() {
+        // The decoder keeps `length` when a tool-bearing request truncates
+        // mid-call, so this shape is indistinguishable from the benign ceiling
+        // stop in the evidence alone. This smoke declares no tools, so tool
+        // material in the observations means the provider volunteered
+        // something nobody asked for, and that must not pass.
+        let observations = vec![Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: "{\"city\":".to_string(),
+            },
+        }];
+
+        let _ = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(stopped_at_ceiling()),
+            &observations,
+        );
+    }
+
+    #[test]
+    fn an_output_ceiling_finish_with_ordinary_observations_is_accepted() {
+        // The negative half: text and usage observations are what a healthy
+        // truncated answer produces, and must not be read as tool material.
+        let observations = vec![
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: "ready".to_string(),
+                },
+            },
+            Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::UsageReported(usage()),
+            },
+        ];
+
+        let decoded = require_decoded_response(
+            TerminalEvidence::BoundaryLoss(stopped_at_ceiling()),
+            &observations,
+        );
+
+        assert!(!decoded.usage_is_final);
     }
 
     #[test]

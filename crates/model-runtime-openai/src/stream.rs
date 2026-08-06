@@ -358,16 +358,15 @@ impl StreamDecoder {
                     if self.reported_model.is_none() {
                         return self.violation("stream terminated without a model identity");
                     }
-                    if !self.tool_builders.is_empty() || !self.completed_tools.is_empty() {
-                        // The consistency check below, and `finalize_tools`,
-                        // are both downstream of this return, so accumulated
-                        // tool state would otherwise go unexamined. Any tool
-                        // content contradicts a finish that is not `tool_calls`
-                        // exactly as it does on the recognized path.
-                        return self.violation(
-                            "tool-call content does not match the reported finish_reason",
-                        );
-                    }
+                    // Accumulated tool state is deliberately *not* a reason to
+                    // withhold the finish. A request carrying tools can
+                    // legitimately exhaust the output ceiling partway through a
+                    // tool call, so `length` is then an observed fact about the
+                    // response rather than a contradiction: the buffered
+                    // decoder keeps it in exactly that case (see
+                    // `ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material`
+                    // in `response.rs`), and a finish observed before a stream
+                    // loss must survive in `finish_reported`.
                     self.finish = Some(finish);
                     return self.violation("stream carries an unrecognized finish_reason");
                 }
@@ -875,17 +874,12 @@ mod tests {
 
         let loss = expect_boundary_loss(terminal);
 
-        // Still boundary loss, as this case has always required. The reported
-        // finish is now deliberately withheld: accumulated tool content
-        // contradicts this finish, and a caller that can see the token cannot
-        // tell this malformed stream from a well-formed response that merely
-        // stopped at an output bound. Reporting the contradiction instead, and
-        // nothing else, is what keeps those two distinguishable.
         assert_eq!(
-            loss.cause,
-            protocol_violation("tool-call content does not match the reported finish_reason")
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string(),
+            })
         );
-        assert_eq!(loss.finish_reported, None);
     }
 
     #[test]
@@ -1046,10 +1040,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognized_finish_with_accumulated_tool_state_reports_the_mismatch() {
-        // `finalize_tools` and the finish/tool consistency check are both
-        // downstream of that early return, so tool content arriving under a
-        // finish this smoke never asks for must be rejected here instead.
+    fn a_truncated_tool_call_keeps_its_length_finish_like_the_buffered_path() {
+        // Exhausting the output ceiling partway through a tool call is a real
+        // outcome for a request that carries tools, not a contradiction, so
+        // the observed token survives. This is the streamed twin of
+        // `response.rs`'s
+        // `ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material`;
+        // the two decoders must not disagree about the same response.
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
@@ -1062,10 +1059,11 @@ mod tests {
         let loss = expect_boundary_loss(terminal);
 
         assert_eq!(
-            loss.cause,
-            protocol_violation("tool-call content does not match the reported finish_reason")
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string()
+            })
         );
-        assert_eq!(loss.finish_reported, None);
     }
 
     #[test]

@@ -251,11 +251,15 @@ so the adapter fails toward known failure rather than inventing evidence.
 
 Unrecognized finish reasons end the stream before the end-of-stream envelope
 checks would otherwise run, so that branch applies the two decidable ones —
-assistant role established, model identity reported, and no accumulated
-tool-call content — before recording the finish. A stream failing either reports
-the envelope defect and carries no `finish_reported`. Why: without that, a
-caller cannot distinguish a well-formed response that stopped at an output bound
-from an envelope that was never valid and also reported one.
+assistant role established and model identity reported — before recording the
+finish. A stream failing either reports the envelope defect and carries no
+`finish_reported`. Why: without that, a caller cannot distinguish a well-formed
+response that stopped at an output bound from an envelope that was never valid
+and also reported one. Accumulated tool content is deliberately not among those
+checks: a tool-bearing request can legitimately exhaust the output ceiling
+partway through a call, so the token is an observed fact rather than a
+contradiction, and the buffered decoder retains it in exactly that case — the
+two decoders must not disagree about the same response.
 
 Post-finish error records: once a stream has reported why generation stopped, a
 later error record that classifies as `Unrecognized` is a protocol violation
