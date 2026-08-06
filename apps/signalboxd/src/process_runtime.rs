@@ -2442,6 +2442,9 @@ fn process_delegation_rejection(
                     WireDelegationToolRequestState::AwaitingApproval
                 }
                 DelegationRequestExecutionState::Denied => WireDelegationToolRequestState::Denied,
+                DelegationRequestExecutionState::Approved => {
+                    WireDelegationToolRequestState::Approved
+                }
                 DelegationRequestExecutionState::Prepared => {
                     WireDelegationToolRequestState::Prepared
                 }
@@ -2571,7 +2574,7 @@ where
             signalbox_persistence::session_delegation::SessionDelegationRepositoryError::CommitAmbiguous(
                 _,
             ),
-        ) => unavailable_protocol_error(InternalDiagnostic::SessionDelegationCommitAmbiguous),
+        ) => ProtocolError::mutation_commit_ambiguous(),
         PostgresSessionDelegationPortError::Repository(
             signalbox_persistence::session_delegation::SessionDelegationRepositoryError::ToolLoop(
                 error,
@@ -11933,7 +11936,6 @@ enum InternalDiagnostic {
     SessionDefaultsCommandKindMismatch,
     SessionDefaultsCorruption,
     SessionDelegationDatabase,
-    SessionDelegationCommitAmbiguous,
     SessionDelegationCorruption,
     SessionDelegationContract,
     SystemPromptMemberMissing,
@@ -11965,8 +11967,7 @@ impl InternalDiagnostic {
             Self::ImportedSessionCommitAmbiguous
             | Self::SessionCreationCommitAmbiguous
             | Self::SessionMetadataCommitAmbiguous
-            | Self::SessionDefaultsCommitAmbiguous
-            | Self::SessionDelegationCommitAmbiguous => OperatorFailureClass::Infrastructure {
+            | Self::SessionDefaultsCommitAmbiguous => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
             },
             Self::ConversationImportAllocationFailure => OperatorFailureClass::Infrastructure {
@@ -12071,7 +12072,6 @@ impl InternalDiagnostic {
             Self::SessionDefaultsCommandKindMismatch => "session_defaults_command_kind_mismatch",
             Self::SessionDefaultsCorruption => "session_defaults_corruption",
             Self::SessionDelegationDatabase => "session_delegation_database",
-            Self::SessionDelegationCommitAmbiguous => "session_delegation_commit_ambiguous",
             Self::SessionDelegationCorruption => "session_delegation_corruption",
             Self::SessionDelegationContract => "session_delegation_contract",
             Self::SystemPromptMemberMissing => "system_prompt_member_missing",
@@ -13634,8 +13634,8 @@ mod tests {
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
         wire_model_call_state, wire_tool_decision, wire_turn_state, wire_uuid, write_content,
-        write_context_compaction_repository_error, write_snapshot_spool_error,
-        write_transcript_entry,
+        write_context_compaction_repository_error, write_delegation_port_error,
+        write_snapshot_spool_error, write_transcript_entry,
     };
 
     macro_rules! assert_import_failure_ordinal {
@@ -14263,6 +14263,37 @@ mod tests {
             decode_server_line(&encoded)?.message(),
             ServerMessage::Error {
                 code: ErrorCode::Unavailable,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_commit_ambiguity_uses_the_mutation_recovery_code()
+    -> Result<(), Box<dyn Error>> {
+        let (mut writer, mut reader) = duplex(1_024);
+
+        write_delegation_port_error(
+            &mut writer,
+            ProtocolVersion::One,
+            RequestId::try_new(13)?,
+            CanonicalUuid::from_uuid(Uuid::from_u128(14)),
+            crate::session_delegation::PostgresSessionDelegationPortError::Repository(
+                signalbox_persistence::session_delegation::SessionDelegationRepositoryError::CommitAmbiguous(
+                    sqlx::Error::PoolClosed,
+                ),
+            ),
+        )
+        .await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        assert!(matches!(
+            decode_server_line(&encoded)?.message(),
+            ServerMessage::Error {
+                code: ErrorCode::CommitAmbiguous,
                 ..
             }
         ));
@@ -16296,6 +16327,17 @@ mod tests {
             request_id,
             peer_id,
         );
+        let approved = process_delegation_rejection(
+            ProcessDelegationRequestRejection::Operation(
+                DelegationOperationRejection::StaleDispatch {
+                    state: DelegationRequestExecutionState::Approved,
+                },
+            ),
+            session_id,
+            turn_id,
+            request_id,
+            peer_id,
+        );
         let prepared = process_delegation_rejection(
             ProcessDelegationRequestRejection::Operation(
                 DelegationOperationRejection::StaleDispatch {
@@ -16365,6 +16407,13 @@ mod tests {
             ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
                 tool_request_id: request_id,
                 state: WireDelegationToolRequestState::Denied,
+            })
+        );
+        assert_eq!(
+            approved.detail,
+            ErrorDetail::rejected(RejectionDetail::DelegationToolRequestNotExecutable {
+                tool_request_id: request_id,
+                state: WireDelegationToolRequestState::Approved,
             })
         );
         assert_eq!(

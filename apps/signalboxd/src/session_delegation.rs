@@ -9,8 +9,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::session_delegation::{
     DelegationOperationRejection, ProcessDelegationOutcome, ProcessDelegationRequestRejection,
-    RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, SessionDelegationRepository,
-    SessionDelegationRepositoryError,
+    RecordDelegationMessageOutcome, RecordDelegationWaitOutcome, RecordedDelegationMessage,
+    SessionDelegationRepository, SessionDelegationRepositoryError,
 };
 use signalbox_tools_sessions::{
     AwaitSessionPortOutcome, AwaitSessionReceipt, DeliveredChildResult, SessionDelegationPort,
@@ -120,13 +120,8 @@ impl PostgresSessionDelegationPort {
                 .await?;
             match outcome {
                 ProcessDelegationOutcome::Applied((logical, recorded)) => {
-                    let receipt = SessionMessageReceipt::from_relation_event(
-                        &logical,
-                        recorded.relation(),
-                        recorded.event(),
-                        recorded.delivery_sequence(),
-                    )
-                    .ok_or(PostgresSessionDelegationPortError::Contract)?;
+                    let receipt = SessionMessageReceipt::from_delivery(&logical, recorded.as_ref())
+                        .ok_or(PostgresSessionDelegationPortError::Contract)?;
                     return Ok(ProcessDelegationOutcome::Applied(receipt));
                 }
                 ProcessDelegationOutcome::Rejected(
@@ -245,6 +240,7 @@ impl From<SessionDelegationRepositoryError> for PostgresSessionDelegationPortErr
 
 impl SessionDelegationPort for PostgresSessionDelegationPort {
     type Error = PostgresSessionDelegationPortError;
+    type MessageDelivery = RecordedDelegationMessage;
 
     async fn spawn_session(
         &mut self,
@@ -276,7 +272,7 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
         &mut self,
         request: DelegationMessageRequest,
         dispatch: ToolDispatchAuthority,
-    ) -> Result<SessionDelegationPortOutcome<SessionMessageReceipt>, Self::Error> {
+    ) -> Result<SessionDelegationPortOutcome<Self::MessageDelivery>, Self::Error> {
         loop {
             let message = DelegationMessageId::from_uuid(uuid::Uuid::now_v7());
             let first = self
@@ -290,14 +286,7 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
             .await?
             {
                 RecordDelegationMessageOutcome::Recorded(recorded) => {
-                    let receipt = SessionMessageReceipt::from_relation_event(
-                        &request,
-                        recorded.relation(),
-                        recorded.event(),
-                        recorded.delivery_sequence(),
-                    )
-                    .ok_or(PostgresSessionDelegationPortError::Contract)?;
-                    return Ok(SessionDelegationPortOutcome::Applied(receipt));
+                    return Ok(SessionDelegationPortOutcome::Applied(*recorded));
                 }
                 RecordDelegationMessageOutcome::Rejected(
                     DelegationOperationRejection::MessageIdentityCollision,
@@ -312,24 +301,25 @@ impl SessionDelegationPort for PostgresSessionDelegationPort {
 
 async fn reconcile_commit_ambiguous<T, Retry, RetryFuture>(
     first: Result<T, SessionDelegationRepositoryError>,
-    retry: Retry,
+    mut retry: Retry,
 ) -> Result<T, SessionDelegationRepositoryError>
 where
-    Retry: FnOnce() -> RetryFuture,
+    Retry: FnMut() -> RetryFuture,
     RetryFuture: Future<Output = Result<T, SessionDelegationRepositoryError>>,
 {
-    if matches!(
-        first,
+    let mut result = first;
+    while matches!(
+        result,
         Err(SessionDelegationRepositoryError::CommitAmbiguous(_))
     ) {
-        retry().await
-    } else {
-        first
+        result = retry().await;
     }
+    result
 }
 
 impl SessionDelegationPort for DaemonSessionDelegationPort {
     type Error = PostgresSessionDelegationPortError;
+    type MessageDelivery = RecordedDelegationMessage;
 
     async fn spawn_session(
         &mut self,
@@ -357,7 +347,7 @@ impl SessionDelegationPort for DaemonSessionDelegationPort {
         &mut self,
         request: DelegationMessageRequest,
         dispatch: ToolDispatchAuthority,
-    ) -> Result<SessionDelegationPortOutcome<SessionMessageReceipt>, Self::Error> {
+    ) -> Result<SessionDelegationPortOutcome<Self::MessageDelivery>, Self::Error> {
         match self {
             Self::Postgres(port) => port.send_session_message(request, dispatch).await,
             Self::Unavailable => Ok(SessionDelegationPortOutcome::Rejected),
@@ -371,11 +361,24 @@ mod tests {
 
     #[tokio::test]
     async fn commit_ambiguous_delegation_effect_retries_its_exact_replay() {
+        let mut retries = [
+            Err(SessionDelegationRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed,
+            )),
+            Ok(7),
+        ]
+        .into_iter();
         let reconciled = reconcile_commit_ambiguous::<u8, _, _>(
             Err(SessionDelegationRepositoryError::CommitAmbiguous(
                 sqlx::Error::PoolClosed,
             )),
-            || std::future::ready(Ok(7)),
+            || {
+                std::future::ready(
+                    retries
+                        .next()
+                        .expect("the fixture supplies each ambiguous replay"),
+                )
+            },
         )
         .await
         .expect("the immutable replay resolves the ambiguous commit");

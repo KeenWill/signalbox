@@ -5241,6 +5241,8 @@ pub enum DelegationToolRequestState {
     AwaitingApproval,
     /// Approval was denied.
     Denied,
+    /// Approval succeeded, but proposal-ordered execution has not prepared an attempt.
+    Approved,
     /// A physical attempt exists but has not been authorized for execution.
     Prepared,
     /// The logical request already closed without executable work.
@@ -12487,6 +12489,7 @@ mod tests {
         const NOT_EXECUTABLE_FRAME_REQUEST: u64 = 41;
         const ORDINAL_EXHAUSTED_FRAME_REQUEST: u64 = 42;
         const PREPARED_FRAME_REQUEST: u64 = 43;
+        const APPROVED_FRAME_REQUEST: u64 = 44;
         let ids = delegation_wire_identities();
 
         assert_server_message_round_trip(
@@ -12516,6 +12519,20 @@ mod tests {
                 ),
             },
             r#"{"type":"error","code":"rejected","message":"delegation request is not executable","detail":{"type":"delegation_tool_request_not_executable","tool_request_id":"00000000-0000-0000-0000-000000000007","state":"prepared"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(APPROVED_FRAME_REQUEST)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("delegation request is not executable"),
+                detail: ErrorDetail::rejected(
+                    RejectionDetail::DelegationToolRequestNotExecutable {
+                        tool_request_id: ids.await_request,
+                        state: DelegationToolRequestState::Approved,
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"rejected","message":"delegation request is not executable","detail":{"type":"delegation_tool_request_not_executable","tool_request_id":"00000000-0000-0000-0000-000000000004","state":"approved"}}"#,
         )?;
         assert_server_message_round_trip(
             request(ORDINAL_EXHAUSTED_FRAME_REQUEST)?,

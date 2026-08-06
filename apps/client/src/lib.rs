@@ -1143,7 +1143,9 @@ async fn session_delegation(
                     child_session_id,
                     relationship: recorded_relationship,
                 } => {
-                    if recorded_request == tool_request_id && recorded_relationship == relationship
+                    if recorded_request == tool_request_id
+                        && child_session_id != session_id
+                        && recorded_relationship == relationship
                     {
                         output.session_spawned(tool_request_id, child_session_id, relationship)?;
                         Ok(())
@@ -1217,6 +1219,7 @@ async fn session_delegation(
                     if mode == DelegationWaitMode::Foreground
                         && recorded_request == tool_request_id
                         && recorded_child == child_session_id
+                        && delegation_provenance_matches(session_id, child_session_id, provenance)
                     {
                         output.child_result(
                             tool_request_id,
@@ -1304,6 +1307,24 @@ async fn session_delegation(
                 }
             }
         }
+    }
+}
+
+fn delegation_provenance_matches(
+    parent: CanonicalUuid,
+    child: CanonicalUuid,
+    provenance: DelegationProvenance,
+) -> bool {
+    match provenance {
+        DelegationProvenance::ChildTurn {
+            child_session_id, ..
+        } => child_session_id == child,
+        DelegationProvenance::ParentTurnCommand {
+            parent_session_id, ..
+        }
+        | DelegationProvenance::ParentGoalCommand {
+            parent_session_id, ..
+        } => parent_session_id == parent,
     }
 }
 
@@ -7991,214 +8012,331 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn delegation_verbs_encode_exact_requests_and_render_typed_receipts()
-    -> Result<(), Box<dyn Error>> {
-        const SESSION: &str = "00000000-0000-0000-0000-000000000001";
-        const TURN: &str = "00000000-0000-0000-0000-000000000002";
-        const SPAWN_REQUEST: &str = "00000000-0000-0000-0000-000000000003";
-        const CHILD: &str = "00000000-0000-0000-0000-000000000004";
-        const AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000005";
-        const CHILD_TURN: &str = "00000000-0000-0000-0000-000000000006";
-        const MESSAGE_REQUEST: &str = "00000000-0000-0000-0000-000000000007";
-        const MESSAGE: &str = "00000000-0000-0000-0000-000000000008";
-        const BACKGROUND_AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000009";
+    const DELEGATION_SESSION: &str = "00000000-0000-0000-0000-000000000001";
+    const DELEGATION_TURN: &str = "00000000-0000-0000-0000-000000000002";
+    const DELEGATION_SPAWN_REQUEST: &str = "00000000-0000-0000-0000-000000000003";
+    const DELEGATION_CHILD: &str = "00000000-0000-0000-0000-000000000004";
+    const DELEGATION_AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000005";
+    const DELEGATION_CHILD_TURN: &str = "00000000-0000-0000-0000-000000000006";
+    const DELEGATION_MESSAGE_REQUEST: &str = "00000000-0000-0000-0000-000000000007";
+    const DELEGATION_MESSAGE: &str = "00000000-0000-0000-0000-000000000008";
+    const DELEGATION_BACKGROUND_AWAIT_REQUEST: &str = "00000000-0000-0000-0000-000000000009";
+    const DELEGATION_FOREIGN_PARENT: &str = "00000000-0000-0000-0000-00000000000a";
+
+    async fn run_delegation_verb(
+        command: &[&str],
+        expected: ClientRequest,
+        response: ServerMessage,
+    ) -> Result<(ExitCode, String, String), Box<dyn Error>> {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let listener = UnixListener::bind(&socket)?;
-        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(SESSION)?);
-        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(TURN)?);
-        let spawn_request_id = CanonicalUuid::from_uuid(Uuid::parse_str(SPAWN_REQUEST)?);
-        let child_session_id = CanonicalUuid::from_uuid(Uuid::parse_str(CHILD)?);
-        let await_request_id = CanonicalUuid::from_uuid(Uuid::parse_str(AWAIT_REQUEST)?);
-        let child_turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(CHILD_TURN)?);
-        let message_request_id = CanonicalUuid::from_uuid(Uuid::parse_str(MESSAGE_REQUEST)?);
-        let message_id = CanonicalUuid::from_uuid(Uuid::parse_str(MESSAGE)?);
-        let background_await_request_id =
-            CanonicalUuid::from_uuid(Uuid::parse_str(BACKGROUND_AWAIT_REQUEST)?);
+        let server =
+            tokio::spawn(
+                async move { accept_request_and_reply(&listener, &expected, response).await },
+            );
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            client_arguments(&socket, command),
+            None,
+            &mut input,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        server.await??;
+        Ok((exit, String::from_utf8(stdout)?, String::from_utf8(stderr)?))
+    }
+
+    #[tokio::test]
+    async fn delegation_spawn_encodes_request_and_renders_receipt() -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
+        let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
         let relationship = DelegationPolicy::Bound {
             on_parent_stopped: BoundChildAction::Stop,
             on_parent_cancelled: BoundChildAction::Cancel,
         };
-        let server = tokio::spawn(async move {
-            accept_request_and_reply(
-                &listener,
-                &ClientRequest::SpawnSession {
-                    session_id,
-                    turn_id,
-                    tool_request_id: spawn_request_id,
-                    task: String::from("inspect logs"),
-                    relationship,
-                },
-                ServerMessage::SessionSpawned {
-                    tool_request_id: spawn_request_id,
-                    child_session_id,
-                    relationship,
-                },
-            )
-            .await?;
-            accept_request_and_reply(
-                &listener,
-                &ClientRequest::AwaitSession {
-                    session_id,
-                    turn_id,
-                    tool_request_id: await_request_id,
-                    child_session_id,
-                    mode: DelegationWaitMode::Foreground,
-                },
-                ServerMessage::ChildResult {
-                    await_request_id,
-                    spawning_request_id: spawn_request_id,
-                    child_session_id,
-                    outcome: DelegationOutcome::Returned,
-                    content: Some(String::from("done\nnow")),
-                    reason: DelegationReason::ChildCompleted,
-                    provenance: DelegationProvenance::ChildTurn {
-                        child_session_id,
-                        child_turn_id,
-                    },
-                },
-            )
-            .await?;
-            accept_request_and_reply(
-                &listener,
-                &ClientRequest::AwaitSession {
-                    session_id,
-                    turn_id,
-                    tool_request_id: background_await_request_id,
-                    child_session_id,
-                    mode: DelegationWaitMode::Background,
-                },
-                ServerMessage::SessionAwaitRegistered {
-                    tool_request_id: background_await_request_id,
-                    child_session_id,
-                    mode: DelegationWaitMode::Background,
-                },
-            )
-            .await?;
-            accept_request_and_reply(
-                &listener,
-                &ClientRequest::SendSessionMessage {
-                    session_id,
-                    turn_id,
-                    tool_request_id: message_request_id,
-                    peer_session_id: child_session_id,
-                    content: String::from("status ready"),
-                },
-                ServerMessage::SessionMessageSent {
-                    tool_request_id: message_request_id,
-                    message_id,
-                    direction: DelegationMessageDirection::ParentToChild,
-                    ordinal: CanonicalU64::new(1),
-                    delivery_sequence: CanonicalU64::new(1),
-                },
-            )
-            .await
-        });
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "spawn",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_SPAWN_REQUEST,
+                "--task",
+                "inspect logs",
+                "--bound",
+                "--on-parent-stopped",
+                "stop",
+                "--on-parent-cancelled",
+                "cancel",
+            ],
+            ClientRequest::SpawnSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                task: String::from("inspect logs"),
+                relationship,
+            },
+            ServerMessage::SessionSpawned {
+                tool_request_id: request_id,
+                child_session_id: child_id,
+                relationship,
+            },
+        )
+        .await?;
 
-        let spawn_exit = run(
-            client_arguments(
-                &socket,
-                &[
-                    "session",
-                    "spawn",
-                    SESSION,
-                    TURN,
-                    SPAWN_REQUEST,
-                    "--task",
-                    "inspect logs",
-                    "--bound",
-                    "--on-parent-stopped",
-                    "stop",
-                    "--on-parent-cancelled",
-                    "cancel",
-                ],
-            ),
-            None,
-            &mut input,
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-        let await_exit = run(
-            client_arguments(
-                &socket,
-                &[
-                    "session",
-                    "await",
-                    SESSION,
-                    TURN,
-                    AWAIT_REQUEST,
-                    CHILD,
-                    "--mode",
-                    "foreground",
-                ],
-            ),
-            None,
-            &mut input,
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-        let background_await_exit = run(
-            client_arguments(
-                &socket,
-                &[
-                    "session",
-                    "await",
-                    SESSION,
-                    TURN,
-                    BACKGROUND_AWAIT_REQUEST,
-                    CHILD,
-                    "--mode",
-                    "background",
-                ],
-            ),
-            None,
-            &mut input,
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-        let message_exit = run(
-            client_arguments(
-                &socket,
-                &[
-                    "session",
-                    "message",
-                    SESSION,
-                    TURN,
-                    MESSAGE_REQUEST,
-                    CHILD,
-                    "--content",
-                    "status ready",
-                ],
-            ),
-            None,
-            &mut input,
-            &mut stdout,
-            &mut stderr,
-        )
-        .await;
-
-        assert_eq!(spawn_exit, ExitCode::SUCCESS);
-        assert_eq!(await_exit, ExitCode::SUCCESS);
-        assert_eq!(background_await_exit, ExitCode::SUCCESS);
-        assert_eq!(message_exit, ExitCode::SUCCESS);
+        assert_eq!(exit, ExitCode::SUCCESS);
         assert_eq!(
-            String::from_utf8(stdout)?,
+            stdout,
             format!(
-                "spawn_request={spawn_request_id} child_session={child_session_id} relationship=bound on_parent_stopped=stop on_parent_cancelled=cancel\n\
-                 await_request={await_request_id} spawning_request={spawn_request_id} child_session={child_session_id} delivery=foreground outcome=returned reason=child_completed provenance=child_turn:{child_session_id}:{child_turn_id} content=done\\u{{a}}now\n\
-                 await_request={background_await_request_id} child_session={child_session_id} mode=background\n\
-                 message_request={message_request_id} peer_session={child_session_id} message={message_id} direction=parent_to_child ordinal=1 delivery_sequence=1\n"
+                "spawn_request={request_id} child_session={child_id} relationship=bound on_parent_stopped=stop on_parent_cancelled=cancel\n"
             )
         );
-        assert_eq!(String::from_utf8(stderr)?, "");
-        server.await??;
+        assert_eq!(stderr, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_spawn_rejects_the_parent_as_its_own_child() -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
+        let relationship = DelegationPolicy::Bound {
+            on_parent_stopped: BoundChildAction::Stop,
+            on_parent_cancelled: BoundChildAction::Cancel,
+        };
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "spawn",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_SPAWN_REQUEST,
+                "--task",
+                "inspect logs",
+                "--bound",
+                "--on-parent-stopped",
+                "stop",
+                "--on-parent-cancelled",
+                "cancel",
+            ],
+            ClientRequest::SpawnSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                task: String::from("inspect logs"),
+                relationship,
+            },
+            ServerMessage::SessionSpawned {
+                tool_request_id: request_id,
+                child_session_id: session_id,
+                relationship,
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(stdout, "");
+        assert!(!stderr.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_foreground_await_encodes_request_and_renders_result()
+    -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_AWAIT_REQUEST)?);
+        let spawn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
+        let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
+        let child_turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD_TURN)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "await",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_AWAIT_REQUEST,
+                DELEGATION_CHILD,
+                "--mode",
+                "foreground",
+            ],
+            ClientRequest::AwaitSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                child_session_id: child_id,
+                mode: DelegationWaitMode::Foreground,
+            },
+            ServerMessage::ChildResult {
+                await_request_id: request_id,
+                spawning_request_id: spawn_id,
+                child_session_id: child_id,
+                outcome: DelegationOutcome::Returned,
+                content: Some(String::from("done\nnow")),
+                reason: DelegationReason::ChildCompleted,
+                provenance: DelegationProvenance::ChildTurn {
+                    child_session_id: child_id,
+                    child_turn_id,
+                },
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(
+            stdout,
+            format!(
+                "await_request={request_id} spawning_request={spawn_id} child_session={child_id} delivery=foreground outcome=returned reason=child_completed provenance=child_turn:{child_id}:{child_turn_id} content=done\\u{{a}}now\n"
+            )
+        );
+        assert_eq!(stderr, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_foreground_await_rejects_another_parent_provenance()
+    -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let foreign_parent = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_FOREIGN_PARENT)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_AWAIT_REQUEST)?);
+        let spawn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SPAWN_REQUEST)?);
+        let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
+        let command_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "await",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_AWAIT_REQUEST,
+                DELEGATION_CHILD,
+                "--mode",
+                "foreground",
+            ],
+            ClientRequest::AwaitSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                child_session_id: child_id,
+                mode: DelegationWaitMode::Foreground,
+            },
+            ServerMessage::ChildResult {
+                await_request_id: request_id,
+                spawning_request_id: spawn_id,
+                child_session_id: child_id,
+                outcome: DelegationOutcome::Stopped,
+                content: None,
+                reason: DelegationReason::ParentStopped,
+                provenance: DelegationProvenance::ParentGoalCommand {
+                    parent_session_id: foreign_parent,
+                    goal_generation: CanonicalU64::new(1),
+                    command_id,
+                    descendant_scope: DescendantTerminationScope::ParentAndDescendants,
+                },
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(stdout, "");
+        assert!(!stderr.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_background_await_encodes_request_and_renders_registration()
+    -> Result<(), Box<dyn Error>> {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id =
+            CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_BACKGROUND_AWAIT_REQUEST)?);
+        let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "await",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_BACKGROUND_AWAIT_REQUEST,
+                DELEGATION_CHILD,
+                "--mode",
+                "background",
+            ],
+            ClientRequest::AwaitSession {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                child_session_id: child_id,
+                mode: DelegationWaitMode::Background,
+            },
+            ServerMessage::SessionAwaitRegistered {
+                tool_request_id: request_id,
+                child_session_id: child_id,
+                mode: DelegationWaitMode::Background,
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(
+            stdout,
+            format!("await_request={request_id} child_session={child_id} mode=background\n")
+        );
+        assert_eq!(stderr, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegation_message_encodes_request_and_renders_receipt() -> Result<(), Box<dyn Error>>
+    {
+        let session_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_SESSION)?);
+        let turn_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_TURN)?);
+        let request_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE_REQUEST)?);
+        let child_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_CHILD)?);
+        let message_id = CanonicalUuid::from_uuid(Uuid::parse_str(DELEGATION_MESSAGE)?);
+        let (exit, stdout, stderr) = run_delegation_verb(
+            &[
+                "session",
+                "message",
+                DELEGATION_SESSION,
+                DELEGATION_TURN,
+                DELEGATION_MESSAGE_REQUEST,
+                DELEGATION_CHILD,
+                "--content",
+                "status ready",
+            ],
+            ClientRequest::SendSessionMessage {
+                session_id,
+                turn_id,
+                tool_request_id: request_id,
+                peer_session_id: child_id,
+                content: String::from("status ready"),
+            },
+            ServerMessage::SessionMessageSent {
+                tool_request_id: request_id,
+                message_id,
+                direction: DelegationMessageDirection::ParentToChild,
+                ordinal: CanonicalU64::new(1),
+                delivery_sequence: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(
+            stdout,
+            format!(
+                "message_request={request_id} peer_session={child_id} message={message_id} direction=parent_to_child ordinal=1 delivery_sequence=1\n"
+            )
+        );
+        assert_eq!(stderr, "");
         Ok(())
     }
 

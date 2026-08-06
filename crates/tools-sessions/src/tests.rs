@@ -274,11 +274,42 @@ impl ClassifyOperatorFailure for FakeError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FakeMessageDelivery {
+    tool_request: ToolRequestId,
+    message: DelegationMessageId,
+    direction: DelegationMessageDirection,
+    ordinal: DelegationEventOrdinal,
+    delivery_sequence: NonZeroU64,
+}
+
+impl DelegationMessageDeliveryProjection for FakeMessageDelivery {
+    fn tool_request(&self) -> ToolRequestId {
+        self.tool_request
+    }
+
+    fn message(&self) -> DelegationMessageId {
+        self.message
+    }
+
+    fn direction(&self) -> DelegationMessageDirection {
+        self.direction
+    }
+
+    fn ordinal(&self) -> DelegationEventOrdinal {
+        self.ordinal
+    }
+
+    fn delivery_sequence(&self) -> NonZeroU64 {
+        self.delivery_sequence
+    }
+}
+
 #[derive(Debug)]
 struct FakePort {
     spawn_result: Option<SessionDelegationPortOutcome<SpawnSessionReceipt>>,
     await_result: Option<AwaitSessionPortOutcome>,
-    message_result: Option<SessionDelegationPortOutcome<SessionMessageReceipt>>,
+    message_result: Option<SessionDelegationPortOutcome<FakeMessageDelivery>>,
     spawn_requests: Vec<DelegatedSpawnRequest>,
     await_requests: Vec<DelegationAwaitRequest>,
     message_requests: Vec<DelegationMessageRequest>,
@@ -307,11 +338,11 @@ impl FakePort {
         }
     }
 
-    fn messaging(receipt: SessionMessageReceipt) -> Self {
+    fn messaging(delivery: FakeMessageDelivery) -> Self {
         Self {
             spawn_result: None,
             await_result: None,
-            message_result: Some(SessionDelegationPortOutcome::Applied(receipt)),
+            message_result: Some(SessionDelegationPortOutcome::Applied(delivery)),
             spawn_requests: Vec::new(),
             await_requests: Vec::new(),
             message_requests: Vec::new(),
@@ -321,6 +352,7 @@ impl FakePort {
 
 impl SessionDelegationPort for FakePort {
     type Error = FakeError;
+    type MessageDelivery = FakeMessageDelivery;
 
     fn spawn_session(
         &mut self,
@@ -354,7 +386,7 @@ impl SessionDelegationPort for FakePort {
         request: DelegationMessageRequest,
         dispatch: ToolDispatchAuthority,
     ) -> impl Future<
-        Output = Result<SessionDelegationPortOutcome<SessionMessageReceipt>, Self::Error>,
+        Output = Result<SessionDelegationPortOutcome<Self::MessageDelivery>, Self::Error>,
     > + Send {
         assert_eq!(dispatch.request(), request.request());
         self.message_requests.push(request);
@@ -870,14 +902,14 @@ fn message_executor_returns_identity_direction_ordinal_and_delivery_sequence() {
         NonZeroU64::new(7).expect("fixture message ordinal is positive"),
     );
     let delivery_sequence = NonZeroU64::new(11).expect("fixture delivery sequence is positive");
-    let receipt = SessionMessageReceipt {
+    let delivery = FakeMessageDelivery {
         tool_request: raw.id(),
         message: durable_message,
         direction: DelegationMessageDirection::ChildToParent,
         ordinal,
         delivery_sequence,
     };
-    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::messaging(receipt))
+    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::messaging(delivery))
         .expect("fixture tools compile")
         .into_parts();
     let operation = decode_operation(&raw).expect("fixture message request is canonical");
@@ -897,4 +929,25 @@ fn message_executor_returns_identity_direction_ordinal_and_delivery_sequence() {
     assert_eq!(output["direction"], json!("child_to_parent"));
     assert_eq!(output["ordinal"], json!(ordinal.get()));
     assert_eq!(output["delivery_sequence"], json!(delivery_sequence.get()));
+}
+
+#[test]
+fn message_executor_rejects_a_delivery_for_another_tool_request() {
+    let raw = message_request(29, session(28));
+    let delivery = FakeMessageDelivery {
+        tool_request: request_id(30),
+        message: message_id(31),
+        direction: DelegationMessageDirection::ParentToChild,
+        ordinal: DelegationEventOrdinal::new(
+            NonZeroU64::new(2).expect("fixture message ordinal is positive"),
+        ),
+        delivery_sequence: NonZeroU64::new(3).expect("fixture delivery sequence is positive"),
+    };
+    let (_catalog, mut executor) = SessionDelegationTools::try_new(FakePort::messaging(delivery))
+        .expect("fixture tools compile")
+        .into_parts();
+    let operation = decode_operation(&raw).expect("fixture message request is canonical");
+    let authority = dispatch(&raw, ToolEffectClass::ExternalEffect);
+
+    assert_port_contract(run_ready(executor.execute_operation(operation, authority)));
 }

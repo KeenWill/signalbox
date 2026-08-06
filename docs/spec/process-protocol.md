@@ -1178,9 +1178,11 @@ request admits `session_not_found`, `tool_request_not_found`, and
 the named request belongs to another turn, and
 `delegation_tool_request_not_executable { tool_request_id, state }` when a first
 execution names a request whose state is `awaiting_approval`, `denied`,
-`prepared`, `closed`, or `attempt_ended`. Durable equal replay is checked first
-against the exact stored operation and returns its original receipt without
-requiring a still-live execution attempt. `spawn_session` additionally admits
+`approved`, `prepared`, `closed`, or `attempt_ended`. `approved` means the
+proposal-ordered request has approval but no physical attempt yet. Durable equal
+replay is checked first against the exact stored operation and returns its
+original receipt without requiring a still-live execution attempt.
+`spawn_session` additionally admits
 `delegation_spawn_conflict { tool_request_id }` for a non-equal replay and
 `delegated_child_identity_collision { child_session_id }` when the generated
 child identity is already occupied. It has no fixed active-child-count

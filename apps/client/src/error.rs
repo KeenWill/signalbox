@@ -592,6 +592,7 @@ const fn delegation_tool_request_state_name(value: DelegationToolRequestState) -
     match value {
         DelegationToolRequestState::AwaitingApproval => "awaiting_approval",
         DelegationToolRequestState::Denied => "denied",
+        DelegationToolRequestState::Approved => "approved",
         DelegationToolRequestState::Prepared => "prepared",
         DelegationToolRequestState::Closed => "closed",
         DelegationToolRequestState::AttemptEnded => "attempt_ended",

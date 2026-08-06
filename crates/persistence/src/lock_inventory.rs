@@ -105,6 +105,9 @@ pub(crate) const DELEGATION_FIND_RELATION_FOR_MESSAGE: &str = "SELECT spawning_t
          OR (parent_session_id = $2 AND child_session_id = $1)
       FOR UPDATE";
 
+pub(crate) const DELEGATION_DELIVERY_SESSION: &str =
+    "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE";
+
 pub(crate) const DELEGATION_LOAD_RELATION: &str =
     "SELECT relation.parent_session_id, relation.parent_turn_id,
             relation.child_session_id, relation.policy_kind,
