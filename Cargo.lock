@@ -3633,6 +3633,7 @@ dependencies = [
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",
+ "signalbox-tools-exec",
  "signalbox-tools-git",
  "signalbox-tools-github",
  "signalbox-tools-plan",
