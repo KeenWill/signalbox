@@ -54,20 +54,28 @@ def report(*targets: dict) -> dict:
 
 class ProductSplitTests(unittest.TestCase):
     def test_a_test_bundle_is_excluded_from_the_headline_total(self) -> None:
-        """S1: an `.xctest` bundle runs its own code by construction, so
+        """An `.xctest` bundle runs its own code by construction, so
         counting it would report how thoroughly the tests test themselves;
         the headline covers product targets alone."""
+        product = source_file("/repo/App.swift", executable=100, covered=50)
         document = report(
-            target("SignalboxNative.app", source_file("/repo/App.swift", executable=100, covered=50)),
+            target("SignalboxNative.app", product),
             target("Tests.xctest", source_file("/repo/Tests.swift", executable=100, covered=100)),
         )
 
         rendered = summarize_coverage.render(document, REPOSITORY_ROOT, 0, "Native client coverage (report only)")
 
-        self.assertIn("**50.00%** of product lines covered (50/100).", rendered)
+        # The counts come from the fixture, so a fixture edit cannot make this
+        # fail while the summarizer is right. The percentage stays a hardcoded
+        # literal: recomputing it here would mirror the code under test.
+        self.assertIn(
+            f"({product['coveredLines']}/{product['executableLines']})",
+            rendered,
+        )
+        self.assertIn("**50.00%** of product lines covered", rendered)
 
     def test_the_excluded_bundles_are_named(self) -> None:
-        """S2: what a number leaves out is stated with the number, so a reader
+        """What a number leaves out is stated with the number, so a reader
         can tell that the excluded bundles are the reason it is not higher."""
         document = report(
             target("SignalboxNative.app", source_file("/repo/App.swift", executable=10, covered=5)),
@@ -79,7 +87,7 @@ class ProductSplitTests(unittest.TestCase):
         self.assertIn("`Tests.xctest`", rendered)
 
     def test_a_run_with_no_test_bundles_says_none_were_excluded(self) -> None:
-        """S3: the exclusion sentence is unconditional, so it must read
+        """The exclusion sentence is unconditional, so it must read
         correctly when there is nothing to exclude."""
         document = report(target("SignalboxNative.app", source_file("/repo/App.swift", executable=10, covered=5)))
 
@@ -90,7 +98,7 @@ class ProductSplitTests(unittest.TestCase):
 
 class UncoveredFileTests(unittest.TestCase):
     def test_ranking_is_by_uncovered_lines_not_by_percentage(self) -> None:
-        """S4: a large mostly-tested view file can hide more untested code
+        """A large mostly-tested view file can hide more untested code
         than a tiny file at 0%, and the list exists to find untested code."""
         document = report(
             target(
@@ -106,7 +114,7 @@ class UncoveredFileTests(unittest.TestCase):
         self.assertIn("Tiny.swift", rows[1])
 
     def test_a_fully_covered_file_is_absent(self) -> None:
-        """S5: the list names gaps, and a file with no uncovered line is not
+        """The list names gaps, and a file with no uncovered line is not
         a gap."""
         document = report(
             target(
@@ -122,7 +130,7 @@ class UncoveredFileTests(unittest.TestCase):
         self.assertIn("Partial.swift", rows[0])
 
     def test_a_path_outside_the_checkout_is_rendered_verbatim(self) -> None:
-        """S6: a derived-data or SDK path that reaches the report keeps its
+        """A derived-data or SDK path that reaches the report keeps its
         absolute form rather than producing a misleading relative one."""
         self.assertEqual(
             summarize_coverage.relative_path("/elsewhere/Generated.swift", REPOSITORY_ROOT),
@@ -132,7 +140,7 @@ class UncoveredFileTests(unittest.TestCase):
 
 class ReportOnlyTests(unittest.TestCase):
     def test_the_report_states_that_it_gates_nothing(self) -> None:
-        """S7: a reader meeting this on a pull request must not mistake a
+        """A reader meeting this on a pull request must not mistake a
         measurement for a gate, so the report says so in its own body."""
         document = report(target("SignalboxNative.app", source_file("/repo/App.swift", executable=10, covered=1)))
 

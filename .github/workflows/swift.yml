@@ -86,6 +86,12 @@ jobs:
         run: |
           sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
+      # Cheap and first: the coverage summarizer's regression tests run in
+      # seconds, ahead of the build and simulator pass whose report they
+      # render. This job is gated on `clients/native/**` having changed, which
+      # is exactly when the summarizer can regress.
+      - name: Test the coverage summarizer
+        run: python3 clients/native/scripts/test_summarize_coverage.py
       - name: Build (iOS Simulator, Debug)
         run: clients/native/scripts/build-xcode.sh
       # Runs the canonical test script with the UI-test bundle excluded. The
