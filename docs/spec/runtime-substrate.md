@@ -453,7 +453,33 @@ a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
 from that same 200 exchange — see the refusal-downgrade rule above; a raw
 `Refused` never leaves the adapter) — either way with provider-reported input
-and output usage present — and nothing about answer quality.
+and output usage present — and nothing about answer quality. Output usage is
+asserted present, not positive: a valid `Completed` response can legitimately
+report zero output tokens, and a downgraded refusal can be blocked before any
+completion token is produced, so both accepted shapes share one usage-presence
+check.
+
+`gpt-5`-family models spend hidden reasoning tokens against the same output
+ceiling as visible content; at the provider's default effort that spend is
+unbounded, up to the entire ceiling, which makes a `length` finish reason (and
+therefore `BoundaryLoss`) a live possibility on an ordinary exchange, not only
+on provider drift. The smoke pins the lowest reasoning effort the provider
+documents for this model family through an explicit `ModelSettings` control and
+a matching exact-target entry in its `ModelCapabilityCatalog`, rather than
+leaving the effort at the provider default or only enlarging the ceiling —
+enlarging the ceiling lowers the odds of an unbounded-effort truncation but does
+not bound it, and cannot distinguish that stochastic outcome from a real
+compatibility break.
+
+This smoke's required aggregate is merge-gating for a pull request that changes
+the adapter crate or the workflow itself — an explicit exception to
+`CONTRIBUTING.md`'s general testing-strategy default that a credentialed
+live-provider smoke is never the merge gate, extending the same accepted
+tradeoff already commissioned for the Codex CLI smoke's required check. Provider
+unavailability, rate limiting, or a misconfigured credential therefore reports
+as a temporary red rather than a verdict on the change's correctness; the
+accepted remedy is rerunning the smoke once the provider or environment
+recovers, not weakening the gate.
 
 The workflow reports on every pull request without a path filter. GitHub
 independently withholds secrets from ordinary fork `pull_request` runs
@@ -470,6 +496,16 @@ requires the smoke, the aggregate also repeats the same-repository comparison.
 Manual dispatch remains available, and a path-filtered push to `main` — gated on
 the adapter crate and the workflow file itself, so an edit to the workflow's own
 definition cannot land unexercised — reruns the smoke after merge.
+
+A twice-daily schedule (`0 13 * * *` and `0 1 * * *` UTC) also triggers the
+workflow as a provider-drift canary between adapter-touching pull requests,
+spending one more real, paid exchange per run. A scheduled trigger is not a
+`pull_request` event, so the eligibility gate's non-`pull_request` branch marks
+it required unconditionally — the same branch a manual dispatch or a qualifying
+push takes — and the workflow-level concurrency group already falls back to the
+run id for a non-`pull_request` event, so each scheduled run keeps its own slot.
+GitHub only fires `schedule` events from a repository's default branch, so the
+schedule takes effect only once a change lands on `main`.
 
 The `openai-smoke` environment is configured for all branches, for the same
 reason the `codex-smoke` environment is: GitHub evaluates an environment used by

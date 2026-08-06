@@ -35,6 +35,8 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+use std::collections::BTreeSet;
+
 #[cfg(test)]
 use signalbox_model_runtime::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
@@ -43,9 +45,10 @@ use signalbox_model_runtime::{
 };
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
-    CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts, ModelOperation,
-    ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, RequestedTarget,
-    ResolvedTarget, TerminalEvidence, TokenUsage,
+    CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts,
+    ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition, ModelOperation,
+    ModelRuntime, ModelSettings, PreparationOutcome, ProviderErrorKind, ReasoningLevel,
+    RequestedTarget, ResolvedTarget, TerminalEvidence, TokenUsage,
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 
@@ -62,38 +65,73 @@ const MODEL: &str = "gpt-5-nano";
 /// still exercises the whole response envelope.
 const PROMPT: &str = "Reply with the single word: ready";
 
-/// `gpt-5-nano` is a reasoning model: its hidden reasoning tokens are billed
-/// against the same `max_completion_tokens` ceiling as visible output, so a
-/// budget sized only for the trivial visible reply can still truncate. This
-/// must stay generous enough that a live run clears truncation — a
-/// finish_reason of `length` is not decoded as typed completion evidence by
-/// this adapter (see `map_finish` in `src/response.rs`: OpenAI reuses
-/// `length` for both the requested output ceiling and the model's context
-/// limit, and the adapter deliberately refuses to guess which one occurred
-/// rather than invent evidence), so a truncated exchange fails this smoke
-/// with `LossCause::ResponseUnintelligible` instead of asserting anything
-/// useful about the response contract.
+/// `gpt-5-nano` is a reasoning model: at the provider's *default* reasoning
+/// effort it can spend hidden reasoning tokens — billed against the same
+/// `max_completion_tokens` ceiling as visible output — unboundedly, up to the
+/// entire ceiling, before producing any visible reply. That is stochastic:
+/// raising the ceiling only makes the failure less likely, it does not make
+/// the exchange deterministic, and it cannot distinguish a real provider
+/// regression from an ordinary long reasoning trace. `REASONING_LEVEL` below
+/// is the actual fix — pinning the lowest effort the provider documents for
+/// `gpt-5`-family models bounds the hidden-token spend deterministically.
+/// This ceiling remains generous as a secondary cost-capped margin, not the
+/// primary defense: a `length` finish is not decoded as typed completion
+/// evidence by this adapter (see `map_finish` in `src/response.rs`: OpenAI
+/// reuses `length` for both the requested output ceiling and the model's
+/// context limit, and the adapter deliberately refuses to guess which one
+/// occurred rather than invent evidence), so a truncated exchange fails this
+/// smoke with `LossCause::ResponseUnintelligible` instead of asserting
+/// anything useful about the response contract.
 const MAX_OUTPUT_TOKENS: u32 = 512;
+
+/// The lowest reasoning effort OpenAI documents for `gpt-5`-family models
+/// (`gpt-5-nano` included). Pinned explicitly, rather than left at the
+/// provider default, so this smoke's completion is deterministically
+/// sub-ceiling: the provider default can spend the entire
+/// `MAX_OUTPUT_TOKENS` budget on hidden reasoning before any visible reply
+/// (see above), which is exactly the nondeterminism a required, twice-daily
+/// paid check cannot tolerate. Pinning it requires an exact-target capability
+/// record — see `openai_config` below — because the adapter validates any
+/// explicit provider control against the exact target's declared
+/// capabilities before it will honor it.
+const REASONING_LEVEL: ReasoningLevel = ReasoningLevel::Minimal;
+
+/// Declares `MODEL`'s exact-target capabilities so the adapter's preparation
+/// gate honors the explicit `REASONING_LEVEL` control below (an operation
+/// carrying an explicit provider control validates against the exact target
+/// record; an absent record fails preparation with `UnknownTarget`).
+fn openai_config() -> OpenAiConfig {
+    let mut config = OpenAiConfig::new();
+    config.model_capabilities =
+        ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
+            ResolvedTarget::new(MODEL),
+            ModelCapabilities::new(BTreeSet::from([REASONING_LEVEL]), None, BTreeSet::new()),
+        )])
+        .expect("smoke capability catalog is valid");
+    config
+}
 
 #[tokio::test]
 #[ignore = "spends one real OpenAI exchange; run only from the gated compatibility smoke"]
 async fn the_openai_api_completes_one_exchange() {
     let credential_reference = CredentialReference::new("openai-smoke");
     let runtime = OpenAiRuntime::new(
-        OpenAiConfig::new(),
+        openai_config(),
         EnvironmentCredential {
             variable: API_KEY_VARIABLE,
         },
     )
     .expect("smoke runtime configuration is valid");
 
+    let mut settings = ModelSettings::new(MAX_OUTPUT_TOKENS);
+    settings.reasoning_level = Some(REASONING_LEVEL);
     let operation = ModelOperation::new(
         "openai-smoke".to_string(),
         credential_reference,
         RequestedTarget::new(MODEL),
         ResolvedTarget::new(MODEL),
         vec![ConversationMessage::user_text(PROMPT)],
-        ModelSettings::new(MAX_OUTPUT_TOKENS),
+        settings,
     );
 
     let prepared = require_prepared(
@@ -107,32 +145,7 @@ async fn the_openai_api_completes_one_exchange() {
         .await;
 
     let decoded = require_decoded_response(report.evidence);
-    assert_eq!(
-        decoded.exchange.http_status,
-        Some(200),
-        "the adapter no longer records the documented success status"
-    );
-    assert!(
-        decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0),
-        "the Chat Completions API no longer reports input usage the adapter can decode"
-    );
-    // A completion always billed generating at least one output token for
-    // this prompt, but a valid content_filter refusal can legitimately
-    // arrive before any completion token is produced (`output_tokens:
-    // Some(0)`): the spec's compatibility-smoke contract promises usage
-    // *present*, not positive. Only the completed path can honestly demand a
-    // positive count.
-    if decoded.completed {
-        assert!(
-            decoded.usage.output_tokens.is_some_and(|tokens| tokens > 0),
-            "the Chat Completions API no longer reports output usage the adapter can decode"
-        );
-    } else {
-        assert!(
-            decoded.usage.output_tokens.is_some(),
-            "the Chat Completions API no longer reports output usage the adapter can decode"
-        );
-    }
+    assert_well_formed_response(&decoded);
 }
 
 /// Resolves the live API key from the environment, exactly once per
@@ -178,10 +191,6 @@ fn require_prepared<C, P>(outcome: PreparationOutcome<C, P>) -> P {
 struct DecodedResponse {
     exchange: ExchangeFacts,
     usage: TokenUsage,
-    /// `true` for genuine `Completed` evidence, `false` for the adapter's
-    /// downgraded-refusal `ProviderError` shape. The two paths carry
-    /// different honest usage guarantees (see the call site).
-    completed: bool,
 }
 
 /// Accepts a completion, or the adapter's own decoded-refusal shape, as
@@ -200,17 +209,13 @@ struct DecodedResponse {
 /// refusal, so this recognizes what the adapter actually returns instead. The
 /// `http_status == 200` guard keeps this arm from also swallowing a genuine
 /// unrecognized 4xx/5xx provider error, which the assertions below must still
-/// fail on. The returned `completed` flag distinguishes the two accepted
-/// shapes for the caller: a refusal can legitimately arrive with zero output
-/// tokens (blocked before any completion token was produced), so only the
-/// completed path may honestly demand a positive count.
+/// fail on.
 #[track_caller]
 fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
     match evidence {
         TerminalEvidence::Completed(completed) => DecodedResponse {
             exchange: completed.exchange,
             usage: completed.usage,
-            completed: true,
         },
         TerminalEvidence::ProviderError(error)
             if error.kind == ProviderErrorKind::Unrecognized
@@ -219,7 +224,6 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             DecodedResponse {
                 exchange: error.exchange,
                 usage: error.usage,
-                completed: false,
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
@@ -235,6 +239,34 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             panic!("the OpenAI API returned no decoded response: {rejected:?}")
         }
     }
+}
+
+/// Asserts a decoded response is well-formed under the compatibility-smoke
+/// contract in `docs/spec/runtime-substrate.md`: a definitive success status
+/// and provider-reported input/output usage *present*. Input tokens must
+/// also be positive — a request that reached the model always billed at
+/// least one — but output tokens are asserted only present, not positive: a
+/// valid `Completed` response can legitimately report zero output tokens
+/// (the adapter's own streamed fixtures cover an `end_turn` with
+/// `output_tokens: Some(0)` as `Completed`), and a downgraded-refusal
+/// `ProviderError` can be blocked before any completion token is produced.
+/// Straight-line and credential-free: no test body branches on which
+/// accepted shape arrived.
+#[track_caller]
+fn assert_well_formed_response(decoded: &DecodedResponse) {
+    assert_eq!(
+        decoded.exchange.http_status,
+        Some(200),
+        "the adapter no longer records the documented success status"
+    );
+    assert!(
+        decoded.usage.input_tokens.is_some_and(|tokens| tokens > 0),
+        "the Chat Completions API no longer reports input usage the adapter can decode"
+    );
+    assert!(
+        decoded.usage.output_tokens.is_some(),
+        "the Chat Completions API no longer reports output usage the adapter can decode"
+    );
 }
 
 /// Credential-free, straight-line coverage for `require_decoded_response`'s
@@ -276,7 +308,33 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-        assert!(decoded.completed);
+    }
+
+    #[test]
+    fn completed_with_zero_output_tokens_is_accepted() {
+        // The adapter's own streamed fixtures already prove an `end_turn`
+        // response with `output_tokens: Some(0)` decodes as `Completed`
+        // (`stream.rs`), so this classifier must not reject it either —
+        // only `assert_well_formed_response` requires usage merely present,
+        // not positive, for exactly this reason.
+        let expected_exchange = exchange(200);
+        let expected_usage = TokenUsage {
+            input_tokens: Some(3),
+            output_tokens: Some(0),
+            ..TokenUsage::default()
+        };
+
+        let decoded = require_decoded_response(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: expected_exchange.clone(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::EndTurn,
+            content: Vec::new(),
+            usage: expected_usage,
+        }));
+
+        assert_eq!(decoded.exchange, expected_exchange);
+        assert_eq!(decoded.usage, expected_usage);
     }
 
     #[test]
@@ -300,16 +358,16 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-        assert!(!decoded.completed);
     }
 
     #[test]
     fn downgraded_refusal_with_zero_output_tokens_is_accepted() {
         // A content_filter refusal can be blocked before any completion
         // token is produced — `output_tokens: Some(0)` is a valid, honest
-        // report here, unlike for a genuine completion. The classifier must
-        // still accept it; only the caller's `completed`-gated assertion
-        // (see `the_openai_api_completes_one_exchange`) tells the two apart.
+        // report here too (see `completed_with_zero_output_tokens_is_accepted`
+        // above for the completed path). The classifier accepts both shapes
+        // identically; only `assert_well_formed_response`'s single, uniform
+        // usage-presence check applies to either.
         let expected_exchange = exchange(200);
         let expected_usage = TokenUsage {
             input_tokens: Some(3),
@@ -328,7 +386,6 @@ mod require_decoded_response_tests {
 
         assert_eq!(decoded.exchange, expected_exchange);
         assert_eq!(decoded.usage, expected_usage);
-        assert!(!decoded.completed);
     }
 
     #[test]
@@ -403,6 +460,70 @@ mod require_decoded_response_tests {
     }
 }
 
+/// Credential-free, straight-line coverage for `assert_well_formed_response`,
+/// the helper the paid live test calls instead of branching on the decoded
+/// shape itself.
+#[cfg(test)]
+mod assert_well_formed_response_tests {
+    use super::*;
+
+    fn decoded(
+        http_status: u16,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    ) -> DecodedResponse {
+        DecodedResponse {
+            exchange: ExchangeFacts {
+                http_status: Some(http_status),
+                ..ExchangeFacts::default()
+            },
+            usage: TokenUsage {
+                input_tokens,
+                output_tokens,
+                ..TokenUsage::default()
+            },
+        }
+    }
+
+    #[test]
+    fn positive_usage_passes() {
+        assert_well_formed_response(&decoded(200, Some(3), Some(1)));
+    }
+
+    #[test]
+    fn present_zero_output_tokens_passes() {
+        // The exact edge both accept paths can legitimately report: a
+        // present-but-zero output count is not a positivity requirement.
+        assert_well_formed_response(&decoded(200, Some(3), Some(0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "documented success status")]
+    fn non_200_status_panics() {
+        assert_well_formed_response(&decoded(500, Some(3), Some(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "input usage")]
+    fn missing_input_tokens_panics() {
+        assert_well_formed_response(&decoded(200, None, Some(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "input usage")]
+    fn zero_input_tokens_panics() {
+        // Unlike output, input tokens must be positive: a request that
+        // reached the model always billed at least one.
+        assert_well_formed_response(&decoded(200, Some(0), Some(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "output usage")]
+    fn missing_output_tokens_panics() {
+        assert_well_formed_response(&decoded(200, Some(3), None));
+    }
+}
+
 /// Credential-free, straight-line coverage for `require_prepared`'s
 /// branching: it is generic over the prepared capability type, so a
 /// placeholder `u32` capability exercises every `PreparationOutcome` variant
@@ -413,9 +534,11 @@ mod require_prepared_tests {
 
     #[test]
     fn prepared_outcome_returns_its_capability() {
-        let outcome: PreparationOutcome<String, u32> = PreparationOutcome::Prepared(7);
+        let expected_capability: u32 = 7;
+        let outcome: PreparationOutcome<String, u32> =
+            PreparationOutcome::Prepared(expected_capability);
 
-        assert_eq!(require_prepared(outcome), 7);
+        assert_eq!(require_prepared(outcome), expected_capability);
     }
 
     #[test]
@@ -452,5 +575,51 @@ mod require_prepared_tests {
         };
 
         let _ = require_prepared(outcome);
+    }
+}
+
+/// Proves the wiring between `openai_config`'s capability catalog and the
+/// pinned `REASONING_LEVEL` actually admits preparation, offline. An
+/// operation carrying an explicit provider control without a matching
+/// exact-target capability record fails preparation with `UnknownTarget`
+/// (`ModelCapabilityCatalog::validate_explicit`) — a mistake in the catalog
+/// below would otherwise surface only when the live smoke spends its one
+/// credentialed exchange, not before.
+#[cfg(test)]
+mod reasoning_capability_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct FixedCredential;
+
+    impl CredentialAccess for FixedCredential {
+        async fn resolve(
+            &self,
+            _reference: &CredentialReference,
+        ) -> Result<CredentialValue, CredentialAccessError> {
+            Ok(CredentialValue::new(b"fixture-key".to_vec()))
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_reasoning_effort_prepares_successfully() {
+        let runtime = OpenAiRuntime::new(openai_config(), FixedCredential)
+            .expect("smoke runtime configuration is valid");
+        let mut settings = ModelSettings::new(MAX_OUTPUT_TOKENS);
+        settings.reasoning_level = Some(REASONING_LEVEL);
+        let operation = ModelOperation::new(
+            "reasoning-capability-test".to_string(),
+            CredentialReference::new("openai-smoke"),
+            RequestedTarget::new(MODEL),
+            ResolvedTarget::new(MODEL),
+            vec![ConversationMessage::user_text(PROMPT)],
+            settings,
+        );
+
+        let _ = require_prepared(
+            runtime
+                .prepare(operation, CancellationSignal::never())
+                .await,
+        );
     }
 }
