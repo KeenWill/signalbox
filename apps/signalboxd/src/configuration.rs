@@ -1,24 +1,40 @@
 //! Deployment-owned model mappings and credential delivery.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DirectModelSelection, FrozenAliasDefinition, ModelAlias, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
-    ToolApprovalPosture, ToolName,
+    AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
+    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
+    ModelAlias, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
+    ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, ReasoningLevel,
+    RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
+    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
+    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
-    CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
-    CredentialValue,
+    AnthropicServiceTier as RuntimeAnthropicServiceTier,
+    CodexCliServiceTier as RuntimeCodexCliServiceTier, CredentialAccess, CredentialAccessError,
+    CredentialAccessFailure, CredentialReference, CredentialValue, FastMode as RuntimeFastMode,
+    FastModeTarget as RuntimeFastModeTarget, ModelCapabilities as RuntimeModelCapabilities,
+    ModelCapabilityCatalog as RuntimeModelCapabilityCatalog,
+    ModelCapabilityDefinition as RuntimeModelCapabilityDefinition,
+    ModelSettings as RuntimeModelSettings, OpenAiServiceTier as RuntimeOpenAiServiceTier,
+    ReasoningLevel as RuntimeReasoningLevel, ResolvedTarget as RuntimeResolvedTarget,
+    ServiceTier as RuntimeServiceTier,
 };
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
@@ -27,9 +43,13 @@ use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
     process_read::ProcessModelCallInputTokenSemantics,
 };
-use signalbox_process_protocol::{MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_RATE_VERSION_UTF8_BYTES};
+use signalbox_process_protocol::{
+    MAX_MODEL_ALIAS_CATALOG_ENTRIES, MAX_MODEL_CAPABILITY_CATALOG_ENTRIES,
+    MAX_RATE_VERSION_UTF8_BYTES,
+};
 use signalbox_tools_github::{GITHUB_CREDENTIAL_REFERENCE, GitHubEgressPolicy};
 use signalbox_tools_web::WebFetchEgressPolicy;
+use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
@@ -40,6 +60,8 @@ pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
+const MAX_REPOSITORY_WATCH_RULES: usize = 128;
+const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 
 /// Adapter implementations this daemon build can construct.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -245,6 +267,92 @@ pub const MAX_COMPACTION_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// Default maximum assembled source bytes for one conversation import.
 pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
+const MAX_WATCHED_REPOSITORIES: usize = 128;
+const MAX_SIGNAL_REVIEWERS: usize = 128;
+
+/// One repository-specific version-one polling and credential configuration.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WatchedRepositoryConfiguration {
+    repository: RepositorySlug,
+    poll_interval: Duration,
+    credential_file: PathBuf,
+}
+
+impl WatchedRepositoryConfiguration {
+    /// Returns the canonical repository identity authorized by this entry.
+    pub const fn repository(&self) -> &RepositorySlug {
+        &self.repository
+    }
+
+    /// Returns the positive interval between completed polling attempts.
+    pub const fn poll_interval(&self) -> Duration {
+        self.poll_interval
+    }
+
+    /// Returns the deployment-owned credential-file reference.
+    pub fn credential_file(&self) -> &Path {
+        &self.credential_file
+    }
+
+    /// Returns the non-secret request credential reference for this repository.
+    pub fn credential_reference(&self) -> CredentialReference {
+        CredentialReference::new(format!("repository-watch:{}", self.repository.as_str()))
+    }
+}
+
+impl fmt::Debug for WatchedRepositoryConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WatchedRepositoryConfiguration")
+            .field("repository", &self.repository)
+            .field("poll_interval", &self.poll_interval)
+            .field("credential_file", &"[REDACTED REFERENCE]")
+            .finish()
+    }
+}
+
+/// Complete optional version-one repository-watch configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryWatchConfiguration {
+    signal_reviewers: Box<[RepoWatchAuthorLogin]>,
+    repositories: Box<[WatchedRepositoryConfiguration]>,
+    rules: Box<[RepoWatchRule]>,
+}
+
+impl RepositoryWatchConfiguration {
+    /// Returns the exact canonical login set used for reaction ingestion.
+    pub fn signal_reviewers(&self) -> &[RepoWatchAuthorLogin] {
+        &self.signal_reviewers
+    }
+
+    /// Returns every independently credentialed repository task.
+    pub fn repositories(&self) -> &[WatchedRepositoryConfiguration] {
+        &self.repositories
+    }
+
+    /// Returns the validated structured rules in declaration order.
+    pub fn rules(&self) -> &[RepoWatchRule] {
+        &self.rules
+    }
+
+    /// Validates every rule against the immutable session-template catalog.
+    pub fn validate_template_contexts(
+        &self,
+        declarations: &[RepoWatchTemplateContextDeclaration],
+    ) -> Result<(), HubModelConfigurationError> {
+        for rule in &self.rules {
+            rule.validate_template_contexts(declarations)
+                .map_err(
+                    |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                        rule: rule.id().as_str().to_owned(),
+                        reason: error.to_string(),
+                    },
+                )?;
+        }
+        Ok(())
+    }
+}
+
 /// Validated static model and alias definitions used by hub composition.
 #[derive(Clone, Debug)]
 pub struct HubModelConfiguration {
@@ -253,6 +361,9 @@ pub struct HubModelConfiguration {
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
+    model_capabilities: ModelCapabilityCatalog,
+    runtime_model_capabilities: RuntimeModelCapabilityCatalog,
+    model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_kinds: HashMap<Arc<str>, BillingKind>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
@@ -267,6 +378,13 @@ pub struct HubModelConfiguration {
     daemon_tools: Option<DaemonToolConfiguration>,
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
+    repository_watch: Option<RepositoryWatchConfiguration>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModelSettingsLowerLayers {
+    profile: ModelSettingsOverlay,
+    global_default: ModelSettingsOverlay,
 }
 
 impl HubModelConfiguration {
@@ -287,7 +405,10 @@ impl HubModelConfiguration {
                 "credential_profiles",
                 "adapter_mappings",
                 "codex_cli",
+                "model_settings",
+                "model_settings_profiles",
                 "models",
+                "serving_targets",
                 "aliases",
                 "compaction",
                 "conversation_import",
@@ -295,11 +416,15 @@ impl HubModelConfiguration {
                 "tool_mappings",
                 "tool_approval_postures",
                 "approval_judge",
+                "repository_watch",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
             return Err(HubModelConfigurationError::UnsupportedVersion);
         }
+        let global_model_settings = parse_model_settings_overlay(document.get("model_settings"))?;
+        let model_settings_profiles =
+            parse_model_settings_profiles(document.get("model_settings_profiles"))?;
         let compaction = document
             .get("compaction")
             .and_then(|item| item.as_table())
@@ -386,6 +511,10 @@ impl HubModelConfiguration {
         let tool_approval_postures =
             parse_tool_approval_postures(document.get("tool_approval_postures"))?;
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
+        let repository_watch = document
+            .get("repository_watch")
+            .map(parse_repository_watch_configuration)
+            .transpose()?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -393,6 +522,7 @@ impl HubModelConfiguration {
         if models.is_empty() {
             return Err(HubModelConfigurationError::MissingModels);
         }
+        validate_model_count(models.len())?;
 
         let mapping_tables = document
             .get("adapter_mappings")
@@ -487,11 +617,16 @@ impl HubModelConfiguration {
 
         let mut domain_definitions = Vec::with_capacity(models.len());
         let mut runtime_definitions = Vec::with_capacity(models.len());
+        let mut capability_definitions = Vec::with_capacity(models.len());
+        let mut model_settings_lower_layers = HashMap::with_capacity(models.len());
         let mut direct_selections = HashSet::with_capacity(models.len());
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_provider_models = HashMap::with_capacity(models.len());
+        let mut selectable_targets = HashSet::with_capacity(models.len());
         let mut provider_model_adapters = HashMap::with_capacity(models.len());
+        let mut runtime_capability_projections = Vec::with_capacity(models.len());
         for model in models {
             reject_unknown_fields(
                 model,
@@ -507,6 +642,11 @@ impl HubModelConfiguration {
                     "output_usd_per_million_tokens",
                     "cache_creation_input_usd_per_million_tokens",
                     "cache_read_input_usd_per_million_tokens",
+                    "reasoning_levels",
+                    "fast_mode",
+                    "fast_target_id",
+                    "service_tiers",
+                    "settings_profile",
                 ],
             )?;
             let selection = DirectModelSelection::from_uuid(required_uuid(model, "selection_id")?);
@@ -526,6 +666,64 @@ impl HubModelConfiguration {
             let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 required_uuid(model, "target_id")?,
             ));
+            selectable_targets.insert(target);
+            let capabilities = parse_model_capabilities(model, mapping.adapter)?;
+            let profile = match model.get("settings_profile") {
+                None => ModelSettingsOverlay::inherit_all(),
+                Some(_) => {
+                    let profile_name = validated_name(required_string(model, "settings_profile")?)?;
+                    model_settings_profiles
+                        .get(&profile_name)
+                        .copied()
+                        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?
+                }
+            };
+            capabilities
+                .validate_explicit(selection, global_model_settings)
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            capabilities
+                .validate_explicit(selection, profile)
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            let global_settings = capabilities
+                .validate_precedence(
+                    selection,
+                    ModelSettingsPrecedence::new(
+                        ModelSettingsOverlay::inherit_all(),
+                        ModelSettingsOverlay::inherit_all(),
+                        ModelSettingsOverlay::inherit_all(),
+                        global_model_settings,
+                    ),
+                )
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            validate_adapter_model_settings(mapping.adapter, max_output_tokens, global_settings)?;
+            let configured_settings = capabilities
+                .validate_precedence(
+                    selection,
+                    ModelSettingsPrecedence::new(
+                        ModelSettingsOverlay::inherit_all(),
+                        ModelSettingsOverlay::inherit_all(),
+                        profile,
+                        global_model_settings,
+                    ),
+                )
+                .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+            validate_adapter_model_settings(
+                mapping.adapter,
+                max_output_tokens,
+                configured_settings,
+            )?;
+            model_settings_lower_layers.insert(
+                selection,
+                ModelSettingsLowerLayers {
+                    profile,
+                    global_default: global_model_settings,
+                },
+            );
+            let fast_target = match capabilities.fast_mode() {
+                FastModeSupport::AlternateTarget(target) => Some(target),
+                FastModeSupport::Unsupported | FastModeSupport::RequestControl => None,
+            };
+            let provider_model = provider_model.to_owned();
             let rates = parse_model_billing_rates(model)?;
             if let Some(previous) = target_billing_rates.insert(target, rates.clone())
                 && previous != rates
@@ -537,8 +735,13 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) = target_provider_models.insert(target, provider_model.clone())
+                && previous != provider_model
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
             if let Some(previous) =
-                provider_model_adapters.insert(provider_model.to_owned(), mapping.adapter)
+                provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                 && previous != mapping.adapter
             {
                 return Err(HubModelConfigurationError::ConflictingProviderModelRoute);
@@ -553,15 +756,84 @@ impl HubModelConfiguration {
                 },
             );
             domain_definitions.push(ModelTargetDefinition::new(selection, target));
-            runtime_definitions.push(
-                RuntimeModelDefinition::try_new(
-                    target,
-                    provider_model.to_owned(),
-                    max_output_tokens,
-                    context_window_tokens,
-                )
-                .map_err(|_| HubModelConfigurationError::InvalidField)?,
-            );
+            capability_definitions.push(ModelCapabilityDefinition::new(
+                selection,
+                capabilities.clone(),
+            ));
+            runtime_capability_projections.push(RuntimeCapabilityProjection {
+                adapter: mapping.adapter,
+                provider_model: provider_model.clone(),
+                capabilities,
+            });
+            let runtime_definition = RuntimeModelDefinition::try_new(
+                target,
+                provider_model,
+                max_output_tokens,
+                context_window_tokens,
+            )
+            .map_err(|_| HubModelConfigurationError::InvalidField)?;
+            runtime_definitions.push(match fast_target {
+                Some(target) => runtime_definition.with_fast_target(target),
+                None => runtime_definition,
+            });
+        }
+
+        if let Some(serving_targets) = document
+            .get("serving_targets")
+            .map(|item| {
+                item.as_array_of_tables()
+                    .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+            })
+            .transpose()?
+        {
+            for serving_target in serving_targets {
+                reject_unknown_fields(
+                    serving_target,
+                    &[
+                        "target_id",
+                        "model_family",
+                        "provider_model",
+                        "max_output_tokens",
+                        "context_window_tokens",
+                    ],
+                )?;
+                let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                    required_uuid(serving_target, "target_id")?,
+                ));
+                if target_provider_models.contains_key(&target) {
+                    return Err(HubModelConfigurationError::ConflictingTarget);
+                }
+                let model_family =
+                    validated_name(required_string(serving_target, "model_family")?)?;
+                let Some(mapping) = mappings.get(&model_family) else {
+                    return Err(HubModelConfigurationError::UnmappedModelFamily { model_family });
+                };
+                let provider_model = required_string(serving_target, "provider_model")?;
+                if provider_model.is_empty() || provider_model.trim() != provider_model {
+                    return Err(HubModelConfigurationError::InvalidProviderModel);
+                }
+                let provider_model = provider_model.to_owned();
+                let max_output_tokens = required_positive_u32(serving_target, "max_output_tokens")?;
+                let context_window_tokens =
+                    required_positive_u32(serving_target, "context_window_tokens")?;
+                target_provider_models.insert(target, provider_model.clone());
+                target_adapters.insert(target, mapping.adapter);
+                if let Some(previous) =
+                    provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
+                    && previous != mapping.adapter
+                {
+                    return Err(HubModelConfigurationError::ConflictingProviderModelRoute);
+                }
+                runtime_definitions.push(
+                    RuntimeModelDefinition::try_new(
+                        target,
+                        provider_model,
+                        max_output_tokens,
+                        context_window_tokens,
+                    )
+                    .map_err(|_| HubModelConfigurationError::InvalidField)?,
+                );
+            }
         }
 
         if approval_judge_selection.is_some_and(|selection| !direct_selections.contains(&selection))
@@ -598,6 +870,15 @@ impl HubModelConfiguration {
 
         let targets = ModelTargetCatalog::try_from_definitions(domain_definitions)
             .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
+        let model_capabilities =
+            ModelCapabilityCatalog::try_from_definitions(capability_definitions)
+                .map_err(|_| HubModelConfigurationError::DuplicateSelection)?;
+        let runtime_model_capabilities = project_runtime_model_capabilities(
+            runtime_capability_projections,
+            &target_provider_models,
+            &target_adapters,
+            &selectable_targets,
+        )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         let billing_rates = target_billing_rates
@@ -621,6 +902,9 @@ impl HubModelConfiguration {
             direct_selections,
             aliases,
             routes,
+            model_capabilities,
+            runtime_model_capabilities,
+            model_settings_lower_layers,
             billing_kinds,
             billing_rates,
             target_adapters,
@@ -635,12 +919,53 @@ impl HubModelConfiguration {
             daemon_tools,
             tool_approval_postures,
             approval_judge_selection,
+            repository_watch,
         })
     }
 
     /// Returns the immutable domain target catalog used by persistence.
     pub fn target_catalog(&self) -> ModelTargetCatalog {
         self.targets.clone()
+    }
+
+    /// Returns the complete per-direct-selection settings capability catalog.
+    pub fn model_capability_catalog(&self) -> ModelCapabilityCatalog {
+        self.model_capabilities.clone()
+    }
+
+    /// Returns the exact provider-target capability catalog used at preparation.
+    pub fn runtime_model_capability_catalog(&self) -> RuntimeModelCapabilityCatalog {
+        self.runtime_model_capabilities.clone()
+    }
+
+    /// Returns the copied profile and global layers for a direct selection.
+    pub fn model_settings_lower_layers(
+        &self,
+        selection: DirectModelSelection,
+    ) -> Option<(ModelSettingsOverlay, ModelSettingsOverlay)> {
+        self.model_settings_lower_layers
+            .get(&selection)
+            .map(|layers| (layers.profile, layers.global_default))
+    }
+
+    /// Resolves and validates one caller-owned session layer against its direct model.
+    pub fn validate_session_model_settings(
+        &self,
+        selection: ModelSelectionRequest,
+        session: ModelSettingsOverlay,
+    ) -> Option<Result<ValidatedModelSettings, UnsupportedModelSetting>> {
+        let direct = self.resolve_direct_selection(selection)?;
+        let capabilities = self.model_capabilities.resolve(direct)?;
+        let layers = self.model_settings_lower_layers.get(&direct)?;
+        Some(capabilities.validate_precedence(
+            direct,
+            ModelSettingsPrecedence::new(
+                ModelSettingsOverlay::inherit_all(),
+                session,
+                layers.profile,
+                layers.global_default,
+            ),
+        ))
     }
 
     /// Returns the exact runtime delivery catalog used by the provider bridge.
@@ -672,6 +997,22 @@ impl HubModelConfiguration {
         self.routes
             .get(&direct)
             .ok_or(UnknownSessionModel { selection })
+    }
+
+    /// Resolves a direct or current alias request to its selected direct key.
+    pub fn resolve_direct_selection(
+        &self,
+        selection: ModelSelectionRequest,
+    ) -> Option<DirectModelSelection> {
+        match selection {
+            ModelSelectionRequest::Direct(direct) => {
+                self.direct_selections.contains(&direct).then_some(direct)
+            }
+            ModelSelectionRequest::Alias(alias) => self
+                .aliases
+                .get(&alias)
+                .map(|definition| definition.selected()),
+        }
     }
 
     /// Returns the adapter selected for an exact provider-native model name.
@@ -757,11 +1098,13 @@ impl HubModelConfiguration {
                     .codex_cli_credential_profile
                     .as_deref()
                     .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE);
-                CodexCliRuntime::new(CodexCliConfig::new(
+                let mut runtime_configuration = CodexCliConfig::new(
                     configuration.executable.clone(),
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
-                ))
+                );
+                runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
+                CodexCliRuntime::new(runtime_configuration)
             })
             .transpose()
     }
@@ -824,6 +1167,11 @@ impl HubModelConfiguration {
         self.direct_selections.contains(&selection)
     }
 
+    /// Returns the complete watch configuration, or absence when no task starts.
+    pub const fn repository_watch(&self) -> Option<&RepositoryWatchConfiguration> {
+        self.repository_watch.as_ref()
+    }
+
     /// Resolves one configured alias to the immutable definition frozen at
     /// acceptance time.
     pub fn resolve_alias(&self, alias: ModelAlias) -> Option<FrozenAliasDefinition> {
@@ -836,6 +1184,499 @@ impl HubModelConfiguration {
             .iter()
             .map(|(alias, definition)| (*alias, definition.selected()))
     }
+}
+
+fn parse_repository_watch_configuration(
+    item: &Item,
+) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(
+        table,
+        &["version", "signal_reviewers", "repositories", "rules"],
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if table.get("version").and_then(Item::as_integer) != Some(1) {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let reviewer_values = table
+        .get("signal_reviewers")
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if reviewer_values.len() > MAX_SIGNAL_REVIEWERS {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut signal_reviewers = Vec::with_capacity(reviewer_values.len());
+    let mut reviewer_set = HashSet::with_capacity(reviewer_values.len());
+    for value in reviewer_values {
+        let login = value
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            .and_then(|value| {
+                RepoWatchAuthorLogin::try_new(value.to_owned())
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            })?;
+        if !reviewer_set.insert(login.clone()) {
+            return Err(HubModelConfigurationError::DuplicateSignalReviewer);
+        }
+        signal_reviewers.push(login);
+    }
+    signal_reviewers.sort();
+
+    let repository_tables = table
+        .get("repositories")
+        .and_then(Item::as_array_of_tables)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if repository_tables.is_empty() || repository_tables.len() > MAX_WATCHED_REPOSITORIES {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut repositories = Vec::with_capacity(repository_tables.len());
+    let mut repository_set = HashSet::with_capacity(repository_tables.len());
+    let mut credential_file_references: Vec<PathBuf> = Vec::with_capacity(repository_tables.len());
+    for repository in repository_tables {
+        reject_unknown_fields(
+            repository,
+            &["repository", "poll_interval_seconds", "credential_file"],
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        let repository_slug = RepositorySlug::try_new(
+            required_string(repository, "repository")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                .to_owned(),
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if !repository_set.insert(repository_slug.clone()) {
+            return Err(HubModelConfigurationError::DuplicateWatchedRepository);
+        }
+        let interval = repository
+            .get("poll_interval_seconds")
+            .and_then(Item::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        let credential_file = PathBuf::from(
+            required_string(repository, "credential_file")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?,
+        );
+        if !credential_file.is_absolute() {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        if credential_file
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        let resolved_credential_file = resolved_credential_file_reference(&credential_file)?;
+        if credential_file_references.iter().any(|existing| {
+            credential_file_references_conflict(existing, &resolved_credential_file)
+        }) {
+            return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+        }
+        credential_file_references.push(resolved_credential_file);
+        repositories.push(WatchedRepositoryConfiguration {
+            repository: repository_slug,
+            poll_interval: Duration::from_secs(interval),
+            credential_file,
+        });
+    }
+    repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
+    let rules = parse_repository_watch_rules(table)?;
+    Ok(RepositoryWatchConfiguration {
+        signal_reviewers: signal_reviewers.into_boxed_slice(),
+        repositories: repositories.into_boxed_slice(),
+        rules: rules.into_boxed_slice(),
+    })
+}
+
+fn parse_repository_watch_rules(
+    table: &Table,
+) -> Result<Vec<RepoWatchRule>, HubModelConfigurationError> {
+    let Some(item) = table.get("rules") else {
+        return Ok(Vec::new());
+    };
+    let tables = item
+        .as_array_of_tables()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if tables.len() > MAX_REPOSITORY_WATCH_RULES {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut rules = Vec::with_capacity(tables.len());
+    let mut identities = HashSet::with_capacity(tables.len());
+    for table in tables {
+        reject_unknown_fields(
+            table,
+            &[
+                "id",
+                "version",
+                "matcher",
+                "actions",
+                "singleton_per",
+                "cooldown_seconds",
+            ],
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if table.get("version").and_then(Item::as_integer) != Some(1) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        let id = RepoWatchRuleId::try_new(
+            required_string(table, "id")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                .to_owned(),
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if !identities.insert(id.clone()) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        let matcher = table
+            .get("matcher")
+            .and_then(Item::as_table)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            .and_then(parse_repository_watch_matcher)?;
+        let actions = parse_repository_watch_actions(table)?;
+        let singleton_per = match table.get("singleton_per").and_then(Item::as_str) {
+            None | Some("pull_request") => RepoWatchSingletonScope::PullRequest,
+            Some("stack") => RepoWatchSingletonScope::Stack,
+            Some("rule") => RepoWatchSingletonScope::Rule,
+            Some("repo") => RepoWatchSingletonScope::Repository,
+            Some(_) => return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration),
+        };
+        let cooldown = table
+            .get("cooldown_seconds")
+            .map(|item| {
+                item.as_integer()
+                    .and_then(|value| u64::try_from(value).ok())
+                    .filter(|value| *value <= i64::MAX as u64)
+                    .map(Duration::from_secs)
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            })
+            .transpose()?
+            .unwrap_or(Duration::ZERO);
+        let rule = RepoWatchRule::try_new(id.clone(), matcher, actions, singleton_per, cooldown)
+            .map_err(
+                |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                    rule: id.as_str().to_owned(),
+                    reason: error.to_string(),
+                },
+            )?;
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
+fn parse_repository_watch_matcher(
+    table: &Table,
+) -> Result<RepoWatchMatcherV1, HubModelConfigurationError> {
+    reject_unknown_fields(
+        table,
+        &[
+            "event_kinds",
+            "repo",
+            "base_branch",
+            "head_branch_regex",
+            "title_regex",
+            "body_regex",
+            "labels",
+            "draft",
+            "author",
+            "mergeable_state",
+            "conclusion",
+        ],
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    Ok(RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+        event_kinds: parse_event_kind_list(table.get("event_kinds"))?,
+        repository: optional_repo_watch_string(table, "repo", RepositorySlug::try_new)?,
+        base_branch: optional_repo_watch_string(table, "base_branch", BranchName::try_new)?,
+        head_branch: optional_repo_watch_string(
+            table,
+            "head_branch_regex",
+            RepoWatchPattern::try_new,
+        )?,
+        title: optional_repo_watch_string(table, "title_regex", RepoWatchPattern::try_new)?,
+        body: optional_repo_watch_string(table, "body_regex", RepoWatchPattern::try_new)?,
+        labels: parse_label_matcher(table.get("labels"))?,
+        draft: table
+            .get("draft")
+            .map(|item| {
+                item.as_bool()
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+            })
+            .transpose()?,
+        author: optional_repo_watch_string(table, "author", RepoWatchAuthorLogin::try_new)?,
+        mergeable_state: parse_mergeable_state_list(table.get("mergeable_state"))?,
+        conclusion: parse_conclusion_list(table.get("conclusion"))?,
+    }))
+}
+
+fn optional_repo_watch_string<T>(
+    table: &Table,
+    key: &str,
+    constructor: impl FnOnce(String) -> Result<T, signalbox_domain::RepoWatchTextError>,
+) -> Result<Option<T>, HubModelConfigurationError> {
+    table
+        .get(key)
+        .map(|item| {
+            item.as_str()
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+                .and_then(|value| {
+                    constructor(value.to_owned()).map_err(|_| {
+                        HubModelConfigurationError::InvalidRepositoryWatchConfiguration
+                    })
+                })
+        })
+        .transpose()
+}
+
+fn parse_repo_watch_any_of(
+    item: Option<&Item>,
+) -> Result<Option<&toml_edit::Array>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["any_of"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    table
+        .get("any_of")
+        .and_then(Item::as_array)
+        .map(Some)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+}
+
+fn parse_event_kind_list(
+    item: Option<&Item>,
+) -> Result<Vec<RepoWatchEventKindNameV1>, HubModelConfigurationError> {
+    parse_repo_watch_string_array(item, |value| match value {
+        "pull_request_opened" => Some(RepoWatchEventKindNameV1::PullRequestOpened),
+        "pull_request_closed" => Some(RepoWatchEventKindNameV1::PullRequestClosed),
+        "pull_request_merged" => Some(RepoWatchEventKindNameV1::PullRequestMerged),
+        "head_changed" => Some(RepoWatchEventKindNameV1::HeadChanged),
+        "mergeable_state_changed" => Some(RepoWatchEventKindNameV1::MergeableStateChanged),
+        "checks_completed" => Some(RepoWatchEventKindNameV1::ChecksCompleted),
+        "check_run_completed" => Some(RepoWatchEventKindNameV1::CheckRunCompleted),
+        "branch_workflow_run_completed" => {
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        }
+        "review_submitted" => Some(RepoWatchEventKindNameV1::ReviewSubmitted),
+        "thread_opened" => Some(RepoWatchEventKindNameV1::ThreadOpened),
+        "thread_resolved" => Some(RepoWatchEventKindNameV1::ThreadResolved),
+        "labeled" => Some(RepoWatchEventKindNameV1::Labeled),
+        "unlabeled" => Some(RepoWatchEventKindNameV1::Unlabeled),
+        "base_advanced" => Some(RepoWatchEventKindNameV1::BaseAdvanced),
+        "reaction_changed" => Some(RepoWatchEventKindNameV1::ReactionChanged),
+        _ => None,
+    })
+}
+
+fn parse_label_matcher(
+    item: Option<&Item>,
+) -> Result<RepoWatchLabelMatcher, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(RepoWatchLabelMatcher::default());
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["any_of", "all_of", "none_of"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    Ok(RepoWatchLabelMatcher::new(RepoWatchLabelMatcherInput {
+        any_of: parse_repo_watch_text_array(table.get("any_of"), LabelName::try_new)?,
+        all_of: parse_repo_watch_text_array(table.get("all_of"), LabelName::try_new)?,
+        none_of: parse_repo_watch_text_array(table.get("none_of"), LabelName::try_new)?,
+    }))
+}
+
+fn parse_mergeable_state_list(
+    item: Option<&Item>,
+) -> Result<Vec<MergeableState>, HubModelConfigurationError> {
+    let array = parse_repo_watch_any_of(item)?;
+    parse_repo_watch_array_values(array, |value| match value {
+        "mergeable" => Some(MergeableState::Mergeable),
+        "conflicting" => Some(MergeableState::Conflicting),
+        "unknown" => Some(MergeableState::Unknown),
+        _ => None,
+    })
+}
+
+fn parse_conclusion_list(
+    item: Option<&Item>,
+) -> Result<Vec<CheckConclusion>, HubModelConfigurationError> {
+    let array = parse_repo_watch_any_of(item)?;
+    parse_repo_watch_array_values(array, |value| match value {
+        "success" => Some(CheckConclusion::Success),
+        "failure" => Some(CheckConclusion::Failure),
+        "neutral" => Some(CheckConclusion::Neutral),
+        "cancelled" => Some(CheckConclusion::Cancelled),
+        "skipped" => Some(CheckConclusion::Skipped),
+        "timed_out" => Some(CheckConclusion::TimedOut),
+        "action_required" => Some(CheckConclusion::ActionRequired),
+        "stale" => Some(CheckConclusion::Stale),
+        "startup_failure" => Some(CheckConclusion::StartupFailure),
+        _ => None,
+    })
+}
+
+fn parse_repo_watch_text_array<T>(
+    item: Option<&Item>,
+    constructor: impl Fn(String) -> Result<T, signalbox_domain::RepoWatchTextError>,
+) -> Result<Vec<T>, HubModelConfigurationError>
+where
+    T: Eq,
+{
+    parse_repo_watch_string_array(item, |value| constructor(value.to_owned()).ok())
+}
+
+fn parse_repo_watch_string_array<T>(
+    item: Option<&Item>,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, HubModelConfigurationError>
+where
+    T: Eq,
+{
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    let array = item
+        .as_array()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    parse_repo_watch_array_values(Some(array), parser)
+}
+
+fn parse_repo_watch_array_values<T>(
+    array: Option<&toml_edit::Array>,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Result<Vec<T>, HubModelConfigurationError>
+where
+    T: Eq,
+{
+    let Some(array) = array else {
+        return Ok(Vec::new());
+    };
+    let mut parsed = Vec::with_capacity(array.len());
+    for value in array {
+        let value = value
+            .as_str()
+            .and_then(&parser)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if parsed.contains(&value) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        parsed.push(value);
+    }
+    Ok(parsed)
+}
+
+fn parse_repository_watch_actions(
+    table: &Table,
+) -> Result<Vec<RepoWatchRuleActionV1>, HubModelConfigurationError> {
+    let actions = table
+        .get("actions")
+        .and_then(Item::as_array_of_tables)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if actions.is_empty() || actions.len() > MAX_REPOSITORY_WATCH_ACTIONS {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    actions
+        .iter()
+        .map(|action| {
+            reject_unknown_fields(action, &["kind", "template"])
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+            if required_string(action, "kind")
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                != "dispatch_session"
+            {
+                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+            }
+            let template = SessionTemplateName::try_new(
+                required_string(action, "template")
+                    .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                    .to_owned(),
+            )
+            .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+            Ok(RepoWatchRuleActionV1::DispatchSession { template })
+        })
+        .collect()
+}
+
+fn credential_file_references_conflict(left: &Path, right: &Path) -> bool {
+    left == right || same_file_identity(left, right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+fn resolved_credential_file_reference(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
+    let mut resolved = normalize_absolute_reference(path)?;
+    for _ in 0..40 {
+        let mut prefix = PathBuf::new();
+        let mut components = resolved.components();
+        let mut replacement = None;
+        while let Some(component) = components.next() {
+            prefix.push(component.as_os_str());
+            let metadata = match fs::symlink_metadata(&prefix) {
+                Ok(metadata) => metadata,
+                Err(_) => return Ok(resolved),
+            };
+            if !metadata.file_type().is_symlink() {
+                continue;
+            }
+            let target = fs::read_link(&prefix)
+                .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+            let mut target = if target.is_absolute() {
+                target
+            } else {
+                prefix
+                    .parent()
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
+                    .join(target)
+            };
+            target.extend(components.map(|remaining| remaining.as_os_str()));
+            replacement = Some(normalize_absolute_reference(&target)?);
+            break;
+        }
+        let Some(replacement) = replacement else {
+            return Ok(fs::canonicalize(&resolved).unwrap_or(resolved));
+        };
+        resolved = replacement;
+    }
+    Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+}
+
+fn normalize_absolute_reference(path: &Path) -> Result<PathBuf, HubModelConfigurationError> {
+    if !path.is_absolute() {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+                }
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn parse_tool_approval_postures(
@@ -1077,6 +1918,14 @@ fn validate_alias_count(count: usize) -> Result<(), HubModelConfigurationError> 
     }
 }
 
+fn validate_model_count(count: usize) -> Result<(), HubModelConfigurationError> {
+    if count > MAX_MODEL_CAPABILITY_CATALOG_ENTRIES {
+        Err(HubModelConfigurationError::TooManyModels)
+    } else {
+        Ok(())
+    }
+}
+
 fn validated_name(value: &str) -> Result<Arc<str>, HubModelConfigurationError> {
     if value.is_empty() || value.trim() != value || value.contains('\0') {
         Err(HubModelConfigurationError::InvalidField)
@@ -1118,6 +1967,361 @@ fn required_positive_u32(table: &Table, key: &str) -> Result<u32, HubModelConfig
         Err(HubModelConfigurationError::InvalidLimit)
     } else {
         Ok(value)
+    }
+}
+
+fn parse_model_settings_profiles(
+    item: Option<&Item>,
+) -> Result<HashMap<Arc<str>, ModelSettingsOverlay>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(HashMap::new());
+    };
+    let profiles = item
+        .as_array_of_tables()
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    let mut parsed = HashMap::with_capacity(profiles.len());
+    for profile in profiles {
+        reject_unknown_fields(
+            profile,
+            &["name", "reasoning_level", "fast_mode", "service_tier"],
+        )
+        .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+        let name = validated_name(required_string(profile, "name")?)?;
+        let settings = parse_model_settings_overlay_table(profile)?;
+        if parsed.insert(name, settings).is_some() {
+            return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration);
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_model_settings_overlay(
+    item: Option<&Item>,
+) -> Result<ModelSettingsOverlay, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(ModelSettingsOverlay::inherit_all());
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    reject_unknown_fields(table, &["reasoning_level", "fast_mode", "service_tier"])
+        .map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    parse_model_settings_overlay_table(table)
+}
+
+fn parse_model_settings_overlay_table(
+    table: &Table,
+) -> Result<ModelSettingsOverlay, HubModelConfigurationError> {
+    let reasoning_level = match table.get("reasoning_level") {
+        None => SettingOverlay::Inherit,
+        Some(item) => match item.as_str() {
+            Some("provider_default") => SettingOverlay::ProviderDefault,
+            Some(value) => SettingOverlay::Value(parse_configured_reasoning_level(value)?),
+            None => return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+        },
+    };
+    let fast_mode = match table.get("fast_mode").and_then(Item::as_str) {
+        None if table.get("fast_mode").is_none() => FastModeOverlay::Inherit,
+        Some("disabled") => FastModeOverlay::Value(FastMode::Disabled),
+        Some("enabled") => FastModeOverlay::Value(FastMode::Enabled),
+        _ => return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+    };
+    let service_tier = match table.get("service_tier") {
+        None => SettingOverlay::Inherit,
+        Some(item) if item.as_str() == Some("provider_default") => SettingOverlay::ProviderDefault,
+        Some(item) => SettingOverlay::Value(parse_configured_service_tier(item)?),
+    };
+    Ok(ModelSettingsOverlay::new(
+        reasoning_level,
+        fast_mode,
+        service_tier,
+    ))
+}
+
+fn parse_configured_reasoning_level(
+    value: &str,
+) -> Result<ReasoningLevel, HubModelConfigurationError> {
+    match value {
+        "none" => Ok(ReasoningLevel::None),
+        "minimal" => Ok(ReasoningLevel::Minimal),
+        "low" => Ok(ReasoningLevel::Low),
+        "medium" => Ok(ReasoningLevel::Medium),
+        "high" => Ok(ReasoningLevel::High),
+        "xhigh" => Ok(ReasoningLevel::XHigh),
+        "max" => Ok(ReasoningLevel::Max),
+        "ultra" => Ok(ReasoningLevel::Ultra),
+        _ => Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+    }
+}
+
+fn parse_configured_service_tier(item: &Item) -> Result<ServiceTier, HubModelConfigurationError> {
+    let table = item
+        .as_inline_table()
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    if table.len() != 2 || !table.contains_key("provider") || !table.contains_key("value") {
+        return Err(HubModelConfigurationError::InvalidModelSettingsConfiguration);
+    }
+    let provider = table
+        .get("provider")
+        .and_then(toml_edit::Value::as_str)
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    let value = table
+        .get("value")
+        .and_then(toml_edit::Value::as_str)
+        .ok_or(HubModelConfigurationError::InvalidModelSettingsConfiguration)?;
+    match (provider, value) {
+        ("anthropic", "auto") => Ok(ServiceTier::Anthropic(AnthropicServiceTier::Auto)),
+        ("anthropic", "standard_only") => {
+            Ok(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))
+        }
+        ("open_ai", "auto") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Auto)),
+        ("open_ai", "default") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Default)),
+        ("open_ai", "flex") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Flex)),
+        ("open_ai", "scale") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Scale)),
+        ("open_ai", "priority") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Priority)),
+        ("open_ai", "fast") => Ok(ServiceTier::OpenAi(OpenAiServiceTier::Fast)),
+        ("codex_cli", "default") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Default)),
+        ("codex_cli", "priority") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Priority)),
+        ("codex_cli", "flex") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Flex)),
+        _ => Err(HubModelConfigurationError::InvalidModelSettingsConfiguration),
+    }
+}
+
+struct RuntimeCapabilityProjection {
+    adapter: ModelAdapter,
+    provider_model: String,
+    capabilities: ModelCapabilities,
+}
+
+fn project_runtime_model_capabilities(
+    projections: Vec<RuntimeCapabilityProjection>,
+    target_provider_models: &HashMap<ResolvedProviderTarget, String>,
+    target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
+    selectable_targets: &HashSet<ResolvedProviderTarget>,
+) -> Result<RuntimeModelCapabilityCatalog, HubModelConfigurationError> {
+    let mut capabilities_by_provider_model = BTreeMap::new();
+    for projection in projections {
+        let capabilities = runtime_model_capabilities(
+            projection.adapter,
+            &projection.capabilities,
+            target_provider_models,
+            target_adapters,
+            selectable_targets,
+        )?;
+        if let Some(previous) =
+            capabilities_by_provider_model.insert(projection.provider_model, capabilities.clone())
+            && previous != capabilities
+        {
+            return Err(HubModelConfigurationError::InvalidModelCapabilities);
+        }
+    }
+    RuntimeModelCapabilityCatalog::try_from_definitions(
+        capabilities_by_provider_model
+            .into_iter()
+            .map(|(provider_model, capabilities)| {
+                RuntimeModelCapabilityDefinition::new(
+                    RuntimeResolvedTarget::new(provider_model),
+                    capabilities,
+                )
+            }),
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidModelCapabilities)
+}
+
+fn runtime_model_capabilities(
+    adapter: ModelAdapter,
+    capabilities: &ModelCapabilities,
+    target_provider_models: &HashMap<ResolvedProviderTarget, String>,
+    target_adapters: &HashMap<ResolvedProviderTarget, ModelAdapter>,
+    selectable_targets: &HashSet<ResolvedProviderTarget>,
+) -> Result<RuntimeModelCapabilities, HubModelConfigurationError> {
+    let reasoning_levels = capabilities
+        .reasoning_levels()
+        .iter()
+        .copied()
+        .map(runtime_reasoning_level)
+        .collect();
+    let fast_mode = match capabilities.fast_mode() {
+        FastModeSupport::Unsupported => None,
+        FastModeSupport::RequestControl => Some(RuntimeFastModeTarget::SameTarget),
+        FastModeSupport::AlternateTarget(target) => {
+            if selectable_targets.contains(&target) {
+                return Err(HubModelConfigurationError::InvalidModelCapabilities);
+            }
+            let provider_model = target_provider_models
+                .get(&target)
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
+            if target_adapters.get(&target) != Some(&adapter) {
+                return Err(HubModelConfigurationError::InvalidModelCapabilities);
+            }
+            Some(RuntimeFastModeTarget::Mapped(RuntimeResolvedTarget::new(
+                provider_model.clone(),
+            )))
+        }
+    };
+    let service_tiers = capabilities
+        .service_tiers()
+        .iter()
+        .copied()
+        .map(runtime_service_tier)
+        .collect();
+    Ok(RuntimeModelCapabilities::new(
+        reasoning_levels,
+        fast_mode,
+        service_tiers,
+    ))
+}
+
+const fn runtime_reasoning_level(value: ReasoningLevel) -> RuntimeReasoningLevel {
+    match value {
+        ReasoningLevel::None => RuntimeReasoningLevel::None,
+        ReasoningLevel::Minimal => RuntimeReasoningLevel::Minimal,
+        ReasoningLevel::Low => RuntimeReasoningLevel::Low,
+        ReasoningLevel::Medium => RuntimeReasoningLevel::Medium,
+        ReasoningLevel::High => RuntimeReasoningLevel::High,
+        ReasoningLevel::XHigh => RuntimeReasoningLevel::XHigh,
+        ReasoningLevel::Max => RuntimeReasoningLevel::Max,
+        ReasoningLevel::Ultra => RuntimeReasoningLevel::Ultra,
+    }
+}
+
+const fn runtime_service_tier(value: ServiceTier) -> RuntimeServiceTier {
+    match value {
+        ServiceTier::Anthropic(value) => RuntimeServiceTier::Anthropic(match value {
+            AnthropicServiceTier::Auto => RuntimeAnthropicServiceTier::Auto,
+            AnthropicServiceTier::StandardOnly => RuntimeAnthropicServiceTier::StandardOnly,
+        }),
+        ServiceTier::OpenAi(value) => RuntimeServiceTier::OpenAi(match value {
+            signalbox_domain::OpenAiServiceTier::Auto => RuntimeOpenAiServiceTier::Auto,
+            signalbox_domain::OpenAiServiceTier::Default => RuntimeOpenAiServiceTier::Default,
+            signalbox_domain::OpenAiServiceTier::Flex => RuntimeOpenAiServiceTier::Flex,
+            signalbox_domain::OpenAiServiceTier::Scale => RuntimeOpenAiServiceTier::Scale,
+            signalbox_domain::OpenAiServiceTier::Priority => RuntimeOpenAiServiceTier::Priority,
+            signalbox_domain::OpenAiServiceTier::Fast => RuntimeOpenAiServiceTier::Fast,
+        }),
+        ServiceTier::CodexCli(value) => RuntimeServiceTier::CodexCli(match value {
+            CodexCliServiceTier::Default => RuntimeCodexCliServiceTier::Default,
+            CodexCliServiceTier::Priority => RuntimeCodexCliServiceTier::Priority,
+            CodexCliServiceTier::Flex => RuntimeCodexCliServiceTier::Flex,
+        }),
+    }
+}
+
+fn validate_adapter_model_settings(
+    adapter: ModelAdapter,
+    max_output_tokens: u32,
+    settings: ValidatedModelSettings,
+) -> Result<(), HubModelConfigurationError> {
+    let effective = settings.effective();
+    let mut runtime = RuntimeModelSettings::new(max_output_tokens);
+    runtime.reasoning_level = effective.reasoning_level().map(runtime_reasoning_level);
+    runtime.fast_mode = match effective.fast_mode() {
+        FastMode::Disabled => RuntimeFastMode::Disabled,
+        FastMode::Enabled => RuntimeFastMode::Enabled,
+    };
+    runtime.service_tier = effective.service_tier().map(runtime_service_tier);
+    let supported = match adapter {
+        ModelAdapter::Anthropic => {
+            signalbox_model_runtime_anthropic::validate_model_settings(&runtime)
+        }
+        ModelAdapter::CodexCli => {
+            signalbox_model_runtime_codex_cli::validate_model_settings(&runtime)
+        }
+    };
+    supported.map_err(|_| HubModelConfigurationError::InvalidModelSettingsConfiguration)
+}
+
+fn parse_model_capabilities(
+    model: &Table,
+    adapter: ModelAdapter,
+) -> Result<ModelCapabilities, HubModelConfigurationError> {
+    let reasoning_levels = optional_string_array(model, "reasoning_levels")?
+        .into_iter()
+        .map(|value| parse_reasoning_level(adapter, value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let fast_mode = match (
+        model.get("fast_mode").and_then(Item::as_str),
+        model.get("fast_target_id"),
+    ) {
+        (None | Some("unsupported"), None) => FastModeSupport::Unsupported,
+        (Some("request_control"), None) => FastModeSupport::RequestControl,
+        (Some("alternate_target"), Some(_)) => {
+            FastModeSupport::AlternateTarget(ResolvedProviderTarget::naming(
+                ProviderModelIdentity::from_uuid(required_uuid(model, "fast_target_id")?),
+            ))
+        }
+        _ => return Err(HubModelConfigurationError::InvalidModelCapabilities),
+    };
+    let service_tiers = optional_string_array(model, "service_tiers")?
+        .into_iter()
+        .map(|value| parse_service_tier(adapter, value))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(ModelCapabilities::new(
+        reasoning_levels,
+        fast_mode,
+        service_tiers,
+    ))
+}
+
+fn optional_string_array<'a>(
+    table: &'a Table,
+    key: &str,
+) -> Result<Vec<&'a str>, HubModelConfigurationError> {
+    let Some(item) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let array = item
+        .as_array()
+        .ok_or(HubModelConfigurationError::InvalidModelCapabilities)?;
+    let values = array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(HubModelConfigurationError::InvalidModelCapabilities)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique = values.iter().copied().collect::<BTreeSet<_>>();
+    if unique.len() != values.len() {
+        return Err(HubModelConfigurationError::InvalidModelCapabilities);
+    }
+    Ok(values)
+}
+
+fn parse_reasoning_level(
+    adapter: ModelAdapter,
+    value: &str,
+) -> Result<ReasoningLevel, HubModelConfigurationError> {
+    match (adapter, value) {
+        (ModelAdapter::CodexCli, "none") => Ok(ReasoningLevel::None),
+        (ModelAdapter::CodexCli, "minimal") => Ok(ReasoningLevel::Minimal),
+        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "low") => Ok(ReasoningLevel::Low),
+        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "medium") => Ok(ReasoningLevel::Medium),
+        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "high") => Ok(ReasoningLevel::High),
+        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "xhigh") => Ok(ReasoningLevel::XHigh),
+        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "max") => Ok(ReasoningLevel::Max),
+        (ModelAdapter::CodexCli, "ultra") => Ok(ReasoningLevel::Ultra),
+        _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
+    }
+}
+
+fn parse_service_tier(
+    adapter: ModelAdapter,
+    value: &str,
+) -> Result<ServiceTier, HubModelConfigurationError> {
+    match (adapter, value) {
+        (ModelAdapter::Anthropic, "auto") => Ok(ServiceTier::Anthropic(AnthropicServiceTier::Auto)),
+        (ModelAdapter::Anthropic, "standard_only") => {
+            Ok(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))
+        }
+        (ModelAdapter::CodexCli, "default") => {
+            Ok(ServiceTier::CodexCli(CodexCliServiceTier::Default))
+        }
+        (ModelAdapter::CodexCli, "priority") => {
+            Ok(ServiceTier::CodexCli(CodexCliServiceTier::Priority))
+        }
+        (ModelAdapter::CodexCli, "flex") => Ok(ServiceTier::CodexCli(CodexCliServiceTier::Flex)),
+        _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
     }
 }
 
@@ -1205,8 +2409,29 @@ pub enum HubModelConfigurationError {
     InvalidConversationImportLimit,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
+    /// The optional version-one repository-watch section was malformed.
+    InvalidRepositoryWatchConfiguration,
+    /// One structured repository-watch rule failed closed validation.
+    InvalidRepositoryWatchRule {
+        /// Stable operator-assigned rule identity.
+        rule: String,
+        /// Safe domain or template-validation diagnostic.
+        reason: String,
+    },
+    /// Two repository-watch entries normalized to the same repository.
+    DuplicateWatchedRepository,
+    /// Two signal-reviewer spellings normalized to the same login.
+    DuplicateSignalReviewer,
+    /// Two watched repositories named the same credential-file reference.
+    DuplicateRepositoryWatchCredentialFile,
     /// One direct selection appeared more than once.
     DuplicateSelection,
+    /// One per-model settings capability record was malformed.
+    InvalidModelCapabilities,
+    /// A global, named-profile, or model-profile settings declaration was malformed.
+    InvalidModelSettingsConfiguration,
+    /// The model catalog exceeded the process-protocol capability bound.
+    TooManyModels,
     /// One target was assigned conflicting runtime meanings.
     ConflictingTarget,
     /// The aliases field was not an array of tables.
@@ -1221,6 +2446,12 @@ pub enum HubModelConfigurationError {
 
 impl fmt::Display for HubModelConfigurationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::InvalidRepositoryWatchRule { rule, reason } = self {
+            return write!(
+                formatter,
+                "model configuration contains invalid repository-watch rule `{rule}`: {reason}"
+            );
+        }
         formatter.write_str(match self {
             Self::Read => "model configuration file could not be read",
             Self::InvalidDocument => "model configuration is not valid TOML",
@@ -1292,7 +2523,27 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
             }
+            Self::InvalidRepositoryWatchConfiguration => {
+                "model configuration contains invalid repository-watch settings"
+            }
+            Self::InvalidRepositoryWatchRule { .. } => {
+                "model configuration contains an invalid repository-watch rule"
+            }
+            Self::DuplicateWatchedRepository => "model configuration repeats a watched repository",
+            Self::DuplicateSignalReviewer => {
+                "model configuration repeats a repository-watch signal reviewer"
+            }
+            Self::DuplicateRepositoryWatchCredentialFile => {
+                "model configuration repeats a repository-watch credential-file reference"
+            }
             Self::DuplicateSelection => "model configuration repeats a direct selection",
+            Self::InvalidModelCapabilities => {
+                "model configuration contains invalid model capabilities"
+            }
+            Self::InvalidModelSettingsConfiguration => {
+                "model configuration contains invalid model settings layers"
+            }
+            Self::TooManyModels => "model configuration contains too many models",
             Self::ConflictingTarget => "model configuration gives one target conflicting meaning",
             Self::InvalidAliases => "model aliases are not an array of tables",
             Self::TooManyAliases => "model configuration contains too many aliases",
@@ -1350,6 +2601,7 @@ fn credential_bytes(file_bytes: &[u8]) -> &[u8] {
 pub struct FileCredentialAccess {
     path: Arc<PathBuf>,
     reference: CredentialReference,
+    maximum_bytes: Option<usize>,
 }
 
 impl FileCredentialAccess {
@@ -1358,6 +2610,19 @@ impl FileCredentialAccess {
         Self {
             path: Arc::new(path),
             reference,
+            maximum_bytes: None,
+        }
+    }
+
+    pub(crate) fn new_bounded(
+        path: PathBuf,
+        reference: CredentialReference,
+        maximum_bytes: usize,
+    ) -> Self {
+        Self {
+            path: Arc::new(path),
+            reference,
+            maximum_bytes: Some(maximum_bytes),
         }
     }
 
@@ -1388,7 +2653,13 @@ impl CredentialAccess for FileCredentialAccess {
                 CredentialAccessFailure::Unmapped,
             ));
         }
-        match tokio::fs::read(self.path.as_ref()).await {
+        let file_bytes = match self.maximum_bytes {
+            Some(maximum_bytes) => {
+                read_bounded_credential_file(self.path.as_ref(), maximum_bytes).await
+            }
+            None => tokio::fs::read(self.path.as_ref()).await,
+        };
+        match file_bytes {
             Ok(file_bytes) => Ok(CredentialValue::new(credential_bytes(&file_bytes))),
             Err(error) => Err(CredentialAccessError::new(
                 reference.clone(),
@@ -1402,16 +2673,38 @@ impl CredentialAccess for FileCredentialAccess {
     }
 }
 
+async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    let read_limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(maximum_bytes.min(8 * 1_024));
+    file.take(read_limit).read_to_end(&mut bytes).await?;
+    if bytes.len() > maximum_bytes {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "credential file exceeds its accepted byte bound",
+        ))
+    } else {
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
+        time::Duration,
     };
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        DirectModelSelection, ModelAlias, ModelSelectionRequest, ToolApprovalPosture,
+        AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
+        ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
+        ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
+        RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, ServiceTier,
+        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -1424,9 +2717,30 @@ mod tests {
         FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
         MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
         ModelCallInputUsage, UnknownSessionModel, credential_bytes, validate_alias_count,
+        validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
+    const WATCH_REPOSITORY: &str = "namespace/project";
+    const SECOND_WATCH_REPOSITORY: &str = "namespace/second";
+    const WATCH_CREDENTIAL_FILE: &str = "/run/credentials/repository-watch-token";
+    const SECOND_WATCH_CREDENTIAL_FILE: &str = "/run/credentials/second-watch-token";
+    const PARENT_COMPONENT_WATCH_CREDENTIAL_FILE: &str =
+        "/run/credentials/alias/../repository-watch-token";
+    const WATCH_CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
+    const WATCH_INTERVAL_SECONDS: u64 = 90;
+    const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
+    const SIGNAL_REVIEWER: &str = "signal-reviewer";
+    const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
+    const PROVIDER_WATCH_REPOSITORY: &str = "Namespace/Project";
+    const PROVIDER_SECOND_WATCH_REPOSITORY: &str = "Namespace/Second";
+    const PROVIDER_SIGNAL_REVIEWER: &str = "Signal-Reviewer";
+    const PROVIDER_SECOND_SIGNAL_REVIEWER: &str = "Review-Bot[bot]";
+    const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "NAMESPACE/PROJECT";
+    const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
+    const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
+    const WATCH_RULE_ID: &str = "merge-forward-on-conflict";
+    const WATCH_TEMPLATE: &str = "merge-forward";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -1552,6 +2866,70 @@ cache_read_input_usd_per_million_tokens = "4"
         format!("{}{}", &CONFIGURATION[..start], &CONFIGURATION[end..])
     }
 
+    fn configuration_with_repository_watch() -> String {
+        format!(
+            r#"{CONFIGURATION}
+
+[repository_watch]
+version = 1
+signal_reviewers = ["{PROVIDER_SIGNAL_REVIEWER}", "{PROVIDER_SECOND_SIGNAL_REVIEWER}"]
+
+[[repository_watch.repositories]]
+repository = "{PROVIDER_WATCH_REPOSITORY}"
+poll_interval_seconds = {WATCH_INTERVAL_SECONDS}
+credential_file = "{WATCH_CREDENTIAL_FILE}"
+
+[[repository_watch.repositories]]
+repository = "{PROVIDER_SECOND_WATCH_REPOSITORY}"
+poll_interval_seconds = {SECOND_WATCH_INTERVAL_SECONDS}
+credential_file = "{SECOND_WATCH_CREDENTIAL_FILE}"
+"#,
+        )
+    }
+
+    fn configuration_with_repository_watch_rule() -> String {
+        format!(
+            r#"{}
+
+[[repository_watch.rules]]
+id = "{WATCH_RULE_ID}"
+version = 1
+singleton_per = "pull_request"
+cooldown_seconds = 30
+
+[repository_watch.rules.matcher]
+event_kinds = ["mergeable_state_changed"]
+repo = "{PROVIDER_WATCH_REPOSITORY}"
+base_branch = "main"
+head_branch_regex = "^stack/.+$"
+title_regex = "^.*$"
+body_regex = "^.*$"
+draft = false
+author = "{PROVIDER_SIGNAL_REVIEWER}"
+
+[repository_watch.rules.matcher.labels]
+any_of = ["stack"]
+all_of = ["owned"]
+none_of = ["hold"]
+
+[repository_watch.rules.matcher.mergeable_state]
+any_of = ["conflicting"]
+
+[repository_watch.rules.matcher.conclusion]
+any_of = []
+
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "{WATCH_TEMPLATE}"
+"#,
+            configuration_with_repository_watch()
+        )
+    }
+
+    fn watch_interval_fixture() -> Duration {
+        Duration::from_secs(WATCH_INTERVAL_SECONDS)
+    }
+
     fn judged_direct_selection_fixture() -> DirectModelSelection {
         DirectModelSelection::from_uuid(Uuid::from_u128(2))
     }
@@ -1621,6 +2999,384 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         let judged = judged_direct_selection_fixture();
 
         assert_eq!(configured.approval_judge_selection(judged), judged);
+    }
+
+    #[test]
+    fn absent_repository_watch_configuration_starts_no_watch_tasks() {
+        let configured =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+
+        assert_eq!(configured.repository_watch(), None);
+    }
+
+    #[test]
+    fn repository_watch_normalizes_signal_reviewer_logins() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repository_watch = configured
+            .repository_watch()
+            .expect("fixture configures repository watch");
+
+        assert_eq!(
+            repository_watch.signal_reviewers()[0].as_str(),
+            SECOND_SIGNAL_REVIEWER
+        );
+        assert_eq!(
+            repository_watch.signal_reviewers()[1].as_str(),
+            SIGNAL_REVIEWER
+        );
+    }
+
+    #[test]
+    fn repository_watch_builds_a_canonical_repository_inventory() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repositories = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories();
+
+        assert_eq!(repositories[0].repository().as_str(), WATCH_REPOSITORY);
+        assert_eq!(
+            repositories[1].repository().as_str(),
+            SECOND_WATCH_REPOSITORY
+        );
+    }
+
+    #[test]
+    fn repository_watch_preserves_each_repository_interval() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+
+        assert_eq!(watched.poll_interval(), watch_interval_fixture());
+    }
+
+    #[test]
+    fn repository_watch_preserves_each_credential_file_reference() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repositories = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories();
+
+        assert_eq!(
+            repositories[0].credential_file(),
+            Path::new(WATCH_CREDENTIAL_FILE)
+        );
+        assert_eq!(
+            repositories[1].credential_file(),
+            Path::new(SECOND_WATCH_CREDENTIAL_FILE)
+        );
+    }
+
+    #[test]
+    fn repository_watch_derives_a_repository_scoped_credential_reference() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+
+        assert_eq!(
+            watched.credential_reference().as_str(),
+            WATCH_CREDENTIAL_REFERENCE
+        );
+    }
+
+    #[test]
+    fn repository_watch_debug_redacts_the_credential_file_reference() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+        let debug = format!("{watched:?}");
+
+        assert!(!debug.contains(WATCH_CREDENTIAL_FILE));
+        assert!(debug.contains("[REDACTED REFERENCE]"));
+    }
+
+    #[test]
+    fn repository_watch_parses_the_conflict_only_live_rule() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), WATCH_RULE_ID);
+        assert_eq!(rule.version().get(), 1);
+        assert_eq!(rule.singleton_per(), RepoWatchSingletonScope::PullRequest);
+        assert_eq!(rule.cooldown(), Duration::from_secs(30));
+        assert_eq!(
+            rule.matcher().event_kinds(),
+            [RepoWatchEventKindNameV1::MergeableStateChanged]
+        );
+        assert_eq!(
+            rule.matcher().mergeable_state(),
+            [MergeableState::Conflicting]
+        );
+        assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_rule_accepts_its_declared_template_context() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
+            .expect("template fixture name is valid");
+        let declaration = RepoWatchTemplateContextDeclaration::try_new(
+            template,
+            vec![RepoWatchDispatchContextShape::PullRequest],
+        )
+        .expect("template declaration is nonempty");
+
+        assert_eq!(
+            configured
+                .repository_watch()
+                .expect("fixture configures repository watch")
+                .validate_template_contexts(&[declaration]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn repository_watch_rule_rejects_a_template_context_mismatch() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
+            .expect("repository-watch rule fixture is valid");
+        let template = SessionTemplateName::try_new(String::from(WATCH_TEMPLATE))
+            .expect("template fixture name is valid");
+        let declaration = RepoWatchTemplateContextDeclaration::try_new(
+            template,
+            vec![RepoWatchDispatchContextShape::Branch],
+        )
+        .expect("template declaration is nonempty");
+        let error = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .validate_template_contexts(&[declaration])
+            .expect_err("pull-request rule cannot target branch-only template");
+
+        assert!(error.to_string().contains(WATCH_RULE_ID));
+        assert!(error.to_string().contains(WATCH_TEMPLATE));
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_missing_credential_file_reference() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+            "credential_path_was_omitted = true",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_relative_credential_file_reference() {
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, RELATIVE_WATCH_CREDENTIAL_FILE);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_zero_poll_interval() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("poll_interval_seconds = {WATCH_INTERVAL_SECONDS}"),
+            "poll_interval_seconds = 0",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_duplicate_canonical_repositories() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("repository = \"{PROVIDER_SECOND_WATCH_REPOSITORY}\""),
+            &format!("repository = \"{DUPLICATE_PROVIDER_WATCH_REPOSITORY}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateWatchedRepository)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_duplicate_canonical_signal_reviewers() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!(
+                "signal_reviewers = [\"{PROVIDER_SIGNAL_REVIEWER}\", \"{PROVIDER_SECOND_SIGNAL_REVIEWER}\"]"
+            ),
+            &format!(
+                "signal_reviewers = [\"{PROVIDER_SIGNAL_REVIEWER}\", \"{DUPLICATE_PROVIDER_SIGNAL_REVIEWER}\"]"
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateSignalReviewer)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_shared_credential_file_reference() {
+        let configured = configuration_with_repository_watch()
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, WATCH_CREDENTIAL_FILE);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_shared_credential_file_alias() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let alias = directory.path().join("watch-token-alias");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_watch_rejects_a_shared_hard_linked_credential_file() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the credential fixture exists");
+        let hard_link = directory.path().join("watch-token-hard-link");
+        std::fs::hard_link(&credential, &hard_link).expect("the credential hard link exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(
+                SECOND_WATCH_CREDENTIAL_FILE,
+                &hard_link.display().to_string(),
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_dangling_shared_credential_file_alias() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        let alias = directory.path().join("watch-token-alias");
+        std::os::unix::fs::symlink(&credential, &alias).expect("the credential alias exists");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_dangling_intermediate_credential_alias() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let target_directory = directory.path().join("pending-target");
+        let alias_directory = directory.path().join("pending-alias");
+        std::os::unix::fs::symlink(&target_directory, &alias_directory)
+            .expect("the intermediate credential alias exists");
+        let credential = target_directory.join("watch-token");
+        let alias = alias_directory.join("watch-token");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(SECOND_WATCH_CREDENTIAL_FILE, &alias.display().to_string());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_defers_an_unreadable_credential_file_reference() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        let configured = configuration_with_repository_watch()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string());
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o000))
+            .expect("the credential fixture directory becomes unreadable");
+
+        let parsed = HubModelConfiguration::parse(&configured);
+
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("the credential fixture directory becomes removable");
+        parsed.expect("credential readability is deferred until request preparation");
+    }
+
+    #[test]
+    fn repository_watch_rejects_parent_components_in_credential_paths() {
+        let configured = configuration_with_repository_watch().replace(
+            SECOND_WATCH_CREDENTIAL_FILE,
+            PARENT_COMPONENT_WATCH_CREDENTIAL_FILE,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_unknown_repository_fields() {
+        let configured = configuration_with_repository_watch().replace(
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+            &format!(
+                "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\nwebhook_secret_file = \"/not-v1\""
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_an_unsupported_version() {
+        let configured = configuration_with_repository_watch().replace(
+            "[repository_watch]\nversion = 1",
+            "[repository_watch]\nversion = 2",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
     }
 
     #[test]
@@ -2498,6 +4254,207 @@ extra = true"#,
         );
     }
 
+    #[test]
+    fn configuration_enforces_the_protocol_model_capability_catalog_capacity() {
+        assert_eq!(
+            validate_model_count(signalbox_process_protocol::MAX_MODEL_CAPABILITY_CATALOG_ENTRIES),
+            Ok(())
+        );
+        assert_eq!(
+            validate_model_count(
+                signalbox_process_protocol::MAX_MODEL_CAPABILITY_CATALOG_ENTRIES + 1
+            ),
+            Err(HubModelConfigurationError::TooManyModels)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_reasoning_levels_the_selected_adapter_cannot_map() {
+        let configuration = CONFIGURATION.replace(
+            "context_window_tokens = 200000",
+            "context_window_tokens = 200000\nreasoning_levels = [\"ultra\"]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    #[test]
+    fn configuration_copies_named_profile_and_global_settings_layers_per_model() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[model_settings]\nreasoning_level = \"low\"\n\n[[model_settings_profiles]]\nname = \"deliberate\"\nreasoning_level = \"high\"\nfast_mode = \"enabled\"\nservice_tier = { provider = \"anthropic\", value = \"standard_only\" }",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nreasoning_levels = [\"low\", \"high\"]\nfast_mode = \"request_control\"\nservice_tiers = [\"standard_only\"]\nsettings_profile = \"deliberate\"",
+            );
+        let configured = HubModelConfiguration::parse(&configuration)
+            .expect("the selected model supports its copied lower layers");
+        let (profile, global_default) = configured
+            .model_settings_lower_layers(configured_judge_selection_fixture())
+            .expect("the direct model has copied lower settings layers");
+        let validated = configured
+            .validate_session_model_settings(
+                ModelSelectionRequest::Direct(configured_judge_selection_fixture()),
+                ModelSettingsOverlay::inherit_all(),
+            )
+            .expect("the direct model is configured")
+            .expect("the inherited settings chain is supported");
+
+        assert_eq!(
+            profile.reasoning_level(),
+            SettingOverlay::Value(ReasoningLevel::High)
+        );
+        assert_eq!(
+            global_default.reasoning_level(),
+            SettingOverlay::Value(ReasoningLevel::Low)
+        );
+        assert_eq!(
+            profile.fast_mode(),
+            FastModeOverlay::Value(FastMode::Enabled)
+        );
+        assert_eq!(
+            profile.service_tier(),
+            SettingOverlay::Value(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly))
+        );
+        assert_eq!(
+            validated.effective().reasoning_level(),
+            Some(ReasoningLevel::High)
+        );
+        assert_eq!(
+            validated.resolved().reasoning_source(),
+            Some(ModelSettingSource::Profile)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_lower_layer_unsupported_by_the_selected_model() {
+        let configuration = CONFIGURATION.replace(
+            "version = 1",
+            "version = 1\n\n[model_settings]\nreasoning_level = \"low\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: every explicit lower layer is validated even when a
+    /// higher-precedence layer masks it in the effective configuration.
+    #[test]
+    fn s37_inv051_configuration_rejects_an_unsupported_global_value_masked_by_a_profile() {
+        let profile_configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[[model_settings_profiles]]\nname = \"provider-defaults\"\nreasoning_level = \"provider_default\"",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nsettings_profile = \"provider-defaults\"",
+            );
+        HubModelConfiguration::parse(&profile_configuration)
+            .expect("the selected profile is supported without the masked global layer");
+        let configuration = profile_configuration.replace(
+            "version = 1",
+            "version = 1\n\n[model_settings]\nreasoning_level = \"low\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: an explicit unsupported selected-profile value is
+    /// rejected even when the global layer is valid.
+    #[test]
+    fn s37_inv051_configuration_rejects_an_unsupported_selected_profile_value() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[[model_settings_profiles]]\nname = \"unsupported\"\nreasoning_level = \"low\"",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nsettings_profile = \"unsupported\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: a selected profile cannot combine individually
+    /// supported controls that its adapter cannot enforce together.
+    #[test]
+    fn s37_inv051_configuration_rejects_an_adapter_incompatible_selected_profile() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[[model_settings_profiles]]\nname = \"incompatible\"\nfast_mode = \"enabled\"\nservice_tier = { provider = \"anthropic\", value = \"auto\" }",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"request_control\"\nservice_tiers = [\"auto\"]\nsettings_profile = \"incompatible\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    /// S37 / INV-051: an adapter-incompatible global combination remains
+    /// invalid when a selected profile masks it with a supported combination.
+    #[test]
+    fn s37_inv051_configuration_rejects_a_masked_adapter_incompatible_global_layer() {
+        let configuration = CONFIGURATION
+            .replace(
+                "version = 1",
+                "version = 1\n\n[model_settings]\nfast_mode = \"enabled\"\nservice_tier = { provider = \"anthropic\", value = \"auto\" }\n\n[[model_settings_profiles]]\nname = \"standard-tier\"\nservice_tier = { provider = \"anthropic\", value = \"standard_only\" }",
+            )
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"request_control\"\nservice_tiers = [\"auto\", \"standard_only\"]\nsettings_profile = \"standard-tier\"",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelSettingsConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_selectable_model_as_an_alternate_fast_target() {
+        let configuration = format!(
+            r#"{}
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000002"
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "anthropic"
+provider_model = "synthetic-selectable-fast-target"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+            CONFIGURATION.replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 200000\nfast_mode = \"alternate_target\"\nfast_target_id = \"20000000-0000-4000-8000-000000000002\"",
+            )
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
     /// INV-035: credential references stay scoped while paths and values stay
     /// out of errors and debug output.
     #[tokio::test]
@@ -2555,6 +4512,29 @@ extra = true"#,
             b"rotated-test-value"
         );
         std::fs::remove_file(path).expect("fixture file is removable");
+    }
+
+    #[tokio::test]
+    async fn bounded_file_credentials_reject_before_accumulating_past_the_limit() {
+        const ACCEPTED_BYTES: usize = 8;
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let path = temporary.path().join("bounded-credential");
+        std::fs::write(&path, vec![b'x'; ACCEPTED_BYTES + 1])
+            .expect("oversized credential fixture is writable");
+        let source = FileCredentialAccess::new_bounded(
+            path,
+            CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+            ACCEPTED_BYTES,
+        );
+
+        assert_eq!(
+            source
+                .resolve(&source.credential_reference())
+                .await
+                .expect_err("oversized credential is rejected")
+                .failure,
+            CredentialAccessFailure::Unreadable
+        );
     }
 
     /// A credential-printing tool terminates the line it writes, so the
