@@ -114,13 +114,15 @@ const MINIMUM_MODEL_CALLS_FOR_RESULT_ROUND_TRIP: i64 = 2;
 type EvalResult<T = ()> = Result<T, Box<dyn Error>>;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "spends real OpenAI exchanges; owner/CI-only through tool-evals.yml"]
+#[ignore = "spends real OpenAI exchanges; run only from the gated tool-eval workflow"]
 async fn live_model_in_the_loop_evaluates_one_daemon_tool_family() -> EvalResult {
-    run_selected_family().await
+    run_selected_family_if_enabled().await
 }
 
-async fn run_selected_family() -> EvalResult {
-    let family = EvalFamily::from_environment()?;
+async fn run_selected_family_if_enabled() -> EvalResult {
+    let Some(family) = EvalFamily::from_environment()? else {
+        return Ok(());
+    };
     let database = EvalDatabase::start(family.model()).await?;
     let forced_suite = family.build_suite()?;
     let forced = run_forced_tier(&database, &forced_suite).await?;
@@ -199,12 +201,13 @@ enum EvalFamily {
 }
 
 impl EvalFamily {
-    fn from_environment() -> EvalResult<Self> {
+    fn from_environment() -> EvalResult<Option<Self>> {
         match std::env::var(FAMILY_VARIABLE).as_deref() {
-            Ok("git") => Ok(Self::Git),
-            Ok("workspace") => Ok(Self::Workspace),
-            Ok("web") => Ok(Self::Web),
-            _ => Err(io::Error::other("the tool-eval family is missing or unsupported").into()),
+            Ok("git") => Ok(Some(Self::Git)),
+            Ok("workspace") => Ok(Some(Self::Workspace)),
+            Ok("web") => Ok(Some(Self::Web)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            _ => Err(io::Error::other("the configured tool-eval family is unsupported").into()),
         }
     }
 
