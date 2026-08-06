@@ -46,20 +46,26 @@ use signalbox_domain::{
     DelegationOutcomeReason as DomainDelegationOutcomeReason,
     DelegationProvenance as DomainDelegationProvenance, DelegationWait,
     DelegationWaitMode as DomainDelegationWaitMode, DeliveryRequest, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, FrozenModelSelection, Goal, GoalBlockProvenance,
+    DirectModelSelection, DurableCommandId, FastMode as DomainFastMode,
+    FastModeOverlay as DomainFastModeOverlay, FrozenModelSelection, Goal, GoalBlockProvenance,
     GoalBlockedReasonKind, GoalCommandRejection as DomainGoalCommandRejection, GoalCommandResult,
     GoalEvent, GoalEventKind, GoalGuidance, GoalState, GoalStatement, GoalUserAction,
     GoalUserCommand, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship as DomainImportedSessionRelationship, ImportedSourceAttestation,
     ImportedSpeaker as DomainImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptPosition, ModelAlias, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, ParentTerminationCommandSource, PerInputConfigurationChoices,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, ReviewChangeRequestNumber,
-    ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ImportedTranscriptPosition, ModelAlias, ModelCallId,
+    ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
+    ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
+    ModelSettingsOverlay as DomainModelSettingsOverlay,
+    ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
+    PerInputConfigurationChoices, ReasoningLevel as DomainReasoningLevel,
+    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
+    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
+    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -67,13 +73,17 @@ use signalbox_domain::{
     ReviewPassState, ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy,
     ReviewProducedFindings, ReviewReferencedFindingEvidence, ReviewRun, ReviewRunId, ReviewRunRef,
     ReviewRunState, ReviewTarget, ReviewTargetId, ReviewTargetSubject, ReviewText,
-    ReviewWorkflowKind, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent,
-    SessionMetadataLastWriter, SessionMetadataSnapshot, SessionPlacement as DomainSessionPlacement,
-    SessionPlacementPath, SessionPlacementVersion, SessionTemplateName, SessionTemplateProvenance,
+    ReviewWorkflowKind, SemanticTranscriptEntryId, ServiceTier as DomainServiceTier,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionMetadataContent, SessionMetadataLastWriter, SessionMetadataSnapshot,
+    SessionModelSettingsChanged as DomainSessionModelSettingsChanged,
+    SessionPlacement as DomainSessionPlacement, SessionPlacementPath, SessionPlacementVersion,
+    SessionTemplateName, SessionTemplateProvenance, SettingOverlay as DomainSettingOverlay,
     SubmitInput, SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult,
     ToolApprovalDecision, ToolDenialReason, ToolRequestId, TurnId,
+    TurnModelSettingsResolved as DomainTurnModelSettingsResolved, UnsupportedModelSetting,
     UpdateSessionPlacementRejectionKind, UpdateSessionPlacementResult, UserContent,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
@@ -112,6 +122,7 @@ use signalbox_persistence::{
         ProcessTranscriptTurn, ProcessTurnState,
     },
     replace_session_defaults::{
+        ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRejectionOnlyOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     review_workflow::{ReviewWorkflowStore, ReviewWorkflowStoreError},
@@ -137,30 +148,35 @@ use signalbox_process_protocol::{
     DelegationWaitMode as WireDelegationWaitMode,
     DescendantTerminationScope as WireDescendantTerminationScope,
     EffectiveModelSettings as WireEffectiveModelSettings, ErrorCode, ErrorDetail,
-    FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
-    FrameDecodeErrorKind, FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
+    FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall,
+    FastMode as WireFastMode, FastModeOverlay as WireFastModeOverlay, FrameDecodeErrorKind,
+    FrameEncodeError, GoalBlockedProvenance as WireGoalBlockedProvenance,
     GoalBlockedReason as WireGoalBlockedReason, GoalCommandRejection as WireGoalCommandRejection,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_FRAME_BYTES,
     MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
-    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelSelection as WireModelSelection,
+    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+    ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
+    ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
     ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
-    ModelSettingsSnapshot as WireModelSettingsSnapshot, ProtocolVersion, RejectionDetail,
-    RequestId, ReviewDiffSide as WireReviewDiffSide,
-    ReviewExternalObjectKind as WireReviewExternalObjectKind,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot, ProtocolVersion,
+    ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
+    ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
     ReviewPassTerminalOutcome, ReviewRunLifecycle, ReviewRunSnapshot,
     ReviewSeverity as WireReviewSeverity, ReviewTargetSnapshot,
     ReviewTargetSubject as WireReviewTargetSubject, ReviewWorkflow as WireReviewWorkflow,
-    ServerFrame, ServerMessage, SessionEvent, SessionMetadata as WireSessionMetadata,
-    SessionPlacement as WireSessionPlacement, SystemPromptMember, SystemPromptText,
+    ServerFrame, ServerMessage, ServiceTier as WireServiceTier, SessionEvent,
+    SessionMetadata as WireSessionMetadata, SessionPlacement as WireSessionPlacement,
+    SettingOverlay as WireSettingOverlay, SystemPromptMember, SystemPromptText,
     ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnState, UsageProvenance,
+    TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+    TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
     content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
@@ -204,26 +220,6 @@ const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 const REVIEW_ORCHESTRATION_SNAPSHOT_CONNECTIONS: u32 = 2;
-
-fn provider_default_wire_model_settings() -> WireModelSettingsSnapshot {
-    WireModelSettingsSnapshot {
-        precedence: WireModelSettingsPrecedence {
-            per_call: WireModelSettingsOverlay::inherit_all(),
-            session: WireModelSettingsOverlay::inherit_all(),
-            profile: WireModelSettingsOverlay::inherit_all(),
-            global_default: WireModelSettingsOverlay::inherit_all(),
-        },
-        effective: WireEffectiveModelSettings {
-            reasoning_level: None,
-            fast_mode: FastMode::Disabled,
-            service_tier: None,
-        },
-        reasoning_source: None,
-        fast_mode_source: None,
-        service_tier_source: None,
-        validated_for_selection_id: None,
-    }
-}
 
 #[derive(Debug)]
 struct UnavailableContextCompactionModel;
@@ -535,6 +531,8 @@ fn observe_outbox_metrics(metrics: Option<&TelemetryMetrics>, event: &Dispatched
             observe_model_call_metrics(metrics, *state);
         }
         DispatchedOutboxEventKind::SessionCreated
+        | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
+        | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
         | DispatchedOutboxEventKind::InputAccepted { .. }
         | DispatchedOutboxEventKind::GoalTurnRetired { .. }
         | DispatchedOutboxEventKind::ToolBatchTransition { .. }
@@ -1162,22 +1160,14 @@ where
             system_prompt,
             placement,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_create_session(
                 writer,
                 version,
                 request_id,
                 WireCreateSessionRequest {
-                    command_id: command_id.into_uuid(),
+                    command_uuid: command_id.into_uuid(),
                     initial_model_selection,
+                    model_settings,
                     system_prompt,
                     placement,
                 },
@@ -1209,15 +1199,6 @@ where
             initial_model_selection,
             model_settings,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_create_session_from_imported_frontier(
                 writer,
                 version,
@@ -1228,6 +1209,7 @@ where
                     through_position,
                     relationship,
                     initial_model_selection,
+                    model_settings,
                 },
                 &services.pool,
                 services.model_configuration.as_ref(),
@@ -1431,15 +1413,6 @@ where
             model_settings,
             delivery,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_submit_input(
                 writer,
                 version,
@@ -1448,6 +1421,7 @@ where
                 session_id,
                 content,
                 expected_defaults_version,
+                model_settings,
                 delivery,
                 &services.pool,
                 &services.eligibility_nudge,
@@ -1464,15 +1438,6 @@ where
             expected_defaults_version,
             model_settings,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_reconcile_turn(
                 writer,
                 version,
@@ -1482,6 +1447,7 @@ where
                 expected_active_turn_id,
                 content,
                 expected_defaults_version,
+                model_settings,
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -1603,7 +1569,13 @@ where
             .await
         }
         ClientRequest::ListModelCapabilities {} => {
-            handle_empty_model_capability_catalog(writer, version, request_id).await
+            handle_list_model_capabilities(
+                writer,
+                version,
+                request_id,
+                services.model_configuration.as_ref(),
+            )
+            .await
         }
         ClientRequest::ReadSessionMetadata { session_id } => {
             handle_read_session_metadata(writer, version, request_id, session_id, &services.pool)
@@ -1634,15 +1606,6 @@ where
             dangerous_tool_auto_approval,
             system_prompt,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_replace_session_defaults(
                 writer,
                 version,
@@ -1651,6 +1614,7 @@ where
                 session_id,
                 expected_defaults_version,
                 model_selection,
+                model_settings,
                 dangerous_tool_auto_approval,
                 system_prompt,
                 &services.pool,
@@ -2031,15 +1995,6 @@ where
             descendant_scope,
             model_settings,
         } => {
-            if model_settings != WireModelSettingsOverlay::inherit_all() {
-                return write_error(
-                    writer,
-                    version,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::InvalidRequest),
-                )
-                .await;
-            }
             handle_stop_turn(
                 writer,
                 version,
@@ -2050,6 +2005,7 @@ where
                 content,
                 expected_defaults_version,
                 decode_descendant_scope(descendant_scope),
+                model_settings,
                 &services.pool,
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
@@ -5258,6 +5214,7 @@ struct WireImportedContinuationRequest {
     through_position: CanonicalU64,
     relationship: WireImportedSessionRelationship,
     initial_model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
 }
 
 async fn handle_create_session_from_imported_frontier<Writer>(
@@ -5275,7 +5232,7 @@ where
     let conversation_id = ImportedConversationId::from_uuid(wire_request.conversation.into_uuid());
     let relationship = domain_imported_relationship(wire_request.relationship);
     let model_selection = domain_model_selection(wire_request.initial_model_selection);
-    let defaults = SessionConfigurationDefaults::new(model_selection);
+    let caller_model_settings = domain_model_settings_overlay(wire_request.model_settings);
     let through_position = wire_request.through_position;
     let repository =
         ImportedSessionRepository::new(pool.clone(), model_configuration.session_credential_pin());
@@ -5287,7 +5244,21 @@ where
                 && command.imported_frontier().through_position().as_u64()
                     == through_position.value()
                 && command.relationship() == relationship
-                && command.initial_configuration_defaults() == &defaults
+                && command.initial_configuration_defaults().model() == model_selection
+                && command
+                    .initial_configuration_defaults()
+                    .dangerous_tool_auto_approval()
+                    == DangerousToolAutoApproval::Disabled
+                && command
+                    .initial_configuration_defaults()
+                    .system_prompt()
+                    .is_none()
+                && command
+                    .initial_configuration_defaults()
+                    .model_settings()
+                    .precedence()
+                    .session()
+                    == caller_model_settings
             {
                 return write_message(
                     writer,
@@ -5295,7 +5266,12 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
-                        model_settings: provider_default_wire_model_settings(),
+                        model_settings: wire_model_settings(
+                            recorded
+                                .command()
+                                .initial_configuration_defaults()
+                                .model_settings(),
+                        ),
                     },
                 )
                 .await;
@@ -5352,19 +5328,10 @@ where
         }
     }
 
-    if model_configuration
-        .resolve_session_model(model_selection)
-        .is_err()
-    {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    }
-
+    // An unclaimed command resolves its wire address against the immutable
+    // imported aggregate before any application construction, so an absent
+    // conversation or an out-of-range position wins over a settings admission
+    // failure and each still leaves the command identity unclaimed.
     let Some(position) = ImportedTranscriptPosition::try_from_u64(through_position.value()) else {
         return write_error(
             writer,
@@ -5428,6 +5395,51 @@ where
         .await;
     };
     let last_position = last_imported_position(&conversation);
+
+    let model_settings = match validate_session_model_settings(
+        model_configuration,
+        model_selection,
+        caller_model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
+    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
+        model_selection,
+        DangerousToolAutoApproval::Disabled,
+        None,
+        model_settings,
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+
+    if model_configuration
+        .resolve_session_model(model_selection)
+        .is_err()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
+
     let request = CreateSessionFromImportedFrontierRequest::try_new(
         command_id,
         frontier,
@@ -5455,7 +5467,7 @@ where
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
-                    model_settings: provider_default_wire_model_settings(),
+                    model_settings: wire_model_settings(model_settings),
                 },
             )
             .await
@@ -7019,8 +7031,9 @@ const fn wire_imported_speaker_attestation(
 }
 
 struct WireCreateSessionRequest {
-    command_id: uuid::Uuid,
+    command_uuid: uuid::Uuid,
     initial_model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
     system_prompt: SystemPromptMember,
     placement: WireSessionPlacement,
 }
@@ -7029,18 +7042,19 @@ async fn handle_create_session<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
-    request: WireCreateSessionRequest,
+    wire_request: WireCreateSessionRequest,
     services: &ConnectionServices,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
     let WireCreateSessionRequest {
-        command_id,
+        command_uuid,
         initial_model_selection,
+        model_settings,
         system_prompt,
         placement,
-    } = request;
+    } = wire_request;
     let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
         return write_error(
             writer,
@@ -7060,14 +7074,114 @@ where
         .await;
     };
     let model_selection = domain_model_selection(initial_model_selection);
-    let request = CreateSessionRequest::try_new(
-        DurableCommandId::from_uuid(command_id),
-        SessionConfigurationDefaults::complete(
-            model_selection,
-            DangerousToolAutoApproval::Disabled,
-            system_prompt,
-        ),
+    let caller_model_settings = domain_model_settings_overlay(model_settings);
+    let command_id = DurableCommandId::from_uuid(command_uuid);
+    let repository = CreateSessionRepository::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
     );
+    match repository.load(command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            let defaults = command.initial_configuration_defaults();
+            if defaults.model() == model_selection
+                && defaults.dangerous_tool_auto_approval() == DangerousToolAutoApproval::Disabled
+                && defaults.system_prompt() == system_prompt.as_ref()
+                && defaults.model_settings().precedence().session() == caller_model_settings
+                && command.template_provenance().is_none()
+                && command.placement() == &placement
+            {
+                return write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCreated {
+                        session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
+                        model_settings: wire_model_settings(defaults.model_settings()),
+                    },
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::CommitAmbiguous(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(true),
+            )
+            .await;
+        }
+        Err(CreateSessionRepositoryError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    None,
+                    InternalDiagnostic::TemplateSessionCreationCorruption,
+                ),
+            )
+            .await;
+        }
+    }
+    let model_settings = match validate_session_model_settings(
+        services.model_configuration.as_ref(),
+        model_selection,
+        caller_model_settings,
+    ) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                model_settings_protocol_error(error),
+            )
+            .await;
+        }
+    };
+    let Some(defaults) = SessionConfigurationDefaults::complete_with_model_settings(
+        model_selection,
+        DangerousToolAutoApproval::Disabled,
+        system_prompt,
+        model_settings,
+    ) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let request = CreateSessionRequest::try_new(command_id, defaults);
     let Ok(request) = request.map(|request| request.with_placement(placement)) else {
         return write_error(
             writer,
@@ -7137,7 +7251,12 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
-                        model_settings: provider_default_wire_model_settings(),
+                        model_settings: wire_model_settings(
+                            recorded
+                                .command()
+                                .initial_configuration_defaults()
+                                .model_settings(),
+                        ),
                     },
                 )
                 .await;
@@ -7457,7 +7576,12 @@ where
                     request_id,
                     ServerMessage::SessionCreated {
                         session_id: wire_uuid(recorded.applied_result().session().into_uuid()),
-                        model_settings: provider_default_wire_model_settings(),
+                        model_settings: wire_model_settings(
+                            recorded
+                                .command()
+                                .initial_configuration_defaults()
+                                .model_settings(),
+                        ),
                     },
                 )
                 .await;
@@ -7525,6 +7649,7 @@ where
         .await;
     }
 
+    let model_settings = request.initial_configuration_defaults().model_settings();
     let mut service = CreateSessionService::new(UuidV7SessionIdGenerator, repository);
     match service.execute(request).await {
         Ok(CreateSessionOutcome::Applied(result)) => {
@@ -7534,7 +7659,7 @@ where
                 request_id,
                 ServerMessage::SessionCreated {
                     session_id: wire_uuid(result.session().into_uuid()),
-                    model_settings: provider_default_wire_model_settings(),
+                    model_settings: wire_model_settings(model_settings),
                 },
             )
             .await
@@ -7658,14 +7783,16 @@ where
     .await
 }
 
-async fn handle_empty_model_capability_catalog<Writer>(
+async fn handle_list_model_capabilities<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
     request_id: RequestId,
+    configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    let catalog = configuration.model_capability_catalog();
     write_message(
         writer,
         version,
@@ -7673,12 +7800,45 @@ where
         ServerMessage::ModelCapabilitiesStart {},
     )
     .await?;
+    let mut capability_count = 0_u64;
+    for (selection, capabilities) in catalog.iter() {
+        capability_count = capability_count
+            .checked_add(1)
+            .ok_or(ProcessConnectionError::EncodeInvariant)?;
+        write_message(
+            writer,
+            version,
+            request_id,
+            ServerMessage::ModelCapabilityItem {
+                selection_id: wire_uuid(selection.into_uuid()),
+                capabilities: WireModelCapabilities {
+                    reasoning_levels: capabilities
+                        .reasoning_levels()
+                        .iter()
+                        .copied()
+                        .map(wire_reasoning_level)
+                        .collect(),
+                    fast_mode_supported: !matches!(
+                        capabilities.fast_mode(),
+                        signalbox_domain::FastModeSupport::Unsupported
+                    ),
+                    service_tiers: capabilities
+                        .service_tiers()
+                        .iter()
+                        .copied()
+                        .map(wire_service_tier)
+                        .collect(),
+                },
+            },
+        )
+        .await?;
+    }
     write_message(
         writer,
         version,
         request_id,
         ServerMessage::ModelCapabilitiesEnd {
-            capability_count: CanonicalU64::new(0),
+            capability_count: CanonicalU64::new(capability_count),
         },
     )
     .await
@@ -8268,7 +8428,7 @@ where
                     session_id,
                     defaults_version: CanonicalU64::new(read.version().as_u64()),
                     model_selection: wire_domain_model_selection(read.defaults().model()),
-                    model_settings: provider_default_wire_model_settings(),
+                    model_settings: wire_model_settings(read.defaults().model_settings()),
                     dangerous_tool_auto_approval: matches!(
                         read.defaults().dangerous_tool_auto_approval(),
                         DangerousToolAutoApproval::ApproveAll
@@ -8435,6 +8595,7 @@ async fn handle_replace_session_defaults<Writer>(
     session_id: CanonicalUuid,
     expected_defaults_version: CanonicalU64,
     model_selection: WireModelSelection,
+    model_settings: WireModelSettingsOverlay,
     dangerous_tool_auto_approval: bool,
     system_prompt: SystemPromptMember,
     pool: &PgPool,
@@ -8465,46 +8626,54 @@ where
         .await;
     };
     let replacement_model = domain_model_selection(model_selection);
-    let replacement = SessionConfigurationDefaults::complete(
-        replacement_model,
-        if dangerous_tool_auto_approval {
-            DangerousToolAutoApproval::ApproveAll
-        } else {
-            DangerousToolAutoApproval::Disabled
-        },
-        system_prompt,
-    );
-    let durable_command_id = DurableCommandId::from_uuid(command_id);
-    // A member the frame could not state must not silently clear a prompt
-    // the current epoch carries; the transaction refuses that atomically
-    // under the compare-and-set lock, recording nothing.
-    let prompt_member = if prompt_member_is_absent {
-        PromptMemberStatement::Unstated
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let caller_model_settings = domain_model_settings_overlay(model_settings);
+    let dangerous_tool_auto_approval = if dangerous_tool_auto_approval {
+        DangerousToolAutoApproval::ApproveAll
     } else {
-        PromptMemberStatement::Stated
+        DangerousToolAutoApproval::Disabled
     };
-    let request = ReplaceSessionDefaultsRequest::try_new(
-        durable_command_id,
-        SessionId::from_uuid(session_id.into_uuid()),
-        expected_version,
-        replacement,
-        prompt_member,
-    );
-    let Ok(request) = request else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
-    };
+    let durable_command_id = DurableCommandId::from_uuid(command_id);
     let repository = ReplaceSessionDefaultsRepository::new(pool.clone());
-    let command_is_claimed = match repository.load(durable_command_id).await {
-        Ok(Some(_)) | Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }) => {
-            true
+    match repository.load(durable_command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            let replacement = command.replacement();
+            if command.session() == session
+                && command.expected_current_version() == expected_version
+                && !prompt_member_is_absent
+                && replacement.model() == replacement_model
+                && replacement.dangerous_tool_auto_approval() == dangerous_tool_auto_approval
+                && replacement.system_prompt() == system_prompt.as_ref()
+                && command.caller_model_settings() == caller_model_settings
+            {
+                return write_replace_session_defaults_result(
+                    writer,
+                    version,
+                    request_id,
+                    session_id,
+                    recorded.result(),
+                )
+                .await;
+            }
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
         }
-        Ok(None) => false,
+        Ok(None) => {}
+        Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await;
+        }
         Err(ReplaceSessionDefaultsRepositoryError::Database { .. }) => {
             return write_error(
                 writer,
@@ -8526,8 +8695,236 @@ where
             )
             .await;
         }
+    }
+    let prompt_member = if prompt_member_is_absent {
+        PromptMemberStatement::Unstated
+    } else {
+        PromptMemberStatement::Stated
     };
-    if !replacement_model_is_admitted(command_is_claimed, replacement_model, model_configuration) {
+    // The immutable catalog decides an unknown direct selection or alias before
+    // any application construction below, so that read-only fact can never be
+    // recorded under this command identity as a defaults-version mismatch by
+    // the rejection-only boundary. Unlike a capability rejection, it depends on
+    // no defaults snapshot and therefore cannot lose a race worth replaying.
+    if model_configuration
+        .resolve_direct_selection(replacement_model)
+        .is_none()
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            model_settings_protocol_error(ModelSettingsAdmissionError::UnknownModel),
+        )
+        .await;
+    }
+    let prior_model_settings = match ProcessReadRepository::new(pool.clone())
+        .read_session_defaults(session, None)
+        .await
+    {
+        Ok(ProcessSessionDefaultsRead::Read(read)) if read.version() == expected_version => {
+            Some(read.defaults().model_settings())
+        }
+        Ok(ProcessSessionDefaultsRead::Read(read)) if read.version() > expected_version => None,
+        Ok(ProcessSessionDefaultsRead::Read(_)) => {
+            let placeholder = SessionConfigurationDefaults::complete(
+                replacement_model,
+                dangerous_tool_auto_approval,
+                system_prompt.clone(),
+            );
+            let command = DomainReplaceSessionDefaults::with_model_settings_adjustments(
+                durable_command_id,
+                session,
+                expected_version,
+                placeholder,
+                caller_model_settings,
+                Vec::new(),
+            );
+            match handle_defaults_rejection_only(&repository, command, prompt_member).await {
+                Ok(Some(outcome)) => {
+                    return write_replace_session_defaults_outcome(
+                        writer, version, request_id, session_id, outcome,
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    match ProcessReadRepository::new(pool.clone())
+                        .read_session_defaults(session, Some(expected_version))
+                        .await
+                    {
+                        Ok(ProcessSessionDefaultsRead::Read(read)) => {
+                            Some(read.defaults().model_settings())
+                        }
+                        Ok(
+                            ProcessSessionDefaultsRead::SessionNotFound
+                            | ProcessSessionDefaultsRead::VersionNotFound,
+                        ) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                internal_protocol_error(
+                                    Some(session_id.into_uuid()),
+                                    InternalDiagnostic::SessionDefaultsCorruption,
+                                ),
+                            )
+                            .await;
+                        }
+                        Err(ProcessReadError::Database(_)) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                ProtocolError::mutation_unavailable(false),
+                            )
+                            .await;
+                        }
+                        Err(ProcessReadError::Corruption(_)) => {
+                            return write_error(
+                                writer,
+                                version,
+                                request_id,
+                                internal_protocol_error(
+                                    Some(session_id.into_uuid()),
+                                    InternalDiagnostic::SessionDefaultsCorruption,
+                                ),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(ReplaceSessionDefaultsRepositoryError::Database {
+                    commit_ambiguous, ..
+                }) => {
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        ProtocolError::mutation_unavailable(commit_ambiguous),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    let diagnostic = session_defaults_internal_diagnostic(&error);
+                    return write_error(
+                        writer,
+                        version,
+                        request_id,
+                        internal_protocol_error(Some(session_id.into_uuid()), diagnostic),
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(ProcessSessionDefaultsRead::SessionNotFound) => None,
+        Ok(ProcessSessionDefaultsRead::VersionNotFound) => {
+            Some(ValidatedModelSettings::provider_defaults())
+        }
+        Err(ProcessReadError::Database(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::mutation_unavailable(false),
+            )
+            .await;
+        }
+        Err(ProcessReadError::Corruption(_)) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SessionDefaultsCorruption,
+                ),
+            )
+            .await;
+        }
+    };
+    let (model_settings, model_settings_adjustments) = match prior_model_settings {
+        Some(prior_model_settings) => match validate_replacement_model_settings(
+            model_configuration,
+            replacement_model,
+            caller_model_settings,
+            prior_model_settings,
+        ) {
+            Ok(settings) => settings,
+            Err(error) => {
+                // Validation used an unlocked defaults snapshot. Re-enter the
+                // pointer-locked rejection boundary before surfacing the
+                // caller error, so a racing advance records and replays its
+                // authoritative mismatch instead.
+                let placeholder = SessionConfigurationDefaults::complete(
+                    replacement_model,
+                    dangerous_tool_auto_approval,
+                    system_prompt.clone(),
+                );
+                let command = DomainReplaceSessionDefaults::with_model_settings_adjustments(
+                    durable_command_id,
+                    session,
+                    expected_version,
+                    placeholder,
+                    caller_model_settings,
+                    Vec::new(),
+                );
+                match handle_defaults_rejection_only(&repository, command, prompt_member).await {
+                    Ok(Some(outcome)) => {
+                        return write_replace_session_defaults_outcome(
+                            writer, version, request_id, session_id, outcome,
+                        )
+                        .await;
+                    }
+                    Ok(None) => {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            model_settings_protocol_error(error),
+                        )
+                        .await;
+                    }
+                    Err(ReplaceSessionDefaultsRepositoryError::Database {
+                        commit_ambiguous,
+                        ..
+                    }) => {
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            ProtocolError::mutation_unavailable(commit_ambiguous),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let diagnostic = session_defaults_internal_diagnostic(&error);
+                        return write_error(
+                            writer,
+                            version,
+                            request_id,
+                            internal_protocol_error(Some(session_id.into_uuid()), diagnostic),
+                        )
+                        .await;
+                    }
+                }
+            }
+        },
+        // A stale epoch can never move backward, and an absent session must be
+        // classified by the durable command boundary. The catalog identity was
+        // already decided above, so preserve the canonical caller overlay while
+        // supplying an inert replacement snapshot and let the transaction
+        // record and replay its authoritative rejection first.
+        None => (
+            ValidatedModelSettings::provider_defaults(),
+            Vec::<DomainModelChangeAdjustment>::new().into_boxed_slice(),
+        ),
+    };
+    let Some(replacement) = SessionConfigurationDefaults::complete_with_model_settings(
+        replacement_model,
+        dangerous_tool_auto_approval,
+        system_prompt,
+        model_settings,
+    ) else {
         return write_error(
             writer,
             version,
@@ -8535,82 +8932,33 @@ where
             ProtocolError::without_detail(ErrorCode::InvalidRequest),
         )
         .await;
-    }
+    };
+    // A member the frame could not state must not silently clear a prompt
+    // the current epoch carries; the transaction refuses that atomically
+    // under the compare-and-set lock, recording nothing.
+    let request = ReplaceSessionDefaultsRequest::try_new_with_model_settings_adjustments(
+        durable_command_id,
+        session,
+        expected_version,
+        replacement,
+        caller_model_settings,
+        model_settings_adjustments.into_vec(),
+        prompt_member,
+    );
+    let Ok(request) = request else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
     let mut service = ReplaceSessionDefaultsService::new(repository);
     match service.execute(request).await {
-        Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
-            applied,
-        ))) => {
-            let installed = applied.installed();
-            let system_prompt = SystemPromptMember::present(
-                wire_system_prompt(installed.defaults().system_prompt())
-                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
-            );
-            write_mutation_receipt_via_spool(
-                writer,
-                version,
-                request_id,
-                ServerMessage::SessionDefaultsReplaced {
-                    session_id,
-                    defaults_version: CanonicalU64::new(installed.version().as_u64()),
-                    model_selection: wire_domain_model_selection(installed.defaults().model()),
-                    model_settings: provider_default_wire_model_settings(),
-                    dangerous_tool_auto_approval: matches!(
-                        installed.defaults().dangerous_tool_auto_approval(),
-                        DangerousToolAutoApproval::ApproveAll
-                    ),
-                    system_prompt,
-                },
-            )
-            .await
-        }
-        Ok(ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
-            rejected,
-        ))) => {
-            let detail = match rejected {
-                ReplaceSessionDefaultsRejectedResult::SessionNotFound(rejected) => {
-                    RejectionDetail::SessionNotFound {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                    }
-                }
-                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(rejected) => {
-                    RejectionDetail::DefaultsVersionMismatch {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                        expected: CanonicalU64::new(rejected.expected().as_u64()),
-                        current: CanonicalU64::new(rejected.current().as_u64()),
-                    }
-                }
-                ReplaceSessionDefaultsRejectedResult::VersionExhausted(rejected) => {
-                    RejectionDetail::DefaultsVersionExhausted {
-                        session_id: wire_uuid(rejected.session().into_uuid()),
-                        current: CanonicalU64::new(rejected.current().as_u64()),
-                    }
-                }
-            };
-            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
-        }
-        // Frame validation rejects an absent system-prompt member, so this
-        // repository outcome cannot be client-triggered.
-        Ok(ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(
-                    Some(session_id.into_uuid()),
-                    InternalDiagnostic::SystemPromptMemberMissing,
-                ),
-            )
-            .await
-        }
-        Ok(ReplaceSessionDefaultsOutcome::ConflictingReuse { .. }) => {
-            write_error(
-                writer,
-                version,
-                request_id,
-                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
-            )
-            .await
+        Ok(outcome) => {
+            write_replace_session_defaults_outcome(writer, version, request_id, session_id, outcome)
+                .await
         }
         Err(ReplaceSessionDefaultsRepositoryError::Database {
             commit_ambiguous, ..
@@ -8639,20 +8987,137 @@ where
     }
 }
 
-fn replacement_model_is_admitted(
-    command_is_claimed: bool,
-    replacement_model: ModelSelectionRequest,
-    model_configuration: &HubModelConfiguration,
-) -> bool {
-    command_is_claimed
-        || match replacement_model {
-            ModelSelectionRequest::Direct(selection) => {
-                model_configuration.contains_selection(selection)
+async fn handle_defaults_rejection_only(
+    repository: &ReplaceSessionDefaultsRepository,
+    command: DomainReplaceSessionDefaults,
+    prompt_member: PromptMemberStatement,
+) -> Result<Option<ReplaceSessionDefaultsOutcome>, ReplaceSessionDefaultsRepositoryError> {
+    let outcome = repository
+        .handle_rejection_only_where_prompt_member(command, prompt_member)
+        .await?;
+    Ok(match outcome {
+        ReplaceSessionDefaultsRejectionOnlyOutcome::CurrentVersionMatched => None,
+        ReplaceSessionDefaultsRejectionOnlyOutcome::Handled(outcome) => Some(match outcome {
+            ReplaceSessionDefaultsHandlingOutcome::Applied(result) => {
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
+                    result,
+                ))
             }
-            ModelSelectionRequest::Alias(alias) => {
-                model_configuration.resolve_alias(alias).is_some()
+            ReplaceSessionDefaultsHandlingOutcome::Rejected(result) => {
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
+                    result,
+                ))
             }
+            ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id } => {
+                ReplaceSessionDefaultsOutcome::ConflictingReuse { command_id }
+            }
+            ReplaceSessionDefaultsHandlingOutcome::PromptRequiresStatedMember => {
+                ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember
+            }
+        }),
+    })
+}
+
+async fn write_replace_session_defaults_outcome<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    outcome: ReplaceSessionDefaultsOutcome,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match outcome {
+        ReplaceSessionDefaultsOutcome::Recorded(result) => {
+            write_replace_session_defaults_result(writer, version, request_id, session_id, &result)
+                .await
         }
+        // Frame validation rejects an absent system-prompt member, so this
+        // repository outcome cannot be client-triggered.
+        ReplaceSessionDefaultsOutcome::PromptRequiresStatedMember => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(
+                    Some(session_id.into_uuid()),
+                    InternalDiagnostic::SystemPromptMemberMissing,
+                ),
+            )
+            .await
+        }
+        ReplaceSessionDefaultsOutcome::ConflictingReuse { .. } => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+    }
+}
+
+async fn write_replace_session_defaults_result<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    session_id: CanonicalUuid,
+    result: &ReplaceSessionDefaultsResult,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    match result {
+        ReplaceSessionDefaultsResult::Applied(applied) => {
+            let installed = applied.installed();
+            let system_prompt = SystemPromptMember::present(
+                wire_system_prompt(installed.defaults().system_prompt())
+                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
+            );
+            write_mutation_receipt_via_spool(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionDefaultsReplaced {
+                    session_id,
+                    defaults_version: CanonicalU64::new(installed.version().as_u64()),
+                    model_selection: wire_domain_model_selection(installed.defaults().model()),
+                    model_settings: wire_model_settings(installed.defaults().model_settings()),
+                    dangerous_tool_auto_approval: matches!(
+                        installed.defaults().dangerous_tool_auto_approval(),
+                        DangerousToolAutoApproval::ApproveAll
+                    ),
+                    system_prompt,
+                },
+            )
+            .await
+        }
+        ReplaceSessionDefaultsResult::Rejected(rejected) => {
+            let detail = match rejected {
+                ReplaceSessionDefaultsRejectedResult::SessionNotFound(rejected) => {
+                    RejectionDetail::SessionNotFound {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                    }
+                }
+                ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(rejected) => {
+                    RejectionDetail::DefaultsVersionMismatch {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        expected: CanonicalU64::new(rejected.expected().as_u64()),
+                        current: CanonicalU64::new(rejected.current().as_u64()),
+                    }
+                }
+                ReplaceSessionDefaultsRejectedResult::VersionExhausted(rejected) => {
+                    RejectionDetail::DefaultsVersionExhausted {
+                        session_id: wire_uuid(rejected.session().into_uuid()),
+                        current: CanonicalU64::new(rejected.current().as_u64()),
+                    }
+                }
+            };
+            write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+        }
+    }
 }
 
 async fn write_session_metadata_read_error<Writer>(
@@ -8743,6 +9208,7 @@ async fn handle_submit_input<Writer>(
     session_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: Option<CanonicalU64>,
+    model_settings: WireModelSettingsOverlay,
     delivery: Option<InputDelivery>,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
@@ -8763,12 +9229,20 @@ where
     };
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
+    let model_settings = domain_model_settings_overlay(model_settings);
     let configuration = || {
         expected_version.map(|version| {
-            PerInputConfigurationChoices::new(version, ModelSelectionOverride::UseSessionDefault)
+            PerInputConfigurationChoices::with_model_settings(
+                version,
+                ModelSelectionOverride::UseSessionDefault,
+                model_settings,
+            )
         })
     };
     let delivery = match delivery {
@@ -8776,9 +9250,13 @@ where
             .map(|configuration| DeliveryRequest::StartWhenNoActiveTurn { configuration }),
         Some(InputDelivery::Steer {
             expected_active_turn_id,
-        }) if expected_defaults_version.is_none() => Some(DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
-        }),
+        }) if expected_defaults_version.is_none()
+            && model_settings == DomainModelSettingsOverlay::inherit_all() =>
+        {
+            Some(DeliveryRequest::NextSafePoint {
+                expected_active_turn: TurnId::from_uuid(expected_active_turn_id.into_uuid()),
+            })
+        }
         Some(InputDelivery::Queue {
             expected_active_turn_id,
         }) => configuration().map(|configuration| DeliveryRequest::AfterCurrentTurn {
@@ -8841,6 +9319,7 @@ async fn handle_reconcile_turn<Writer>(
     expected_active_turn_id: CanonicalUuid,
     content: InputContent,
     expected_defaults_version: CanonicalU64,
+    model_settings: WireModelSettingsOverlay,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -8852,7 +9331,10 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -8888,6 +9370,7 @@ where
         )
         .await;
     };
+    let model_settings = domain_model_settings_overlay(model_settings);
     if !command_is_claimed {
         match ProcessReadRepository::new(pool.clone())
             .model_call_recovery_precondition(session)
@@ -8950,9 +9433,10 @@ where
         DeliveryRequest::Interrupt {
             expected_active_turn,
             descendant_scope: DescendantTerminationScope::ParentAlone,
-            configuration: PerInputConfigurationChoices::new(
+            configuration: PerInputConfigurationChoices::with_model_settings(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
+                model_settings,
             ),
         },
     );
@@ -9013,6 +9497,7 @@ async fn handle_stop_turn<Writer>(
     content: InputContent,
     expected_defaults_version: CanonicalU64,
     descendant_scope: DescendantTerminationScope,
+    model_settings: WireModelSettingsOverlay,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
@@ -9024,7 +9509,10 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -9045,6 +9533,7 @@ where
         )
         .await;
     };
+    let model_settings = domain_model_settings_overlay(model_settings);
     let request = SubmitInputRequest::try_new(
         command_id,
         session,
@@ -9052,9 +9541,10 @@ where
         DeliveryRequest::Interrupt {
             expected_active_turn,
             descendant_scope,
-            configuration: PerInputConfigurationChoices::new(
+            configuration: PerInputConfigurationChoices::with_model_settings(
                 expected_version,
                 ModelSelectionOverride::UseSessionDefault,
+                model_settings,
             ),
         },
     );
@@ -9121,7 +9611,9 @@ where
                     accepted_input_id: wire_uuid(result.accepted_input().into_uuid()),
                     acceptance_position: CanonicalU64::new(result.acceptance_position().as_u64()),
                     turn_id: wire_uuid(result.turn().into_uuid()),
-                    model_settings: provider_default_wire_model_settings(),
+                    model_settings: wire_model_settings(
+                        result.origin_configuration().effective().model_settings(),
+                    ),
                 },
             )
             .await
@@ -9247,6 +9739,9 @@ where
                 Some(session_id.into_uuid()),
                 InternalDiagnostic::SubmitInputIdentityCollision,
             )
+        }
+        SubmitInputRepositoryError::UnsupportedModelSetting(error) => {
+            ProtocolError::rejected(wire_unsupported_model_setting(error))
         }
         SubmitInputRepositoryError::Corruption(_) => internal_protocol_error(
             Some(session_id.into_uuid()),
@@ -9732,7 +10227,7 @@ where
                 let message = ServerMessage::SessionEvent {
                     cursor: CanonicalU64::new(cursor),
                     session_id,
-                    event: event.wire(),
+                    event: event.wire()?,
                 };
                 let Some(event_write) = run_until_shutdown(
                     &mut shutdown,
@@ -9949,6 +10444,7 @@ where
             turn_id: wire_uuid(turn.turn().into_uuid()),
             acceptance_position: CanonicalU64::new(turn.acceptance_position()),
             state: wire_turn_state(turn.state()),
+            model_settings: turn.model_settings().map(wire_turn_model_settings),
         },
     )
     .await
@@ -10686,6 +11182,402 @@ fn wire_domain_model_selection(selection: ModelSelectionRequest) -> WireModelSel
         ModelSelectionRequest::Alias(alias) => WireModelSelection::Alias {
             alias_id: wire_uuid(alias.into_uuid()),
         },
+    }
+}
+
+fn wire_frozen_model_selection(selection: &FrozenModelSelection) -> WireModelSelection {
+    match selection {
+        FrozenModelSelection::Direct(selection) => WireModelSelection::Direct {
+            selection_id: wire_uuid(selection.into_uuid()),
+        },
+        FrozenModelSelection::FrozenAlias { alias, .. } => WireModelSelection::Alias {
+            alias_id: wire_uuid(alias.into_uuid()),
+        },
+    }
+}
+
+fn domain_model_settings_overlay(value: WireModelSettingsOverlay) -> DomainModelSettingsOverlay {
+    DomainModelSettingsOverlay::new(
+        domain_setting_overlay(value.reasoning_level, domain_reasoning_level),
+        domain_fast_mode_overlay(value.fast_mode),
+        domain_setting_overlay(value.service_tier, domain_service_tier),
+    )
+}
+
+fn validate_session_model_settings(
+    configuration: &HubModelConfiguration,
+    selection: ModelSelectionRequest,
+    value: DomainModelSettingsOverlay,
+) -> Result<ValidatedModelSettings, ModelSettingsAdmissionError> {
+    configuration
+        .validate_session_model_settings(selection, value)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?
+        .map_err(|error| {
+            ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
+        })
+}
+
+fn validate_replacement_model_settings(
+    configuration: &HubModelConfiguration,
+    selection: ModelSelectionRequest,
+    caller: DomainModelSettingsOverlay,
+    prior: ValidatedModelSettings,
+) -> Result<(ValidatedModelSettings, Box<[DomainModelChangeAdjustment]>), ModelSettingsAdmissionError>
+{
+    let direct = configuration
+        .resolve_direct_selection(selection)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    let catalog = configuration.model_capability_catalog();
+    let capabilities = catalog
+        .resolve(direct)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    let (profile, global_default) = configuration
+        .model_settings_lower_layers(direct)
+        .ok_or(ModelSettingsAdmissionError::UnknownModel)?;
+    let precedence = DomainModelSettingsPrecedence::new(
+        DomainModelSettingsOverlay::inherit_all(),
+        model_settings_overlay_inheriting_from(caller, prior.precedence().session()),
+        profile,
+        global_default,
+    );
+    if prior
+        .validated_for()
+        .is_some_and(|prior_selection| prior_selection != direct)
+    {
+        return capabilities
+            .validate_model_change(direct, precedence, caller)
+            .map(signalbox_domain::AdjustedModelSettings::into_parts)
+            .map_err(|error| {
+                ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
+            });
+    }
+    capabilities
+        .validate_precedence(direct, precedence)
+        .map(|settings| {
+            (
+                settings,
+                Vec::<DomainModelChangeAdjustment>::new().into_boxed_slice(),
+            )
+        })
+        .map_err(|error| {
+            ModelSettingsAdmissionError::Unsupported(wire_unsupported_model_setting(error))
+        })
+}
+
+const fn model_settings_overlay_inheriting_from(
+    caller: DomainModelSettingsOverlay,
+    prior: DomainModelSettingsOverlay,
+) -> DomainModelSettingsOverlay {
+    DomainModelSettingsOverlay::new(
+        match caller.reasoning_level() {
+            DomainSettingOverlay::Inherit => prior.reasoning_level(),
+            value @ (DomainSettingOverlay::ProviderDefault | DomainSettingOverlay::Value(_)) => {
+                value
+            }
+        },
+        match caller.fast_mode() {
+            DomainFastModeOverlay::Inherit => prior.fast_mode(),
+            value @ DomainFastModeOverlay::Value(_) => value,
+        },
+        match caller.service_tier() {
+            DomainSettingOverlay::Inherit => prior.service_tier(),
+            value @ (DomainSettingOverlay::ProviderDefault | DomainSettingOverlay::Value(_)) => {
+                value
+            }
+        },
+    )
+}
+
+enum ModelSettingsAdmissionError {
+    UnknownModel,
+    Unsupported(RejectionDetail),
+}
+
+fn model_settings_protocol_error(error: ModelSettingsAdmissionError) -> ProtocolError {
+    match error {
+        ModelSettingsAdmissionError::UnknownModel => {
+            ProtocolError::without_detail(ErrorCode::InvalidRequest)
+        }
+        ModelSettingsAdmissionError::Unsupported(detail) => ProtocolError::rejected(detail),
+    }
+}
+
+fn wire_unsupported_model_setting(value: UnsupportedModelSetting) -> RejectionDetail {
+    match value {
+        UnsupportedModelSetting::ReasoningLevel {
+            selection,
+            requested,
+        } => RejectionDetail::UnsupportedReasoningLevel {
+            selection_id: wire_uuid(selection.into_uuid()),
+            requested: wire_reasoning_level(requested),
+        },
+        UnsupportedModelSetting::FastMode { selection } => RejectionDetail::UnsupportedFastMode {
+            selection_id: wire_uuid(selection.into_uuid()),
+        },
+        UnsupportedModelSetting::ServiceTier {
+            selection,
+            requested,
+        } => RejectionDetail::UnsupportedServiceTier {
+            selection_id: wire_uuid(selection.into_uuid()),
+            requested: wire_service_tier(requested),
+        },
+    }
+}
+
+fn domain_setting_overlay<WireT, DomainT>(
+    value: WireSettingOverlay<WireT>,
+    map: impl FnOnce(WireT) -> DomainT,
+) -> DomainSettingOverlay<DomainT> {
+    match value {
+        WireSettingOverlay::Inherit => DomainSettingOverlay::Inherit,
+        WireSettingOverlay::ProviderDefault => DomainSettingOverlay::ProviderDefault,
+        WireSettingOverlay::Value(value) => DomainSettingOverlay::Value(map(value)),
+    }
+}
+
+const fn domain_reasoning_level(value: WireReasoningLevel) -> DomainReasoningLevel {
+    match value {
+        WireReasoningLevel::None => DomainReasoningLevel::None,
+        WireReasoningLevel::Minimal => DomainReasoningLevel::Minimal,
+        WireReasoningLevel::Low => DomainReasoningLevel::Low,
+        WireReasoningLevel::Medium => DomainReasoningLevel::Medium,
+        WireReasoningLevel::High => DomainReasoningLevel::High,
+        WireReasoningLevel::XHigh => DomainReasoningLevel::XHigh,
+        WireReasoningLevel::Max => DomainReasoningLevel::Max,
+        WireReasoningLevel::Ultra => DomainReasoningLevel::Ultra,
+    }
+}
+
+const fn wire_reasoning_level(value: DomainReasoningLevel) -> WireReasoningLevel {
+    match value {
+        DomainReasoningLevel::None => WireReasoningLevel::None,
+        DomainReasoningLevel::Minimal => WireReasoningLevel::Minimal,
+        DomainReasoningLevel::Low => WireReasoningLevel::Low,
+        DomainReasoningLevel::Medium => WireReasoningLevel::Medium,
+        DomainReasoningLevel::High => WireReasoningLevel::High,
+        DomainReasoningLevel::XHigh => WireReasoningLevel::XHigh,
+        DomainReasoningLevel::Max => WireReasoningLevel::Max,
+        DomainReasoningLevel::Ultra => WireReasoningLevel::Ultra,
+    }
+}
+
+const fn domain_fast_mode(value: WireFastMode) -> DomainFastMode {
+    match value {
+        WireFastMode::Disabled => DomainFastMode::Disabled,
+        WireFastMode::Enabled => DomainFastMode::Enabled,
+    }
+}
+
+const fn domain_fast_mode_overlay(value: WireFastModeOverlay) -> DomainFastModeOverlay {
+    match value {
+        WireFastModeOverlay::Inherit => DomainFastModeOverlay::Inherit,
+        WireFastModeOverlay::Value(value) => DomainFastModeOverlay::Value(domain_fast_mode(value)),
+    }
+}
+
+const fn wire_fast_mode(value: DomainFastMode) -> WireFastMode {
+    match value {
+        DomainFastMode::Disabled => WireFastMode::Disabled,
+        DomainFastMode::Enabled => WireFastMode::Enabled,
+    }
+}
+
+const fn domain_service_tier(value: WireServiceTier) -> DomainServiceTier {
+    match value {
+        WireServiceTier::Anthropic(value) => DomainServiceTier::Anthropic(match value {
+            signalbox_process_protocol::AnthropicServiceTier::Auto => {
+                signalbox_domain::AnthropicServiceTier::Auto
+            }
+            signalbox_process_protocol::AnthropicServiceTier::StandardOnly => {
+                signalbox_domain::AnthropicServiceTier::StandardOnly
+            }
+        }),
+        WireServiceTier::OpenAi(value) => DomainServiceTier::OpenAi(match value {
+            signalbox_process_protocol::OpenAiServiceTier::Auto => {
+                signalbox_domain::OpenAiServiceTier::Auto
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Default => {
+                signalbox_domain::OpenAiServiceTier::Default
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Flex => {
+                signalbox_domain::OpenAiServiceTier::Flex
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Scale => {
+                signalbox_domain::OpenAiServiceTier::Scale
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Priority => {
+                signalbox_domain::OpenAiServiceTier::Priority
+            }
+            signalbox_process_protocol::OpenAiServiceTier::Fast => {
+                signalbox_domain::OpenAiServiceTier::Fast
+            }
+        }),
+        WireServiceTier::CodexCli(value) => DomainServiceTier::CodexCli(match value {
+            signalbox_process_protocol::CodexCliServiceTier::Default => {
+                signalbox_domain::CodexCliServiceTier::Default
+            }
+            signalbox_process_protocol::CodexCliServiceTier::Priority => {
+                signalbox_domain::CodexCliServiceTier::Priority
+            }
+            signalbox_process_protocol::CodexCliServiceTier::Flex => {
+                signalbox_domain::CodexCliServiceTier::Flex
+            }
+        }),
+    }
+}
+
+const fn wire_service_tier(value: DomainServiceTier) -> WireServiceTier {
+    match value {
+        DomainServiceTier::Anthropic(value) => WireServiceTier::Anthropic(match value {
+            signalbox_domain::AnthropicServiceTier::Auto => {
+                signalbox_process_protocol::AnthropicServiceTier::Auto
+            }
+            signalbox_domain::AnthropicServiceTier::StandardOnly => {
+                signalbox_process_protocol::AnthropicServiceTier::StandardOnly
+            }
+        }),
+        DomainServiceTier::OpenAi(value) => WireServiceTier::OpenAi(match value {
+            signalbox_domain::OpenAiServiceTier::Auto => {
+                signalbox_process_protocol::OpenAiServiceTier::Auto
+            }
+            signalbox_domain::OpenAiServiceTier::Default => {
+                signalbox_process_protocol::OpenAiServiceTier::Default
+            }
+            signalbox_domain::OpenAiServiceTier::Flex => {
+                signalbox_process_protocol::OpenAiServiceTier::Flex
+            }
+            signalbox_domain::OpenAiServiceTier::Scale => {
+                signalbox_process_protocol::OpenAiServiceTier::Scale
+            }
+            signalbox_domain::OpenAiServiceTier::Priority => {
+                signalbox_process_protocol::OpenAiServiceTier::Priority
+            }
+            signalbox_domain::OpenAiServiceTier::Fast => {
+                signalbox_process_protocol::OpenAiServiceTier::Fast
+            }
+        }),
+        DomainServiceTier::CodexCli(value) => WireServiceTier::CodexCli(match value {
+            signalbox_domain::CodexCliServiceTier::Default => {
+                signalbox_process_protocol::CodexCliServiceTier::Default
+            }
+            signalbox_domain::CodexCliServiceTier::Priority => {
+                signalbox_process_protocol::CodexCliServiceTier::Priority
+            }
+            signalbox_domain::CodexCliServiceTier::Flex => {
+                signalbox_process_protocol::CodexCliServiceTier::Flex
+            }
+        }),
+    }
+}
+
+const fn wire_model_change_adjustment(
+    value: DomainModelChangeAdjustment,
+) -> WireModelChangeAdjustment {
+    match value {
+        DomainModelChangeAdjustment::ReasoningLevelClamped { from, to } => {
+            WireModelChangeAdjustment::ReasoningLevelClamped {
+                from: wire_reasoning_level(from),
+                to: wire_reasoning_level(to),
+            }
+        }
+        DomainModelChangeAdjustment::ReasoningLevelCleared { from } => {
+            WireModelChangeAdjustment::ReasoningLevelCleared {
+                from: wire_reasoning_level(from),
+            }
+        }
+        DomainModelChangeAdjustment::FastModeDisabled => {
+            WireModelChangeAdjustment::FastModeDisabled {}
+        }
+        DomainModelChangeAdjustment::ServiceTierCleared { from } => {
+            WireModelChangeAdjustment::ServiceTierCleared {
+                from: wire_service_tier(from),
+            }
+        }
+    }
+}
+
+fn wire_model_settings(settings: ValidatedModelSettings) -> WireModelSettingsSnapshot {
+    let precedence = settings.precedence();
+    let resolved = settings.resolved();
+    let effective = resolved.effective();
+    WireModelSettingsSnapshot {
+        precedence: WireModelSettingsPrecedence {
+            per_call: wire_model_settings_overlay(precedence.per_call()),
+            session: wire_model_settings_overlay(precedence.session()),
+            profile: wire_model_settings_overlay(precedence.profile()),
+            global_default: wire_model_settings_overlay(precedence.global_default()),
+        },
+        effective: WireEffectiveModelSettings {
+            reasoning_level: effective.reasoning_level().map(wire_reasoning_level),
+            fast_mode: wire_fast_mode(effective.fast_mode()),
+            service_tier: effective.service_tier().map(wire_service_tier),
+        },
+        reasoning_source: resolved.reasoning_source().map(wire_model_setting_source),
+        fast_mode_source: resolved.fast_mode_source().map(wire_model_setting_source),
+        service_tier_source: resolved
+            .service_tier_source()
+            .map(wire_model_setting_source),
+        validated_for_selection_id: settings
+            .validated_for()
+            .map(|selection| wire_uuid(selection.into_uuid())),
+    }
+}
+
+fn wire_turn_model_settings(
+    event: &DomainTurnModelSettingsResolved,
+) -> WireTurnModelSettingsSnapshot {
+    WireTurnModelSettingsSnapshot {
+        turn_id: wire_uuid(event.turn().into_uuid()),
+        accepted_input_id: wire_uuid(event.accepted_input().into_uuid()),
+        defaults_version: CanonicalU64::new(event.defaults_version().as_u64()),
+        requested_model: wire_frozen_model_selection(event.selection()),
+        selected_direct_id: wire_uuid(event.selection().selected_direct().into_uuid()),
+        per_call_override: wire_model_settings_overlay(event.per_call_override()),
+        settings: wire_model_settings(event.settings()),
+        adjusted_from_selection_id: event
+            .adjusted_from_selection()
+            .map(|selection| wire_uuid(selection.into_uuid())),
+        adjustments: event
+            .adjustments()
+            .iter()
+            .copied()
+            .map(wire_model_change_adjustment)
+            .collect(),
+    }
+}
+
+fn wire_model_settings_overlay(value: DomainModelSettingsOverlay) -> WireModelSettingsOverlay {
+    WireModelSettingsOverlay {
+        reasoning_level: wire_setting_overlay(value.reasoning_level(), wire_reasoning_level),
+        fast_mode: wire_fast_mode_overlay(value.fast_mode()),
+        service_tier: wire_setting_overlay(value.service_tier(), wire_service_tier),
+    }
+}
+
+const fn wire_fast_mode_overlay(value: DomainFastModeOverlay) -> WireFastModeOverlay {
+    match value {
+        DomainFastModeOverlay::Inherit => WireFastModeOverlay::Inherit,
+        DomainFastModeOverlay::Value(value) => WireFastModeOverlay::Value(wire_fast_mode(value)),
+    }
+}
+
+fn wire_setting_overlay<DomainT, WireT>(
+    value: DomainSettingOverlay<DomainT>,
+    map: impl FnOnce(DomainT) -> WireT,
+) -> WireSettingOverlay<WireT> {
+    match value {
+        DomainSettingOverlay::Inherit => WireSettingOverlay::Inherit,
+        DomainSettingOverlay::ProviderDefault => WireSettingOverlay::ProviderDefault,
+        DomainSettingOverlay::Value(value) => WireSettingOverlay::Value(map(value)),
+    }
+}
+
+const fn wire_model_setting_source(value: DomainModelSettingSource) -> WireModelSettingSource {
+    match value {
+        DomainModelSettingSource::PerCall => WireModelSettingSource::PerCall,
+        DomainModelSettingSource::Session => WireModelSettingSource::Session,
+        DomainModelSettingSource::Profile => WireModelSettingSource::Profile,
+        DomainModelSettingSource::GlobalDefault => WireModelSettingSource::GlobalDefault,
     }
 }
 
@@ -11949,6 +12841,8 @@ impl ProcessUpdate {
 #[derive(Clone, Debug)]
 enum ProcessUpdateEvent {
     SessionCreated,
+    SessionModelSettingsChanged(DomainSessionModelSettingsChanged),
+    TurnModelSettingsResolved(DomainTurnModelSettingsResolved),
     InputAccepted {
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
@@ -12017,6 +12911,12 @@ impl ProcessUpdateEvent {
     fn from_outbox(event: &DispatchedOutboxEventKind) -> Option<Self> {
         Some(match event {
             DispatchedOutboxEventKind::SessionCreated => Self::SessionCreated,
+            DispatchedOutboxEventKind::SessionModelSettingsChanged(event) => {
+                Self::SessionModelSettingsChanged(event.clone())
+            }
+            DispatchedOutboxEventKind::TurnModelSettingsResolved(event) => {
+                Self::TurnModelSettingsResolved(event.clone())
+            }
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input,
                 turn,
@@ -12130,9 +13030,48 @@ impl ProcessUpdateEvent {
         })
     }
 
-    fn wire(&self) -> SessionEvent {
-        match self {
+    fn wire(&self) -> Result<SessionEvent, ProcessConnectionError> {
+        let event = match self {
             Self::SessionCreated => SessionEvent::SessionCreated {},
+            Self::SessionModelSettingsChanged(event) => SessionEvent::SessionModelSettingsChanged {
+                command_id: signalbox_process_protocol::CommandId::try_from_uuid(
+                    event.command_id().into_uuid(),
+                )
+                .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                prior_defaults_version: CanonicalU64::new(event.prior_defaults_version().as_u64()),
+                installed_defaults_version: CanonicalU64::new(
+                    event.installed_defaults_version().as_u64(),
+                ),
+                prior_model: wire_domain_model_selection(event.prior_model()),
+                installed_model: wire_domain_model_selection(event.installed_model()),
+                prior_settings: wire_model_settings(event.prior_settings()),
+                installed_settings: wire_model_settings(event.installed_settings()),
+                caller_override: wire_model_settings_overlay(event.caller_override()),
+                adjustments: event
+                    .adjustments()
+                    .iter()
+                    .copied()
+                    .map(wire_model_change_adjustment)
+                    .collect(),
+            },
+            Self::TurnModelSettingsResolved(event) => SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id: wire_uuid(event.accepted_input().into_uuid()),
+                turn_id: wire_uuid(event.turn().into_uuid()),
+                defaults_version: CanonicalU64::new(event.defaults_version().as_u64()),
+                requested_model: wire_frozen_model_selection(event.selection()),
+                selected_direct_id: wire_uuid(event.selection().selected_direct().into_uuid()),
+                per_call_override: wire_model_settings_overlay(event.per_call_override()),
+                settings: wire_model_settings(event.settings()),
+                adjusted_from_selection_id: event
+                    .adjusted_from_selection()
+                    .map(|selection| wire_uuid(selection.into_uuid())),
+                adjustments: event
+                    .adjustments()
+                    .iter()
+                    .copied()
+                    .map(wire_model_change_adjustment)
+                    .collect(),
+            },
             Self::InputAccepted {
                 accepted_input,
                 turn,
@@ -12286,7 +13225,8 @@ impl ProcessUpdateEvent {
                 }
             },
             Self::DelegationUpdate(update) => wire_delegation_update(update),
-        }
+        };
+        Ok(event)
     }
 }
 
@@ -12616,7 +13556,7 @@ impl Error for ProcessRuntimeError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeSet, VecDeque},
         error::Error,
         io::{self, Write},
         sync::{Arc, Mutex, mpsc},
@@ -12630,15 +13570,19 @@ mod tests {
     use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConversionFailure;
     use signalbox_conversation_import_codex::CodexRolloutJsonlConversionFailure;
     use signalbox_domain::{
-        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId, Goal,
+        AcceptedInputId, ContextFrontierId, DirectModelSelection, DurableCommandId,
+        FastModeOverlay, FastModeSupport, FrozenAliasDefinition, FrozenModelSelection, Goal,
         GoalStatement, GoalUserProvenance, ImportedConversation, ImportedConversationFormat,
-        ImportedConversationId, ImportedTranscriptEntryId, ModelCallId, ModelSelectionRequest,
-        ReviewPass, ReviewPassAcceptedInputEvidence, ReviewPassEvidence, ReviewPassId,
-        ReviewPassKind, ReviewPassRef, ReviewPassState, ReviewPassTurnEvidence,
-        ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId, ReviewRunRef, ReviewRunState,
-        ReviewTargetId, ReviewWorkflowKind, SemanticTranscriptEntryId, SessionId,
-        SessionInputPosition, SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId,
-        ToolRequestId, TurnAttemptId, TurnId,
+        ImportedConversationId, ImportedTranscriptEntryId, ModelAlias, ModelCallId,
+        ModelCapabilities, ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+        ModelSettingsPrecedence, ReasoningLevel, ReviewPass, ReviewPassAcceptedInputEvidence,
+        ReviewPassEvidence, ReviewPassId, ReviewPassKind, ReviewPassRef, ReviewPassState,
+        ReviewPassTurnEvidence, ReviewPassTurnOutcome, ReviewPolicy, ReviewRun, ReviewRunId,
+        ReviewRunRef, ReviewRunState, ReviewTargetId, ReviewWorkflowKind,
+        SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, SessionModelSettingsChanged, SettingOverlay,
+        SubmitInputRejectedResult, ToolApprovalDecision, ToolAttemptId, ToolRequestId,
+        TurnAttemptId, TurnId, TurnModelSettingsResolved, ValidatedModelSettings,
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
@@ -12679,8 +13623,7 @@ mod tests {
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_delegation_issuer, nudge_delegation_wake,
         observe_outbox_metrics_once, operational_import_error, process_delegation_rejection,
-        read_frame_line, replacement_model_is_admitted,
-        retain_inbound_frame_permit_during_import_admission,
+        read_frame_line, retain_inbound_frame_permit_during_import_admission,
         retry_context_compaction_range_database_reads, run_until_shutdown,
         snapshot_reader_capacity, spool_error_display, spool_goal_snapshot,
         submit_input_model_execution_diagnostic, unavailable_protocol_error, wire_goal_event,
@@ -13369,50 +14312,6 @@ mod tests {
                 active_turn_id: wire_uuid(actual_active_turn.into_uuid()),
             }
         );
-        Ok(())
-    }
-
-    #[test]
-    fn recorded_defaults_replay_does_not_depend_on_the_current_catalog()
-    -> Result<(), Box<dyn Error>> {
-        let current_catalog = crate::HubModelConfiguration::parse(
-            r#"
-version = 1
-
-[[credential_profiles]]
-name = "anthropic-primary"
-billing_kind = "api_metered"
-
-[[adapter_mappings]]
-model_family = "anthropic"
-adapter = "anthropic"
-credential_profile = "anthropic-primary"
-
-[compaction]
-prompt = "Summarize the prior conversation faithfully for continuation."
-
-[[models]]
-selection_id = "00000000-0000-0000-0000-000000000001"
-target_id = "00000000-0000-0000-0000-000000000002"
-model_family = "anthropic"
-provider_model = "still-current"
-max_output_tokens = 256
-context_window_tokens = 200000
-"#,
-        )?;
-        let removed_selection =
-            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(4)));
-
-        assert!(replacement_model_is_admitted(
-            true,
-            removed_selection,
-            &current_catalog,
-        ));
-        assert!(!replacement_model_is_admitted(
-            false,
-            removed_selection,
-            &current_catalog,
-        ));
         Ok(())
     }
 
@@ -14615,6 +15514,7 @@ context_window_tokens = 200000
             ServerMessage::TranscriptTurn {
                 turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX)),
                 acceptance_position: CanonicalU64::new(u64::MAX),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
                     content: InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
@@ -15002,9 +15902,236 @@ context_window_tokens = 200000
                 .expect("a client-visible event projects to one update");
 
         assert_eq!(
-            update.wire(),
+            update.wire().expect("the fixture event is representable"),
             SessionEvent::GoalTurnRetired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+            }
+        );
+    }
+
+    /// INV-033: a recorded session settings change reaches the wire as its
+    /// typed projection without losing either settings snapshot.
+    #[test]
+    fn inv033_session_model_settings_change_projects_to_the_closed_wire_shape() {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let command = DurableCommandId::from_uuid(Uuid::from_u128(2));
+        let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(3));
+        let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
+        let prior_version = SessionConfigurationDefaultsVersion::first();
+        let installed_version = prior_version
+            .checked_next()
+            .expect("the initial defaults version has a successor");
+        let prior_settings = ValidatedModelSettings::provider_defaults();
+        let inherited = ModelSettingsOverlay::inherit_all();
+        let installed_precedence = ModelSettingsPrecedence::new(
+            inherited,
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::Low),
+                FastModeOverlay::Inherit,
+                SettingOverlay::Inherit,
+            ),
+            inherited,
+            inherited,
+        );
+        let installed_settings = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::Low]),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(installed_selection, installed_precedence)
+        .expect("the fixture capability admits low reasoning");
+        let caller_override = ModelSettingsOverlay::new(
+            SettingOverlay::Value(ReasoningLevel::Low),
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let changed = SessionModelSettingsChanged::try_new(
+            session,
+            command,
+            prior_version,
+            installed_version,
+            ModelSelectionRequest::Direct(prior_selection),
+            ModelSelectionRequest::Direct(installed_selection),
+            prior_settings,
+            installed_settings,
+            caller_override,
+            Vec::new(),
+        )
+        .expect("the fixture changes direct model selection");
+        let changed_update = ProcessUpdateEvent::from_outbox(
+            &DispatchedOutboxEventKind::SessionModelSettingsChanged(changed),
+        )
+        .expect("the fixture event projects onto an update");
+
+        assert_eq!(
+            changed_update
+                .wire()
+                .expect("the fixture event is representable"),
+            SessionEvent::SessionModelSettingsChanged {
+                command_id: signalbox_process_protocol::CommandId::try_from_uuid(
+                    command.into_uuid(),
+                )
+                .expect("fixture command identity is admitted"),
+                prior_defaults_version: CanonicalU64::new(prior_version.as_u64()),
+                installed_defaults_version: CanonicalU64::new(installed_version.as_u64()),
+                prior_model: signalbox_process_protocol::ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(prior_selection.into_uuid()),
+                },
+                installed_model: signalbox_process_protocol::ModelSelection::Direct {
+                    selection_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
+                },
+                prior_settings: signalbox_process_protocol::ModelSettingsSnapshot {
+                    precedence: signalbox_process_protocol::ModelSettingsPrecedence {
+                        per_call: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        session: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        profile: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        global_default:
+                            signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                    },
+                    effective: signalbox_process_protocol::EffectiveModelSettings {
+                        reasoning_level: None,
+                        fast_mode: signalbox_process_protocol::FastMode::Disabled,
+                        service_tier: None,
+                    },
+                    reasoning_source: None,
+                    fast_mode_source: None,
+                    service_tier_source: None,
+                    validated_for_selection_id: None,
+                },
+                installed_settings: signalbox_process_protocol::ModelSettingsSnapshot {
+                    precedence: signalbox_process_protocol::ModelSettingsPrecedence {
+                        per_call: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        session: signalbox_process_protocol::ModelSettingsOverlay {
+                            reasoning_level: signalbox_process_protocol::SettingOverlay::Value(
+                                signalbox_process_protocol::ReasoningLevel::Low,
+                            ),
+                            fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+                            service_tier: signalbox_process_protocol::SettingOverlay::Inherit,
+                        },
+                        profile: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        global_default:
+                            signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                    },
+                    effective: signalbox_process_protocol::EffectiveModelSettings {
+                        reasoning_level: Some(signalbox_process_protocol::ReasoningLevel::Low),
+                        fast_mode: signalbox_process_protocol::FastMode::Disabled,
+                        service_tier: None,
+                    },
+                    reasoning_source: Some(signalbox_process_protocol::ModelSettingSource::Session,),
+                    fast_mode_source: None,
+                    service_tier_source: None,
+                    validated_for_selection_id: Some(CanonicalUuid::from_uuid(
+                        installed_selection.into_uuid(),
+                    )),
+                },
+                caller_override: signalbox_process_protocol::ModelSettingsOverlay {
+                    reasoning_level: signalbox_process_protocol::SettingOverlay::Value(
+                        signalbox_process_protocol::ReasoningLevel::Low,
+                    ),
+                    fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+                    service_tier: signalbox_process_protocol::SettingOverlay::Inherit,
+                },
+                adjustments: Vec::new(),
+            }
+        );
+    }
+
+    /// INV-033: a recorded per-turn settings resolution reaches the wire with
+    /// its requested alias and exact resolved-settings evidence.
+    #[test]
+    fn inv033_turn_model_settings_resolution_projects_to_the_closed_wire_shape() {
+        let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(5));
+        let turn = TurnId::from_uuid(Uuid::from_u128(6));
+        let requested_alias = ModelAlias::from_uuid(Uuid::from_u128(3));
+        let prior_selection = DirectModelSelection::from_uuid(Uuid::from_u128(2));
+        let installed_selection = DirectModelSelection::from_uuid(Uuid::from_u128(4));
+        let installed_version = SessionConfigurationDefaultsVersion::first();
+        let caller_override = ModelSettingsOverlay::inherit_all();
+        let session_settings = ModelSettingsOverlay::new(
+            SettingOverlay::ProviderDefault,
+            FastModeOverlay::Inherit,
+            SettingOverlay::Inherit,
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            caller_override,
+            session_settings,
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let settings = ModelCapabilities::new(
+            BTreeSet::new(),
+            FastModeSupport::Unsupported,
+            BTreeSet::new(),
+        )
+        .validate_precedence(installed_selection, precedence)
+        .expect("the explicit provider default is supported");
+        let resolved = TurnModelSettingsResolved::try_new(
+            accepted_input,
+            turn,
+            installed_version,
+            FrozenModelSelection::FrozenAlias {
+                alias: requested_alias,
+                definition: FrozenAliasDefinition::selecting(installed_selection),
+            },
+            caller_override,
+            settings,
+            Some(prior_selection),
+            vec![ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::High,
+            }],
+        )
+        .expect("provider-default settings are valid for the fixture selection");
+        let resolved_update = ProcessUpdateEvent::from_outbox(
+            &DispatchedOutboxEventKind::TurnModelSettingsResolved(resolved),
+        )
+        .expect("the fixture event projects onto an update");
+
+        assert_eq!(
+            resolved_update
+                .wire()
+                .expect("the fixture event is representable"),
+            SessionEvent::TurnModelSettingsResolved {
+                accepted_input_id: CanonicalUuid::from_uuid(accepted_input.into_uuid()),
+                turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
+                defaults_version: CanonicalU64::new(installed_version.as_u64()),
+                requested_model: signalbox_process_protocol::ModelSelection::Alias {
+                    alias_id: CanonicalUuid::from_uuid(requested_alias.into_uuid()),
+                },
+                selected_direct_id: CanonicalUuid::from_uuid(installed_selection.into_uuid()),
+                per_call_override: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                settings: signalbox_process_protocol::ModelSettingsSnapshot {
+                    precedence: signalbox_process_protocol::ModelSettingsPrecedence {
+                        per_call: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        session: signalbox_process_protocol::ModelSettingsOverlay {
+                            reasoning_level:
+                                signalbox_process_protocol::SettingOverlay::ProviderDefault,
+                            fast_mode: signalbox_process_protocol::FastModeOverlay::Inherit,
+                            service_tier: signalbox_process_protocol::SettingOverlay::Inherit,
+                        },
+                        profile: signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                        global_default:
+                            signalbox_process_protocol::ModelSettingsOverlay::inherit_all(),
+                    },
+                    effective: signalbox_process_protocol::EffectiveModelSettings {
+                        reasoning_level: None,
+                        fast_mode: signalbox_process_protocol::FastMode::Disabled,
+                        service_tier: None,
+                    },
+                    reasoning_source: Some(signalbox_process_protocol::ModelSettingSource::Session,),
+                    fast_mode_source: None,
+                    service_tier_source: None,
+                    validated_for_selection_id: Some(CanonicalUuid::from_uuid(
+                        installed_selection.into_uuid(),
+                    )),
+                },
+                adjusted_from_selection_id: Some(CanonicalUuid::from_uuid(
+                    prior_selection.into_uuid(),
+                )),
+                adjustments: vec![
+                    signalbox_process_protocol::ModelChangeAdjustment::ReasoningLevelCleared {
+                        from: signalbox_process_protocol::ReasoningLevel::High,
+                    },
+                ],
             }
         );
     }
@@ -15023,7 +16150,7 @@ context_window_tokens = 200000
         .expect("a delegation update is client-visible");
 
         assert_eq!(
-            update.wire(),
+            update.wire().expect("the fixture event is representable"),
             SessionEvent::ChildSpawned {
                 spawning_request_id: CanonicalUuid::from_uuid(spawning_request.into_uuid()),
                 child_session_id: CanonicalUuid::from_uuid(child.into_uuid()),
@@ -15269,7 +16396,9 @@ context_window_tokens = 200000
             })
             .expect("a client-visible event projects to one update");
         assert_eq!(
-            cancelled.wire(),
+            cancelled
+                .wire()
+                .expect("the fixture event is representable"),
             SessionEvent::TurnCancelled {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 cancellation_entry_id: CanonicalUuid::from_uuid(entry.into_uuid()),
@@ -15285,7 +16414,9 @@ context_window_tokens = 200000
         )
         .expect("a client-visible event projects to one update");
         assert_eq!(
-            reconciliation.wire(),
+            reconciliation
+                .wire()
+                .expect("the fixture event is representable"),
             SessionEvent::TurnReconciliationRequired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
@@ -15303,7 +16434,7 @@ context_window_tokens = 200000
             })
             .expect("a client-visible event projects to one update");
         assert_eq!(
-            recovery.wire(),
+            recovery.wire().expect("the fixture event is representable"),
             SessionEvent::ToolBatchTransition {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
                 model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),

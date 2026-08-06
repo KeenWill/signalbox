@@ -367,6 +367,7 @@ impl PostgresToolLoopRepository {
                   WHERE lifecycle.session_id = $1
                     AND lifecycle.turn_id = $2
                     AND lifecycle.state_kind = 'active'
+                    AND NOT lifecycle.delegation_runtime_terminal
                     AND lifecycle.active_phase_kind = 'awaiting_child'",
             )
             .bind(session_id_to_uuid(session))
@@ -396,6 +397,7 @@ impl PostgresToolLoopRepository {
                   WHERE session_id = $2
                     AND turn_id = $3
                     AND state_kind = 'active'
+                    AND NOT delegation_runtime_terminal
                     AND active_phase_kind = 'awaiting_child'
                     AND current_attempt_id IS NULL",
             )
