@@ -31,9 +31,11 @@ from postgres_integration_suites import (
     archive_plan,
     documentation_disagreements,
     documented_ignored_commands,
+    invokes_reader,
     manifest_line,
     parse_suites,
     run_matrix,
+    simple_commands,
     workflow_disagreements,
     workflow_shell_commands,
 )
@@ -161,6 +163,33 @@ class ManifestParsingTests(unittest.TestCase):
             parse_suites(
                 '[[suite]]\nname = "a"\npackage = "b"\nshards = 1\nskip = [" "]\n'
             )
+
+    def test_comma_separated_features_in_one_entry_are_rejected(self) -> None:
+        # Cargo reads `--features foo,bar` as two features, but the manifest
+        # would hold `"foo,bar"` as one — so the identical documented command
+        # would compare unequal and fail the docs gate.
+        with self.assertRaises(ManifestError) as raised:
+            parse_suites(
+                '[[suite]]\nname = "a"\npackage = "b"\nshards = 1\n'
+                'features = ["foo,bar"]\n'
+            )
+
+        self.assertIn("own entry", str(raised.exception))
+
+    def test_space_separated_features_in_one_entry_are_rejected(self) -> None:
+        with self.assertRaises(ManifestError):
+            parse_suites(
+                '[[suite]]\nname = "a"\npackage = "b"\nshards = 1\n'
+                'features = ["foo bar"]\n'
+            )
+
+    def test_a_plain_feature_name_is_accepted(self) -> None:
+        suites = parse_suites(
+            '[[suite]]\nname = "a"\npackage = "b"\nshards = 1\n'
+            'features = ["postgres-integration", "tls_1.3+ring"]\n'
+        )
+
+        self.assertEqual(suites[0].features, ("postgres-integration", "tls_1.3+ring"))
 
     def test_skip_term_carrying_filterset_syntax_is_rejected(self) -> None:
         # `skip` terms are concatenated into a filterset expression, so a term
@@ -411,6 +440,43 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("windows-latest", failures[0])
 
+    def test_naming_the_reader_without_running_it_is_not_an_invocation(self) -> None:
+        # `echo python3 scripts/…py --matrix` contains the reader and the mode
+        # and executes neither. Only the command word separates the two.
+        echoed = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py"
+            " --matrix\n",
+            "      - run: echo python3 scripts/postgres_integration_suites.py"
+            " --matrix\n",
+        )
+
+        failures = self.disagreements(echoed)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--matrix", failures[0])
+
+    def test_the_reader_inside_a_command_substitution_counts(self) -> None:
+        # How this workflow reads the shard matrix: the invocation is inside
+        # `$( … )` within a quoted argument.
+        substituted = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py"
+            " --matrix\n",
+            "      - run: printf 'matrix=%s\\n'"
+            ' "$(python3 scripts/postgres_integration_suites.py --matrix)"'
+            ' >> "$GITHUB_OUTPUT"\n',
+        )
+
+        self.assertEqual(self.disagreements(substituted), [])
+
+    def test_the_reader_run_directly_counts(self) -> None:
+        direct = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py"
+            " --matrix\n",
+            "      - run: scripts/postgres_integration_suites.py --matrix\n",
+        )
+
+        self.assertEqual(self.disagreements(direct), [])
+
     def test_an_inline_comment_is_not_an_invocation(self) -> None:
         # The reader's name trailing a real command as a `#` comment is text
         # the runner never executes.
@@ -475,6 +541,24 @@ class WorkflowAgreementTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("publishes no", failures[0])
+
+    def test_simple_commands_splits_on_operators_and_substitutions(self) -> None:
+        executed = simple_commands('a && b | c; "$(d --flag)"')
+
+        self.assertIn(["d", "--flag"], executed)
+        self.assertIn(["a"], executed)
+        self.assertIn(["b"], executed)
+        self.assertIn(["c"], executed)
+
+    def test_invokes_reader_requires_the_command_word(self) -> None:
+        reader = "scripts/postgres_integration_suites.py"
+
+        self.assertTrue(invokes_reader(["python3", reader, "--matrix"], "--matrix"))
+        self.assertTrue(invokes_reader([reader, "--matrix"], "--matrix"))
+        self.assertFalse(
+            invokes_reader(["echo", "python3", reader, "--matrix"], "--matrix")
+        )
+        self.assertFalse(invokes_reader(["python3", reader, "--matrix"], "--archive-plan"))
 
     def test_a_block_indicator_is_not_command_text(self) -> None:
         commands = workflow_shell_commands(

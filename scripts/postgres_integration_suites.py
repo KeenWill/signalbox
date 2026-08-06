@@ -52,7 +52,15 @@ SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^ #\n]+)", re.MULTILINE)
 SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inline>.*)$")
 BLOCK_INDICATOR = re.compile(r"[|>][+-]?\d*")
-REQUIRED_INVOCATIONS = (f"{EMITTER} --archive-plan", f"{EMITTER} --matrix")
+REQUIRED_MODES = ("--archive-plan", "--matrix")
+INTERPRETERS = ("python3", "python")
+COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&]")
+SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
+# Cargo feature names, one per manifest entry. Cargo would read a comma or a
+# space inside one entry as a separator and enable two features; the docs
+# comparison splits documented commands the same way, so an entry carrying its
+# own separator compares unequal to the identical documented command.
+FEATURE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_+.-]*")
 
 
 class ManifestError(Exception):
@@ -131,11 +139,17 @@ def parse_suites(text: str) -> tuple[Suite, ...]:
             raise ManifestError(f"{where} (`{name}`) needs a `package` string")
         features = entry.get("features", [])
         if not isinstance(features, list) or not all(
-            isinstance(feature, str) and feature for feature in features
+            isinstance(feature, str) for feature in features
         ):
             raise ManifestError(
                 f"{where} (`{name}`) needs `features` as a list of strings"
             )
+        for feature in features:
+            if FEATURE_NAME.fullmatch(feature) is None:
+                raise ManifestError(
+                    f"{where} (`{name}`) feature `{feature}` is not one Cargo "
+                    "feature name; list each feature as its own entry"
+                )
         shards = entry.get("shards")
         if not isinstance(shards, int) or isinstance(shards, bool) or shards < 1:
             raise ManifestError(
@@ -312,6 +326,44 @@ def workflow_shell_commands(text: str) -> list[str]:
     return commands
 
 
+def simple_commands(command: str) -> list[list[str]]:
+    """Split one flattened shell command into the argument lists it executes.
+
+    Shell operators separate commands, and `$( … )` bodies are commands too —
+    this workflow reads the shard matrix through one. Each piece is tokenized;
+    a piece that does not tokenize is dropped rather than raised, since prose
+    reaches here as readily as a command does.
+    """
+    segments = [command]
+    segments.extend(match.group("body") for match in SUBSTITUTION.finditer(command))
+    executed: list[list[str]] = []
+    for segment in segments:
+        for piece in COMMAND_SEPARATOR.split(segment):
+            try:
+                tokens = shlex.split(piece, comments=True)
+            except ValueError:
+                continue
+            if tokens:
+                executed.append(tokens)
+    return executed
+
+
+def invokes_reader(tokens: list[str], mode: str) -> bool:
+    """Return whether one argument list actually runs the reader in `mode`.
+
+    The reader has to be the command word — directly, or as the argument of a
+    Python interpreter. `echo python3 scripts/…py --matrix` names the reader
+    and every flag, and runs nothing; only the leading word separates the two.
+    """
+    if tokens[0] == EMITTER:
+        arguments = tokens[1:]
+    elif tokens[0] in INTERPRETERS and len(tokens) > 1 and tokens[1] == EMITTER:
+        arguments = tokens[2:]
+    else:
+        return False
+    return mode in arguments
+
+
 def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     """Report every way the Rust workflow disagrees with the manifest.
 
@@ -325,14 +377,15 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     commands = workflow_shell_commands(text)
     failures: list[str] = []
 
-    # Both invocations, and inside an actual command — the filename appearing
-    # in a comment is not the workflow reading the manifest, and each mode
-    # feeds a different job: `--archive-plan` the build, `--matrix` the shards.
-    for invocation in REQUIRED_INVOCATIONS:
-        if not any(invocation in command for command in commands):
+    # Both modes, each as a command the shell actually executes — naming the
+    # reader is not running it. The modes feed different jobs: `--archive-plan`
+    # the build, `--matrix` the shards, so each is asserted on its own.
+    executed = [tokens for command in commands for tokens in simple_commands(command)]
+    for mode in REQUIRED_MODES:
+        if not any(invokes_reader(tokens, mode) for tokens in executed):
             failures.append(
-                f"{WORKFLOW} runs no `{invocation}` command, so its PostgreSQL "
-                f"integration jobs no longer derive from {MANIFEST}"
+                f"{WORKFLOW} executes no `{EMITTER} {mode}` command, so its "
+                f"PostgreSQL integration jobs no longer derive from {MANIFEST}"
             )
 
     named = {

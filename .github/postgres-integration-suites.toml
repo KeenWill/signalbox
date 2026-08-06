@@ -41,8 +41,10 @@
 name = "persistence"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The long pole by an order of magnitude: 662 of the 827 ignored tests, and
-# 22m22s as one job against 6-7m per shard at three ways.
+# The long pole by an order of magnitude: 684 of the 850 ignored tests these
+# suites hold, and 22m22s as one job against 6-7m per shard at three ways.
+# Counts are a snapshot, taken with `cargo test --tests -- --ignored --list`;
+# they justify the shard count and nothing depends on them staying exact.
 shards = 3
 skip = []
 
