@@ -4767,7 +4767,7 @@ async fn insert_prepared_command(
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
              $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-             $26, $27, $28, $29, $30)",
+             $26, $27, $28, $29, $30, $31)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -4840,7 +4840,7 @@ async fn insert_prepared_effects(
                  origin_turn_id)
              VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16)",
+                 $14, $15, $16, $17)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
