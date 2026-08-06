@@ -358,6 +358,16 @@ impl StreamDecoder {
                     if self.reported_model.is_none() {
                         return self.violation("stream terminated without a model identity");
                     }
+                    if !self.tool_builders.is_empty() || !self.completed_tools.is_empty() {
+                        // The consistency check below, and `finalize_tools`,
+                        // are both downstream of this return, so accumulated
+                        // tool state would otherwise go unexamined. Any tool
+                        // content contradicts a finish that is not `tool_calls`
+                        // exactly as it does on the recognized path.
+                        return self.violation(
+                            "tool-call content does not match the reported finish_reason",
+                        );
+                    }
                     self.finish = Some(finish);
                     return self.violation("stream carries an unrecognized finish_reason");
                 }
@@ -590,10 +600,10 @@ impl StreamDecoder {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderReportedModel,
-        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName,
+        AssistantPart, BoundaryLossEvidence, CompletionFinish, ExchangeFacts, FinishReason,
+        LossCause, Observation, ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind,
+        ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -863,15 +873,19 @@ mod tests {
               \"finish_reason\":\"length\"}]}\n\n",
         ]);
 
-        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("ambiguous finish must remain boundary-loss evidence");
-        };
+        let loss = expect_boundary_loss(terminal);
+
+        // Still boundary loss, as this case has always required. The reported
+        // finish is now deliberately withheld: accumulated tool content
+        // contradicts this finish, and a caller that can see the token cannot
+        // tell this malformed stream from a well-formed response that merely
+        // stopped at an output bound. Reporting the contradiction instead, and
+        // nothing else, is what keeps those two distinguishable.
         assert_eq!(
-            loss.finish_reported,
-            Some(FinishReason::Unrecognized {
-                provider_token: "length".to_string(),
-            })
+            loss.cause,
+            protocol_violation("tool-call content does not match the reported finish_reason")
         );
+        assert_eq!(loss.finish_reported, None);
     }
 
     #[test]
@@ -991,6 +1005,25 @@ mod tests {
         assert_eq!(error.usage.output_tokens, Some(7));
     }
 
+    /// The boundary-loss payload of a terminal outcome, so a case that is
+    /// about *which* loss occurred reads as setup and assertions with no
+    /// branch of its own.
+    #[track_caller]
+    fn expect_boundary_loss(terminal: Option<TerminalEvidence>) -> BoundaryLossEvidence {
+        match terminal {
+            Some(TerminalEvidence::BoundaryLoss(loss)) => loss,
+            other => panic!("expected boundary-loss evidence, got {other:?}"),
+        }
+    }
+
+    /// The `StreamProtocolViolation` cause carrying `detail`, spelled once so
+    /// each case names only the detail it is about.
+    fn protocol_violation(detail: &str) -> LossCause {
+        LossCause::StreamProtocolViolation {
+            detail: detail.to_string(),
+        }
+    }
+
     #[test]
     fn an_unrecognized_finish_without_the_assistant_role_reports_the_envelope_defect() {
         // The unrecognized-finish branch ends the stream before `apply_done`,
@@ -1003,14 +1036,34 @@ mod tests {
               \"finish_reason\":\"length\"}]}\n\n",
         ]);
 
-        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("a stream without the assistant role is protocol loss");
-        };
+        let loss = expect_boundary_loss(terminal);
+
         assert_eq!(
             loss.cause,
-            LossCause::StreamProtocolViolation {
-                detail: "stream terminated without establishing the assistant role".to_string()
-            }
+            protocol_violation("stream terminated without establishing the assistant role")
+        );
+        assert_eq!(loss.finish_reported, None);
+    }
+
+    #[test]
+    fn an_unrecognized_finish_with_accumulated_tool_state_reports_the_mismatch() {
+        // `finalize_tools` and the finish/tool consistency check are both
+        // downstream of that early return, so tool content arriving under a
+        // finish this smoke never asks for must be rejected here instead.
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"probe\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        ]);
+
+        let loss = expect_boundary_loss(terminal);
+
+        assert_eq!(
+            loss.cause,
+            protocol_violation("tool-call content does not match the reported finish_reason")
         );
         assert_eq!(loss.finish_reported, None);
     }
@@ -1023,9 +1076,8 @@ mod tests {
               \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         ]);
 
-        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("an unrecognized finish is protocol loss");
-        };
+        let loss = expect_boundary_loss(terminal);
+
         assert_eq!(
             loss.finish_reported,
             Some(FinishReason::Unrecognized {
@@ -1050,15 +1102,11 @@ mod tests {
             b"data: {\"error\":{}}\n\n",
         ]);
 
-        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("an unclassifiable post-finish error record is protocol loss");
-        };
+        let loss = expect_boundary_loss(terminal);
+
         assert_eq!(
             loss.cause,
-            LossCause::StreamProtocolViolation {
-                detail: "unclassifiable error record follows the reported finish_reason"
-                    .to_string()
-            }
+            protocol_violation("unclassifiable error record follows the reported finish_reason")
         );
     }
 

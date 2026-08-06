@@ -8,13 +8,23 @@
 //!
 //! What it proves is protocol compatibility, which is what a public API
 //! change actually breaks: `POST /v1/chat/completions` still accepts the
-//! request the adapter builds, and its response still decodes as a completed
-//! outcome, or as the adapter's downgraded-refusal `ProviderError` shape
-//! (this transport exposes no independent proof that a response arrived only
-//! after the complete request was sent, so `OpenAiRuntime::execute` never
-//! returns a raw `Refused` — see `require_decoded_response` below), through
-//! the adapter's own types, with usage reported. It deliberately asserts
-//! nothing about answer quality.
+//! request the adapter builds, and its response still decodes through the
+//! adapter's own types. Three outcomes pass, and they do not carry the same
+//! guarantee:
+//!
+//! - a completed outcome, with usage reported;
+//! - the adapter's downgraded-refusal `ProviderError` shape, also with usage
+//!   (this transport exposes no independent proof that a response arrived
+//!   only after the complete request was sent, so `OpenAiRuntime::execute`
+//!   never returns a raw `Refused` — see `require_decoded_response` below);
+//! - the exchange that stopped at this smoke's output ceiling, which reports
+//!   *no* usage at all, because the decoder ends the stream on the finish
+//!   chunk and the trailing usage-only chunk never arrives. It is accepted
+//!   because answer length is not this smoke's business; see
+//!   `assert_well_formed_response`, which applies the usage bar only to the
+//!   outcomes that can meet it.
+//!
+//! It deliberately asserts nothing about answer quality.
 //!
 //! This adapter is wired into signalboxd alongside the Anthropic adapter; this
 //! smoke still validates the crate directly through its own `ModelRuntime`
@@ -269,12 +279,17 @@ struct DecodedResponse {
 /// ceiling and the context limit, and the adapter will not guess), so the
 /// decoder ends the stream as `BoundaryLoss` carrying the token verbatim.
 /// That outcome is a truthful report about answer length, not a protocol
-/// break: the request was accepted, the SSE body framed and decoded, the model
-/// identity reported, and usage reported — every surface this smoke exists to
-/// check. Failing a required, twice-daily paid check on it would be asserting
-/// something about answer quality, which the owning specification says this
-/// smoke does not do. The arm is keyed to that exact token, so any other
-/// unrecognized finish, and every other loss cause, still fails.
+/// break: the request was accepted, the SSE body framed and decoded, and the
+/// model identity reported. Usage is *not* among what it proves — the decoder
+/// ends the stream on the finish chunk, before the trailing usage-only chunk —
+/// so this arm marks the result `usage_is_final: false` and
+/// `assert_well_formed_response` holds it only to the success status. Failing a
+/// required, twice-daily paid check on it would be asserting something about
+/// answer quality, which the owning specification says this smoke does not do.
+/// The arm is keyed to that exact token from a 200 exchange that also reported
+/// a model identity, so any other unrecognized finish, and every other loss
+/// cause, still fails; a malformed envelope reaching a `length` finish carries
+/// no reported finish at all (`stream.rs`) and so cannot reach this arm.
 #[track_caller]
 fn require_decoded_response(
     evidence: TerminalEvidence,
