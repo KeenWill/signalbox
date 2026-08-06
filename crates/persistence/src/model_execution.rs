@@ -1557,18 +1557,18 @@ async fn locked_delegation_logical_terminal(
         lock_session(connection, session).await?;
         return Ok(false);
     };
-    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let relation = sqlx::query_as::<_, DelegationTerminalRelationRow>(
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
     )
     .bind(session_id_to_uuid(session))
     .bind(turn)
     .fetch_optional(&mut *connection)
     .await?;
-    let Some((spawning_request, parent)) = relation else {
+    let Some(relation) = relation else {
         lock_session(connection, session).await?;
         return Ok(false);
     };
-    let parent = session_id_from_uuid(parent);
+    let parent = session_id_from_uuid(relation.parent_session_id);
     let (first, second) = crate::lock_inventory::ordered_session_pair(session, parent);
     lock_delegation_terminal_session(connection, first).await?;
     if second != first {
@@ -1578,19 +1578,26 @@ async fn locked_delegation_logical_terminal(
     if second != first {
         lock_session(connection, second).await?;
     }
-    let locked =
-        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
-            .bind(session_id_to_uuid(session))
-            .bind(turn)
-            .fetch_optional(&mut *connection)
-            .await?;
-    if locked != Some((spawning_request, session_id_to_uuid(parent))) {
+    let locked = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if locked != Some(relation) {
         return Err(ModelCallCorruption::Inconsistent(
             "delegated terminal relationship changed while locking",
         )
         .into());
     }
     model_call_is_delegation_logically_terminal(connection, session, call).await
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct DelegationTerminalRelationRow {
+    spawning_tool_request_id: Uuid,
+    parent_session_id: Uuid,
 }
 
 async fn lock_delegation_terminal_session(
@@ -4349,27 +4356,28 @@ async fn lock_delegated_child_result_frontier(
     child: SessionId,
     turn: TurnId,
 ) -> Result<(), ModelCallRepositoryError> {
-    let relation = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let relation = sqlx::query_as::<_, DelegationTerminalRelationRow>(
         crate::lock_inventory::DELEGATION_TERMINAL_RELATION_IDENTITY,
     )
     .bind(session_id_to_uuid(child))
     .bind(turn_id_to_uuid(turn))
     .fetch_optional(&mut *connection)
     .await?;
-    let Some((spawning_request, parent)) = relation else {
+    let Some(relation) = relation else {
         return Ok(());
     };
     sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_PARENT_SESSION)
-        .bind(parent)
+        .bind(relation.parent_session_id)
         .execute(&mut *connection)
         .await?;
-    let locked =
-        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
-            .bind(session_id_to_uuid(child))
-            .bind(turn_id_to_uuid(turn))
-            .fetch_optional(&mut *connection)
-            .await?;
-    if locked != Some((spawning_request, parent)) {
+    let locked = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+    )
+    .bind(session_id_to_uuid(child))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    if locked != Some(relation) {
         return Err(ModelCallCorruption::Inconsistent(
             "delegated terminal relationship changed while locking",
         )
@@ -4409,22 +4417,25 @@ async fn persist_delegated_child_result(
         }
     };
     let content = outcome.content().map(DelegationContent::as_str);
-    let relation =
-        sqlx::query_as::<_, (Uuid, Uuid)>(crate::lock_inventory::DELEGATION_TERMINAL_RELATION)
-            .bind(session_id_to_uuid(child))
-            .bind(turn_id_to_uuid(turn))
-            .fetch_optional(&mut *connection)
-            .await?;
-    let Some((spawning_request, parent)) = relation else {
+    let relation = sqlx::query_as::<_, DelegationTerminalRelationRow>(
+        crate::lock_inventory::DELEGATION_TERMINAL_RELATION,
+    )
+    .bind(session_id_to_uuid(child))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(relation) = relation else {
         return Ok(());
     };
+    let spawning_request = relation.spawning_tool_request_id;
+    let parent = relation.parent_session_id;
     if sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1 FROM session_child_result
              WHERE spawning_tool_request_id = $1
         )",
     )
-    .bind(spawning_request)
+    .bind(relation.spawning_tool_request_id)
     .fetch_one(&mut *connection)
     .await?
     {
@@ -4513,8 +4524,8 @@ async fn persist_delegated_child_result(
                           THEN NULL ELSE 'background_result' END)",
         )
         .bind(awaiting_request)
-        .bind(spawning_request)
-        .bind(parent)
+        .bind(relation.spawning_tool_request_id)
+        .bind(relation.parent_session_id)
         .bind(delivery_sequence)
         .execute(&mut *connection)
         .await?;

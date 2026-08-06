@@ -1235,6 +1235,81 @@ async fn s18_inv010_inv012_spawn_reconstitution_rejects_contradictory_provenance
     Ok(())
 }
 
+/// S18 / INV-010 / INV-012: relationship reconstitution rejects stored outcome
+/// provenance carrying a field outside the selected provenance variant.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s18_inv010_inv012_outcome_reconstitution_rejects_contradictory_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = DELEGATION_REPOSITORY_BACKGROUND_WAIT_SEED;
+    let fixture = prepare_delegation_repository_fixture(&pool, seed, "background").await?;
+    let dispatch = repository_wait_dispatch(&pool, fixture, seed).await?;
+    let request = DelegationAwaitRequest::parse(
+        dispatch.request().clone(),
+        fixture.child,
+        DelegationWaitMode::Background,
+    )?;
+    let repository = SessionDelegationRepository::new(pool.clone());
+    repository.record_wait(request.clone(), &dispatch).await?;
+    sqlx::query(
+        "ALTER TABLE session_delegation_event
+         DROP CONSTRAINT session_delegation_event_provenance_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_delegation_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_child_result DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, reason_kind, provenance_kind,
+             provenance_session_id, provenance_turn_id,
+             provenance_goal_generation)
+         VALUES ($1, 2, 'outcome_recorded', 'child_failed',
+                 'child_execution_failed', 'child_turn', $2, $3, 1)",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .bind(fixture.initial_turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_child_result
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             outcome_kind, content_text)
+         VALUES ($1, 2, 'outcome_recorded', 'child_failed', NULL)",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    sqlx::query("ALTER TABLE session_delegation_event ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE session_child_result ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .record_wait(request, &dispatch)
+        .await
+        .expect_err("outcome replay rejects contradictory provenance fields");
+
+    assert_eq!(
+        delegation_corruption(error),
+        SessionDelegationCorruption::Inconsistent("outcome provenance shape")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S17 / INV-010 / INV-012: background-wait replay authenticates the exact
 /// completed effect-free attempt and normalized registration receipt.
 #[tokio::test(flavor = "multi_thread")]
