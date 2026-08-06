@@ -456,11 +456,12 @@ a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
 the adapter's downgraded-refusal `ProviderError` shape (`kind: Unrecognized`
 from that same 200 exchange — see the refusal-downgrade rule above; a raw
 `Refused` never leaves the adapter) — either way with provider-reported input
-and output usage present — and nothing about answer quality. Output usage is
-asserted present, not positive: a valid `Completed` response can legitimately
-report zero output tokens, and a downgraded refusal can be blocked before any
-completion token is produced, so both accepted shapes share one usage-presence
-check.
+usage present *and positive* (a request that reached the model always billed at
+least one input token) — and nothing about answer quality. Output usage is held
+to a looser bar: present, not positive. A valid `Completed` response can
+legitimately report zero output tokens, and a downgraded refusal can be blocked
+before any completion token is produced, so both accepted shapes share one
+output usage-presence check without demanding it be nonzero.
 
 `gpt-5`-family models spend hidden reasoning tokens against the same output
 ceiling as visible content; at the provider's default effort that spend is
