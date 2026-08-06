@@ -269,7 +269,7 @@ The daemon composes it from these implemented families:
 - session plan tools and `goal_declare`;
 - the mapped local Git tools `git_status`, `git_diff`, `git_log`, `git_stage`,
   `git_create_commit`, `git_branch_create`, and `git_branch_switch`; and
-- the execution tools `sandboxed_exec`, `unsandboxed_exec`, and
+- the mapped execution tools `sandboxed_exec`, `unsandboxed_exec`, and
   `cargo_diagnostics`.
 
 Each family supplies its compiled declarations and matching executor. The
@@ -281,7 +281,8 @@ Local Git and execution tools bind the same configured workspace root used by
 the workspace families. The mapped composition admits the local Git family only
 with an explicit Git identity and a root that is a direct main repository
 worktree; otherwise startup fails closed rather than advertising a partial
-family. The mapping-free base composition remains available without Git tools.
+family. The mapping-free base composition remains available without local Git or
+execution tools.
 
 The implemented `git_push_configured` declaration is not part of the daemon
 registry. No production `GitPushTransport` exists, so no production composition
@@ -293,9 +294,10 @@ registration remain undecided under
 Runner-side remote tool execution is future and unimplemented. No present
 surface dispatches the daemon registry, the local Git family, or the execution
 family to a runner, and this page defines no runner-side workstation registry,
-placement policy, per-tool runner deadline, or remote-execution protocol. The
-generic runner foundation supplies no tool inventory or execution path by
-itself; the workstation registry and executor remain undecided under
+exact tool inventory, tool names, or per-tool runner deadline. The generic
+runner foundation's existing committed unimplemented contracts do not select
+that registry, and this change adds no runner execution behavior. The
+workstation registry and executor remain undecided under
 [Scheduling and runners](../open-questions.md#scheduling-and-runners).
 
 Each provider operation carries the exact session-executable definition and
@@ -499,10 +501,11 @@ an optional detail and is stored once on the attempt row. A present detail is
 1–4,096 UTF-8 bytes, contains no control character, and has no leading or
 trailing POSIX whitespace; it is otherwise retained exactly. Domain construction
 and the database constraint enforce the same admission rule. These two bounds
-constrain every executor's crate-owned capture policy: an executor that produces
-more output than its durable evidence can hold truncates honestly and reports
-the true sizes rather than widening the bound or converting a success into a
-failure.
+constrain every executor's crate-owned capture policy. Each tool family owns its
+bounded capture, truncation, and completeness evidence; no universal true-size
+field is required when a traversal or collection cannot know it. No executor
+widens the durable bound or converts an otherwise bounded success into a failure
+merely because it omitted additional result members.
 
 Semantic tool-result entries contain references only:
 
