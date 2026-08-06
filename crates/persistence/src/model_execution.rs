@@ -750,12 +750,8 @@ impl PostgresModelCallRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
-            if model_call_is_delegation_logically_terminal(
-                &mut transaction,
-                session,
-                observation.call(),
-            )
-            .await?
+            if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
+                .await?
             {
                 return Ok(None);
             }
@@ -1122,12 +1118,8 @@ impl PostgresModelCallRepository {
                     "retained observation correlation changed",
                 ));
             }
-            if model_call_is_delegation_logically_terminal(
-                &mut transaction,
-                session,
-                observation.call(),
-            )
-            .await?
+            if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
+                .await?
             {
                 return Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal);
             }
@@ -1536,6 +1528,39 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
     ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
         self.reread_capability_failure(session, call).await
     }
+}
+
+/// Locks the delegated relationship owning this call's turn, then reports
+/// whether a cascade already delivered that turn's logical terminal.
+///
+/// The cascade and a terminal-observation transaction share no lock until the
+/// relationship lock this takes, so reading the logical terminal before taking
+/// it decides on a snapshot the cascade can invalidate a moment later: the
+/// observation would then terminalize a turn whose stop was already delivered,
+/// replacing the relationship result the cascade recorded. Taking the lock
+/// first makes the answer authoritative for the rest of the transaction, for
+/// every terminal outcome kind — including the tool-round arm, which takes no
+/// relationship lock of its own.
+async fn locked_delegation_logical_terminal(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<bool, ModelCallRepositoryError> {
+    let turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM model_call
+          WHERE session_id = $1
+            AND model_call_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(turn) = turn else {
+        return Ok(false);
+    };
+    lock_delegated_child_result_frontier(connection, session, TurnId::from_uuid(turn)).await?;
+    model_call_is_delegation_logically_terminal(connection, session, call).await
 }
 
 async fn model_call_is_delegation_logically_terminal(
@@ -2923,6 +2948,7 @@ async fn load_delegated_live_turn(
             defaults.direct_model_selection_id AS goal_defaults_direct_id,
             defaults.model_alias_id AS goal_defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_settings AS goal_defaults_model_settings,
             task.requested_model_kind,
             task.requested_direct_model_selection_id,
             task.requested_model_alias_id,
@@ -3062,6 +3088,7 @@ async fn load_delegated_live_wake_turn(
             defaults.direct_model_selection_id AS goal_defaults_direct_id,
             defaults.model_alias_id AS goal_defaults_alias_id,
             defaults.dangerous_tool_auto_approval AS goal_defaults_tool_auto_approval,
+            defaults.model_settings AS goal_defaults_model_settings,
             wake.requested_model_kind,
             wake.requested_direct_model_selection_id,
             wake.requested_model_alias_id,
@@ -5331,6 +5358,47 @@ async fn persist_reclassified_pending_steering(
     source_turn: TurnId,
     successors: &[ReclassifiedPendingSteeringTurn],
 ) -> Result<(), ModelCallRepositoryError> {
+    if successors.is_empty() {
+        return Ok(());
+    }
+    // An accepted-input source turn resolves to its configuration root through
+    // the queue chain. A delegation-origin source turn has no
+    // `queued_input_origin` row at all — it is its own configuration root, the
+    // successor's configuration comes from
+    // `turn_origin_exact_model_configuration` below, and a delegated turn
+    // carries no resolved per-turn settings evidence to copy — so its successor
+    // requires none. Exactly one arm below produces a row; a missing
+    // accepted-input root stays a corruption.
+    let model_settings_evidence_required: bool = sqlx::query_scalar(
+        "WITH RECURSIVE configuration_chain AS (
+            SELECT source.*
+              FROM queued_input_origin AS source
+             WHERE source.turn_id = $1
+               AND source.session_id = $2
+            UNION
+            SELECT ancestor.*
+              FROM configuration_chain AS current
+              JOIN queued_input_origin AS ancestor
+                ON ancestor.turn_id = current.source_configuration_turn_id
+               AND ancestor.session_id = current.session_id
+         )
+         SELECT model_settings_evidence_required
+           FROM configuration_chain
+          WHERE source_configuration_turn_id IS NULL
+         UNION ALL
+         SELECT FALSE
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.turn_id = $1
+            AND lifecycle.session_id = $2
+            AND lifecycle.origin_kind = 'delegation'",
+    )
+    .bind(turn_id_to_uuid(source_turn))
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing(
+        "reclassified source configuration root",
+    ))?;
     for successor in successors {
         let AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. } =
             successor.accepted_input().disposition()
@@ -5478,6 +5546,45 @@ async fn persist_reclassified_pending_steering(
         .await?
         .rows_affected();
         require_single(lifecycle_rows, "reclassified successor lifecycle")?;
+
+        let settings_rows = sqlx::query(
+            "INSERT INTO turn_model_settings_resolved
+                (accepted_input_id, turn_id, session_id, defaults_version,
+                 selected_direct_model_id, per_call_model_settings,
+                 resolved_model_settings, adjusted_from_selection_id, adjustments)
+             SELECT $2, $1, source.session_id, source.defaults_version,
+                    source.selected_direct_model_id, source.per_call_model_settings,
+                    source.resolved_model_settings, source.adjusted_from_selection_id,
+                    source.adjustments
+               FROM turn_model_settings_resolved AS source
+              WHERE source.turn_id = $4
+                AND source.session_id = $3",
+        )
+        .bind(turn_id_to_uuid(successor.turn()))
+        .bind(successor.accepted_input().id().into_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(source_turn))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        if settings_rows > 1 {
+            return Err(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Inconsistent("reclassified successor model settings"),
+            ));
+        }
+        if settings_rows == 0 && model_settings_evidence_required {
+            return Err(ModelCallCorruption::Missing("reclassified source model settings").into());
+        }
+        if settings_rows == 1 {
+            outbox::append(
+                connection,
+                OutboxEvent::TurnModelSettingsResolved {
+                    session,
+                    accepted_input: successor.accepted_input().id(),
+                },
+            )
+            .await?;
+        }
 
         outbox::append(
             connection,
@@ -6028,6 +6135,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositor
         }
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             ModelCallCorruption::Inconsistent("origin accepted-input identity").into()
+        }
+        SubmitInputRepositoryError::UnsupportedModelSetting(_) => {
+            ModelCallCorruption::Inconsistent("origin model settings").into()
         }
         SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()

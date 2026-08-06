@@ -2526,10 +2526,15 @@ extension SignalboxTranscriptTurnState {
     reason: SignalboxDelegationReason,
     provenance: SignalboxDelegationProvenance
   ) -> Bool {
-    guard
-      (outcome == .stopped && reason == .parentStopped)
-        || (outcome == .cancelled && reason == .parentCancelled)
-    else {
+    // The outcome names the bound-child action and the reason independently
+    // names the parent verb, so a bound relationship whose policy maps a parent
+    // stop to a child cancel (or the reverse) produces a crossed pair. All four
+    // are valid, matching the delegation result entry below.
+    switch (outcome, reason) {
+    case (.stopped, .parentStopped), (.stopped, .parentCancelled),
+      (.cancelled, .parentStopped), (.cancelled, .parentCancelled):
+      break
+    default:
       return false
     }
     switch provenance {
