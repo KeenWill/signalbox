@@ -121,9 +121,15 @@ jobs:
     # OPENAI_API_KEY. Its all-branches availability setting is documented
     # above and deliberately supplies no additional author-trust decision.
     environment: openai-smoke
-    concurrency:
-      group: openai-smoke
-      cancel-in-progress: false
+    # No job-level concurrency group here. A fixed group shared across every
+    # ref lets an unrelated smoke-required run evict this job's queued slot —
+    # GitHub keeps at most one running and one pending member per group and
+    # replaces the pending one when a third arrives, regardless of
+    # cancel-in-progress — failing a required check that never tested its own
+    # head. The workflow-level group above already releases a run's slot only
+    # when a newer push supersedes the *same* ref. A concurrent real exchange
+    # costs a small fraction of a cent; required-check integrity is worth more
+    # than serializing that spend.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

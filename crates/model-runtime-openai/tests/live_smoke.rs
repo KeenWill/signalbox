@@ -35,6 +35,12 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+#[cfg(test)]
+use signalbox_model_runtime::{
+    BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
+    LossCause, NativeErrorFacts, ProvenUnsentEvidence, ProviderErrorEvidence, RefusalEvidence,
+    UnsentCause,
+};
 use signalbox_model_runtime::{
     CancellationSignal, ConversationMessage, CredentialAccess, CredentialAccessError,
     CredentialAccessFailure, CredentialReference, CredentialValue, ExchangeFacts, ModelOperation,
@@ -195,7 +201,146 @@ fn require_decoded_response(evidence: TerminalEvidence) -> DecodedResponse {
             }
         }
         // Adapter-produced evidence is already credential-shape redacted, so
-        // printing it here cannot surface credential material.
-        other => panic!("the OpenAI API returned no decoded response: {other:?}"),
+        // printing it here cannot surface credential material. Enumerated
+        // explicitly, per docs/style.md's owned-enum rule, so a future
+        // `TerminalEvidence` variant fails to compile here instead of
+        // silently inheriting this panic path.
+        rejected @ (TerminalEvidence::Refused(_)
+        | TerminalEvidence::ProviderError(_)
+        | TerminalEvidence::CancellationConfirmed(_)
+        | TerminalEvidence::ProvenUnsent(_)
+        | TerminalEvidence::BoundaryLoss(_)) => {
+            panic!("the OpenAI API returned no decoded response: {rejected:?}")
+        }
+    }
+}
+
+/// Credential-free, straight-line coverage for `require_decoded_response`'s
+/// branching: one case per accept path and one per rejected variant, so the
+/// classifier the paid ignored test relies on is also exercised by the
+/// ordinary suite.
+#[cfg(test)]
+mod require_decoded_response_tests {
+    use super::*;
+
+    fn exchange(http_status: u16) -> ExchangeFacts {
+        ExchangeFacts {
+            http_status: Some(http_status),
+            ..ExchangeFacts::default()
+        }
+    }
+
+    fn usage() -> TokenUsage {
+        TokenUsage {
+            input_tokens: Some(3),
+            output_tokens: Some(1),
+            ..TokenUsage::default()
+        }
+    }
+
+    #[test]
+    fn completed_evidence_is_accepted() {
+        let decoded = require_decoded_response(TerminalEvidence::Completed(CompletionEvidence {
+            exchange: exchange(200),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::EndTurn,
+            content: Vec::new(),
+            usage: usage(),
+        }));
+
+        assert_eq!(decoded.exchange, exchange(200));
+        assert_eq!(decoded.usage, usage());
+    }
+
+    #[test]
+    fn downgraded_refusal_provider_error_is_accepted() {
+        // The exact shape `without_unproven_refusal` constructs: `kind:
+        // Unrecognized` carried by the same HTTP 200 exchange. Unlike
+        // Anthropic's shape, OpenAI's native error_token stays `None` here
+        // (see runtime.rs: refusal came from `finish_reason` or
+        // `message.refusal`, not a native error-envelope token).
+        let decoded =
+            require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: exchange(200),
+                reported_model: None,
+                kind: ProviderErrorKind::Unrecognized,
+                native: NativeErrorFacts::default(),
+                usage: usage(),
+            }));
+
+        assert_eq!(decoded.exchange, exchange(200));
+        assert_eq!(decoded.usage, usage());
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn raw_refused_panics() {
+        let _ = require_decoded_response(TerminalEvidence::Refused(RefusalEvidence {
+            exchange: exchange(200),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: usage(),
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn unrecognized_provider_error_from_a_non_200_status_panics() {
+        // Same `kind` as the accepted downgraded-refusal shape, but from a
+        // real error status: the `http_status == 200` guard must keep this
+        // from being swallowed as a well-formed decode.
+        let _ = require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: exchange(500),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn recognized_provider_error_panics() {
+        let _ = require_decoded_response(TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: exchange(401),
+            reported_model: None,
+            kind: ProviderErrorKind::CredentialRejected,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn cancellation_confirmed_panics() {
+        let _ = require_decoded_response(TerminalEvidence::CancellationConfirmed(
+            CancellationConfirmedEvidence {
+                exchange: exchange(200),
+                reported_model: None,
+                native: NativeErrorFacts::default(),
+            },
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn proven_unsent_panics() {
+        let _ = require_decoded_response(TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+            cause: UnsentCause::CancelledBeforeSend,
+        }));
+    }
+
+    #[test]
+    #[should_panic(expected = "returned no decoded response")]
+    fn boundary_loss_panics() {
+        let _ = require_decoded_response(TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::UnexpectedHttpStatus,
+            exchange: exchange(200),
+            reported_model: None,
+            finish_reported: None,
+            usage: TokenUsage::unreported(),
+        }));
     }
 }
