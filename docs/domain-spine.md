@@ -7269,6 +7269,18 @@ pub trait ClassifyOperatorFailure {
 }
 ```
 
+## application: session_delegation
+
+```rust
+pub trait DelegationMessageDeliveryProjection {
+    fn tool_request(&self) -> ToolRequestId;
+    fn message(&self) -> DelegationMessageId;
+    fn direction(&self) -> DelegationMessageDirection;
+    fn ordinal(&self) -> DelegationEventOrdinal;
+    fn delivery_sequence(&self) -> NonZeroU64;
+}
+```
+
 ## application: start_eligible_turn
 
 ```rust
@@ -9723,6 +9735,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: model_execution                       | 32 (incl. 8 traits)   |
 | application: tool_loop                             | 23 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
+| application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
 | application: repo_watch                            | 33 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
@@ -9734,4 +9747,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **238**               |
+| **signalbox-application total**                    | **239**               |

@@ -16,6 +16,7 @@ mod repo_watch;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod session_delegation;
 mod session_metadata;
 mod start_eligible_turn;
 mod startup_scan;
@@ -108,6 +109,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
 };
+pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
     ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
