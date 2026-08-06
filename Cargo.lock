@@ -1943,6 +1943,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3478,6 +3490,7 @@ dependencies = [
  "git2",
  "gix-hash",
  "gix-validate",
+ "nix",
  "rustix",
  "schemars 1.2.2",
  "serde",
@@ -3560,6 +3573,7 @@ name = "signalbox-tools-workspace"
 version = "0.0.0"
 dependencies = [
  "glob",
+ "nix",
  "regex",
  "rustix",
  "schemars 1.2.2",

@@ -562,6 +562,32 @@ fn entry_kind(file_type: FileType) -> WorkspaceEntryKind {
 mod tests {
     use super::*;
 
+    /// Creates an owner-readable, owner-writable FIFO at `path`.
+    ///
+    /// `path` is always absolute here, so resolving it against the process
+    /// working directory is the same operation on every platform.
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    fn create_fifo(path: &Path) -> std::io::Result<()> {
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            path,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )?;
+        Ok(())
+    }
+
+    /// Creates an owner-readable, owner-writable FIFO at `path`.
+    ///
+    /// rustix omits `mkfifoat` on Apple targets, so this uses nix's `mkfifo`.
+    /// `path` is always absolute here, so the two are equivalent.
+    #[cfg(target_vendor = "apple")]
+    fn create_fifo(path: &Path) -> std::io::Result<()> {
+        use nix::sys::stat::Mode;
+
+        nix::unistd::mkfifo(path, Mode::S_IRUSR | Mode::S_IWUSR)
+            .map_err(|errno| std::io::Error::from_raw_os_error(errno as i32))
+    }
+
     #[test]
     fn workspace_root_identity_reports_the_pinned_descriptor() {
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
@@ -809,12 +835,7 @@ mod tests {
     fn fifo_read_is_rejected_without_blocking() {
         let workspace = tempfile::tempdir().expect("workspace fixture constructs");
         let fifo = workspace.path().join("pipe");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .expect("fifo fixture constructs");
+        create_fifo(&fifo).expect("fifo fixture constructs");
         let filesystem = LocalWorkspaceFileSystem;
         let root =
             WorkspaceRoot::try_new(&filesystem, workspace.path()).expect("fixture root is valid");
