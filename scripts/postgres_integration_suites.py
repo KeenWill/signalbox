@@ -41,8 +41,12 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = Path(".github/postgres-integration-suites.toml")
 WORKFLOW = Path(".github/workflows/rust.yml")
 EMITTER = "scripts/postgres_integration_suites.py"
+UPLOAD_ACTION = re.compile(
+    r"^(?P<indent>[ ]*)(?:-[ ]+)?uses:[ ]*actions/upload-artifact"
+)
 ARCHIVE_ARTIFACT = re.compile(
-    r"postgres-integration-archive-(?P<suite>[A-Za-z0-9][A-Za-z0-9-]*)"
+    r"^[ ]*name:[ ]*"
+    r"(?P<suite>postgres-integration-archive-[A-Za-z0-9][A-Za-z0-9-]*)[ ]*$"
 )
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
 RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^ #\n]+)", re.MULTILINE)
@@ -211,6 +215,57 @@ def archive_plan(suites: tuple[Suite, ...]) -> str:
     return "".join(f"{row}\n" for row in rows)
 
 
+def strip_shell_comment(line: str) -> str:
+    """Drop a trailing `#` comment from one shell line, honouring quotes.
+
+    A `#` only opens a comment at the start of a word, and never inside a
+    quoted string — `echo 'a # b'` prints the hash. Without this, a comment is
+    indistinguishable from the command it follows, and every containment check
+    below can be satisfied by text the runner never executes.
+    """
+    quote: str | None = None
+    previous = " "
+    for position, character in enumerate(line):
+        if quote is not None:
+            if character == quote:
+                quote = None
+        elif character in ("'", '"'):
+            quote = character
+        elif character == "#" and previous.isspace():
+            return line[:position].rstrip()
+        previous = character
+    return line.rstrip()
+
+
+def uploaded_artifacts(text: str) -> set[str]:
+    """Return the artifact names published by `actions/upload-artifact` steps.
+
+    Read from the upload steps themselves, not from the file's text: an
+    artifact name surviving in a comment after its upload step was deleted
+    would otherwise still count as published, and the docs gate would keep
+    asserting that a suite whose archive no longer exists is executed.
+    """
+    lines = text.splitlines()
+    names: set[str] = set()
+    for index, line in enumerate(lines):
+        match = UPLOAD_ACTION.match(line)
+        if match is None:
+            continue
+        indentation = len(match.group("indent"))
+        for following in lines[index + 1 :]:
+            if not following.strip():
+                continue
+            depth = len(following) - len(following.lstrip(" "))
+            if depth < indentation or (
+                depth == indentation and following.lstrip().startswith("- ")
+            ):
+                break
+            named = ARCHIVE_ARTIFACT.match(following)
+            if named is not None:
+                names.add(named.group("suite"))
+    return names
+
+
 def workflow_shell_commands(text: str) -> list[str]:
     """Return each `run:`/`command:` scalar in a workflow, flattened to one line.
 
@@ -242,10 +297,16 @@ def workflow_shell_commands(text: str) -> list[str]:
             line = lines[index]
             if line.strip() and len(line) - len(line.lstrip(" ")) <= indentation:
                 break
-            if line.strip() and not line.lstrip().startswith("#"):
+            if line.strip():
                 body.append(line.strip())
             index += 1
-        joined = " ".join(part.removesuffix("\\").strip() for part in body if part)
+        # Comments are stripped per physical line, before the lines are
+        # joined: a comment ends its own line, not the rest of a `|` block.
+        joined = " ".join(
+            stripped
+            for part in body
+            if (stripped := strip_shell_comment(part).removesuffix("\\").strip())
+        )
         if joined:
             commands.append(joined)
     return commands
@@ -274,7 +335,10 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"integration jobs no longer derive from {MANIFEST}"
             )
 
-    named = {match.group("suite") for match in ARCHIVE_ARTIFACT.finditer(text)}
+    named = {
+        name.removeprefix("postgres-integration-archive-")
+        for name in uploaded_artifacts(text)
+    }
     expected = {suite.name for suite in suites}
     for missing in sorted(expected - named):
         failures.append(

@@ -411,6 +411,71 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("windows-latest", failures[0])
 
+    def test_an_inline_comment_is_not_an_invocation(self) -> None:
+        # The reader's name trailing a real command as a `#` comment is text
+        # the runner never executes.
+        commented = AGREEING_WORKFLOW.replace(
+            "      - run: python3 scripts/postgres_integration_suites.py"
+            " --archive-plan\n",
+            "      - run: cargo nextest archive -p alpha"
+            " # python3 scripts/postgres_integration_suites.py --archive-plan\n",
+        )
+
+        failures = self.disagreements(commented)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("--archive-plan", failures[0])
+
+    def test_an_inline_comment_does_not_hide_the_rest_of_a_block(self) -> None:
+        # Comments end their own line, not the `|` block they sit inside.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: |\n"
+            "          echo starting  # a note\n"
+            "          cargo test -p alpha --tests -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_a_quoted_hash_is_not_a_comment(self) -> None:
+        self.assertEqual(
+            workflow_shell_commands(
+                "jobs:\n  a:\n    steps:\n      - run: echo 'a # b'\n"
+            ),
+            ["echo 'a # b'"],
+        )
+
+    def test_an_artifact_named_only_in_a_comment_is_not_published(self) -> None:
+        # An upload step deleted while its artifact name survives in a comment
+        # would otherwise still count as published, and the docs gate would
+        # keep asserting a suite runs whose archive does not exist.
+        commented = AGREEING_WORKFLOW.replace(
+            "      - uses: actions/upload-artifact@v7\n"
+            "        with:\n"
+            "          name: postgres-integration-archive-alpha\n",
+            "      # dropped: postgres-integration-archive-alpha\n",
+        )
+
+        failures = self.disagreements(commented)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("publishes no", failures[0])
+
+    def test_a_step_name_is_not_an_artifact_name(self) -> None:
+        renamed = AGREEING_WORKFLOW.replace(
+            "      - uses: actions/upload-artifact@v7\n"
+            "        with:\n"
+            "          name: postgres-integration-archive-alpha\n",
+            "      - name: postgres-integration-archive-alpha\n"
+            "        run: echo not an upload\n",
+        )
+
+        failures = self.disagreements(renamed)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("publishes no", failures[0])
+
     def test_a_block_indicator_is_not_command_text(self) -> None:
         commands = workflow_shell_commands(
             "jobs:\n"
