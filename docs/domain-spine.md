@@ -6138,6 +6138,7 @@ pub struct ToolExecutionInvocation { /* private */ }
 impl ToolExecutionInvocation {
     // accessors: request(), dispatch_authority(), definition(), correlation()
     pub fn bind(self, evidence: ToolExecutorEvidence) -> CorrelatedToolExecutorEvidence;
+    pub fn durable_completion(self) -> CorrelatedDurableToolCompletion;
 }
 
 pub enum ToolExecutorEvidence {
@@ -6152,6 +6153,12 @@ pub struct CorrelatedToolExecutorEvidence { /* private */ }
 // sealed: ToolExecutionInvocation::bind
 impl CorrelatedToolExecutorEvidence {
     // accessors: correlation(), evidence()
+}
+
+pub struct CorrelatedDurableToolCompletion { /* private */ }
+// sealed: ToolExecutionInvocation::durable_completion
+impl CorrelatedDurableToolCompletion {
+    pub const fn correlation(self) -> ToolAttemptDispatchCorrelation;
 }
 
 pub trait ToolExecutor {
@@ -9736,7 +9743,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
 | application: model_execution                       | 32 (incl. 8 traits)   |
-| application: tool_loop                             | 23 (incl. 5 traits)   |
+| application: tool_loop                             | 24 (incl. 5 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
@@ -9750,4 +9757,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)    |
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **239**               |
+| **signalbox-application total**                    | **240**               |
