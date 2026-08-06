@@ -94,10 +94,38 @@ jobs:
       # stay a manual/local flow via clients/native/scripts for now; the
       # four unit-test bundles still run against a booted simulator the script
       # resolves itself.
+      #
+      # Coverage rides along on this run rather than taking a macOS job of its
+      # own: instrumenting the suite that already runs costs a fraction of what
+      # a second simulator pass would, and a measurement is not worth a second
+      # pass.
       - name: Run native unit-test bundles
         run: clients/native/scripts/test-xcode.sh
         env:
           SIGNALBOX_NATIVE_SKIP_TESTING: SignalboxNativeUITests
+          # Quoted deliberately: the script tests for the exact string, and an
+          # unquoted YES is a YAML boolean that a parser may hand the step as
+          # "true" instead, silently turning the measurement off.
+          SIGNALBOX_NATIVE_ENABLE_CODE_COVERAGE: "YES"
+      # Report only, and structurally incapable of gating: it never fails the
+      # job, and it runs even when the tests failed, because a partial
+      # measurement still names untested code. No step compares the reported
+      # percentage against anything.
+      - name: Report native coverage (report only)
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          SIGNALBOX_NATIVE_COVERAGE_OUTPUT_DIR: ${{ runner.temp }}/native-coverage
+        run: clients/native/scripts/report-coverage.sh >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the native coverage report
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-coverage
+          path: ${{ runner.temp }}/native-coverage
+          if-no-files-found: warn
+          retention-days: 14
       - name: Check privacy boundary
         run: clients/native/scripts/check-privacy.sh
       - name: Check Tart scripts (dry run)
