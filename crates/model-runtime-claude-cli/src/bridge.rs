@@ -15,7 +15,8 @@ use serde_json::value::RawValue;
 
 pub(crate) const SERVER_NAME: &str = "signalbox_tools";
 pub(crate) const TOOL_PREFIX: &str = "mcp__signalbox_tools__";
-pub(crate) const TOOL_ACKNOWLEDGEMENT: &str =
+/// Exact text returned after the bridge records a caller-tool proposal.
+pub const TOOL_ACKNOWLEDGEMENT: &str =
     "Signalbox recorded this tool proposal for external execution.";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const BRIDGE_LINE_LIMIT: usize = 8 * 1024 * 1024;

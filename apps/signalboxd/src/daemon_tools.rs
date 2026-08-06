@@ -1061,7 +1061,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt, fs, time::SystemTime};
+    use std::{
+        fmt, fs,
+        io::{BufRead, BufReader, Write},
+        path::{Path, PathBuf},
+        process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+        time::SystemTime,
+    };
 
     use signalbox_application::ToolCatalog;
     use signalbox_model_runtime::{
@@ -1244,6 +1250,127 @@ mod tests {
             .iter()
             .map(|definition| definition.name().as_str())
             .collect()
+    }
+
+    fn mapped_daemon_catalog(workspace: &Path) -> DaemonToolCatalog {
+        git2::Repository::init(workspace).expect("fixture repository initializes");
+        DaemonTools::try_new(
+            || SystemTime::UNIX_EPOCH,
+            OfflineTransport,
+            MappedDaemonCredentialInputs {
+                web_search: OfflineCredentials,
+                code_host: OfflineCredentials,
+                github: OfflineCredentials,
+            },
+            OfflineSearchTransport,
+            OfflineWriter,
+            OfflineCodeHostTransport,
+            OfflineGitHubTransport,
+            GitHubEgressPolicy::github_api_only(),
+            LocalWorkspaceFileSystem,
+            workspace,
+            git_identity(),
+            TokioProcessRunner::try_new(
+                std::env::current_exe().expect("test executable path is available"),
+            )
+            .expect("test executable can stand in for the unused supervisor"),
+            OfflineConversationPort,
+            OfflineConversationPort,
+            WebFetchEgressPolicy::deny_all(),
+        )
+        .expect("static daemon tools compile")
+        .into_parts()
+        .0
+    }
+
+    fn bridge_catalog(definitions: &[ToolDefinition]) -> serde_json::Value {
+        let tools = definitions
+            .iter()
+            .map(|definition| {
+                serde_json::json!({
+                    "name": definition.name().as_str(),
+                    "description": definition.description(),
+                    "inputSchema": serde_json::from_str::<serde_json::Value>(
+                        definition.input_schema().as_str(),
+                    )
+                    .expect("daemon tool schema remains valid JSON"),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"tools": tools})
+    }
+
+    fn claude_mcp_bridge_executable() -> PathBuf {
+        let current = std::env::current_exe().expect("test executable path is available");
+        let profile = current
+            .parent()
+            .and_then(Path::parent)
+            .expect("test executable is under the Cargo profile directory");
+        profile.join(format!(
+            "signalbox-claude-mcp-bridge{}",
+            std::env::consts::EXE_SUFFIX
+        ))
+    }
+
+    struct McpBridgeProcess {
+        child: Child,
+        input: Option<ChildStdin>,
+        output: BufReader<ChildStdout>,
+    }
+
+    impl McpBridgeProcess {
+        fn spawn(catalog: &Path, ready: &Path) -> Self {
+            let mut child = Command::new(claude_mcp_bridge_executable())
+                .arg("--serve")
+                .arg(catalog)
+                .arg(ready)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("Claude MCP bridge binary starts");
+            let input = child.stdin.take().expect("bridge stdin is piped");
+            let output = BufReader::new(child.stdout.take().expect("bridge stdout is piped"));
+            Self {
+                child,
+                input: Some(input),
+                output,
+            }
+        }
+
+        fn request(&mut self, request: &serde_json::Value) -> serde_json::Value {
+            let input = self.input.as_mut().expect("bridge stdin remains open");
+            serde_json::to_writer(&mut *input, request).expect("MCP request serializes");
+            input.write_all(b"\n").expect("MCP request is written");
+            input.flush().expect("MCP request is flushed");
+            let mut response = String::new();
+            self.output
+                .read_line(&mut response)
+                .expect("MCP response is read");
+            serde_json::from_str(&response).expect("MCP response is JSON")
+        }
+
+        fn notify(&mut self, notification: &serde_json::Value) {
+            let input = self.input.as_mut().expect("bridge stdin remains open");
+            serde_json::to_writer(&mut *input, notification).expect("MCP notification serializes");
+            input.write_all(b"\n").expect("MCP notification is written");
+            input.flush().expect("MCP notification is flushed");
+        }
+
+        fn finish(mut self) {
+            drop(self.input.take());
+            let status = self.child.wait().expect("bridge process is reaped");
+            assert!(status.success());
+        }
+    }
+
+    impl Drop for McpBridgeProcess {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
     }
 
     #[test]
@@ -1532,33 +1659,7 @@ mod tests {
     #[test]
     fn daemon_catalog_contains_every_injected_tool_family() {
         let workspace = tempfile::tempdir().expect("workspace root exists");
-        git2::Repository::init(workspace.path()).expect("fixture repository initializes");
-        let (catalog, _executor) = DaemonTools::try_new(
-            || SystemTime::UNIX_EPOCH,
-            OfflineTransport,
-            MappedDaemonCredentialInputs {
-                web_search: OfflineCredentials,
-                code_host: OfflineCredentials,
-                github: OfflineCredentials,
-            },
-            OfflineSearchTransport,
-            OfflineWriter,
-            OfflineCodeHostTransport,
-            OfflineGitHubTransport,
-            GitHubEgressPolicy::github_api_only(),
-            LocalWorkspaceFileSystem,
-            workspace.path(),
-            git_identity(),
-            TokioProcessRunner::try_new(
-                std::env::current_exe().expect("test executable path is available"),
-            )
-            .expect("test executable can stand in for the unused supervisor"),
-            OfflineConversationPort,
-            OfflineConversationPort,
-            WebFetchEgressPolicy::deny_all(),
-        )
-        .expect("static daemon tools compile")
-        .into_parts();
+        let catalog = mapped_daemon_catalog(workspace.path());
 
         let definitions = catalog.definitions();
         let names = definition_names(&definitions);
@@ -1616,5 +1717,65 @@ mod tests {
                 WRITE_FILE_NAME,
             ]
         );
+    }
+
+    /// The adapter-owned stdio bridge exposes the exact daemon registry and
+    /// acknowledges a workspace proposal without executing it itself.
+    #[test]
+    fn claude_mcp_bridge_conforms_to_the_daemon_catalog() {
+        let workspace = tempfile::tempdir().expect("workspace root exists");
+        let catalog = mapped_daemon_catalog(workspace.path());
+        let bridge_catalog = bridge_catalog(&catalog.definitions());
+        let support = tempfile::tempdir().expect("bridge support directory exists");
+        let catalog_path = support.path().join("tools.json");
+        let ready_path = support.path().join("ready");
+        fs::write(
+            &catalog_path,
+            serde_json::to_vec(&bridge_catalog).expect("bridge catalog serializes"),
+        )
+        .expect("bridge catalog is written");
+        let mut bridge = McpBridgeProcess::spawn(&catalog_path, &ready_path);
+        let protocol_version = "2025-11-25";
+        let initialized = bridge.request(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": protocol_version},
+        }));
+        bridge.notify(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        }));
+        let listed = bridge.request(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {},
+        }));
+        let target = workspace.path().join("bridge-must-not-write.txt");
+        let called = bridge.request(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": WRITE_FILE_NAME,
+                "arguments": {
+                    "path": "bridge-must-not-write.txt",
+                    "content": "proposal only\n",
+                },
+            },
+        }));
+        bridge.finish();
+
+        assert_eq!(initialized["result"]["protocolVersion"], protocol_version);
+        assert_eq!(listed["result"]["tools"], bridge_catalog["tools"]);
+        assert!(ready_path.is_file());
+        assert_eq!(called["result"]["isError"], false);
+        assert_eq!(called["result"]["content"][0]["type"], "text");
+        assert_eq!(
+            called["result"]["content"][0]["text"],
+            signalbox_model_runtime_claude_cli::CLAUDE_MCP_TOOL_ACKNOWLEDGEMENT
+        );
+        assert!(!target.exists());
     }
 }
