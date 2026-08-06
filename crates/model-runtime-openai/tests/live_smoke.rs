@@ -66,9 +66,9 @@ use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 /// `.github/workflows/openai-smoke.yml`.
 const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 
-/// The cheapest current OpenAI model that spends no hidden reasoning tokens,
-/// chosen so a compatibility run costs a small fraction of a cent *and*
-/// cannot truncate nondeterministically.
+/// The cheapest model this repository's own OpenAI catalog records as having
+/// no reasoning control, so a compatibility run costs a small fraction of a
+/// cent *and* cannot truncate nondeterministically.
 ///
 /// A `gpt-5`-family target always reasons: hidden reasoning tokens bill
 /// against the same `max_completion_tokens` ceiling as visible output, and no
@@ -81,12 +81,19 @@ const API_KEY_VARIABLE: &str = "OPENAI_API_KEY";
 /// will not guess which one occurred), so the exchange fails as
 /// `BoundaryLoss` — indistinguishable from a real compatibility break. A
 /// required, twice-daily paid check cannot carry that stochastic red, and a
-/// non-reasoning target removes the whole failure class structurally rather
-/// than lowering its odds. This also matches the Chat Completions surface this
-/// adapter actually implements, and mirrors the Anthropic smoke, whose target
-/// spends no hidden reasoning either because extended thinking there is opt-in
-/// per request.
-const MODEL: &str = "gpt-4.1-nano";
+/// target with no reasoning tier removes the whole failure class structurally
+/// rather than lowering its odds. That also mirrors the Anthropic smoke, whose
+/// target spends no hidden reasoning either because extended thinking there is
+/// opt-in per request.
+///
+/// `gpt-4.1-mini` rather than its cheaper `nano` sibling: the model catalog in
+/// `config/signalboxd.example.toml` deliberately omits `gpt-4.1-nano` because
+/// the provider's deprecation summary retires it while its own model page
+/// carries no such notice, and that conflict is unresolved. A merge-gating
+/// check is the last place to depend on a target this repository has already
+/// decided it cannot vouch for; the price difference on a one-word exchange is
+/// far below a cent either way.
+const MODEL: &str = "gpt-4.1-mini";
 
 /// A trivial prompt keeps the exchange to the smallest billable turn that
 /// still exercises the whole response envelope.
@@ -213,9 +220,12 @@ struct DecodedResponse {
 /// genuine provider-error class) fails this gate.
 ///
 /// `OpenAiRuntime::execute` never returns a raw `TerminalEvidence::Refused` to
-/// its caller: a fully buffered request exposes no independent proof that the
-/// response arrived only after the complete upload, so `execute`
-/// unconditionally downgrades a decoded refusal into
+/// its caller. That downgrade is unconditional, so it covers this smoke's
+/// streamed exchange too; the specification's refusal-downgrade rule states
+/// why it is unconditional (a fully buffered HTTP request exposes no
+/// independent proof that the response arrived only after the complete
+/// upload, and the adapter fails toward known failure rather than inventing
+/// evidence). `execute` therefore rewrites a decoded refusal into
 /// `ProviderError { kind: Unrecognized, native: { error_token: None, .. }, .. }`
 /// from the same HTTP 200 exchange before returning (`without_unproven_refusal`,
 /// runtime.rs:616,628-646; the "Refusal downgrade" rule in

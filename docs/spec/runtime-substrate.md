@@ -442,15 +442,16 @@ request in addition to that alternate target.
 
 The OpenAI adapter carries a gated live compatibility smoke
 (`.github/workflows/openai-smoke.yml`) that spends one real exchange against the
-cheapest non-reasoning model the provider currently advertises — `gpt-4.1-nano`,
-for the determinism reason given below — run through this crate's own
-`ModelRuntime` implementation with a small fixed prompt and no provider-side
-prompt caching: at one exchange per gated run a cache write is never amortized
-by a later read, so caching would raise the cost of the run it is meant to
-cheapen. Unlike the Codex CLI smoke, there is no locally installed executable
-and therefore no version to verify beforehand; the adapter targets the
-provider's stable public API directly, so spending the one exchange is the whole
-smoke rather than a second gate behind a credential-free version probe.
+cheapest model this repository's own OpenAI catalog records as carrying no
+reasoning control — `gpt-4.1-mini`, for the determinism reason given below — run
+through this crate's own `ModelRuntime` implementation with a small fixed prompt
+and no provider-side prompt caching: at one exchange per gated run a cache write
+is never amortized by a later read, so caching would raise the cost of the run
+it is meant to cheapen. Unlike the Codex CLI smoke, there is no locally
+installed executable and therefore no version to verify beforehand; the adapter
+targets the provider's stable public API directly, so spending the one exchange
+is the whole smoke rather than a second gate behind a credential-free version
+probe.
 
 The smoke asserts only the protocol surfaces a provider-side change would move:
 a definitive HTTP 200, and the response decoding as `Completed` evidence, or as
