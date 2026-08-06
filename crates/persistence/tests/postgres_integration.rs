@@ -1352,21 +1352,28 @@ async fn record_stale_active_input(
 async fn active_origin_collision(
     repository: &SubmitInputRepository,
     pool: &PgPool,
-    command_value: u128,
+    command_id: DurableCommandId,
+    session: SessionId,
+    active_origin_input: AcceptedInputId,
     delivery: DeliveryRequest,
     turn: Option<u128>,
 ) -> Result<(SubmitInputRepositoryError, i64), Box<dyn Error>> {
-    let command = input_with_delivery(command_value, 0x841, "colliding active origin", delivery);
+    let command = input_with_delivery(
+        command_id.into_uuid().as_u128(),
+        session.into_uuid().as_u128(),
+        "colliding active origin",
+        delivery,
+    );
     let error = repository
         .handle(
             command,
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
+            active_origin_input,
             turn.map(|value| TurnId::from_uuid(Uuid::from_u128(value))),
         )
         .await
         .expect_err("new acceptance cannot reuse the active origin identity");
     let claimed = sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
-        .bind(Uuid::from_u128(command_value))
+        .bind(command_id.into_uuid())
         .fetch_one(pool)
         .await?;
     Ok((error, claimed))
@@ -1574,6 +1581,63 @@ where
             }
         }
     }
+}
+
+type CancellationDispatch = (
+    SessionId,
+    TurnId,
+    SemanticTranscriptEntryId,
+    ContextFrontierId,
+);
+
+async fn drain_cancellation_dispatches(
+    pool: &PgPool,
+) -> Result<Vec<CancellationDispatch>, OutboxDispatchError> {
+    let mut cancellations = Vec::new();
+    drain_outbox(pool, |event| {
+        let DispatchedOutboxEventKind::TurnCancelled {
+            turn,
+            cancellation_entry,
+            terminal_frontier,
+        } = event.kind()
+        else {
+            return;
+        };
+        cancellations.push((
+            event.session(),
+            *turn,
+            *cancellation_entry,
+            *terminal_frontier,
+        ));
+    })
+    .await?;
+    Ok(cancellations)
+}
+
+type ReconciliationDispatch = (
+    SessionId,
+    TurnId,
+    DispatchedReconciliationOperation,
+    ContextFrontierId,
+);
+
+async fn drain_reconciliation_dispatches(
+    pool: &PgPool,
+) -> Result<Vec<ReconciliationDispatch>, OutboxDispatchError> {
+    let mut reconciliations = Vec::new();
+    drain_outbox(pool, |event| {
+        let DispatchedOutboxEventKind::TurnReconciliationRequired {
+            turn,
+            operation,
+            terminal_frontier,
+        } = event.kind()
+        else {
+            return;
+        };
+        reconciliations.push((event.session(), *turn, *operation, *terminal_frontier));
+    })
+    .await?;
+    Ok(reconciliations)
 }
 
 async fn dispatched_tool_approval_decision(
@@ -6626,8 +6690,8 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         (String::from("known_failed"), String::from("crash_lost"))
     );
 
-    let disposition: String = sqlx::query_scalar(
-        "SELECT terminal_disposition_kind
+    let (disposition, terminal_frontier_id): (String, Uuid) = sqlx::query_as(
+        "SELECT terminal_disposition_kind, terminal_frontier_id
            FROM turn_lifecycle
           WHERE session_id = $1
             AND turn_id = $2",
@@ -6675,20 +6739,25 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         "an interrupt that consumed the batch makes a stale continuation hint no work"
     );
 
-    let mut cancellation_dispatched = false;
-    drain_outbox(&pool, |event| {
-        if matches!(
-            event.kind(),
-            DispatchedOutboxEventKind::TurnCancelled { turn, .. }
-                if *turn == fixture.turn
-        ) {
-            cancellation_dispatched = true;
-        }
-    })
+    let cancellation_entry_id: Uuid = sqlx::query_scalar(
+        "SELECT semantic_entry_id
+           FROM semantic_transcript_entry
+          WHERE cancelled_turn_id = $1
+            AND payload_kind = 'turn_cancelled'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
     .await?;
-    assert!(
-        cancellation_dispatched,
-        "tool-batch cancellation must remain deliverable after its producing call"
+
+    let cancellation_events = drain_cancellation_dispatches(&pool).await?;
+    assert_eq!(
+        cancellation_events,
+        vec![(
+            fixture.session,
+            fixture.turn,
+            SemanticTranscriptEntryId::from_uuid(cancellation_entry_id),
+            ContextFrontierId::from_uuid(terminal_frontier_id),
+        )]
     );
 
     let follow_up = SubmitInputRepository::new(pool.clone())
@@ -6768,17 +6837,15 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
             Some(TurnId::from_uuid(Uuid::from_u128(seed + 25))),
         )
         .await?;
-    assert!(
-        matches!(
-            outcome,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
-                    session,
-                    active_turn,
-                },
-            )) if session == fixture.session && active_turn == fixture.turn
-        ),
-        "an interrupt alone must not bypass the decision command: {outcome:?}"
+    assert_eq!(
+        outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                session: fixture.session,
+                active_turn: fixture.turn,
+            },
+        )),
+        "an interrupt alone must not bypass the decision command",
     );
 
     let parked_after: (String, Option<Uuid>, i64) = sqlx::query_as(
@@ -6811,17 +6878,15 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
             Some(TurnId::from_uuid(Uuid::from_u128(seed + 27))),
         )
         .await?;
-    assert!(
-        matches!(
-            replayed,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
-                    session,
-                    active_turn,
-                },
-            )) if session == fixture.session && active_turn == fixture.turn
-        ),
-        "equal replay must return the recorded parked-approval rejection: {replayed:?}"
+    assert_eq!(
+        replayed,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                session: fixture.session,
+                active_turn: fixture.turn,
+            },
+        )),
+        "equal replay must return the recorded parked-approval rejection",
     );
 
     pool.close().await;
@@ -7847,12 +7912,14 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
             || panic!("turn-closed request consumes no continuation identity"),
         )
         .await?;
-    assert!(matches!(
+    assert_eq!(
         rejection.result(),
-        DecideToolRequestResult::Rejected(
-            signalbox_domain::DecideToolRequestRejectedResult::AlreadyResolved { request }
-        ) if *request == first_request
-    ));
+        &DecideToolRequestResult::Rejected(
+            signalbox_domain::DecideToolRequestRejectedResult::AlreadyResolved {
+                request: first_request,
+            },
+        )
+    );
     let terminal_suffix: Vec<String> = sqlx::query_scalar(
         "SELECT entry.payload_kind
            FROM turn_lifecycle AS lifecycle
@@ -9787,15 +9854,21 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     let interrupt_outcome = SubmitInputRepository::new(pool.clone())
         .handle(interrupt.clone(), successor_input, Some(successor_turn))
         .await?;
-    assert!(matches!(
-        &interrupt_outcome,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(applied)
-        )) if applied.turn() == successor_turn
-            && applied
-                .applied_interrupt()
-                .is_some_and(|interrupt| interrupt.proof().predecessor() == fixture.turn)
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(applied),
+    )) = &interrupt_outcome
+    else {
+        panic!("the interrupt must record its successor origin")
+    };
+    assert_eq!(applied.turn(), successor_turn);
+    assert_eq!(
+        applied
+            .applied_interrupt()
+            .expect("the successor retains interrupt proof")
+            .proof()
+            .predecessor(),
+        fixture.turn
+    );
 
     let stopped_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -9870,12 +9943,17 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        terminal,
-        ModelCallTerminalOutcome::Cancelled(ref cancelled)
-            if cancelled.turn() == fixture.turn
-                && cancelled.call().is_some_and(|call| call.id() == fixture.call)
-    ));
+    let ModelCallTerminalOutcome::Cancelled(cancelled) = &terminal else {
+        panic!("the terminal observation must cancel the interrupted call")
+    };
+    assert_eq!(cancelled.turn(), fixture.turn);
+    assert_eq!(
+        cancelled
+            .call()
+            .expect("physical cancellation retains its call")
+            .id(),
+        fixture.call
+    );
 
     let terminal_shape: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -9915,15 +9993,16 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
             terminal_call: Some(fixture.call),
         }
     );
-    assert!(matches!(
-        cancelled_snapshot.entries().last(),
-        Some(ProcessTranscriptEntry::TurnCancelled {
-            entry,
-            turn,
-            ..
-        }) if *entry == SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22))
-            && *turn == fixture.turn
-    ));
+    let Some(ProcessTranscriptEntry::TurnCancelled { entry, turn, .. }) =
+        cancelled_snapshot.entries().last()
+    else {
+        panic!("the transcript ends with the cancellation marker")
+    };
+    assert_eq!(
+        *entry,
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22))
+    );
+    assert_eq!(*turn, fixture.turn);
     assert_eq!(
         model_repository
             .reread_terminal_observation(fixture.session, &observation)
@@ -9941,31 +10020,15 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
         interrupt_outcome
     );
 
-    let mut cancellation_event = None;
-    drain_outbox(&pool, |event| {
-        if let DispatchedOutboxEventKind::TurnCancelled {
-            turn,
-            cancellation_entry,
-            terminal_frontier,
-        } = event.kind()
-        {
-            cancellation_event = Some((
-                event.session(),
-                *turn,
-                *cancellation_entry,
-                *terminal_frontier,
-            ));
-        }
-    })
-    .await?;
+    let cancellation_events = drain_cancellation_dispatches(&pool).await?;
     assert_eq!(
-        cancellation_event,
-        Some((
+        cancellation_events,
+        vec![(
             fixture.session,
             fixture.turn,
             SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
             ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
-        ))
+        )]
     );
 
     sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER USER")
@@ -10052,18 +10115,18 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        terminal,
-        ModelCallTerminalOutcome::ReconciliationRequired(ref reconciliation)
-            if reconciliation.turn() == fixture.turn
-                && reconciliation.call().id() == fixture.call
-                && matches!(
-                    reconciliation.disposition(),
-                    signalbox_domain::TurnDisposition::ReconciliationRequired { marker }
-                        if marker.ambiguous_operations().contains(
-                            signalbox_domain::IssuedOperationRef::ModelCall(fixture.call)
-                        )
-                )
+    let ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) = &terminal else {
+        panic!("the stopped ambiguous call must require reconciliation")
+    };
+    assert_eq!(reconciliation.turn(), fixture.turn);
+    assert_eq!(reconciliation.call().id(), fixture.call);
+    let signalbox_domain::TurnDisposition::ReconciliationRequired { marker } =
+        reconciliation.disposition()
+    else {
+        panic!("the terminal disposition retains reconciliation evidence")
+    };
+    assert!(marker.ambiguous_operations().contains(
+        signalbox_domain::IssuedOperationRef::ModelCall(fixture.call)
     ));
     assert_eq!(
         model_repository
@@ -10107,26 +10170,15 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
         }
     );
 
-    let mut reconciliation_event = None;
-    drain_outbox(&pool, |event| {
-        if let DispatchedOutboxEventKind::TurnReconciliationRequired {
-            turn,
-            operation: DispatchedReconciliationOperation::ModelCall(call),
-            terminal_frontier,
-        } = event.kind()
-        {
-            reconciliation_event = Some((event.session(), *turn, *call, *terminal_frontier));
-        }
-    })
-    .await?;
+    let reconciliation_events = drain_reconciliation_dispatches(&pool).await?;
     assert_eq!(
-        reconciliation_event,
-        Some((
+        reconciliation_events,
+        vec![(
             fixture.session,
             fixture.turn,
-            fixture.call,
+            DispatchedReconciliationOperation::ModelCall(fixture.call),
             ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
-        ))
+        )]
     );
 
     let waiting_seed = seed + 0x20;
@@ -10147,12 +10199,11 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        waiting_outcome,
-        ModelCallTerminalOutcome::AwaitingRecovery(ref ambiguous)
-            if ambiguous.turn() == waiting.turn
-                && ambiguous.call().id() == waiting.call
-    ));
+    let ModelCallTerminalOutcome::AwaitingRecovery(ambiguous) = &waiting_outcome else {
+        panic!("the unstopped ambiguous call must await recovery")
+    };
+    assert_eq!(ambiguous.turn(), waiting.turn);
+    assert_eq!(ambiguous.call().id(), waiting.call);
     let waiting_snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(waiting.session)
         .await?
@@ -10654,18 +10705,18 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        completed_outcome,
-        ModelCallTerminalOutcome::Completed(ref outcome)
-            if matches!(
-                outcome.attempt().end(),
-                signalbox_domain::AttemptEnd::AfterCancellation {
-                    disposition:
-                        signalbox_domain::CancellationStopDisposition::TurnCompleted,
-                    ..
-                }
-            )
-    ));
+    let ModelCallTerminalOutcome::Completed(outcome) = &completed_outcome else {
+        panic!("the physical completion must remain completed")
+    };
+    let signalbox_domain::AttemptEnd::AfterCancellation { disposition, .. } =
+        outcome.attempt().end()
+    else {
+        panic!("the completed call retains its cancellation history")
+    };
+    assert_eq!(
+        *disposition,
+        signalbox_domain::CancellationStopDisposition::TurnCompleted
+    );
     assert_eq!(
         completed_repository
             .reread_terminal_observation(completed.session, &completed_observation)
@@ -10721,17 +10772,18 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
             ),
         )
         .await?;
-    assert!(matches!(
-        restart_outcome,
-        ModelCallTerminalOutcome::ReconciliationRequired(ref reconciliation)
-            if matches!(
-                reconciliation.attempt().end(),
-                signalbox_domain::AttemptEnd::AfterCancellation {
-                    disposition: signalbox_domain::CancellationStopDisposition::Lost,
-                    ..
-                }
-            )
-    ));
+    let ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) = &restart_outcome else {
+        panic!("restart loss after cancellation must require reconciliation")
+    };
+    let signalbox_domain::AttemptEnd::AfterCancellation { disposition, .. } =
+        reconciliation.attempt().end()
+    else {
+        panic!("restart reconciliation retains its cancellation history")
+    };
+    assert_eq!(
+        *disposition,
+        signalbox_domain::CancellationStopDisposition::Lost
+    );
     let restart_terminal_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*)
@@ -21415,8 +21467,10 @@ async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
 async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let prepared_session = prepared(0x441, 0x841, direct(0xc41));
+    let session = prepared_session.session().id();
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(0x441, 0x841, direct(0xc41)))
+        .handle(prepared_session)
         .await?;
     let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x941));
     let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa41));
@@ -21437,7 +21491,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     let activated = activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
-            session: Uuid::from_u128(0x841),
+            session: session.into_uuid(),
             origin_entry: Uuid::from_u128(0xd41),
             starting_frontier: Uuid::from_u128(0xe41),
             initial_attempt: Uuid::from_u128(0xb41),
@@ -21461,22 +21515,22 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
             Some(TurnId::from_uuid(Uuid::from_u128(0xa42))),
         )
         .await?;
-    assert!(matches!(
+    assert_eq!(
         active_start_outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::ActiveTurnPresent {
                 session,
-                active_turn,
-            }
-        )) if session == SessionId::from_uuid(Uuid::from_u128(0x841))
-            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-    ));
+                active_turn: active_origin_turn,
+            },
+        ))
+    );
 
+    let stale_expected_turn = TurnId::from_uuid(Uuid::from_u128(0xaff));
     let stale_after = record_stale_active_input(
         &repository,
         0x444,
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            expected_active_turn: stale_expected_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
         0x943,
@@ -21487,7 +21541,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         &repository,
         0x445,
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            expected_active_turn: stale_expected_turn,
         },
         0x944,
         None,
@@ -21497,7 +21551,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         &repository,
         0x446,
         DeliveryRequest::Interrupt {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            expected_active_turn: stale_expected_turn,
             descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
@@ -21505,82 +21559,67 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         Some(0xa45),
     )
     .await?;
-    assert!(matches!(
-        stale_after.1.clone(),
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::ActiveTurnMismatch {
-                expected_active_turn,
-                actual_active_turn,
-                ..
-            }
-        )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
-            && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+    let stale_expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnMismatch {
+            session,
+            expected_active_turn: stale_expected_turn,
+            actual_active_turn: active_origin_turn,
+        },
     ));
-    assert!(matches!(
-        stale_safe_point.1.clone(),
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::ActiveTurnMismatch {
-                expected_active_turn,
-                actual_active_turn,
-                ..
-            }
-        )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
-            && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-    ));
-    assert!(matches!(
-        stale_interrupt.1.clone(),
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::ActiveTurnMismatch {
-                expected_active_turn,
-                actual_active_turn,
-                ..
-            }
-        )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
-            && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-    ));
+    assert_eq!(stale_after.1, stale_expected);
+    assert_eq!(stale_safe_point.1, stale_expected);
+    assert_eq!(stale_interrupt.1, stale_expected);
 
+    let after_collision_command = DurableCommandId::from_uuid(Uuid::from_u128(0x449));
     let after_collision = active_origin_collision(
         &repository,
         &pool,
-        0x449,
+        after_collision_command,
+        session,
+        active_origin_input,
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
         Some(0xa49),
     )
     .await?;
+    let safe_point_collision_command = DurableCommandId::from_uuid(Uuid::from_u128(0x44a));
     let safe_point_collision = active_origin_collision(
         &repository,
         &pool,
-        0x44a,
+        safe_point_collision_command,
+        session,
+        active_origin_input,
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
         },
         None,
     )
     .await?;
-    assert!(matches!(
-        after_collision.0,
-        SubmitInputRepositoryError::AcceptedInputIdentityCollision {
-            command_id,
-            active_turn,
-            accepted_input,
-        } if command_id == DurableCommandId::from_uuid(Uuid::from_u128(0x449))
-            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-            && accepted_input == AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
-    ));
+    let SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+        command_id,
+        active_turn,
+        accepted_input,
+    } = after_collision.0
+    else {
+        panic!("after-current collision retains exact authority")
+    };
+    assert_eq!(command_id, after_collision_command);
+    assert_eq!(active_turn, active_origin_turn);
+    assert_eq!(accepted_input, active_origin_input);
     assert_eq!(after_collision.1, 0);
-    assert!(matches!(
-        safe_point_collision.0,
-        SubmitInputRepositoryError::AcceptedInputIdentityCollision {
-            command_id,
-            active_turn,
-            accepted_input,
-        } if command_id == DurableCommandId::from_uuid(Uuid::from_u128(0x44a))
-            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-            && accepted_input == AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
-    ));
+    let SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+        command_id,
+        active_turn,
+        accepted_input,
+    } = safe_point_collision.0
+    else {
+        panic!("safe-point collision retains exact authority")
+    };
+    assert_eq!(command_id, safe_point_collision_command);
+    assert_eq!(active_turn, active_origin_turn);
+    assert_eq!(accepted_input, active_origin_input);
     assert_eq!(safe_point_collision.1, 0);
 
     let queued_before_interrupt = repository
@@ -21630,26 +21669,35 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         0x841,
         "matching interrupt",
         DeliveryRequest::Interrupt {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
             descendant_scope: DescendantTerminationScope::ParentAlone,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
+    let matching_successor_turn = TurnId::from_uuid(Uuid::from_u128(0xa46));
     let outcome = repository
         .handle(
             matching_interrupt.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x946)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa46))),
+            Some(matching_successor_turn),
         )
         .await
         .expect("matching interrupt applies atomically");
-    assert!(matches!(
-        &outcome,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(applied)
-        )) if applied.turn() == TurnId::from_uuid(Uuid::from_u128(0xa46))
-            && applied.applied_interrupt().is_some()
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(applied),
+    )) = &outcome
+    else {
+        panic!("matching interrupt records its successor origin")
+    };
+    assert_eq!(applied.turn(), matching_successor_turn);
+    assert_eq!(
+        applied
+            .applied_interrupt()
+            .expect("matching interrupt retains proof")
+            .proof()
+            .predecessor(),
+        active_origin_turn
+    );
     let claimed: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM durable_command WHERE command_id = $1),
@@ -21689,7 +21737,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
         0x841,
         "safe point after direct cancellation",
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            expected_active_turn: active_origin_turn,
         },
     );
     let next_outcome = repository
@@ -21699,16 +21747,15 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
             None,
         )
         .await?;
-    assert!(matches!(
-        &next_outcome,
+    assert_eq!(
+        next_outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
                 session,
-                expected_active_turn,
-            }
-        )) if *session == SessionId::from_uuid(Uuid::from_u128(0x841))
-            && *expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-    ));
+                expected_active_turn: active_origin_turn,
+            },
+        ))
+    );
     assert_eq!(
         repository
             .handle(
@@ -21804,17 +21851,14 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     let interrupt_successor = activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
-            session: Uuid::from_u128(0x841),
+            session: session.into_uuid(),
             origin_entry: Uuid::from_u128(0xd46),
             starting_frontier: Uuid::from_u128(0xe46),
             initial_attempt: Uuid::from_u128(0xb46),
         },
     )
     .await?;
-    assert_eq!(
-        interrupt_successor.turn(),
-        TurnId::from_uuid(Uuid::from_u128(0xa46))
-    );
+    assert_eq!(interrupt_successor.turn(), matching_successor_turn);
     assert_eq!(
         interrupt_successor.start().lineage(),
         AcceptedInputStartingLineage::After {
@@ -21842,7 +21886,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     assert!(matches!(
         PostgresStartupScanRepository::new(pool.clone())
             .recover(
-                SessionId::from_uuid(Uuid::from_u128(0x841)),
+                session,
                 signalbox_domain::AcceptedInputTurnFailureIdentities::new(
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd47)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xe47)),
@@ -21855,7 +21899,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     let ordinary_successor = activate_earliest_queued_turn(
         &pool,
         EarliestQueuedTurnActivation {
-            session: Uuid::from_u128(0x841),
+            session: session.into_uuid(),
             origin_entry: Uuid::from_u128(0xd48),
             starting_frontier: Uuid::from_u128(0xe48),
             initial_attempt: Uuid::from_u128(0xb48),
@@ -21869,7 +21913,7 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     assert_eq!(
         ordinary_successor.start().lineage(),
         AcceptedInputStartingLineage::After {
-            immediate_predecessor: TurnId::from_uuid(Uuid::from_u128(0xa46)),
+            immediate_predecessor: matching_successor_turn,
         }
     );
 
@@ -22789,8 +22833,13 @@ async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
 async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create = CreateSessionRepository::new(pool.clone(), test_session_credential_pin());
-    create.handle(prepared(0x311, 0x711, direct(0x811))).await?;
-    create.handle(prepared(0x312, 0x712, alias(0x812))).await?;
+    let direct_session_fixture = prepared(0x311, 0x711, direct(0x811));
+    let direct_session = direct_session_fixture.session().id();
+    create.handle(direct_session_fixture).await?;
+    let default_alias = ModelAlias::from_uuid(Uuid::from_u128(0x812));
+    let alias_session_fixture = prepared(0x312, 0x712, ModelSelectionRequest::Alias(default_alias));
+    let alias_session = alias_session_fixture.session().id();
+    create.handle(alias_session_fixture).await?;
     let repository = SubmitInputRepository::new(pool.clone());
 
     let missing = start_input(
@@ -22836,7 +22885,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    assert!(matches!(
+    assert_eq!(
         repository
             .handle(
                 interrupt,
@@ -22846,11 +22895,11 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                expected_active_turn: recorded,
-                ..
-            }
-        )) if recorded == expected_turn
-    ));
+                session: direct_session,
+                expected_active_turn: expected_turn,
+            },
+        ))
+    );
 
     let next_safe_point = input_with_delivery(
         0x315,
@@ -22860,7 +22909,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             expected_active_turn: expected_turn,
         },
     );
-    assert!(matches!(
+    assert_eq!(
         repository
             .handle(
                 next_safe_point,
@@ -22870,11 +22919,11 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                expected_active_turn: recorded,
-                ..
-            }
-        )) if recorded == expected_turn
-    ));
+                session: direct_session,
+                expected_active_turn: expected_turn,
+            },
+        ))
+    );
 
     let after_current = input_with_delivery(
         0x316,
@@ -22885,7 +22934,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    assert!(matches!(
+    assert_eq!(
         repository
             .handle(
                 after_current,
@@ -22895,11 +22944,11 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                expected_active_turn: recorded,
-                ..
-            }
-        )) if recorded == expected_turn
-    ));
+                session: direct_session,
+                expected_active_turn: expected_turn,
+            },
+        ))
+    );
 
     let stale = start_input(
         0x318,
@@ -22915,16 +22964,19 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             Some(TurnId::from_uuid(Uuid::from_u128(0xa18))),
         )
         .await?;
-    assert!(matches!(
-        stale_recorded,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
-                expected,
-                current,
-                ..
-            }
-        )) if expected.as_u64() == 2 && current.as_u64() == 1
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+            session,
+            expected,
+            current,
+        },
+    )) = &stale_recorded
+    else {
+        panic!("stale defaults must record the exact version mismatch")
+    };
+    assert_eq!(*session, direct_session);
+    assert_eq!(expected.as_u64(), 2);
+    assert_eq!(current.as_u64(), 1);
     ReplaceSessionDefaultsRepository::new(pool.clone())
         .handle(replacement(0x31b, 0x711, 1, direct(0x81b)))
         .await?;
@@ -22946,7 +22998,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
         1,
         ModelSelectionOverride::UseSessionDefault,
     );
-    assert!(matches!(
+    assert_eq!(
         repository
             .handle(
                 unknown,
@@ -22955,18 +23007,22 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::UnknownModelAlias { alias, .. }
-        )) if alias == ModelAlias::from_uuid(Uuid::from_u128(0x812))
-    ));
+            SubmitInputRejectedResult::UnknownModelAlias {
+                session: alias_session,
+                alias: default_alias,
+            },
+        ))
+    );
 
+    let explicit_alias = ModelAlias::from_uuid(Uuid::from_u128(0x81c));
     let explicit_unknown = start_input(
         0x31c,
         0x711,
         "explicit alias",
         2,
-        ModelSelectionOverride::ReplaceWith(alias(0x81c)),
+        ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(explicit_alias)),
     );
-    assert!(matches!(
+    assert_eq!(
         repository
             .handle(
                 explicit_unknown,
@@ -22975,9 +23031,12 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::UnknownModelAlias { alias, .. }
-        )) if alias == ModelAlias::from_uuid(Uuid::from_u128(0x81c))
-    ));
+            SubmitInputRejectedResult::UnknownModelAlias {
+                session: direct_session,
+                alias: explicit_alias,
+            },
+        ))
+    );
 
     let counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT

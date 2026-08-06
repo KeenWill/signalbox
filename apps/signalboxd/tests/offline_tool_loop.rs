@@ -3406,17 +3406,15 @@ async fn s07_s10_inv012_inv028_interrupt_against_parked_approval_wait_is_rejecte
             },
         )?)
         .await?;
-    assert!(
-        matches!(
-            outcome,
-            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
-                    session,
-                    active_turn,
-                },
-            )) if session == fixture.session && active_turn == fixture.turn
-        ),
-        "an interrupt alone must not bypass the decision command: {outcome:?}"
+    assert_eq!(
+        outcome,
+        SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
+                session: fixture.session,
+                active_turn: fixture.turn,
+            },
+        )),
+        "an interrupt alone must not bypass the decision command"
     );
 
     assert!(executor.events().is_empty());

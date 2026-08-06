@@ -9,6 +9,9 @@ aggregation are verified against PR #389 (`agent/cost-accounting`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
+The descendant-termination command scope was re-verified through this PR
+(`agent/delegation-command-scope`).
+
 The model/session-settings wire vocabulary was verified through PR #439
 (`agent/model-settings-protocol`), and its transcript-turn settings snapshot was
 verified through this PR (`agent/model-settings-persistence`).
@@ -1697,9 +1700,20 @@ unchanged. No event embeds or links the child transcript.
 `descendant_scope` is required on both `stop_goal` and `stop_turn`. The terminal
 client spells omission as `parent_alone` and `--descendants` as
 `parent_and_descendants`; it never guesses from the relationship policy. A
-successful cascade receipt includes the selected scope and the exact count of
-recorded descendant dispositions, so a zero-child choice and an unperformed
-cascade cannot be confused.
+successful command records the selected scope as durable intent.
+
+The scope is part of the durable command intent, not receipt-only metadata.
+Domain `GoalUserAction::Stop { descendant_scope }` and
+`DeliveryRequest::Interrupt { descendant_scope, .. }` retain it; command
+storage, comparison, and reconstitution carry the same closed value. Reusing
+either durable command identity with another scope is `conflicting_reuse`.
+
+Committed unimplemented functionality: no present process or client receipt
+surface reports cascade metadata. A future successful cascade receipt must
+include the selected scope and the exact count of recorded descendant
+dispositions, so a zero-child choice and an unperformed cascade cannot be
+confused. An equal durable-command retry must return those stored values without
+reevaluating the cascade.
 
 ## Durable update dispatch
 
