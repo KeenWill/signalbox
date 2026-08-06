@@ -387,6 +387,7 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
             turn_id,
             acceptance_position,
             state,
+            ..
         } => Ok(SnapshotRecord::Turn(TranscriptTurn {
             turn_id,
             acceptance_position: acceptance_position.value(),
@@ -662,6 +663,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id: turn,
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::ActiveAwaitingChild {
                     await_request_id: wire_uuid(2),
                     spawning_request_id: wire_uuid(3),

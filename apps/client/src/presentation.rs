@@ -3326,6 +3326,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id,
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id,
                     content: InputContent::new("queued user text".to_owned()),
@@ -3584,6 +3585,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: selected_turn,
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::ToolReconciliationRequired {
                         terminal_frontier_id: selected_frontier,
                         terminal_attempt_id: wire_uuid(9),
@@ -4145,6 +4147,7 @@ mod tests {
                 ServerMessage::TranscriptTurn {
                     turn_id: wire_uuid(1),
                     acceptance_position: CanonicalU64::new(1),
+                    model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: wire_uuid(10),
                         content: InputContent::new("transcript content".to_owned()),
@@ -4297,12 +4300,33 @@ mod tests {
     }
 
     #[test]
-    fn follow_event_renders_child_result_with_provenance_and_content() {
+    fn follow_event_renders_returned_child_result_content() {
+        let rendered = render_event(SessionEvent::ChildResult {
+            spawning_request_id: wire_uuid(2),
+            child_session_id: wire_uuid(3),
+            outcome: DelegationOutcome::Returned,
+            content: Some(String::from("delivered result")),
+            reason: DelegationReason::ChildCompleted,
+            provenance: DelegationProvenance::ChildTurn {
+                child_session_id: wire_uuid(3),
+                child_turn_id: wire_uuid(4),
+            },
+        });
+
+        expect![[r#"
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_result spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 outcome=returned reason=child_completed provenance=child_turn:00000000-0000-0000-0000-000000000003:00000000-0000-0000-0000-000000000004 content_present=true
+            delivered result
+        "#]]
+        .assert_eq(&rendered);
+    }
+
+    #[test]
+    fn follow_event_renders_parent_cascade_child_result_without_content() {
         let rendered = render_event(SessionEvent::ChildResult {
             spawning_request_id: wire_uuid(2),
             child_session_id: wire_uuid(3),
             outcome: DelegationOutcome::Stopped,
-            content: Some(String::from("delivered result")),
+            content: None,
             reason: DelegationReason::ParentStopped,
             provenance: DelegationProvenance::ParentTurnCommand {
                 parent_session_id: wire_uuid(1),
@@ -4313,8 +4337,7 @@ mod tests {
         });
 
         expect![[r#"
-            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_result spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 outcome=stopped reason=parent_stopped provenance=parent_turn_command:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000004:00000000-0000-0000-0000-000000000005:parent_and_descendants content_present=true
-            delivered result
+            event=1 session=00000000-0000-0000-0000-000000000001 delegation_child_result spawning_request=00000000-0000-0000-0000-000000000002 child=00000000-0000-0000-0000-000000000003 outcome=stopped reason=parent_stopped provenance=parent_turn_command:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000004:00000000-0000-0000-0000-000000000005:parent_and_descendants content_present=false
         "#]]
         .assert_eq(&rendered);
     }
@@ -4390,6 +4413,7 @@ mod tests {
             [ServerMessage::TranscriptTurn {
                 turn_id: wire_uuid(1),
                 acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
                 state,
             }],
         )

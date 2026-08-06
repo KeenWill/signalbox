@@ -3,12 +3,20 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Deserializer};
+use serde_json::{Value, json};
+use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
 use signalbox_domain::{
-    AcceptedInputId, DangerousToolAutoApproval, DelegateApprovalRecommendation, DurableCommandId,
-    GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
-    GoalUserAction, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault,
-    ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
+    AcceptedInputId, AnthropicServiceTier, CheckConclusion, ChecksOutcome, CodexCliServiceTier,
+    DangerousToolAutoApproval, DelegateApprovalRecommendation, DirectModelSelection,
+    DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay, GoalBlockedReasonKind,
+    GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind, GoalUserAction,
+    MergeableState, ModelChangeAdjustment, ModelSettingSource, ModelSettingsOverlay,
+    ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReactionSubject, ReasoningLevel,
+    RepoWatchEventKindNameV1, ReviewState, ServiceTier, SessionConfigurationDefaultsVersion,
+    SessionId, SessionInputPosition, SessionPlacementEventKind, SettingOverlay,
+    ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId, TurnId,
+    UpdateSessionPlacementRejectionKind, ValidatedModelSettings,
 };
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
@@ -405,6 +413,251 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
         _ => None,
     }
 }
+
+/// Stored target shape for one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventTargetStorageKind {
+    PullRequest,
+    Branch,
+}
+
+pub(crate) const fn repo_watch_event_target_to_str(
+    value: RepoWatchEventTargetStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
+        RepoWatchEventTargetStorageKind::Branch => "branch",
+    }
+}
+
+pub(crate) fn repo_watch_event_target_from_str(
+    value: &str,
+) -> Option<RepoWatchEventTargetStorageKind> {
+    match value {
+        "pull_request" => Some(RepoWatchEventTargetStorageKind::PullRequest),
+        "branch" => Some(RepoWatchEventTargetStorageKind::Branch),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_event_kind_to_str(value: RepoWatchEventKindNameV1) -> &'static str {
+    match value {
+        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
+        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
+        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
+        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
+        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
+        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
+        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
+        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
+        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
+        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
+        RepoWatchEventKindNameV1::Labeled => "labeled",
+        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
+        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
+        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
+}
+
+pub(crate) fn repo_watch_event_kind_from_str(value: &str) -> Option<RepoWatchEventKindNameV1> {
+    match value {
+        "pull_request_opened" => Some(RepoWatchEventKindNameV1::PullRequestOpened),
+        "pull_request_closed" => Some(RepoWatchEventKindNameV1::PullRequestClosed),
+        "pull_request_merged" => Some(RepoWatchEventKindNameV1::PullRequestMerged),
+        "head_changed" => Some(RepoWatchEventKindNameV1::HeadChanged),
+        "mergeable_state_changed" => Some(RepoWatchEventKindNameV1::MergeableStateChanged),
+        "checks_completed" => Some(RepoWatchEventKindNameV1::ChecksCompleted),
+        "check_run_completed" => Some(RepoWatchEventKindNameV1::CheckRunCompleted),
+        "branch_workflow_run_completed" => {
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        }
+        "review_submitted" => Some(RepoWatchEventKindNameV1::ReviewSubmitted),
+        "thread_opened" => Some(RepoWatchEventKindNameV1::ThreadOpened),
+        "thread_resolved" => Some(RepoWatchEventKindNameV1::ThreadResolved),
+        "labeled" => Some(RepoWatchEventKindNameV1::Labeled),
+        "unlabeled" => Some(RepoWatchEventKindNameV1::Unlabeled),
+        "base_advanced" => Some(RepoWatchEventKindNameV1::BaseAdvanced),
+        "reaction_changed" => Some(RepoWatchEventKindNameV1::ReactionChanged),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_pull_request_lifecycle_to_str(
+    value: RepoWatchPullRequestLifecycle,
+) -> &'static str {
+    match value {
+        RepoWatchPullRequestLifecycle::Open => "open",
+        RepoWatchPullRequestLifecycle::Closed => "closed",
+        RepoWatchPullRequestLifecycle::Merged => "merged",
+    }
+}
+
+pub(crate) fn repo_watch_pull_request_lifecycle_from_str(
+    value: &str,
+) -> Option<RepoWatchPullRequestLifecycle> {
+    match value {
+        "open" => Some(RepoWatchPullRequestLifecycle::Open),
+        "closed" => Some(RepoWatchPullRequestLifecycle::Closed),
+        "merged" => Some(RepoWatchPullRequestLifecycle::Merged),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_mergeable_state_to_str(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+pub(crate) fn repo_watch_mergeable_state_from_str(value: &str) -> Option<MergeableState> {
+    match value {
+        "mergeable" => Some(MergeableState::Mergeable),
+        "conflicting" => Some(MergeableState::Conflicting),
+        "unknown" => Some(MergeableState::Unknown),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_checks_outcome_to_str(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+pub(crate) fn repo_watch_checks_outcome_from_str(value: &str) -> Option<ChecksOutcome> {
+    match value {
+        "success" => Some(ChecksOutcome::Success),
+        "failure" => Some(ChecksOutcome::Failure),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_check_conclusion_to_str(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+pub(crate) fn repo_watch_check_conclusion_from_str(value: &str) -> Option<CheckConclusion> {
+    match value {
+        "success" => Some(CheckConclusion::Success),
+        "failure" => Some(CheckConclusion::Failure),
+        "neutral" => Some(CheckConclusion::Neutral),
+        "cancelled" => Some(CheckConclusion::Cancelled),
+        "skipped" => Some(CheckConclusion::Skipped),
+        "timed_out" => Some(CheckConclusion::TimedOut),
+        "action_required" => Some(CheckConclusion::ActionRequired),
+        "stale" => Some(CheckConclusion::Stale),
+        "startup_failure" => Some(CheckConclusion::StartupFailure),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_review_state_to_str(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+pub(crate) fn repo_watch_review_state_from_str(value: &str) -> Option<ReviewState> {
+    match value {
+        "approved" => Some(ReviewState::Approved),
+        "changes_requested" => Some(ReviewState::ChangesRequested),
+        "commented" => Some(ReviewState::Commented),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_thread_state_to_str(value: RepoWatchThreadState) -> &'static str {
+    match value {
+        RepoWatchThreadState::Open => "open",
+        RepoWatchThreadState::Resolved => "resolved",
+    }
+}
+
+pub(crate) fn repo_watch_thread_state_from_str(value: &str) -> Option<RepoWatchThreadState> {
+    match value {
+        "open" => Some(RepoWatchThreadState::Open),
+        "resolved" => Some(RepoWatchThreadState::Resolved),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_reaction_change_to_str(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
+}
+
+pub(crate) fn repo_watch_reaction_change_from_str(value: &str) -> Option<ReactionChange> {
+    match value {
+        "added" => Some(ReactionChange::Added),
+        "removed" => Some(ReactionChange::Removed),
+        _ => None,
+    }
+}
+
+/// Stored subject shape for one reaction observation or event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchReactionSubjectStorageKind {
+    PullRequestBody,
+    IssueComment,
+    ReviewComment,
+}
+
+pub(crate) const fn repo_watch_reaction_subject_to_storage(
+    value: ReactionSubject,
+) -> (RepoWatchReactionSubjectStorageKind, Option<u64>) {
+    match value {
+        ReactionSubject::PullRequestBody => {
+            (RepoWatchReactionSubjectStorageKind::PullRequestBody, None)
+        }
+        ReactionSubject::IssueComment { id } => (
+            RepoWatchReactionSubjectStorageKind::IssueComment,
+            Some(id.get()),
+        ),
+        ReactionSubject::ReviewComment { id } => (
+            RepoWatchReactionSubjectStorageKind::ReviewComment,
+            Some(id.get()),
+        ),
+    }
+}
+
+pub(crate) const fn repo_watch_reaction_subject_kind_to_str(
+    value: RepoWatchReactionSubjectStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchReactionSubjectStorageKind::PullRequestBody => "pull_request_body",
+        RepoWatchReactionSubjectStorageKind::IssueComment => "issue_comment",
+        RepoWatchReactionSubjectStorageKind::ReviewComment => "review_comment",
+    }
+}
+
+pub(crate) fn repo_watch_reaction_subject_kind_from_str(
+    value: &str,
+) -> Option<RepoWatchReactionSubjectStorageKind> {
+    match value {
+        "pull_request_body" => Some(RepoWatchReactionSubjectStorageKind::PullRequestBody),
+        "issue_comment" => Some(RepoWatchReactionSubjectStorageKind::IssueComment),
+        "review_comment" => Some(RepoWatchReactionSubjectStorageKind::ReviewComment),
+        _ => None,
+    }
+}
 /// Why a PostgreSQL `numeric(20, 0)` value is not a positive domain ordinal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PositiveOrdinalMappingError {
@@ -667,15 +920,517 @@ pub fn durable_command_id_from_uuid(
     Ok(DurableCommandId::from_uuid(value))
 }
 
+/// A stored settings document that cannot reconstruct domain validation
+/// evidence. Dynamic document content is deliberately omitted from display.
+#[derive(Debug)]
+pub(crate) enum StoredModelSettingsError {
+    Json(serde_json::Error),
+    Invalid(&'static str),
+}
+
+impl fmt::Display for StoredModelSettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(_) => formatter.write_str("stored model settings have an invalid shape"),
+            Self::Invalid(field) => write!(formatter, "stored model settings have invalid {field}"),
+        }
+    }
+}
+
+impl Error for StoredModelSettingsError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Json(error) => Some(error),
+            Self::Invalid(_) => None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredModelSettings {
+    precedence: StoredModelSettingsPrecedence,
+    effective: StoredEffectiveModelSettings,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    reasoning_source: Option<StoredModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    fast_mode_source: Option<StoredModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    service_tier_source: Option<StoredModelSettingSource>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    validated_for_selection_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredModelSettingsPrecedence {
+    per_call: StoredModelSettingsOverlay,
+    session: StoredModelSettingsOverlay,
+    profile: StoredModelSettingsOverlay,
+    global_default: StoredModelSettingsOverlay,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredModelSettingsOverlay {
+    reasoning_level: StoredSetting<StoredReasoningLevel>,
+    fast_mode: StoredFastModeOverlay,
+    service_tier: StoredSetting<StoredServiceTier>,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum StoredFastModeOverlay {
+    Inherit,
+    Value(StoredFastMode),
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum StoredSetting<T> {
+    Inherit,
+    ProviderDefault,
+    Value(T),
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredReasoningLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredFastMode {
+    Disabled,
+    Enabled,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(
+    tag = "provider",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum StoredServiceTier {
+    Anthropic(StoredAnthropicServiceTier),
+    OpenAi(StoredOpenAiServiceTier),
+    CodexCli(StoredCodexCliServiceTier),
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredAnthropicServiceTier {
+    Auto,
+    StandardOnly,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredOpenAiServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredCodexCliServiceTier {
+    Default,
+    Priority,
+    Flex,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEffectiveModelSettings {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    reasoning_level: Option<StoredReasoningLevel>,
+    fast_mode: StoredFastMode,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    service_tier: Option<StoredServiceTier>,
+}
+
+fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
+    deserializer: DeserializerT,
+) -> Result<Option<ValueT>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+    ValueT: Deserialize<'de>,
+{
+    Option::<ValueT>::deserialize(deserializer)
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredModelSettingSource {
+    PerCall,
+    Session,
+    Profile,
+    GlobalDefault,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredModelChangeAdjustment {
+    ReasoningLevelClamped {
+        from: StoredReasoningLevel,
+        to: StoredReasoningLevel,
+    },
+    ReasoningLevelCleared {
+        from: StoredReasoningLevel,
+    },
+    FastModeDisabled,
+    ServiceTierCleared {
+        from: StoredServiceTier,
+    },
+}
+
+pub(crate) fn model_settings_to_json(settings: ValidatedModelSettings) -> Value {
+    let precedence = settings.precedence();
+    let resolved = settings.resolved();
+    let effective = settings.effective();
+    json!({
+        "precedence": {
+            "per_call": model_settings_overlay_to_json(precedence.per_call()),
+            "session": model_settings_overlay_to_json(precedence.session()),
+            "profile": model_settings_overlay_to_json(precedence.profile()),
+            "global_default": model_settings_overlay_to_json(precedence.global_default()),
+        },
+        "effective": {
+            "reasoning_level": effective.reasoning_level().map(reasoning_level_to_json),
+            "fast_mode": fast_mode_to_json(effective.fast_mode()),
+            "service_tier": effective.service_tier().map(service_tier_to_json),
+        },
+        "reasoning_source": resolved.reasoning_source().map(model_setting_source_to_str),
+        "fast_mode_source": resolved.fast_mode_source().map(model_setting_source_to_str),
+        "service_tier_source": resolved.service_tier_source().map(model_setting_source_to_str),
+        "validated_for_selection_id": settings.validated_for().map(|selection| selection.into_uuid().to_string()),
+    })
+}
+
+pub(crate) fn model_settings_from_json(
+    value: Value,
+) -> Result<ValidatedModelSettings, StoredModelSettingsError> {
+    let stored: StoredModelSettings =
+        serde_json::from_value(value).map_err(StoredModelSettingsError::Json)?;
+    let precedence = ModelSettingsPrecedence::new(
+        stored.precedence.per_call.into_domain(),
+        stored.precedence.session.into_domain(),
+        stored.precedence.profile.into_domain(),
+        stored.precedence.global_default.into_domain(),
+    );
+    let effective = EffectiveModelSettings::new(
+        stored
+            .effective
+            .reasoning_level
+            .map(StoredReasoningLevel::into_domain),
+        stored.effective.fast_mode.into_domain(),
+        stored
+            .effective
+            .service_tier
+            .map(StoredServiceTier::into_domain),
+    );
+    let validated_for = stored
+        .validated_for_selection_id
+        .map(|value| {
+            Uuid::parse_str(&value)
+                .map(DirectModelSelection::from_uuid)
+                .map_err(|_| StoredModelSettingsError::Invalid("validation selection"))
+        })
+        .transpose()?;
+    ValidatedModelSettings::reconstitute(
+        precedence,
+        effective,
+        stored
+            .reasoning_source
+            .map(StoredModelSettingSource::into_domain),
+        stored
+            .fast_mode_source
+            .map(StoredModelSettingSource::into_domain),
+        stored
+            .service_tier_source
+            .map(StoredModelSettingSource::into_domain),
+        validated_for,
+    )
+    .ok_or(StoredModelSettingsError::Invalid("precedence correlation"))
+}
+
+pub(crate) fn model_settings_overlay_to_json(settings: ModelSettingsOverlay) -> Value {
+    json!({
+        "reasoning_level": setting_to_json(settings.reasoning_level(), reasoning_level_to_json),
+        "fast_mode": fast_mode_overlay_to_json(settings.fast_mode()),
+        "service_tier": setting_to_json(settings.service_tier(), service_tier_to_json),
+    })
+}
+
+pub(crate) fn model_settings_overlay_from_json(
+    value: Value,
+) -> Result<ModelSettingsOverlay, StoredModelSettingsError> {
+    let stored: StoredModelSettingsOverlay =
+        serde_json::from_value(value).map_err(StoredModelSettingsError::Json)?;
+    Ok(stored.into_domain())
+}
+
+pub(crate) fn model_change_adjustments_to_json(adjustments: &[ModelChangeAdjustment]) -> Value {
+    Value::Array(
+        adjustments
+            .iter()
+            .map(|adjustment| match *adjustment {
+                ModelChangeAdjustment::ReasoningLevelClamped { from, to } => json!({
+                    "kind": "reasoning_level_clamped",
+                    "from": reasoning_level_to_json(from),
+                    "to": reasoning_level_to_json(to),
+                }),
+                ModelChangeAdjustment::ReasoningLevelCleared { from } => json!({
+                    "kind": "reasoning_level_cleared",
+                    "from": reasoning_level_to_json(from),
+                }),
+                ModelChangeAdjustment::FastModeDisabled => {
+                    json!({ "kind": "fast_mode_disabled" })
+                }
+                ModelChangeAdjustment::ServiceTierCleared { from } => json!({
+                    "kind": "service_tier_cleared",
+                    "from": service_tier_to_json(from),
+                }),
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn model_change_adjustments_from_json(
+    value: Value,
+) -> Result<Vec<ModelChangeAdjustment>, StoredModelSettingsError> {
+    let stored: Vec<StoredModelChangeAdjustment> =
+        serde_json::from_value(value).map_err(StoredModelSettingsError::Json)?;
+    Ok(stored
+        .into_iter()
+        .map(StoredModelChangeAdjustment::into_domain)
+        .collect())
+}
+
+fn setting_to_json<T: Copy>(
+    setting: SettingOverlay<T>,
+    value_to_json: impl FnOnce(T) -> Value,
+) -> Value {
+    match setting {
+        SettingOverlay::Inherit => json!({ "kind": "inherit" }),
+        SettingOverlay::ProviderDefault => json!({ "kind": "provider_default" }),
+        SettingOverlay::Value(value) => json!({ "kind": "value", "value": value_to_json(value) }),
+    }
+}
+
+fn fast_mode_overlay_to_json(setting: FastModeOverlay) -> Value {
+    match setting {
+        FastModeOverlay::Inherit => json!({ "kind": "inherit" }),
+        FastModeOverlay::Value(value) => {
+            json!({ "kind": "value", "value": fast_mode_to_json(value) })
+        }
+    }
+}
+
+fn reasoning_level_to_json(value: ReasoningLevel) -> Value {
+    Value::String(String::from(match value {
+        ReasoningLevel::None => "none",
+        ReasoningLevel::Minimal => "minimal",
+        ReasoningLevel::Low => "low",
+        ReasoningLevel::Medium => "medium",
+        ReasoningLevel::High => "high",
+        ReasoningLevel::XHigh => "x_high",
+        ReasoningLevel::Max => "max",
+        ReasoningLevel::Ultra => "ultra",
+    }))
+}
+
+fn fast_mode_to_json(value: FastMode) -> Value {
+    Value::String(String::from(match value {
+        FastMode::Disabled => "disabled",
+        FastMode::Enabled => "enabled",
+    }))
+}
+
+fn service_tier_to_json(value: ServiceTier) -> Value {
+    match value {
+        ServiceTier::Anthropic(value) => {
+            json!({"provider":"anthropic","value":match value { AnthropicServiceTier::Auto=>"auto", AnthropicServiceTier::StandardOnly=>"standard_only" }})
+        }
+        ServiceTier::OpenAi(value) => {
+            json!({"provider":"open_ai","value":match value { OpenAiServiceTier::Auto=>"auto", OpenAiServiceTier::Default=>"default", OpenAiServiceTier::Flex=>"flex", OpenAiServiceTier::Scale=>"scale", OpenAiServiceTier::Priority=>"priority", OpenAiServiceTier::Fast=>"fast" }})
+        }
+        ServiceTier::CodexCli(value) => {
+            json!({"provider":"codex_cli","value":match value { CodexCliServiceTier::Default=>"default", CodexCliServiceTier::Priority=>"priority", CodexCliServiceTier::Flex=>"flex" }})
+        }
+    }
+}
+
+const fn model_setting_source_to_str(value: ModelSettingSource) -> &'static str {
+    match value {
+        ModelSettingSource::PerCall => "per_call",
+        ModelSettingSource::Session => "session",
+        ModelSettingSource::Profile => "profile",
+        ModelSettingSource::GlobalDefault => "global_default",
+    }
+}
+
+impl StoredModelSettingsOverlay {
+    fn into_domain(self) -> ModelSettingsOverlay {
+        ModelSettingsOverlay::new(
+            self.reasoning_level.map(StoredReasoningLevel::into_domain),
+            self.fast_mode.into_domain(),
+            self.service_tier.map(StoredServiceTier::into_domain),
+        )
+    }
+}
+
+impl StoredFastModeOverlay {
+    const fn into_domain(self) -> FastModeOverlay {
+        match self {
+            Self::Inherit => FastModeOverlay::Inherit,
+            Self::Value(value) => FastModeOverlay::Value(value.into_domain()),
+        }
+    }
+}
+
+impl<T> StoredSetting<T> {
+    fn map<U>(self, convert: impl FnOnce(T) -> U) -> SettingOverlay<U> {
+        match self {
+            Self::Inherit => SettingOverlay::Inherit,
+            Self::ProviderDefault => SettingOverlay::ProviderDefault,
+            Self::Value(value) => SettingOverlay::Value(convert(value)),
+        }
+    }
+}
+
+impl StoredReasoningLevel {
+    const fn into_domain(self) -> ReasoningLevel {
+        match self {
+            Self::None => ReasoningLevel::None,
+            Self::Minimal => ReasoningLevel::Minimal,
+            Self::Low => ReasoningLevel::Low,
+            Self::Medium => ReasoningLevel::Medium,
+            Self::High => ReasoningLevel::High,
+            Self::XHigh => ReasoningLevel::XHigh,
+            Self::Max => ReasoningLevel::Max,
+            Self::Ultra => ReasoningLevel::Ultra,
+        }
+    }
+}
+
+impl StoredFastMode {
+    const fn into_domain(self) -> FastMode {
+        match self {
+            Self::Disabled => FastMode::Disabled,
+            Self::Enabled => FastMode::Enabled,
+        }
+    }
+}
+
+impl StoredServiceTier {
+    const fn into_domain(self) -> ServiceTier {
+        match self {
+            Self::Anthropic(StoredAnthropicServiceTier::Auto) => {
+                ServiceTier::Anthropic(AnthropicServiceTier::Auto)
+            }
+            Self::Anthropic(StoredAnthropicServiceTier::StandardOnly) => {
+                ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly)
+            }
+            Self::OpenAi(StoredOpenAiServiceTier::Auto) => {
+                ServiceTier::OpenAi(OpenAiServiceTier::Auto)
+            }
+            Self::OpenAi(StoredOpenAiServiceTier::Default) => {
+                ServiceTier::OpenAi(OpenAiServiceTier::Default)
+            }
+            Self::OpenAi(StoredOpenAiServiceTier::Flex) => {
+                ServiceTier::OpenAi(OpenAiServiceTier::Flex)
+            }
+            Self::OpenAi(StoredOpenAiServiceTier::Scale) => {
+                ServiceTier::OpenAi(OpenAiServiceTier::Scale)
+            }
+            Self::OpenAi(StoredOpenAiServiceTier::Priority) => {
+                ServiceTier::OpenAi(OpenAiServiceTier::Priority)
+            }
+            Self::OpenAi(StoredOpenAiServiceTier::Fast) => {
+                ServiceTier::OpenAi(OpenAiServiceTier::Fast)
+            }
+            Self::CodexCli(StoredCodexCliServiceTier::Default) => {
+                ServiceTier::CodexCli(CodexCliServiceTier::Default)
+            }
+            Self::CodexCli(StoredCodexCliServiceTier::Priority) => {
+                ServiceTier::CodexCli(CodexCliServiceTier::Priority)
+            }
+            Self::CodexCli(StoredCodexCliServiceTier::Flex) => {
+                ServiceTier::CodexCli(CodexCliServiceTier::Flex)
+            }
+        }
+    }
+}
+
+impl StoredModelSettingSource {
+    const fn into_domain(self) -> ModelSettingSource {
+        match self {
+            Self::PerCall => ModelSettingSource::PerCall,
+            Self::Session => ModelSettingSource::Session,
+            Self::Profile => ModelSettingSource::Profile,
+            Self::GlobalDefault => ModelSettingSource::GlobalDefault,
+        }
+    }
+}
+
+impl StoredModelChangeAdjustment {
+    const fn into_domain(self) -> ModelChangeAdjustment {
+        match self {
+            Self::ReasoningLevelClamped { from, to } => {
+                ModelChangeAdjustment::ReasoningLevelClamped {
+                    from: from.into_domain(),
+                    to: to.into_domain(),
+                }
+            }
+            Self::ReasoningLevelCleared { from } => ModelChangeAdjustment::ReasoningLevelCleared {
+                from: from.into_domain(),
+            },
+            Self::FastModeDisabled => ModelChangeAdjustment::FastModeDisabled,
+            Self::ServiceTierCleared { from } => ModelChangeAdjustment::ServiceTierCleared {
+                from: from.into_domain(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::BTreeSet, str::FromStr};
 
     use rust_decimal::Decimal;
+    use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
     use signalbox_domain::{
-        AcceptedInputId, DelegateApprovalRecommendation, DurableCommandId,
-        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
-        SessionPlacementEventKind, ToolApprovalPosture, ToolPermissionDefault, TurnId,
+        AcceptedInputId, CheckConclusion, ChecksOutcome, DelegateApprovalRecommendation,
+        DirectModelSelection, DurableCommandId, FastMode, FastModeOverlay, FastModeSupport,
+        MergeableState, ModelCapabilities, ModelChangeAdjustment, ModelSettingsOverlay,
+        ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange, ReasoningLevel,
+        RepoWatchEventKindNameV1, ReviewState, ServiceTier, SessionConfigurationDefaultsVersion,
+        SessionId, SessionInputPosition, SessionPlacementEventKind, SettingOverlay,
+        ToolApprovalPosture, ToolPermissionDefault, TurnId,
     };
     use sqlx::types::Uuid;
 
@@ -683,14 +1438,25 @@ mod tests {
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
         PositiveOrdinalMappingError, SessionPlacementRejectionStorageKind,
-        SessionPlacementResultStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
-        approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
-        approval_judge_state_from_str, approval_judge_state_to_str,
-        approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, durable_command_kind_from_str, durable_command_kind_to_str,
-        input_position_from_numeric, input_position_to_numeric, plan_event_kind_from_str,
-        plan_event_kind_to_str, session_id_from_uuid, session_id_to_uuid,
+        SessionPlacementResultStorageKind, StoredModelSettingsError, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, approval_judge_recommendation_from_str,
+        approval_judge_recommendation_to_str, approval_judge_state_from_str,
+        approval_judge_state_to_str, approval_judge_terminal_disposition_from_str,
+        approval_judge_terminal_disposition_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        durable_command_kind_from_str, durable_command_kind_to_str, input_position_from_numeric,
+        input_position_to_numeric, model_change_adjustments_from_json,
+        model_change_adjustments_to_json, model_settings_from_json,
+        model_settings_overlay_from_json, model_settings_to_json, plan_event_kind_from_str,
+        plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
+        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
+        repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
+        repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_thread_state_to_str, session_id_from_uuid, session_id_to_uuid,
         session_placement_event_kind_from_str, session_placement_event_kind_to_str,
         session_placement_rejection_from_str, session_placement_result_kind_from_str,
         session_placement_result_kind_to_str, tool_approval_posture_from_str,
@@ -700,6 +1466,316 @@ mod tests {
     use crate::approval_judge::FailedApprovalJudgeDisposition;
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
+    const UNKNOWN_DISCRIMINATOR: &str = "outside-closed-set";
+
+    #[test]
+    fn repository_watch_event_kind_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::PullRequestOpened
+            )),
+            Some(RepoWatchEventKindNameV1::PullRequestOpened)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::PullRequestClosed
+            )),
+            Some(RepoWatchEventKindNameV1::PullRequestClosed)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::PullRequestMerged
+            )),
+            Some(RepoWatchEventKindNameV1::PullRequestMerged)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::HeadChanged
+            )),
+            Some(RepoWatchEventKindNameV1::HeadChanged)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::MergeableStateChanged
+            )),
+            Some(RepoWatchEventKindNameV1::MergeableStateChanged)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ChecksCompleted
+            )),
+            Some(RepoWatchEventKindNameV1::ChecksCompleted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::CheckRunCompleted
+            )),
+            Some(RepoWatchEventKindNameV1::CheckRunCompleted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::BranchWorkflowRunCompleted
+            )),
+            Some(RepoWatchEventKindNameV1::BranchWorkflowRunCompleted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ReviewSubmitted
+            )),
+            Some(RepoWatchEventKindNameV1::ReviewSubmitted)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ThreadOpened
+            )),
+            Some(RepoWatchEventKindNameV1::ThreadOpened)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ThreadResolved
+            )),
+            Some(RepoWatchEventKindNameV1::ThreadResolved)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::Labeled
+            )),
+            Some(RepoWatchEventKindNameV1::Labeled)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::Unlabeled
+            )),
+            Some(RepoWatchEventKindNameV1::Unlabeled)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::BaseAdvanced
+            )),
+            Some(RepoWatchEventKindNameV1::BaseAdvanced)
+        );
+        assert_eq!(
+            repo_watch_event_kind_from_str(repo_watch_event_kind_to_str(
+                RepoWatchEventKindNameV1::ReactionChanged
+            )),
+            Some(RepoWatchEventKindNameV1::ReactionChanged)
+        );
+        assert_eq!(repo_watch_event_kind_from_str(UNKNOWN_DISCRIMINATOR), None);
+    }
+
+    #[test]
+    fn repository_watch_payload_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_pull_request_lifecycle_from_str(repo_watch_pull_request_lifecycle_to_str(
+                RepoWatchPullRequestLifecycle::Merged
+            )),
+            Some(RepoWatchPullRequestLifecycle::Merged)
+        );
+        assert_eq!(
+            repo_watch_mergeable_state_from_str(repo_watch_mergeable_state_to_str(
+                MergeableState::Conflicting
+            )),
+            Some(MergeableState::Conflicting)
+        );
+        assert_eq!(
+            repo_watch_checks_outcome_from_str(repo_watch_checks_outcome_to_str(
+                ChecksOutcome::Failure
+            )),
+            Some(ChecksOutcome::Failure)
+        );
+        assert_eq!(
+            repo_watch_check_conclusion_from_str(repo_watch_check_conclusion_to_str(
+                CheckConclusion::StartupFailure
+            )),
+            Some(CheckConclusion::StartupFailure)
+        );
+        assert_eq!(
+            repo_watch_review_state_from_str(repo_watch_review_state_to_str(
+                ReviewState::ChangesRequested
+            )),
+            Some(ReviewState::ChangesRequested)
+        );
+        assert_eq!(
+            repo_watch_thread_state_from_str(repo_watch_thread_state_to_str(
+                RepoWatchThreadState::Resolved
+            )),
+            Some(RepoWatchThreadState::Resolved)
+        );
+        assert_eq!(
+            repo_watch_reaction_change_from_str(repo_watch_reaction_change_to_str(
+                ReactionChange::Removed
+            )),
+            Some(ReactionChange::Removed)
+        );
+        assert_eq!(
+            repo_watch_pull_request_lifecycle_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_mergeable_state_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_checks_outcome_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_check_conclusion_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_review_state_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_thread_state_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+        assert_eq!(
+            repo_watch_reaction_change_from_str(UNKNOWN_DISCRIMINATOR),
+            None
+        );
+    }
+
+    /// INV-003 / INV-053: the JSONB mapping preserves complete model-settings
+    /// precedence, effective value, source evidence, and validation identity.
+    #[test]
+    fn inv003_inv053_model_settings_json_round_trips_complete_evidence() {
+        let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x51));
+        let capabilities = ModelCapabilities::new(
+            BTreeSet::from([ReasoningLevel::High]),
+            FastModeSupport::RequestControl,
+            BTreeSet::new(),
+        );
+        let precedence = ModelSettingsPrecedence::new(
+            ModelSettingsOverlay::new(
+                SettingOverlay::Value(ReasoningLevel::High),
+                FastModeOverlay::Value(FastMode::Enabled),
+                SettingOverlay::ProviderDefault,
+            ),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+            ModelSettingsOverlay::inherit_all(),
+        );
+        let settings = capabilities
+            .validate_precedence(selection, precedence)
+            .expect("the fixture capability admits every explicit value");
+
+        let decoded = model_settings_from_json(model_settings_to_json(settings))
+            .expect("the encoded complete document reconstitutes");
+
+        assert_eq!(decoded, settings);
+    }
+
+    /// INV-003: unknown stored settings members fail closed instead of being
+    /// silently ignored during reconstitution.
+    #[test]
+    fn inv003_model_settings_json_rejects_unknown_members() {
+        let mut encoded =
+            model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
+        encoded
+            .as_object_mut()
+            .expect("the fixture encoder produces an object")
+            .insert(String::from("unknown_member"), serde_json::Value::Null);
+
+        let error = model_settings_from_json(encoded)
+            .expect_err("an unknown settings member must fail closed");
+
+        assert!(matches!(error, StoredModelSettingsError::Json(_)));
+
+        let nested_tier = serde_json::json!({
+            "reasoning_level": {"kind": "inherit"},
+            "fast_mode": {"kind": "inherit"},
+            "service_tier": {
+                "kind": "value",
+                "value": {"provider": "open_ai", "value": "flex", "extra": true}
+            }
+        });
+        let nested_error = model_settings_overlay_from_json(nested_tier)
+            .expect_err("an unknown nested service-tier member must fail closed");
+
+        assert!(matches!(nested_error, StoredModelSettingsError::Json(_)));
+    }
+
+    /// INV-003: every nullable member remains required durable evidence, so
+    /// omission cannot normalize a truncated document into provider defaults.
+    #[test]
+    fn inv003_model_settings_json_rejects_missing_nullable_members() {
+        let mut missing_source =
+            model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
+        missing_source
+            .as_object_mut()
+            .expect("the fixture encoder produces an object")
+            .remove("reasoning_source");
+
+        let source_error = model_settings_from_json(missing_source)
+            .expect_err("an omitted nullable source must fail closed");
+
+        assert!(matches!(source_error, StoredModelSettingsError::Json(_)));
+
+        let mut missing_effective =
+            model_settings_to_json(signalbox_domain::ValidatedModelSettings::provider_defaults());
+        missing_effective
+            .get_mut("effective")
+            .expect("the fixture contains effective settings")
+            .as_object_mut()
+            .expect("effective settings are an object")
+            .remove("service_tier");
+
+        let effective_error = model_settings_from_json(missing_effective)
+            .expect_err("an omitted nullable effective value must fail closed");
+
+        assert!(matches!(effective_error, StoredModelSettingsError::Json(_)));
+    }
+
+    /// INV-003: fast mode has no provider-default state in the domain, so a
+    /// durable spelling that invents one fails closed.
+    #[test]
+    fn inv003_model_settings_overlay_rejects_provider_default_fast_mode() {
+        let encoded = serde_json::json!({
+            "reasoning_level": {"kind": "inherit"},
+            "fast_mode": {"kind": "provider_default"},
+            "service_tier": {"kind": "inherit"}
+        });
+
+        let error = model_settings_overlay_from_json(encoded)
+            .expect_err("provider-default fast mode must fail closed");
+
+        assert!(matches!(error, StoredModelSettingsError::Json(_)));
+    }
+
+    #[test]
+    fn model_change_adjustment_json_round_trips_every_variant() {
+        let adjustments = vec![
+            ModelChangeAdjustment::ReasoningLevelClamped {
+                from: ReasoningLevel::High,
+                to: ReasoningLevel::Low,
+            },
+            ModelChangeAdjustment::ReasoningLevelCleared {
+                from: ReasoningLevel::Medium,
+            },
+            ModelChangeAdjustment::FastModeDisabled,
+            ModelChangeAdjustment::ServiceTierCleared {
+                from: ServiceTier::OpenAi(OpenAiServiceTier::Priority),
+            },
+        ];
+
+        let decoded =
+            model_change_adjustments_from_json(model_change_adjustments_to_json(&adjustments))
+                .expect("the closed adjustment document decodes");
+
+        assert_eq!(decoded, adjustments);
+    }
+
+    #[test]
+    fn model_change_adjustment_json_rejects_unknown_variants() {
+        let encoded = serde_json::json!([{"kind": "unknown"}]);
+
+        let error = model_change_adjustments_from_json(encoded)
+            .expect_err("an unknown adjustment variant must fail closed");
+
+        assert!(matches!(error, StoredModelSettingsError::Json(_)));
+    }
 
     #[test]
     fn approval_judge_discriminator_mappings_are_closed() {
