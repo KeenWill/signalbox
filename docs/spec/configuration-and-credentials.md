@@ -42,11 +42,13 @@ templates, and orchestration template digests are verified through PR #349
 verified through PR #330 (`agent/audit-verified-fixes`). The opt-in telemetry
 export contract is verified through PR #347 (`agent/telemetry-export`). The
 static model-to-adapter mapping and append-only session credential history are
-verified through PR #373 (`agent/adapter-wiring`). The composed code-host,
-pull-request, workspace, and conversation tool families are verified through PR
-#377 (`agent/tools-daemon-wiring`). Placement-scoped native conversation reads
-are verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law
-lives in [docs/invariants.md](../invariants.md), cited here by tag. The runner
+verified through PR #373 (`agent/adapter-wiring`); the `claude_cli` mapping, its
+process paths, and its ambient-login profile rule are verified against this PR
+(`agent/wire-claude-cli-adapter`). The composed code-host, pull-request,
+workspace, and conversation tool families are verified through PR #377
+(`agent/tools-daemon-wiring`). Placement-scoped native conversation reads are
+verified through PR #400 (`agent/scoped-visibility-wiring`). Invariant law lives
+in [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are verified through PR #376 (`agent/runner-daemon`).
 Runner credential use during provisioning or execution remains committed
@@ -591,16 +593,32 @@ Each `[[models]]` entry defines one direct selection:
   configuration error; omitting all five is valid and yields no dollar figure
   for that model.
 
-This build provides exactly `anthropic` and `codex_cli`. Anthropic mappings use
-the declared `anthropic-primary` profile. Codex mappings may select any declared
-profile, but every Codex family in one daemon configuration must select the same
-one because the composed CLI runtime has one ambient authentication context. A
-Codex mapping also requires `[codex_cli]` with an absolute executable path
-naming an existing regular file and an absolute, existing `working_directory`;
-construction validates that shape and platform support without invoking Codex or
-inspecting login state. The Codex CLI owns its external login exactly as the
-adapter contract specifies. OpenAI HTTP and Claude CLI mappings are not provided
-by this build.
+This build provides exactly `anthropic`, `claude_cli`, and `codex_cli`.
+Anthropic mappings use the declared `anthropic-primary` profile. Codex mappings
+may select any declared profile, but every Codex family in one daemon
+configuration must select the same one because the composed CLI runtime has one
+ambient authentication context. A Codex mapping also requires `[codex_cli]` with
+an absolute executable path naming an existing regular file and an absolute,
+existing `working_directory`; construction validates that shape and platform
+support without invoking Codex or inspecting login state. The Codex CLI owns its
+external login exactly as the adapter contract specifies.
+
+Claude Code mappings follow that same CLI shape. They may select any declared
+profile under the same one-ambient-login rule — every `claude_cli` family in one
+daemon configuration must select the same profile — and the checked-in example
+names `claude-subscription-primary`. A Claude mapping requires `[claude_cli]`
+with three deployment-named absolute paths: `executable` and
+`mcp_bridge_executable` must each name an existing regular file, and
+`working_directory` must name an existing directory. The bridge is the separate
+`signalbox-claude-mcp-bridge` program the adapter spawns as Claude Code's only
+tool server; the deployment names it exactly the way it names the CLI, so the
+daemon derives no executable path from its own image. Construction validates
+that shape and platform support without invoking Claude Code or inspecting login
+state, and Claude Code owns its external login exactly as its adapter contract
+specifies. Because Claude Code exposes no service tier, any `service_tiers`
+entry on a Claude model is a typed startup failure, while its reasoning set and
+either fast-mode form are admitted. OpenAI HTTP mappings are not provided by
+this build.
 
 Each optional `[[aliases]]` entry defines one alias: `alias_id` (UUID of the
 `ModelAlias`) and `selection_id`, which must name a configured model (dangling
@@ -852,9 +870,9 @@ deployment-side rules that code cannot enforce are stated in
   safe in configuration, errors, logs, and durable records; values are safe only
   at the adapter boundary. Why: value rotation preserves the stable name so no
   record or log ever needs the secret (INV-035). The composition constants are
-  `anthropic-primary`, `codex-subscription-primary`, `brave-search-primary`, and
-  `github-primary`; model configuration may declare additional non-secret
-  profiles.
+  `anthropic-primary`, `codex-subscription-primary`,
+  `claude-subscription-primary`, `brave-search-primary`, and `github-primary`;
+  model configuration may declare additional non-secret profiles.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the Anthropic, Brave Search, and GitHub references to their corresponding
   deployment paths and reads the file for every Anthropic model call, web
@@ -864,13 +882,13 @@ deployment-side rules that code cannot enforce are stated in
   authenticated with. Resolution is reference-scoped: a foreign reference fails
   typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
   `Unreadable` — all reference-only errors.
-- **External Codex login.** A Codex mapping's profile names the
-  operator-selected ambient Codex CLI login. The default example uses
-  `codex-subscription-primary`. The daemon and adapter neither locate nor read
-  its credential store and invent no credential-value shape; the fresh CLI
-  process resolves login state under the adapter's existing environment
-  contract. The profile's configured billing kind labels derived cost; adapter
-  kind does not.
+- **External CLI logins.** A Codex or Claude mapping's profile names the
+  operator-selected ambient login of that CLI. The default examples use
+  `codex-subscription-primary` and `claude-subscription-primary`. The daemon and
+  adapter neither locate nor read either credential store and invent no
+  credential-value shape; the fresh CLI process resolves login state under the
+  adapter's existing environment contract. The profile's configured billing kind
+  labels derived cost; adapter kind does not.
 - **The value is the file's bytes less trailing line termination.** The read
   drops trailing `\n` and `\r` bytes and retains every other byte exactly,
   including leading and interior whitespace. Why: the tools that write a
@@ -904,10 +922,10 @@ deployment-side rules that code cannot enforce are stated in
 - **Resolution timing.** The Anthropic adapter resolves the durably pinned
   reference during send preparation — after the durable `Prepared` record,
   before send authorization — and scopes the resulting value to that request
-  (INV-002 boundary type). Codex validates that the operation carries its pinned
-  external-login reference and then prepares the process capability without
-  reading a credential value. The shared cancellation contract for preparation
-  and execution is owned by
+  (INV-002 boundary type). Each CLI adapter validates that the operation carries
+  its pinned external-login reference and then prepares the process capability
+  without reading a credential value. The shared cancellation contract for
+  preparation and execution is owned by
   [model-call-execution](model-call-execution.md#staged-execution). A code-host
   tool resolves its fixed `github-primary` reference only after the durable tool
   attempt is authorized `InFlight` and immediately before its typed transport

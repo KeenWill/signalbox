@@ -36,6 +36,9 @@ use signalbox_model_runtime::{
     ReasoningLevel as RuntimeReasoningLevel, ResolvedTarget as RuntimeResolvedTarget,
     ServiceTier as RuntimeServiceTier,
 };
+use signalbox_model_runtime_claude_cli::{
+    ClaudeCliConfig, ClaudeCliConstructionError, ClaudeCliRuntime,
+};
 use signalbox_model_runtime_codex_cli::{
     CodexCliConfig, CodexCliConstructionError, CodexCliRuntime,
 };
@@ -59,6 +62,10 @@ pub const ANTHROPIC_CREDENTIAL_REFERENCE: &str = "anthropic-primary";
 /// Non-secret reference naming the deployment-selected ambient Codex login.
 pub const CODEX_CLI_CREDENTIAL_REFERENCE: &str = "codex-subscription-primary";
 
+/// Non-secret reference naming the deployment-selected ambient Claude Code
+/// login.
+pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
+
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
@@ -68,6 +75,8 @@ const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
 pub enum ModelAdapter {
     /// Anthropic's HTTP API adapter.
     Anthropic,
+    /// The Claude Code CLI adapter.
+    ClaudeCli,
     /// The Codex CLI adapter.
     CodexCli,
 }
@@ -76,10 +85,24 @@ impl ModelAdapter {
     fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
         match value {
             "anthropic" => Ok(Self::Anthropic),
+            "claude_cli" => Ok(Self::ClaudeCli),
             "codex_cli" => Ok(Self::CodexCli),
             _ => Err(HubModelConfigurationError::UnsupportedAdapter {
                 adapter: Arc::from(value),
             }),
+        }
+    }
+
+    /// Reports whether this adapter's provider-stated input token count
+    /// already contains the separately reported cache axes.
+    ///
+    /// Anthropic's Messages API and the Claude Code CLI both report input
+    /// tokens exclusive of cache creation and cache reads, while the Codex
+    /// CLI's total already contains them.
+    pub(crate) const fn reports_cache_inclusive_input(self) -> bool {
+        match self {
+            Self::Anthropic | Self::ClaudeCli => false,
+            Self::CodexCli => true,
         }
     }
 }
@@ -182,6 +205,35 @@ impl CodexCliConfiguration {
     /// Absolute Codex executable path.
     pub fn executable(&self) -> &Path {
         &self.executable
+    }
+
+    /// Absolute existing working directory used for CLI execution.
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+}
+
+/// Validated deployment paths used to construct the Claude Code CLI adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaudeCliConfiguration {
+    executable: PathBuf,
+    mcp_bridge_executable: PathBuf,
+    working_directory: PathBuf,
+}
+
+impl ClaudeCliConfiguration {
+    /// Absolute Claude Code executable path.
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// Absolute path of the adapter-owned MCP bridge executable.
+    ///
+    /// The bridge is a separate program the adapter spawns as Claude Code's
+    /// only tool server, so the deployment names it exactly the way it names
+    /// the CLI. Nothing is derived from the daemon's own image path.
+    pub fn mcp_bridge_executable(&self) -> &Path {
+        &self.mcp_bridge_executable
     }
 
     /// Absolute existing working directory used for CLI execution.
@@ -372,6 +424,8 @@ pub struct HubModelConfiguration {
     credential_families: ModelCredentialFamilyCatalog,
     codex_cli: Option<CodexCliConfiguration>,
     codex_cli_credential_profile: Option<Arc<str>>,
+    claude_cli: Option<ClaudeCliConfiguration>,
+    claude_cli_credential_profile: Option<Arc<str>>,
     compaction_prompt: Arc<str>,
     conversation_import_max_source_bytes: usize,
     web_fetch_egress_policy: WebFetchEgressPolicy,
@@ -404,6 +458,7 @@ impl HubModelConfiguration {
                 "version",
                 "credential_profiles",
                 "adapter_mappings",
+                "claude_cli",
                 "codex_cli",
                 "model_settings",
                 "model_settings_profiles",
@@ -534,6 +589,7 @@ impl HubModelConfiguration {
         let mut mappings = HashMap::<Arc<str>, AdapterMapping>::new();
         let mut session_credentials = Vec::with_capacity(mapping_tables.len());
         let mut codex_cli_credential_profile = None;
+        let mut claude_cli_credential_profile = None;
         for mapping in mapping_tables {
             reject_unknown_fields(mapping, &["model_family", "adapter", "credential_profile"])?;
             let family = validated_name(required_string(mapping, "model_family")?)?;
@@ -557,6 +613,15 @@ impl HubModelConfiguration {
                     return Err(HubModelConfigurationError::ConflictingCodexCredentialProfiles);
                 }
                 codex_cli_credential_profile = Some(Arc::clone(&credential_profile));
+            }
+            if adapter == ModelAdapter::ClaudeCli {
+                if claude_cli_credential_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile != &credential_profile)
+                {
+                    return Err(HubModelConfigurationError::ConflictingClaudeCredentialProfiles);
+                }
+                claude_cli_credential_profile = Some(Arc::clone(&credential_profile));
             }
             let entry = AdapterMapping {
                 adapter,
@@ -613,6 +678,57 @@ impl HubModelConfiguration {
                 ),
             ))
             .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
+        }
+
+        let claude_cli = document
+            .get("claude_cli")
+            .map(|item| {
+                let table = item
+                    .as_table()
+                    .ok_or(HubModelConfigurationError::InvalidClaudeCliConfiguration)?;
+                reject_unknown_fields(
+                    table,
+                    &["executable", "mcp_bridge_executable", "working_directory"],
+                )?;
+                let executable = PathBuf::from(required_string(table, "executable")?);
+                let mcp_bridge_executable =
+                    PathBuf::from(required_string(table, "mcp_bridge_executable")?);
+                let working_directory = PathBuf::from(required_string(table, "working_directory")?);
+                if !executable.is_absolute()
+                    || !executable.is_file()
+                    || !mcp_bridge_executable.is_absolute()
+                    || !mcp_bridge_executable.is_file()
+                    || !working_directory.is_absolute()
+                    || !working_directory.is_dir()
+                {
+                    return Err(HubModelConfigurationError::InvalidClaudeCliConfiguration);
+                }
+                Ok(ClaudeCliConfiguration {
+                    executable,
+                    mcp_bridge_executable,
+                    working_directory,
+                })
+            })
+            .transpose()?;
+        if mappings
+            .values()
+            .any(|mapping| mapping.adapter == ModelAdapter::ClaudeCli)
+            && claude_cli.is_none()
+        {
+            return Err(HubModelConfigurationError::MissingClaudeCliConfiguration);
+        }
+        if let Some(configuration) = claude_cli.as_ref() {
+            ClaudeCliRuntime::new(ClaudeCliConfig::new(
+                configuration.executable.clone(),
+                configuration.mcp_bridge_executable.clone(),
+                configuration.working_directory.clone(),
+                CredentialReference::new(
+                    claude_cli_credential_profile
+                        .as_deref()
+                        .unwrap_or(CLAUDE_CLI_CREDENTIAL_REFERENCE),
+                ),
+            ))
+            .map_err(|_| HubModelConfigurationError::InvalidClaudeCliConfiguration)?;
         }
 
         let mut domain_definitions = Vec::with_capacity(models.len());
@@ -913,6 +1029,8 @@ impl HubModelConfiguration {
             credential_families,
             codex_cli,
             codex_cli_credential_profile,
+            claude_cli,
+            claude_cli_credential_profile,
             compaction_prompt,
             conversation_import_max_source_bytes,
             web_fetch_egress_policy,
@@ -1024,7 +1142,9 @@ impl HubModelConfiguration {
     pub fn cache_inclusive_input_targets(&self) -> HashSet<ResolvedProviderTarget> {
         self.target_adapters
             .iter()
-            .filter_map(|(target, adapter)| (*adapter == ModelAdapter::CodexCli).then_some(*target))
+            .filter_map(|(target, adapter)| {
+                adapter.reports_cache_inclusive_input().then_some(*target)
+            })
             .collect()
     }
 
@@ -1105,6 +1225,33 @@ impl HubModelConfiguration {
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
+            })
+            .transpose()
+    }
+
+    /// Returns validated Claude Code CLI paths when that adapter is configured.
+    pub fn claude_cli(&self) -> Option<&ClaudeCliConfiguration> {
+        self.claude_cli.as_ref()
+    }
+
+    pub(crate) fn claude_cli_runtime(
+        &self,
+    ) -> Result<Option<ClaudeCliRuntime>, ClaudeCliConstructionError> {
+        self.claude_cli
+            .as_ref()
+            .map(|configuration| {
+                let credential_profile = self
+                    .claude_cli_credential_profile
+                    .as_deref()
+                    .unwrap_or(CLAUDE_CLI_CREDENTIAL_REFERENCE);
+                let mut runtime_configuration = ClaudeCliConfig::new(
+                    configuration.executable.clone(),
+                    configuration.mcp_bridge_executable.clone(),
+                    configuration.working_directory.clone(),
+                    CredentialReference::new(credential_profile),
+                );
+                runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
+                ClaudeCliRuntime::new(runtime_configuration)
             })
             .transpose()
     }
@@ -2224,6 +2371,9 @@ fn validate_adapter_model_settings(
         ModelAdapter::Anthropic => {
             signalbox_model_runtime_anthropic::validate_model_settings(&runtime)
         }
+        ModelAdapter::ClaudeCli => {
+            signalbox_model_runtime_claude_cli::validate_model_settings(&runtime)
+        }
         ModelAdapter::CodexCli => {
             signalbox_model_runtime_codex_cli::validate_model_settings(&runtime)
         }
@@ -2295,11 +2445,21 @@ fn parse_reasoning_level(
     match (adapter, value) {
         (ModelAdapter::CodexCli, "none") => Ok(ReasoningLevel::None),
         (ModelAdapter::CodexCli, "minimal") => Ok(ReasoningLevel::Minimal),
-        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "low") => Ok(ReasoningLevel::Low),
-        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "medium") => Ok(ReasoningLevel::Medium),
-        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "high") => Ok(ReasoningLevel::High),
-        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "xhigh") => Ok(ReasoningLevel::XHigh),
-        (ModelAdapter::Anthropic | ModelAdapter::CodexCli, "max") => Ok(ReasoningLevel::Max),
+        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "low") => {
+            Ok(ReasoningLevel::Low)
+        }
+        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "medium") => {
+            Ok(ReasoningLevel::Medium)
+        }
+        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "high") => {
+            Ok(ReasoningLevel::High)
+        }
+        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "xhigh") => {
+            Ok(ReasoningLevel::XHigh)
+        }
+        (ModelAdapter::Anthropic | ModelAdapter::ClaudeCli | ModelAdapter::CodexCli, "max") => {
+            Ok(ReasoningLevel::Max)
+        }
         (ModelAdapter::CodexCli, "ultra") => Ok(ReasoningLevel::Ultra),
         _ => Err(HubModelConfigurationError::InvalidModelCapabilities),
     }
@@ -2395,6 +2555,12 @@ pub enum HubModelConfigurationError {
     MissingCodexCliConfiguration,
     /// Codex paths were malformed, relative, or named no existing directory.
     InvalidCodexCliConfiguration,
+    /// Claude model families selected more than one credential profile.
+    ConflictingClaudeCredentialProfiles,
+    /// A Claude mapping exists without its required process configuration.
+    MissingClaudeCliConfiguration,
+    /// Claude paths were malformed, relative, or named no existing directory.
+    InvalidClaudeCliConfiguration,
     /// The provider-native model spelling was empty or padded.
     InvalidProviderModel,
     /// Only part of a model's five-field versioned rate set was declared.
@@ -2505,6 +2671,15 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidCodexCliConfiguration => {
                 "model configuration contains invalid Codex CLI settings"
+            }
+            Self::ConflictingClaudeCredentialProfiles => {
+                "model configuration routes Claude CLI through conflicting credential profiles"
+            }
+            Self::MissingClaudeCliConfiguration => {
+                "model configuration maps Claude CLI without Claude CLI settings"
+            }
+            Self::InvalidClaudeCliConfiguration => {
+                "model configuration contains invalid Claude CLI settings"
             }
             Self::InvalidProviderModel => "model configuration contains an invalid provider model",
             Self::IncompleteBillingRates => {
@@ -2801,6 +2976,45 @@ cache_read_input_usd_per_million_tokens = "0.30"
 alias_id = "30000000-0000-4000-8000-000000000001"
 selection_id = "10000000-0000-4000-8000-000000000001"
 "#;
+
+    const CLAUDE_SUBSCRIPTION_PROFILE: &str = "claude-subscription-primary";
+    const CLAUDE_MODEL_ENTRY: &str = r#"
+[[models]]
+selection_id = "10000000-0000-4000-8000-00000000000c"
+target_id = "20000000-0000-4000-8000-00000000000c"
+model_family = "claude_code"
+provider_model = "claude-cli-example"
+max_output_tokens = 256
+context_window_tokens = 200000
+reasoning_levels = ["high"]
+"#;
+
+    fn configuration_with_claude_paths(
+        executable: &Path,
+        mcp_bridge_executable: &Path,
+        working_directory: &Path,
+    ) -> String {
+        format!(
+            r#"{CONFIGURATION}
+[[credential_profiles]]
+name = "{CLAUDE_SUBSCRIPTION_PROFILE}"
+billing_kind = "subscription"
+
+[[adapter_mappings]]
+model_family = "claude_code"
+adapter = "claude_cli"
+credential_profile = "{CLAUDE_SUBSCRIPTION_PROFILE}"
+
+[claude_cli]
+executable = "{}"
+mcp_bridge_executable = "{}"
+working_directory = "{}"
+"#,
+            executable.display(),
+            mcp_bridge_executable.display(),
+            working_directory.display(),
+        )
+    }
 
     fn configuration_with_codex_paths(executable: &Path, working_directory: &Path) -> String {
         format!(
@@ -4093,6 +4307,148 @@ context_window_tokens = 200000
                 .codex_cli_runtime()
                 .expect("the stored profile constructs the runtime")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_missing_claude_executable() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let bridge = std::env::current_exe().expect("the test executable has a path");
+        let missing_executable = temporary.path().join("missing-claude");
+        let configuration =
+            configuration_with_claude_paths(&missing_executable, &bridge, temporary.path());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidClaudeCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_claude_executable_that_is_not_a_file() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let bridge = std::env::current_exe().expect("the test executable has a path");
+        let configuration =
+            configuration_with_claude_paths(temporary.path(), &bridge, temporary.path());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidClaudeCliConfiguration)
+        );
+    }
+
+    /// The MCP bridge is a second deployment-named program, so its path is
+    /// validated exactly as strictly as the CLI's rather than being derived.
+    #[test]
+    fn configuration_rejects_a_missing_claude_mcp_bridge_executable() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let missing_bridge = temporary.path().join("missing-bridge");
+        let configuration =
+            configuration_with_claude_paths(&executable, &missing_bridge, temporary.path());
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidClaudeCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_claude_mapping_without_process_settings() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let complete = configuration_with_claude_paths(&executable, &executable, temporary.path());
+        let start = complete
+            .find("[claude_cli]")
+            .expect("the fixture declares Claude process settings");
+        let without_process_settings = &complete[..start];
+
+        assert_eq!(
+            HubModelConfiguration::parse(without_process_settings).err(),
+            Some(HubModelConfigurationError::MissingClaudeCliConfiguration)
+        );
+    }
+
+    #[test]
+    fn unused_claude_mapping_retains_its_declared_credential_profile() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(&configuration_with_claude_paths(
+            &executable,
+            &executable,
+            temporary.path(),
+        ))
+        .expect("the unused Claude mapping is valid configuration");
+
+        assert_eq!(
+            configuration.claude_cli_credential_profile.as_deref(),
+            Some(CLAUDE_SUBSCRIPTION_PROFILE)
+        );
+        assert_eq!(
+            configuration
+                .claude_cli()
+                .expect("the fixture declares Claude process settings")
+                .mcp_bridge_executable(),
+            executable.as_path()
+        );
+        assert!(
+            configuration
+                .claude_cli_runtime()
+                .expect("the stored profile constructs the runtime")
+                .is_some()
+        );
+    }
+
+    /// Claude Code exposes no service tier, so a configured tier fails startup
+    /// instead of reaching preparation as an unenforceable request control.
+    #[test]
+    fn configuration_rejects_a_service_tier_on_a_claude_model() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = format!(
+            "{}{}",
+            configuration_with_claude_paths(&executable, &executable, temporary.path()),
+            CLAUDE_MODEL_ENTRY.replace(
+                "reasoning_levels = [\"high\"]",
+                "reasoning_levels = [\"high\"]\nservice_tiers = [\"auto\"]",
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configuration).err(),
+            Some(HubModelConfigurationError::InvalidModelCapabilities)
+        );
+    }
+
+    /// Claude Code reports input tokens exclusive of the cache axes it reports
+    /// separately, exactly as the Anthropic API does.
+    #[test]
+    fn configured_claude_models_route_to_the_claude_adapter_with_cache_exclusive_input() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let executable = std::env::current_exe().expect("the test executable has a path");
+        let configuration = HubModelConfiguration::parse(&format!(
+            "{}{CLAUDE_MODEL_ENTRY}",
+            configuration_with_claude_paths(&executable, &executable, temporary.path()),
+        ))
+        .expect("the Claude mapping, process settings, and model are valid");
+        let selection = DirectModelSelection::from_uuid(
+            Uuid::parse_str("10000000-0000-4000-8000-00000000000c").expect("fixture UUID is valid"),
+        );
+
+        let route = configuration
+            .resolve_direct_model(selection)
+            .expect("the Claude selection has an adapter route");
+
+        assert_eq!(route.adapter(), ModelAdapter::ClaudeCli);
+        assert_eq!(route.credential_profile(), CLAUDE_SUBSCRIPTION_PROFILE);
+        assert_eq!(
+            configuration.adapter_for_provider_model("claude-cli-example"),
+            Some(ModelAdapter::ClaudeCli)
+        );
+        assert!(
+            !configuration
+                .cache_inclusive_input_targets()
+                .contains(&route.target())
         );
     }
 

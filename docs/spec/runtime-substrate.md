@@ -29,12 +29,13 @@ CLI redaction contract was verified through PR #316
 single-split parity, and geometric work bound). Exact Codex CLI usage-axis
 projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
 mappings and advisory exceptions are verified against PR #437
-(`agent/model-settings-adapters`). This page covers the provider-neutral
-operation, observation, and evidence vocabulary; SSE framing; structured-output
-and tool decode; `ScriptedModel`; the four provider adapters; and their
-credential boundaries. Layer-2 authorization and evidence classification
-([model-call-execution](model-call-execution.md)), credential channels,
-delivery, and rotation discipline
+(`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
+composition is verified against this PR (`agent/wire-claude-cli-adapter`). This
+page covers the provider-neutral operation, observation, and evidence
+vocabulary; SSE framing; structured-output and tool decode; `ScriptedModel`; the
+four provider adapters; and their credential boundaries. Layer-2 authorization
+and evidence classification ([model-call-execution](model-call-execution.md)),
+credential channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -751,8 +752,10 @@ exception for this adapter. When an operation carries an explicit
 catalog-governed control, exact-target capability and mapping validation
 precedes the ambient-login reference check. A service tier is always rejected.
 
-The adapter crate does not compose itself into signalboxd and defines no
-provider-selection or configuration mapping.
+The crate itself still defines no provider-selection or configuration mapping.
+signalboxd composes it from the deployment-owned `claude_cli` adapter mapping
+and its three absolute process paths, described in
+[configuration-and-credentials](configuration-and-credentials.md#the-static-model-alias-and-web-fetch-catalog).
 
 ## Credential-access boundary
 

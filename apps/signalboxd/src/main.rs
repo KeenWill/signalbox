@@ -1138,18 +1138,21 @@ async fn run_hub(
     })?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let compaction_runtime =
-        ConfiguredModelRuntime::new(compaction_anthropic, &model_configuration).map_err(|_| {
+        ConfiguredModelRuntime::new(compaction_anthropic, &model_configuration).map_err(
+            |error| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(error.cause_code()),
+                )
+            },
+        )?;
+    let runtime =
+        ConfiguredModelRuntime::new(anthropic, &model_configuration).map_err(|error| {
             erase_startup_cause(
                 RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("codex_cli_construction_failed"),
+                SanitizedStartupCause::Static(error.cause_code()),
             )
         })?;
-    let runtime = ConfiguredModelRuntime::new(anthropic, &model_configuration).map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("codex_cli_construction_failed"),
-        )
-    })?;
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );

@@ -132,13 +132,14 @@ fn exceeds_configured_limits(
     {
         return true;
     }
-    let input_tokens = match limits.adapter {
-        ModelAdapter::Anthropic => usage
+    let input_tokens = if limits.adapter.reports_cache_inclusive_input() {
+        usage.input_tokens.unwrap_or(0)
+    } else {
+        usage
             .input_tokens
             .unwrap_or(0)
             .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
-            .saturating_add(usage.cache_read_input_tokens.unwrap_or(0)),
-        ModelAdapter::CodexCli => usage.input_tokens.unwrap_or(0),
+            .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
     };
     input_tokens.saturating_add(usage.output_tokens.unwrap_or(0)) > limits.context_window_tokens
 }
@@ -342,6 +343,30 @@ mod tests {
             max_output_tokens: 50,
             context_window_tokens: 100,
             adapter: ModelAdapter::Anthropic,
+        };
+
+        assert!(!exceeds_configured_limits(at_limit, limits));
+        assert!(exceeds_configured_limits(context_exceeded, limits));
+    }
+
+    /// Claude Code reports the same cache-exclusive input shape the Anthropic
+    /// API does, so its separately reported cache axes join the input total.
+    #[test]
+    fn claude_cache_input_is_counted_against_the_model_context_limit() {
+        let at_limit = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(60))
+            .with_output_tokens(Some(10))
+            .with_cache_creation_input_tokens(Some(15))
+            .with_cache_read_input_tokens(Some(15));
+        let context_exceeded = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(60))
+            .with_output_tokens(Some(10))
+            .with_cache_creation_input_tokens(Some(15))
+            .with_cache_read_input_tokens(Some(16));
+        let limits = ConfiguredUsageLimits {
+            max_output_tokens: 50,
+            context_window_tokens: 100,
+            adapter: ModelAdapter::ClaudeCli,
         };
 
         assert!(!exceeds_configured_limits(at_limit, limits));
