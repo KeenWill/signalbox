@@ -3,7 +3,6 @@
 use std::fs;
 
 use git2::Odb;
-use rustix::fs::{CWD, Mode, mkfifoat};
 
 use crate::arguments::LocalOperation;
 use crate::failure::LocalGitFailure;
@@ -12,7 +11,7 @@ use crate::objects::{PackRoot, persist_objects};
 use crate::pack_install::{OBJECT_PUBLICATION_LOCK, ObjectPublicationLock};
 use crate::pinning::PinnedObjectDatabase;
 use crate::tests::planting::plant_sparse_pack;
-use crate::tests::support::{Fixture, UNTRACKED_CONTENT, plant_packed_blob};
+use crate::tests::support::{Fixture, UNTRACKED_CONTENT, create_fifo, plant_packed_blob};
 
 #[test]
 fn pinned_object_database_never_reopens_a_replacement_fifo() {
@@ -28,8 +27,7 @@ fn pinned_object_database_never_reopens_a_replacement_fifo() {
         .join(&object[2..]);
     fs::rename(&object_path, object_path.with_extension("pinned"))
         .expect("fixture object path retires");
-    mkfifoat(CWD, &object_path, Mode::RUSR | Mode::WUSR)
-        .expect("replacement object FIFO constructs");
+    create_fifo(&object_path).expect("replacement object FIFO constructs");
     let failure = executor.repository_authority.repository();
 
     assert!(matches!(failure, Err(LocalGitFailure::Repository)));
