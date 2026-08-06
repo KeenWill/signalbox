@@ -176,10 +176,12 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use signalbox_model_runtime::{
-        AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish,
-        ConversationMessage, CredentialReference, ExchangeFacts, ModelOperation, ModelRuntime,
-        Observation, ObservationSink, PreparationOutcome, ProviderReportedModel, RequestedTarget,
-        ResolvedTarget, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+        AnthropicServiceTier, AssistantPart, CancellationSignal, CodexCliServiceTier,
+        CompletionEvidence, CompletionFinish, ConversationMessage, CredentialReference,
+        ExchangeFacts, FastMode, ModelOperation, ModelRuntime, ModelSettings, Observation,
+        ObservationSink, PreparationOutcome, ProviderReportedModel, ReasoningLevel,
+        RequestedTarget, ResolvedTarget, Script, ScriptedModel, ServiceTier, TerminalEvidence,
+        TokenUsage,
     };
 
     use crate::configuration::HubModelConfiguration;
@@ -230,6 +232,65 @@ mod tests {
             content: vec![AssistantPart::Text(text.to_owned())],
             usage: TokenUsage::unreported(),
         })
+    }
+
+    #[test]
+    fn alternate_fast_target_projects_as_declared_runtime_lineage() {
+        let standard_model = "claude-standard-fixture";
+        let fast_model = "claude-fast-fixture";
+        let configuration = HubModelConfiguration::parse(&format!(
+            r#"
+version = 1
+
+[[credential_profiles]]
+name = "anthropic-primary"
+billing_kind = "api_metered"
+
+[[adapter_mappings]]
+model_family = "anthropic"
+adapter = "anthropic"
+credential_profile = "anthropic-primary"
+
+[compaction]
+prompt = "Summarize."
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+model_family = "anthropic"
+provider_model = "{standard_model}"
+max_output_tokens = 256
+context_window_tokens = 200000
+fast_mode = "alternate_target"
+fast_target_id = "20000000-0000-4000-8000-000000000002"
+reasoning_levels = ["high"]
+service_tiers = ["standard_only"]
+
+[[serving_targets]]
+target_id = "20000000-0000-4000-8000-000000000002"
+model_family = "anthropic"
+provider_model = "{fast_model}"
+max_output_tokens = 256
+context_window_tokens = 200000
+"#,
+        ))
+        .expect("the declared alternate target is valid");
+        assert_eq!(configuration.model_capability_catalog().iter().count(), 1);
+        let catalog = configuration.runtime_model_capability_catalog();
+        let selected = ResolvedTarget::new(standard_model);
+        let expected = ResolvedTarget::new(fast_model);
+        let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::High);
+        settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::Anthropic(AnthropicServiceTier::StandardOnly));
+        let capabilities = catalog
+            .validate(&selected, &settings)
+            .expect("the selected target declares fast mode");
+
+        assert_eq!(
+            capabilities.effective_target(&selected, settings.fast_mode),
+            Ok((&expected, FastMode::Disabled))
+        );
     }
 
     #[tokio::test]
@@ -360,6 +421,9 @@ model_family = "codex"
 provider_model = "gpt-offline-exact"
 max_output_tokens = 256
 context_window_tokens = 200000
+reasoning_levels = ["low"]
+fast_mode = "request_control"
+service_tiers = ["priority"]
 "#,
             executable.display(),
             temporary.path().display(),
@@ -368,13 +432,17 @@ context_window_tokens = 200000
         let runtime = ConfiguredModelRuntime::new(None::<ScriptedModel<String>>, &configuration)
             .expect("configured adapters construct");
         assert!(format!("{runtime:?}").contains("anthropic: None"));
+        let mut settings = ModelSettings::new(256);
+        settings.reasoning_level = Some(ReasoningLevel::Low);
+        settings.fast_mode = FastMode::Enabled;
+        settings.service_tier = Some(ServiceTier::CodexCli(CodexCliServiceTier::Priority));
         let operation = ModelOperation::new(
             String::from("codex-route"),
             CredentialReference::new("codex-subscription-primary"),
             RequestedTarget::new("codex-selection"),
             ResolvedTarget::new("gpt-offline-exact"),
             vec![ConversationMessage::user_text("respond")],
-            signalbox_model_runtime::ModelSettings::new(256),
+            settings,
         );
 
         let prepared = prepared(
