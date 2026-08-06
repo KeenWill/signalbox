@@ -60,6 +60,11 @@ COMMAND_SEPARATOR = re.compile(r"&&|\|\||[;|&\n]")
 ATTACHED_SHORT_OPTIONS = ("-p", "-F", "-j")
 CARGO_GLOBAL_VALUE_OPTIONS = ("--color", "--config", "--explain", "-Z", "-C")
 CARGO_TEST_COMMANDS = ("test", "t")
+ENVIRONMENT_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+ENV_VALUE_OPTIONS = ("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
+# Cargo package specs may carry a version or a source URL; only the name is
+# comparable against the manifest.
+PACKAGE_SPEC = re.compile(r"(?:.*#)?(?P<name>[^@#/]+?)(?:@[^@]*)?$")
 SUBSTITUTION = re.compile(r"\$\((?P<body>[^()]*)\)")
 # Cargo feature names, one per manifest entry. Cargo would read a comma or a
 # space inside one entry as a separator and enable two features; the docs
@@ -442,6 +447,15 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"{WORKFLOW} runs ignored tests through `cargo test` outside "
                 f"{MANIFEST}: {' '.join(tokens)}"
             )
+        # A nextest run selecting ignored tests without reading an archive is
+        # not the manifest-driven run: it chooses its own packages. Requiring
+        # only that one archive-backed run exists would let a rogue one sit
+        # beside it.
+        if unarchived_ignored_nextest(tokens):
+            failures.append(
+                f"{WORKFLOW} runs ignored tests through `cargo nextest` "
+                f"without an archive, outside {MANIFEST}: {' '.join(tokens)}"
+            )
 
     if not any(runs_archived_ignored_tests(tokens) for tokens in executed):
         failures.append(
@@ -487,6 +501,31 @@ def normalized_cargo_arguments(arguments: list[str]) -> list[str]:
     return normalized
 
 
+def launched_command(tokens: list[str]) -> list[str]:
+    """Strip environment prefixes and `env` wrappers from one command.
+
+    `RUST_LOG=debug cargo test …` and `env RUST_LOG=debug cargo test …` both run
+    Cargo; only the command word differs. Left unstripped they read as some
+    other program entirely, which is silence rather than disagreement.
+    """
+    index = 0
+    while index < len(tokens):
+        word = tokens[index]
+        if ENVIRONMENT_ASSIGNMENT.fullmatch(word):
+            index += 1
+            continue
+        if word.rsplit("/", 1)[-1] == "env":
+            index += 1
+            while index < len(tokens) and (
+                ENVIRONMENT_ASSIGNMENT.fullmatch(tokens[index])
+                or tokens[index] in ENV_VALUE_OPTIONS
+            ):
+                index += 2 if tokens[index] in ENV_VALUE_OPTIONS else 1
+            continue
+        break
+    return tokens[index:]
+
+
 def cargo_subcommand_arguments(
     tokens: list[str], names: tuple[str, ...]
 ) -> list[str] | None:
@@ -496,6 +535,7 @@ def cargo_subcommand_arguments(
     as valid as `cargo test --locked` — so the subcommand is located rather
     than assumed adjacent.
     """
+    tokens = launched_command(tokens)
     if not tokens or tokens[0].rsplit("/", 1)[-1] != "cargo":
         return None
     index = 1
@@ -520,6 +560,15 @@ def cargo_test_arguments(tokens: list[str]) -> list[str] | None:
     """
     arguments = cargo_subcommand_arguments(tokens, CARGO_TEST_COMMANDS)
     return None if arguments is None else normalized_cargo_arguments(arguments)
+
+
+def unarchived_ignored_nextest(tokens: list[str]) -> bool:
+    """Return whether one command runs ignored tests through nextest, unarchived."""
+    arguments = cargo_subcommand_arguments(tokens, ("nextest",))
+    if not arguments or arguments[0] != "run":
+        return False
+    arguments = normalized_cargo_arguments(arguments[1:])
+    return "--run-ignored" in arguments and "--archive-file" not in arguments
 
 
 def runs_archived_ignored_tests(tokens: list[str]) -> bool:
@@ -584,6 +633,18 @@ def documented_ignored_commands(text: str) -> list[tuple[int, list[str]]]:
     return found
 
 
+def package_spec_name(spec: str) -> str | None:
+    """Return the package name one Cargo `-p <SPEC>` selects.
+
+    A spec may carry a version (`name@1.0.0`) or a source URL
+    (`path+file:///…#name`). Comparing the whole spec against the manifest's
+    package names makes a qualified selection read as an unknown package, and
+    an unknown package is skipped rather than compared.
+    """
+    matched = PACKAGE_SPEC.fullmatch(spec.strip())
+    return matched.group("name") if matched else None
+
+
 def manifest_path_package(root: Path, relative: str) -> str | None:
     """Return the package name one `--manifest-path` selects, if it names one."""
     try:
@@ -616,7 +677,7 @@ def documentation_disagreements(
         while index < len(cargo_arguments):
             argument = cargo_arguments[index]
             if argument in ("-p", "--package") and index + 1 < len(cargo_arguments):
-                package = cargo_arguments[index + 1]
+                package = package_spec_name(cargo_arguments[index + 1])
                 index += 2
                 continue
             # A manifest path selects its own package as surely as `-p` does.

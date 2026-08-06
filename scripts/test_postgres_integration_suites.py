@@ -426,6 +426,8 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertIn("--run-ignored only", failures[0])
 
     def test_a_run_without_an_archive_is_reported(self) -> None:
+        # Two distinct problems, reported separately: no archive-backed run
+        # exists, and the run that does exist chooses its own packages.
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
                 ARCHIVE_RUN_STEP,
@@ -433,8 +435,38 @@ class WorkflowAgreementTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(any("--run-ignored only" in failure for failure in failures))
+        self.assertTrue(any("without an archive" in failure for failure in failures))
+
+    def test_an_environment_prefix_does_not_hide_the_command(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: RUST_LOG=debug cargo test -p alpha -- --ignored\n"
+        )
+
         self.assertEqual(len(failures), 1)
-        self.assertIn("--run-ignored only", failures[0])
+        self.assertIn("outside", failures[0])
+
+    def test_an_env_wrapper_does_not_hide_the_command(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: env -u FOO BAR=1 cargo test -p alpha -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
+    def test_an_unarchived_nextest_ignored_run_is_reported(self) -> None:
+        # The archived run existing is not enough: a rogue one can sit beside
+        # it, choosing its own packages.
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: cargo nextest run -p rogue --run-ignored only\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("without an archive", failures[0])
 
     def test_a_toolchain_selector_does_not_hide_the_subcommand(self) -> None:
         # `cargo +toolchain …` is rustup's selector, not an option.
@@ -762,6 +794,19 @@ class DocumentedCommandTests(unittest.TestCase):
 
         self.assertEqual(len(failures), 1)
         self.assertIn("--no-default-features", failures[0][1])
+
+    def test_a_version_qualified_spec_selects_its_package(self) -> None:
+        # `-p name@version` is a valid spec; comparing the whole spec against
+        # the manifest made it read as an unknown package, and unknown
+        # packages are skipped rather than compared.
+        failures = documentation_disagreements(
+            "AGENTS.md",
+            "`cargo test -p pa@0.0.0 --features other --tests -- --ignored`\n",
+            (suite(package="pa", features=("one",)),),
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("other", failures[0][1])
 
     def test_a_manifest_path_selects_its_package(self) -> None:
         # `--manifest-path` selects a package as surely as `-p` does; reading
