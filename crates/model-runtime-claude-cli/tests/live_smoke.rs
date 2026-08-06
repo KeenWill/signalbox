@@ -1964,16 +1964,27 @@ impl EffectivePrivilege {
     /// is why the test asserts one instead of returning early. It previously
     /// returned early under root and reported success without creating a
     /// fixture or running an assertion at all.
-    fn other_only_resolution(
-        self,
-        shadow: std::path::PathBuf,
-        on_path: std::path::PathBuf,
-    ) -> std::path::PathBuf {
+    fn other_only_resolution(self, candidates: OtherOnlyCandidates) -> std::path::PathBuf {
         match self {
-            Self::Root => shadow,
-            Self::Unprivileged => on_path,
+            Self::Root => candidates.shadow,
+            Self::Unprivileged => candidates.on_path,
         }
     }
+}
+
+/// The two files a search sees when an earlier `PATH` directory holds an
+/// other-only file and a later one holds a runnable file of the same name.
+///
+/// A struct rather than two `PathBuf` parameters: the paths are the same type
+/// and the whole question is which one a given privilege selects, so passing
+/// them by position would let a transposed fixture compile and quietly assert
+/// the opposite of what it names.
+#[cfg(unix)]
+struct OtherOnlyCandidates {
+    /// Earlier on the search path, executable only by "other".
+    shadow: std::path::PathBuf,
+    /// Later on the search path, executable by its owner.
+    on_path: std::path::PathBuf,
 }
 
 /// Writes a fixture file whose only permission bits belong to "other", so its
@@ -2016,8 +2027,18 @@ fn executable_resolution_skips_an_other_only_execute_bit() {
 
     assert_eq!(
         resolved,
-        EffectivePrivilege::observe().other_only_resolution(shadow, on_path)
+        EffectivePrivilege::observe()
+            .other_only_resolution(OtherOnlyCandidates { shadow, on_path })
     );
+}
+
+/// Distinct fixture candidates the privilege assertions below select between.
+#[cfg(unix)]
+fn other_only_candidates() -> OtherOnlyCandidates {
+    OtherOnlyCandidates {
+        shadow: std::path::PathBuf::from("/fixture/other-only-shadow"),
+        on_path: std::path::PathBuf::from("/fixture/runnable-on-path"),
+    }
 }
 
 /// The unprivileged expectation, stated directly so the arm the local run does
@@ -2025,12 +2046,12 @@ fn executable_resolution_skips_an_other_only_execute_bit() {
 #[cfg(unix)]
 #[test]
 fn unprivileged_resolution_skips_the_other_only_shadow() {
-    let shadow = std::path::PathBuf::from("/fixture/shadow");
-    let on_path = std::path::PathBuf::from("/fixture/on-path");
+    let candidates = other_only_candidates();
+    let expected = candidates.on_path.clone();
 
     assert_eq!(
-        EffectivePrivilege::Unprivileged.other_only_resolution(shadow, on_path.clone()),
-        on_path
+        EffectivePrivilege::Unprivileged.other_only_resolution(candidates),
+        expected
     );
 }
 
@@ -2039,12 +2060,12 @@ fn unprivileged_resolution_skips_the_other_only_shadow() {
 #[cfg(unix)]
 #[test]
 fn root_resolution_takes_the_other_only_shadow() {
-    let shadow = std::path::PathBuf::from("/fixture/shadow");
-    let on_path = std::path::PathBuf::from("/fixture/on-path");
+    let candidates = other_only_candidates();
+    let expected = candidates.shadow.clone();
 
     assert_eq!(
-        EffectivePrivilege::Root.other_only_resolution(shadow.clone(), on_path),
-        shadow
+        EffectivePrivilege::Root.other_only_resolution(candidates),
+        expected
     );
 }
 
