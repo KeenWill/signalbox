@@ -16,6 +16,7 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime_claude_cli::{
     ClaudeCliConfig, ClaudeCliPreparedRequest, ClaudeCliRuntime, DISABLED_CLAUDE_CLI_BUILTIN_TOOLS,
 };
+use signalbox_test_bin::test_bin_path;
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -790,9 +791,9 @@ fn spawn_count(directory: &Path) -> usize {
 }
 
 fn fake_cli() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-fake-claude-cli"))
+    test_bin_path!("signalbox-fake-claude-cli")
 }
 
 fn bridge_cli() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_signalbox-claude-mcp-bridge"))
+    test_bin_path!("signalbox-claude-mcp-bridge")
 }

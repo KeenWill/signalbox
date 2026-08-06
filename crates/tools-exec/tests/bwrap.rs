@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
     ProcessOutcome, ProcessSpawnFailure, SandboxedCommandRunner, TokioProcessRunner,
@@ -29,8 +30,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         .and_then(std::path::Path::parent)
         .ok_or("tools-exec manifest is not nested under the workspace root")?
         .canonicalize()?;
-    let process_runner =
-        TokioProcessRunner::try_new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"))?;
+    let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
     let mut runner = SandboxedCommandRunner::try_new(process_runner, root)?;
     let arguments = ExecArguments {
         program: String::from("test"),

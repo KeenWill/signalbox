@@ -50,6 +50,8 @@ jobs:
         run: python3 scripts/test_check_migration_versions.py
       - name: Test documentation consistency checker
         run: python3 scripts/test_check_docs_consistency.py
+      - name: Test the PostgreSQL suite manifest reader
+        run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Check formatting
@@ -205,11 +207,22 @@ jobs:
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
+    outputs:
+      matrix: ${{ steps.suites.outputs.matrix }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # First, so a malformed manifest fails before any compilation. The run
+      # job expands this into its shard matrix, which is why adding a shard is
+      # a one-line manifest edit and touches nothing here.
+      - name: Derive the shard matrix from the suite manifest
+        id: suites
+        run: |
+          printf 'matrix=%s\n' \
+            "$(python3 scripts/postgres_integration_suites.py --matrix)" \
+            >> "$GITHUB_OUTPUT"
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -220,27 +233,35 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
-      # and feature set its `cargo test` invocation used, so no suite links a
-      # dependency compiled under features it did not previously see. Only the
-      # persistence library is compiled twice for this — once with
-      # `postgres-integration` for its own suite and once without it as a
-      # dependency of the other two — which is the accepted cost of holding
-      # each suite's feature resolution unchanged.
-      - name: Archive the persistence suite
-        run: >-
-          cargo nextest archive -p signalbox-persistence
-          --features postgres-integration
-          --archive-file "$RUNNER_TEMP/persistence.tar.zst"
-      - name: Archive the signalboxd suite
-        run: >-
-          cargo nextest archive -p signalboxd
-          --archive-file "$RUNNER_TEMP/signalboxd.tar.zst"
-      - name: Archive the terminal-client suite
-        run: >-
-          cargo nextest archive -p signalbox-client
-          --archive-file "$RUNNER_TEMP/terminal-client.tar.zst"
+      # and feature set the manifest declares, so no suite links a dependency
+      # compiled under features it did not previously see. Only the persistence
+      # library is compiled twice for this — once with `postgres-integration`
+      # for its own suite and once without it as a dependency of the other two
+      # — which is the accepted cost of holding each suite's feature resolution
+      # unchanged.
+      #
+      # The loop reads the manifest rather than restating it: package and
+      # feature selection exist in exactly one place, which is the same place
+      # `scripts/check_docs_consistency.py` reads them from.
+      - name: Archive every suite
+        run: |
+          python3 scripts/postgres_integration_suites.py --archive-plan \
+            > "$RUNNER_TEMP/suites.tsv"
+          while IFS=$'\t' read -r suite package features; do
+            echo "::group::archive $suite"
+            if [ -n "$features" ]; then
+              cargo nextest archive -p "$package" --features "$features" \
+                --archive-file "$RUNNER_TEMP/$suite.tar.zst"
+            else
+              cargo nextest archive -p "$package" \
+                --archive-file "$RUNNER_TEMP/$suite.tar.zst"
+            fi
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/suites.tsv"
       # Uploaded as one artifact per suite so a shard downloads only the
-      # archive it runs from.
+      # archive it runs from. These steps name the suites because an upload
+      # action cannot be looped; `check_docs_consistency.py` holds the set of
+      # names here equal to the manifest's.
       - name: Upload the persistence archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -267,10 +288,13 @@ jobs:
   # pinned PostgreSQL container through testcontainers, so the four runner CPUs
   # can execute isolated tests concurrently without sharing database state.
   #
-  # Partition counts are proportional to each suite's ignored-test count and
-  # sum to six runners, matching the concurrency the previous three-suite
-  # matrix already asked for at its widest. Widening further would trade runner
-  # contention against a test slice that is already short.
+  # The matrix is generated from `.github/postgres-integration-suites.toml`:
+  # one runner per shard, so a suite declaring one shard costs one runner and
+  # still travels the same archive-and-partition path a sharded suite does.
+  # Only persistence is sharded today — at 22m22s as a single job it is the
+  # long pole by an order of magnitude, and three ways puts it near 7m — so the
+  # matrix is five runners against the six the previous three-suite matrix
+  # asked for at its widest.
   postgres-integration-run:
     name: >-
       postgres-integration
@@ -280,36 +304,7 @@ jobs:
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - suite: persistence
-            partition: 1
-            partitions: 3
-            filter: all()
-          - suite: persistence
-            partition: 2
-            partitions: 3
-            filter: all()
-          - suite: persistence
-            partition: 3
-            partitions: 3
-            filter: all()
-          - suite: signalboxd
-            partition: 1
-            partitions: 2
-            filter: all()
-          - suite: signalboxd
-            partition: 2
-            partitions: 2
-            filter: all()
-          # Translates the previous `--skip` argument. libtest matched that
-          # argument as a substring of the test path; nextest's `test()`
-          # predicate matches a substring by default, so the two select the
-          # same test.
-          - suite: terminal-client
-            partition: 1
-            partitions: 1
-            filter: not test(terminal_client_completes_the_real_anthropic_path)
+      matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
     steps:
       # The archive holds no sources. Tests that read fixtures relative to
       # their manifest directory need this checkout, which `--workspace-remap`
