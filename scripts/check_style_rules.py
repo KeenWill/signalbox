@@ -363,7 +363,13 @@ def check_comment_provenance(repository: Repository) -> Iterator[Finding]:
 # --- SR-3: one spelling per type per file -----------------------------------
 
 USE_STATEMENT = re.compile(r"^\s*(?:pub\s+)?use\s+([^;]+);", re.MULTILINE)
-WORKSPACE_PATH = re.compile(r"\bsignalbox_[a-z0-9_]+::([A-Z][A-Za-z0-9_]*)")
+# Intermediate module segments included: a name reached as
+# `signalbox_persistence::outbox::DispatchedDelegationUpdate` is the same second
+# spelling as one reached directly off the crate, and a pattern that stopped at
+# the crate name reported only the shorter of the two forms.
+WORKSPACE_PATH = re.compile(
+    r"\bsignalbox_[a-z0-9_]+(?:::[a-z_][a-z0-9_]*)*::([A-Z][A-Za-z0-9_]*)"
+)
 TYPE_NAME = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\b")
 
 
@@ -493,8 +499,11 @@ TUPLE_ALIAS = re.compile(
 # unbounded scan would run to the next `>` in the file and read an unrelated
 # name as this projection's.
 QUERY_AS_TURBOFISH = re.compile(r"query_as::<\s*_\s*,\s*([^>;\n]+)")
+# The binding may destructure. `let (exists, scheduler): (bool, Option<Uuid>)`
+# is the anonymous row this rule is about, and naming the positions at the
+# binding is not the same as the row carrying labels.
 QUERY_AS_BINDING = re.compile(
-    r"\blet\s+[A-Za-z0-9_]+\s*:\s*([^=;]+?)\s*=\s*sqlx::query_as"
+    r"\blet\s+(?:mut\s+)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*:\s*([^=;]+?)\s*=\s*sqlx::query_as"
 )
 IDENTIFIER = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 

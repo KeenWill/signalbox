@@ -167,6 +167,20 @@ class SingleTypeSpellingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_module_qualified_path_of_an_imported_name_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "use signalbox_persistence::outbox::DispatchedDelegationUpdate;\n"
+            "pub fn run() {\n"
+            "    let _ = signalbox_persistence::outbox::DispatchedDelegationUpdate::ChildSpawned;\n"
+            "}\n"
+        )
+
+        result = check("SR-3", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("outbox::DispatchedDelegationUpdate", result.stdout)
+
     def test_same_name_from_another_crate_is_a_disambiguation(self) -> None:
         source = (
             "//! Owned.\n"
@@ -327,6 +341,20 @@ class AnonymousRowDecodingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertEqual(result.stdout.count("SR-6 " + MODULE), 1, result.stdout)
+
+    def test_destructured_tuple_binding_reports(self) -> None:
+        source = (
+            "//! Owned.\n"
+            "pub async fn load() {\n"
+            "    let (exists, scheduler): (bool, Option<Uuid>) = "
+            'sqlx::query_as("SELECT TRUE, id FROM t");\n'
+            "}\n"
+        )
+
+        result = check("SR-6", {MODULE: source})
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(MODULE, result.stdout)
 
     def test_projection_through_a_record_alias_passes(self) -> None:
         source = (
