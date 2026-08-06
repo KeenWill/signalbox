@@ -57,6 +57,25 @@ on:
     branches: [main]
     paths:
       - "crates/model-runtime-claude-cli/**"
+      # A change to this workflow is a change to the gate itself, so it must
+      # trigger its own run rather than being proven only by the next
+      # adapter change.
+      - ".github/workflows/claude-smoke.yml"
+  # Twice-daily drift canary. The wrapped CLI and the model behind it move on
+  # their own cadence, so an unchanged pin can stop working between adapter
+  # changes; a scheduled exchange finds that without waiting for the next pull
+  # request. 13:00 and 01:00 UTC are 9AM and 9PM Eastern during daylight time
+  # and drift one hour under standard time, which is accepted — the canary
+  # cares about the daily interval, not the exact hour.
+  #
+  # Expected red until the credential-delivery open question is resolved.
+  # Scheduled runs take the same credentialed path as pull-request runs, so
+  # they fail at the same authentication step for the same reason, and will
+  # keep doing so until the claude_cli delivery mappings land on the
+  # credential-pools stack. See the owner-decision note in the header above.
+  schedule:
+    - cron: "0 13 * * *"
+    - cron: "0 1 * * *"
 
 # Superseded pull-request runs release their slots against the public
 # concurrency cap. Every other event takes a group of its own: sharing one
@@ -107,14 +126,15 @@ jobs:
             "${BASE_SHA}...${HEAD_SHA}" > "${changed_paths}"
           adapter_changed=false
           while IFS= read -r -d '' path; do
-            if [[ "${path}" == crates/model-runtime-claude-cli/* ]]; then
+            if [[ "${path}" == crates/model-runtime-claude-cli/* \
+              || "${path}" == ".github/workflows/claude-smoke.yml" ]]; then
               adapter_changed=true
               break
             fi
           done < "${changed_paths}"
           if [[ "${adapter_changed}" != "true" ]]; then
             echo "smoke_required=false" >> "${GITHUB_OUTPUT}"
-            echo "Not applicable: crates/model-runtime-claude-cli/** did not change."
+            echo "Not applicable: neither crates/model-runtime-claude-cli/** nor this workflow's own definition changed."
             exit 0
           fi
 

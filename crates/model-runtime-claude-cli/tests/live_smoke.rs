@@ -558,6 +558,41 @@ fn the_smoke_workflow_places_the_native_binary_explicitly() {
     );
 }
 
+/// The wrapped CLI and the model behind it move on their own cadence, so an
+/// unchanged pin can stop working between adapter changes. The twice-daily
+/// canary is what finds that without waiting for the next pull request;
+/// dropping either firing would halve the detection window silently.
+#[test]
+fn the_smoke_workflow_runs_a_twice_daily_drift_canary() {
+    let crons = ["0 13 * * *", "0 1 * * *"];
+    let declared = crons
+        .iter()
+        .filter(|cron| CLAUDE_SMOKE_WORKFLOW.contains(&format!("cron: \"{cron}\"")))
+        .count();
+
+    assert_eq!(
+        declared,
+        crons.len(),
+        "the smoke workflow no longer schedules both daily drift-canary firings"
+    );
+}
+
+/// A change to the workflow is a change to the gate itself, so it must trigger
+/// its own run. Without the self-path in both the push filter and the gate's
+/// changed-path check, an edit to this file would be proven only by whatever
+/// adapter change happened to follow it.
+#[test]
+fn the_smoke_workflow_triggers_on_its_own_definition() {
+    let self_path = "\".github/workflows/claude-smoke.yml\"";
+    let references = CLAUDE_SMOKE_WORKFLOW.matches(self_path).count();
+
+    assert!(
+        references >= 2,
+        "the smoke workflow names its own path {references} times; it belongs in \
+         both the push path filter and the gate's changed-path check"
+    );
+}
+
 #[test]
 fn spawn_error_etxtbsy_is_retryable() {
     assert!(spawn_error_is_retryable(
