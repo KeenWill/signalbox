@@ -848,15 +848,6 @@ transaction parks the attempt and records its result delivery and wake
 atomically, while the scheduling executor reports the same durable-wait
 disposition so the scheduler resumes from stored result evidence.
 
-Background await registration and peer-message append likewise end the physical
-attempt in the same transaction as their delegation effect. Their scheduling
-executor result is a distinct `DurableCompletion` disposition carrying the exact
-terminal evidence, not an ordinary result awaiting a second commit. The
-application authenticates that evidence against the ended dispatch fence before
-accepting it as already committed; a pending, absent, or cross-wired attempt
-fails closed, and a failed reread retains the evidence and dispatch permit for
-same-incarnation reconciliation without repeating the effect.
-
 If an await or message transaction's commit acknowledgement is ambiguous, the
 executor replays that exact immutable request before reporting failure. A
 committed first transaction returns its durable wait or completion, while an

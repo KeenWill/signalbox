@@ -749,6 +749,7 @@ impl PostgresModelCallRepository {
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             if locked_delegation_logical_terminal(&mut transaction, session, observation.call())
                 .await?
@@ -1083,6 +1084,7 @@ impl PostgresModelCallRepository {
     ) -> Result<RetainedModelCallObservationStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             let correlation = observation.correlation();
             if correlation.session() != session {
@@ -1214,6 +1216,7 @@ impl PostgresModelCallRepository {
     ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
+            lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
             let execution = require_exact_call(
                 require_live_execution_for_restart(&mut transaction, session).await?,
@@ -4314,7 +4317,7 @@ async fn lock_delegated_child_result_frontier(
     let Some((spawning_request, parent)) = relation else {
         return Ok(());
     };
-    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_PARENT_SESSION)
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
         .bind(parent)
         .execute(&mut *connection)
         .await?;
@@ -4329,6 +4332,38 @@ async fn lock_delegated_child_result_frontier(
             "delegated terminal relationship changed while locking",
         )
         .into());
+    }
+    Ok(())
+}
+
+/// Locks the immutable parent/child endpoint pair before a child scheduler can
+/// be locked by a transaction that may terminalize the delegated child.
+pub(crate) async fn lock_delegated_child_endpoint_sessions(
+    connection: &mut PgConnection,
+    child: SessionId,
+) -> Result<(), ModelCallRepositoryError> {
+    let parent: Option<Uuid> = sqlx::query_scalar(
+        "SELECT parent_session_id
+           FROM session_delegation
+          WHERE child_session_id = $1",
+    )
+    .bind(session_id_to_uuid(child))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    let parent = session_id_from_uuid(parent);
+    let (first, second) = crate::lock_inventory::ordered_session_pair(child, parent);
+    sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+        .bind(session_id_to_uuid(first))
+        .execute(&mut *connection)
+        .await?;
+    if second != first {
+        sqlx::query(crate::lock_inventory::DELEGATION_TERMINAL_ENDPOINT_SESSION)
+            .bind(session_id_to_uuid(second))
+            .execute(&mut *connection)
+            .await?;
     }
     Ok(())
 }

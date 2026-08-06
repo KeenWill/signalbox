@@ -22,7 +22,7 @@ use crate::{
     commit_failure_is_ambiguous,
     lock_inventory::{
         DELEGATION_DELIVERY_SESSION, DELEGATION_FIND_RELATION_FOR_MESSAGE,
-        DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION,
+        DELEGATION_FIND_RELATION_FOR_WAIT, DELEGATION_LOAD_RELATION, ordered_session_pair,
     },
     mapping::{
         DelegationPolicyStorageKind, bound_child_action_from_str,
@@ -844,24 +844,16 @@ async fn lock_message_sessions(
     sender: SessionId,
     peer: SessionId,
 ) -> Result<(), SessionDelegationRepositoryError> {
-    let (first, second) = ordered_message_sessions(sender, peer);
-    lock_tool_session(connection, first).await?;
-    if second != first {
-        lock_tool_session(connection, second).await?;
-    }
+    let (first, second) = ordered_session_pair(sender, peer);
     lock_delivery_session(connection, first).await?;
     if second != first {
         lock_delivery_session(connection, second).await?;
     }
-    Ok(())
-}
-
-const fn ordered_message_sessions(sender: SessionId, peer: SessionId) -> (SessionId, SessionId) {
-    if sender.as_uuid().as_u128() <= peer.as_uuid().as_u128() {
-        (sender, peer)
-    } else {
-        (peer, sender)
+    lock_tool_session(connection, first).await?;
+    if second != first {
+        lock_tool_session(connection, second).await?;
     }
+    Ok(())
 }
 
 fn complete_attempt(
@@ -1759,7 +1751,7 @@ mod tests {
         let lower = SessionId::from_uuid(Uuid::from_u128(1));
         let higher = SessionId::from_uuid(Uuid::from_u128(2));
 
-        assert_eq!(ordered_message_sessions(lower, higher), (lower, higher));
-        assert_eq!(ordered_message_sessions(higher, lower), (lower, higher));
+        assert_eq!(ordered_session_pair(lower, higher), (lower, higher));
+        assert_eq!(ordered_session_pair(higher, lower), (lower, higher));
     }
 }

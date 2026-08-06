@@ -38,9 +38,9 @@ head, and creation transaction were verified through PR #415
 scopes, delegated transcript origins, foreground-result closure, pre-outbox
 cascade locks, typed delegation wake origins, and exact delegation update and
 wake obligations were verified through this PR
-(`agent/delegation-persistence-schema`); the delegated await and peer-message
-transaction locks were verified through this PR
-(`agent/delegation-runtime-persistence-v2`); the model-settings command fields,
+(`agent/delegation-persistence-schema`); the delegated await, peer-message, and
+child-terminal endpoint locks were verified through PR #462
+(`agent/delegation-runtime-daemon-v2`); the model-settings command fields,
 immutable evidence, snapshot projection, and typed outbox records were verified
 through this PR (`agent/model-settings-persistence`); the defaults-replacement
 pointer-lock admission is verified through this PR
@@ -614,13 +614,17 @@ Locks per transaction, in acquisition order:
   commands commit without firing the trigger, and exact user-command replay
   takes no row lock.
 
-- **StartEligibleTurn**, **startup recovery**, and the **model-call execution
-  transactions** (prepare, authorize, observation commit, restart recovery — all
-  in `model_execution.rs`, reusing the same inventory statement): the
-  `session_scheduler` row `FOR UPDATE` is the only explicit lock (session
-  existence is checked with a bare `EXISTS`). The session row is locked only
-  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
-  `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+- **StartEligibleTurn** and nonterminal **model-call execution transactions**
+  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
+  explicit lock (session existence is checked with a bare `EXISTS`). The session
+  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
+  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+  Terminal observation commit and reread, restart recovery, startup recovery,
+  and submit-input interruption first discover whether the target is a delegated
+  child. When it is, they lock the immutable parent/child session pair
+  `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
+  scheduler lock. This is the shared prefix for any path that can record a child
+  result.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -649,16 +653,16 @@ Locks per transaction, in acquisition order:
   these rows in reverse order.
 
 - **Delegated await and peer-message transactions**: await locks its parent
-  delivery session before the issuing scheduler. Message first locks both
-  endpoint `session_scheduler` rows in canonical session-ID order, then both
-  endpoint `session` rows `FOR NO KEY UPDATE` in that same order. This preserves
-  the scheduler-before-parent-session prefix used when child completion records
-  its parent delivery and prevents the two transactions from holding those rows
-  in reverse order. Each transaction next locks the exact `session_delegation`
-  row `FOR UPDATE`. Delivery-sequence allocation runs while the recipient
-  session lock is held. Message recording claims the global `message_id` before
-  inserting the relationship event; a concurrent claim loser returns the typed
-  message-identity collision without leaving a partial event.
+  delivery session before the issuing scheduler. Message locks both endpoint
+  `session` rows `FOR NO KEY UPDATE` in canonical session-ID order, then both
+  endpoint `session_scheduler` rows in that same order. Child terminalization
+  uses the same canonical endpoint-session prefix before taking the child
+  scheduler, so message, completion, and input submission never hold those row
+  classes in reverse order. Each transaction next locks the exact
+  `session_delegation` row `FOR UPDATE`. Delivery-sequence allocation runs while
+  the recipient session lock is held. Message recording claims the global
+  `message_id` before inserting the relationship event; a concurrent claim loser
+  returns the typed message-identity collision without leaving a partial event.
 
 - **ReplaceSessionDefaults**: an unseen command locks its
   `session_current_defaults` pointer row `FOR UPDATE` before loading and

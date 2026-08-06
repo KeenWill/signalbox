@@ -24,8 +24,8 @@ use crate::{
     },
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        fail_tool_crash_in_transaction, insert_snapshot, persist_terminal_outcome,
-        require_live_execution_for_restart,
+        fail_tool_crash_in_transaction, insert_snapshot, lock_delegated_child_endpoint_sessions,
+        persist_terminal_outcome, require_live_execution_for_restart,
     },
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -309,8 +309,11 @@ async fn recover_in_transaction<Generator>(
 where
     Generator: StartupScanIdGenerator + Send,
 {
-    // This is the same scheduler-row lock ordering used by every lifecycle
-    // writer. Reconstitution and all guarded writes happen while it is held.
+    lock_delegated_child_endpoint_sessions(connection, requested_session)
+        .await
+        .map_err(map_model_call_error)?;
+    // Delegated children already hold their canonical endpoint-session prefix.
+    // Reconstitution and all guarded writes happen while the scheduler lock is held.
     let session_uuid = session_id_to_uuid(requested_session);
     let (session_exists, scheduler_session, active_turn) =
         sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
