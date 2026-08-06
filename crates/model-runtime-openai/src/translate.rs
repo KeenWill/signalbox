@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use signalbox_model_runtime::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationMessage, ConversationRole, DeliveryMode,
-    FastMode, MessagePart, ModelOperation, OpenAiServiceTier, PreparationFailure, ReasoningLevel,
-    ServiceTier, ToolChoice,
+    FastMode, MessagePart, ModelOperation, ModelSettings, OpenAiServiceTier, PreparationFailure,
+    ReasoningLevel, ServiceTier, ToolChoice,
 };
 
 use crate::wire::{
@@ -96,7 +96,7 @@ pub(crate) fn build_request_with_fast_mode<C>(
         .reasoning_level
         .map(openai_reasoning_effort)
         .transpose()?;
-    let service_tier = openai_service_tier(operation, request_fast_mode)?;
+    let service_tier = openai_service_tier(&operation.settings, request_fast_mode)?;
     Ok(ChatRequest {
         model: operation.resolved_target.as_str().to_string(),
         messages,
@@ -116,6 +116,19 @@ pub(crate) fn build_request_with_fast_mode<C>(
     })
 }
 
+/// Validates the complete settings combination enforced by this adapter.
+///
+/// Capability-set validation remains the caller's responsibility. This check
+/// owns cross-knob constraints that independent capability sets cannot state.
+pub fn validate_model_settings(settings: &ModelSettings) -> Result<(), PreparationFailure> {
+    settings
+        .reasoning_level
+        .map(openai_reasoning_effort)
+        .transpose()?;
+    openai_service_tier(settings, settings.fast_mode)?;
+    Ok(())
+}
+
 fn openai_reasoning_effort(level: ReasoningLevel) -> Result<&'static str, PreparationFailure> {
     match level {
         ReasoningLevel::None => Ok("none"),
@@ -131,11 +144,11 @@ fn openai_reasoning_effort(level: ReasoningLevel) -> Result<&'static str, Prepar
     }
 }
 
-fn openai_service_tier<C>(
-    operation: &ModelOperation<C>,
+fn openai_service_tier(
+    settings: &ModelSettings,
     request_fast_mode: FastMode,
 ) -> Result<Option<&'static str>, PreparationFailure> {
-    let tier = match operation.settings.service_tier {
+    let tier = match settings.service_tier {
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Auto)) => Some("auto"),
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Default)) => Some("default"),
         Some(ServiceTier::OpenAi(OpenAiServiceTier::Flex)) => Some("flex"),
@@ -156,7 +169,7 @@ fn openai_service_tier<C>(
         }
         None => None,
     };
-    match (operation.settings.fast_mode, tier) {
+    match (settings.fast_mode, tier) {
         (FastMode::Enabled, None | Some("fast")) => Ok(match (request_fast_mode, tier) {
             (FastMode::Enabled, _) => Some("fast"),
             (FastMode::Disabled, tier) => tier,

@@ -6,7 +6,6 @@ use std::{
 };
 
 use git2::{BranchType, Odb, Repository};
-use rustix::fs::{CWD, Mode, mkfifoat};
 use signalbox_tools_workspace::LocalWorkspaceFileSystem;
 
 use crate::arguments::{GitBranchCreateArguments, LocalOperation};
@@ -18,8 +17,8 @@ use crate::limits::MAX_WORKTREE_INSPECTIONS;
 use crate::pinning::PinnedObjectDatabase;
 use crate::reference_read::read_pinned_reference;
 use crate::tests::support::{
-    FIX_BRANCH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, TRACKED_PATH, commit_all, execute,
-    identity, plant_linear_history,
+    FIX_BRANCH, Fixture, INITIAL_CONTENT, INITIAL_MESSAGE, TRACKED_PATH, commit_all, create_fifo,
+    execute, identity, plant_linear_history,
 };
 
 #[test]
@@ -100,8 +99,7 @@ fn branch_create_rejects_an_alternates_fifo_planted_after_object_pinning() {
         .set_odb(&object_database)
         .expect("pinned object database installs");
     let alternates = fixture.root().join(".git/objects/info/alternates");
-    mkfifoat(CWD, &alternates, Mode::RUSR | Mode::WUSR)
-        .expect("replacement alternates FIFO constructs");
+    create_fifo(&alternates).expect("replacement alternates FIFO constructs");
 
     let failure = branch_create(
         &repository,

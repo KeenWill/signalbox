@@ -37,6 +37,24 @@ pub(super) fn stat_file_identity(status: &rustix::fs::Stat) -> FileIdentity {
     }
 }
 
+/// Widens a rustix mode to the `u32` that `std` permissions are built from.
+///
+/// rustix's `RawMode` is the host's native `mode_t`: `u16` on Apple targets and
+/// `u32` on Linux, where the cast is a no-op.
+#[allow(clippy::unnecessary_cast)]
+pub(super) fn permission_bits(mode: Mode) -> u32 {
+    mode.bits() as u32
+}
+
+/// Narrows a `MetadataExt` mode to a rustix mode.
+///
+/// The inverse of [`permission_bits`]; the cast is a no-op on Linux, where
+/// `RawMode` is already `u32`.
+#[allow(clippy::unnecessary_cast)]
+pub(super) fn mode_from_metadata_bits(bits: u32) -> Mode {
+    Mode::from_raw_mode(bits as rustix::fs::RawMode)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RepositoryIdentity {
     pub(super) root: FileIdentity,
